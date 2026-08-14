@@ -18,13 +18,18 @@
 - The first public product release includes the native GUI, CLI, daemon/headless
   operation, OpenAI-compatible API, and MCP client/server. They share one runtime
   and domain model; none is implemented as an unrelated second product.
-- MCG is single-owner and local-first initially. The architecture must not block
-  authenticated remote control or future multi-user isolation.
+- MCG is single-owner and local-first initially. Built-in remote access to the
+  harness is out of scope for the initial product. Local API surfaces bind only
+  to loopback. Future remote or multi-user operation requires a new threat model
+  and an explicit owner decision.
 
 ## Experience
 
 - The desktop GUI is the primary consumer surface and defaults to a project/task
   experience, not an infrastructure dashboard.
+- The visual language blends a consumer chat application, coding workspace, and
+  operational dashboard. Like LM Studio, it starts in a simple mode and reveals
+  deeper controls through a small number of understandable advanced settings.
 - Normal mode shows goals, progress, approvals, costs, outcomes, and concise
   agent activity. Raw prompts, model calls, events, tool payloads, and experiments
   remain in developer mode.
@@ -85,15 +90,20 @@
   custom-provider prices remain explicitly unknown; users may enter overrides.
 - Routing begins with explainable policy and capability filters, then incorporates
   measured success, latency, and cost. Users can pin models and providers.
-- OpenAI API-key access is a supported production path. Current official OpenAI
-  API documentation describes API keys and workload identity tokens for API
-  authentication but does not document a general third-party consumer
-  “Sign in with ChatGPT” API flow.
-- The requested ChatGPT/Codex OAuth experience will therefore be an isolated auth
-  adapter researched against OpenClaw and other open-source implementations,
-  validated against applicable licenses and current OpenAI policy, and tested for
-  refresh/revocation behavior. It must not scrape or import another tool's local
-  credential files. API-key access remains available if this flow changes.
+- ChatGPT subscription authentication is a required provider path, not an optional
+  substitute for API keys. Official OpenAI documentation supports browser-based
+  ChatGPT sign-in for local Codex clients and a beta device-code flow for headless
+  clients. MCG should offer both, preferring the browser callback in the desktop
+  UI and device code when callbacks are unavailable.
+- Implement ChatGPT/Codex authentication as an isolated Rust adapter derived from
+  reviewed, license-compatible open-source components such as OpenAI's
+  `codex-login` crate and OpenClaw's integration. Reusing an auth component does
+  not make MCG dependent on the Codex agent runtime. The adapter owns secure token
+  storage, refresh, revocation, account display, and conformance tests.
+- API-key access remains a separately supported OpenAI provider mode, but it is not
+  considered an acceptable replacement if subscription OAuth temporarily breaks.
+  OAuth compatibility failures block that provider mode and surface a precise
+  recovery message rather than silently changing the user's billing path.
 - Development integration targets include the owner's OpenAI OAuth account and
   local OpenAI-compatible provider `gpu45`. Hostnames, tokens, and credentials are
   configuration, never committed repository data.
@@ -106,16 +116,19 @@
 - Permissions combine capability, executable, arguments, path scope, network
   destination, risk class, and task context. Prompt instructions are never the
   enforcement boundary.
-- Default policy: allow project-scoped reads; ask before writes until the project
-  is trusted; always ask for destructive deletion, credential access, external
-  publication, Git push, production deployment, or privilege elevation.
+- Default policy is meaningfully autonomous: project-scoped reads, reversible
+  writes, builds, tests, and approved tool classes may proceed without repeated
+  confirmation. Always ask for destructive deletion, credential access, external
+  publication, Git push, production deployment, purchases, or privilege elevation.
+  Users can select simpler autonomy presets and customize individual capabilities.
 - Approval grants can be one-time, task-scoped, session-scoped, or persisted as an
   owner policy. Unattended jobs fail safely or wait for approval unless a specific
   preauthorization covers the exact action class.
 - The owner constitution is versioned, audit-visible, and immutable to MCG. Policy
   edits require owner authentication/confirmation and cannot disable audit history.
-- Remote access is disabled by default. Secret redaction occurs before persistence
-  and model-context assembly. Users can inspect, export, and delete stored memory.
+- Remote access is not built into the initial harness. Secret redaction occurs
+  before persistence and model-context assembly. Users can inspect, export, and
+  delete stored memory.
 
 ## Memory and project intelligence
 
@@ -142,7 +155,9 @@
 - Every shipped workflow has machine-observable success conditions. Website work
   uses builds, tests, HTTP checks, browser semantics, screenshots when useful, and
   deployment health checks.
-- CI begins on Windows and Linux, then macOS as packaging stabilizes. Release gates
+- Windows, Linux, and macOS packages ship together. Development and automated
+  release qualification initially run on Windows and Linux; macOS is produced as
+  a best-effort package until dedicated macOS testing is added. Release gates
   include clean installation, first-run onboarding, provider connection, task
   execution, restart recovery, approval enforcement, and backup/restore.
 - Nondeterministic model behavior is tested with recorded fixtures and fake models
@@ -170,7 +185,8 @@ subsystems are implemented simultaneously before integration begins.
 
 ## Deferred owner choices
 
-Only decisions that materially affect product identity, licensing, distribution,
-or risk remain open. They are listed in `MEMORY.md` and should receive separate
-ADRs when resolved.
+The repository remains private. A public-source license is intentionally deferred
+until public distribution is considered. Product naming, detailed visual design,
+and the exact macOS support disclaimer require later decisions; no schedule or
+spending constraint is currently imposed.
 

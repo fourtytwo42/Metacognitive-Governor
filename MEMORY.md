@@ -4,9 +4,9 @@ Durable project context lives here. Update this file whenever information should
 
 ## Active Handoff
 
-- Current task: Product baseline and GitHub repository setup are complete; awaiting the owner's answers to the remaining high-impact questions.
-- Last meaningful change: Published the documentation baseline to the private GitHub repository `fourtytwo42/Metacognitive-Governor` on `main`.
-- Next step: Resolve the remaining owner choices, then produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
+- Current task: Product discovery is complete enough to begin implementation architecture and scaffolding.
+- Last meaningful change: Incorporated the owner's remaining decisions and documented the verified GPU45 development-provider contract.
+- Next step: Produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
 - Blockers: None documented.
 
 ## Current State
@@ -29,6 +29,11 @@ Durable project context lives here. Update this file whenever information should
 - Support OpenAI OAuth and API keys, OpenRouter, local OpenAI-compatible servers, and arbitrary OpenAI-compatible providers with user-supplied credentials.
 - Discover provider models/capabilities from endpoints and probes, display known costs, and represent unknown costs honestly.
 - Shadow model execution is opt-in for consumers and enabled during development/testing.
+- Keep the repository private. Ship Windows, Linux, and macOS packages together, while initially qualifying releases on Windows and Linux only.
+- Default to meaningful autonomy with configurable presets and advanced capability controls.
+- Do not include built-in remote harness access initially.
+- Use a simple-by-default UI that blends consumer chat, coding workspace, and operations views, with an advanced mode inspired by LM Studio.
+- OpenAI subscription OAuth is required; API-key access is supported separately but is not an acceptable silent fallback for broken OAuth.
 
 ## Source Of Truth
 
@@ -77,6 +82,8 @@ When sources conflict, use this order:
 - 2026-08-13: Ran `scripts/split-prd.ps1`; verified eight canonical spec files contain all 60 numbered sections exactly once and no known mojibake signatures.
 - 2026-08-13: Verified GitHub CLI 2.86.0 is authenticated as `fourtytwo42` with repository permissions.
 - 2026-08-13: Initialized Git on `main`, created root commit `e5e053d` (`Establish MCG product baseline`), created private repository `fourtytwo42/Metacognitive-Governor`, and pushed `main`.
+- 2026-08-13: Verified official OpenAI documentation supports browser ChatGPT login and beta device-code login (`codex login --device-auth`) for local Codex clients; OpenAI's repository exposes this through the Rust `codex-login` crate.
+- 2026-08-13: Read GPU45 `/llms.txt`, `/api/version`, `/api/health/summary`, and inference `/v1/models`; documented the connection at `docs/integrations/gpu45.md`.
 
 ## Decisions
 
@@ -96,7 +103,8 @@ When sources conflict, use this order:
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
-- Official OpenAI API documentation documents API keys and workload identity tokens, but a general third-party consumer ChatGPT/Codex OAuth flow was not found there. OpenClaw documents its own Codex OAuth flow; MCG must isolate and review this adapter for licensing, security, and policy compatibility.
+- MCG must validate that reuse or adaptation of OpenAI's `codex-login` and/or OpenClaw OAuth code is license-compatible and remains functional without depending on the Codex agent runtime. OAuth failures must never silently switch users to API billing.
+- macOS packages are intended to ship alongside Windows and Linux but initially will not receive equivalent automated or maintainer qualification; document this clearly until macOS CI/testing exists.
 
 ## Completed Work
 
@@ -105,12 +113,11 @@ When sources conflict, use this order:
 
 ## Open Follow-ups
 
-- Confirm repository visibility and eventual software license.
-- Confirm whether Windows ships first or Windows/Linux/macOS must launch together.
-- Confirm acceptable fallback if OpenAI changes or disallows the OpenClaw-style Codex OAuth route.
-- Obtain non-secret connection details for local provider `gpu45` when implementation begins; keep credentials outside Git.
-- Confirm remote/multi-user scope, default autonomy/approval posture, visual direction, and delivery constraints.
-- After GitHub publication, produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
+- Choose a public-source license only if/when public distribution is considered; repository remains private.
+- Research and document the exact license/security boundary for a standalone Rust ChatGPT/Codex OAuth adapter using browser callback and device-code flows.
+- Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
+- Add macOS CI and real-device qualification when capacity becomes available.
+- Produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
 
 ## Do Not Forget
 
