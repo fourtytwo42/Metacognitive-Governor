@@ -98,6 +98,10 @@ waits without treating a model's completion message as proof.
 Blocked work exposes an explicit bounded Retry action in desktop and
 `mcg task retry`; ordinary Start replay remains observation-only. Cancelling a
 launched task atomically cancels the run and terminates active agent authority.
+Guided local-tool requests appear on the task card. Approval resumes through the
+same durable run after revalidating context and authority; stable request identity
+prevents the approved side effect from being duplicated. The CLI equivalent is
+`mcg approval approve ID` followed by `mcg task resume TASK_ID`.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

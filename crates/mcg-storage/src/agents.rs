@@ -53,7 +53,147 @@ pub struct TaskLaunchReceipt {
     pub events: Vec<EventEnvelope>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentResumeReceipt {
+    pub task: TaskEnvelope,
+    pub run: AgentRun,
+    pub instance: AgentInstance,
+    pub lease: AgentLease,
+    pub events: Vec<EventEnvelope>,
+}
+
 impl SqliteEventStore {
+    /// Atomically restores one approval-waiting consumer task/run/instance to
+    /// running while retaining its original active lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless exactly one waiting instance and active lease
+    /// hold authority for the waiting launched run.
+    #[allow(clippy::too_many_lines)] // Keep authority validation and its atomic projection/event commit together.
+    pub fn resume_launched_agent_turn(
+        &mut self,
+        task_id: mcg_domain::TaskId,
+        at: DateTime<Utc>,
+    ) -> Result<AgentResumeReceipt, StorageError> {
+        let run_id = self
+            .task_launch_run_id(task_id)?
+            .ok_or_else(|| StorageError::Conflict("task has no consumer launch".into()))?;
+        let mut task = self
+            .load_task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let mut run = self
+            .agent_run(run_id)?
+            .ok_or(StorageError::AgentRunNotFound(run_id))?;
+        let mut instances: Vec<AgentInstance> = self.read_json_rows(
+            "SELECT instance_json FROM agent_instances
+             WHERE run_id = ?1 AND state = 'waiting' ORDER BY instance_id",
+            &run_id.to_string(),
+        )?;
+        if task.state != TaskState::WaitingForApproval
+            || run.state != AgentRunState::Waiting
+            || instances.len() != 1
+        {
+            return Err(StorageError::Conflict(
+                "consumer task does not have one approval-waiting turn".into(),
+            ));
+        }
+        let Some(mut instance) = instances.pop() else {
+            return Err(StorageError::Conflict(
+                "consumer task does not have one approval-waiting turn".into(),
+            ));
+        };
+        let mut leases: Vec<AgentLease> = self.read_json_rows(
+            "SELECT lease_json FROM agent_leases
+             WHERE instance_id = ?1 AND state = 'active' ORDER BY lease_id",
+            &instance.id.to_string(),
+        )?;
+        if leases.len() != 1 {
+            return Err(StorageError::Conflict(
+                "approval-waiting instance does not have one active lease".into(),
+            ));
+        }
+        let Some(lease) = leases.pop() else {
+            return Err(StorageError::Conflict(
+                "approval-waiting instance does not have one active lease".into(),
+            ));
+        };
+        if lease.expires_at <= at {
+            return Err(StorageError::Conflict(
+                "approval-waiting agent lease has expired".into(),
+            ));
+        }
+        task.transition_to(TaskState::Active)?;
+        task.updated_at = at;
+        let previous_run = run.state;
+        run.state = AgentRunState::Running;
+        run.updated_at = at;
+        let previous_instance = instance.state;
+        instance.state = AgentState::Running;
+        instance.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND state = 'waiting'",
+            params![
+                serde_json::to_string(&run)?,
+                at.to_rfc3339(),
+                run.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "waiting agent run changed before resume")?;
+        let changed = transaction.execute(
+            "UPDATE agent_instances SET state = 'running', instance_json = ?1, updated_at = ?2
+             WHERE instance_id = ?3 AND state = 'waiting'",
+            params![
+                serde_json::to_string(&instance)?,
+                at.to_rfc3339(),
+                instance.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "waiting agent instance changed before resume")?;
+        let events = vec![
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(task_id),
+                    serde_json::json!({"from": previous_run, "to": AgentRunState::Running, "run": &run, "reason": "approval_resumed"}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentInstanceStateChanged,
+                    Some(task_id),
+                    serde_json::json!({"from": previous_instance, "to": AgentState::Running, "instance": &instance, "reason": "approval_resumed"}),
+                ),
+            )?,
+        ];
+        let mut events = events;
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(task_id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::WaitingForApproval,
+                    to: TaskState::Active,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok(AgentResumeReceipt {
+            task,
+            run,
+            instance,
+            lease,
+            events,
+        })
+    }
+
     /// Returns the one consumer run bound to a task, when present.
     ///
     /// # Errors

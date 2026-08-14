@@ -15,6 +15,7 @@ use mcg_tools::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{AgentInstance, AgentLease, AgentLeaseState, RoleDefinition};
@@ -513,6 +514,7 @@ fn decode_tool_request(
                 open_world: binding.open_world,
             },
         );
+        request.id = stable_tool_request_id(lease, name, arguments);
         request.namespace = mcg_tools::ToolNamespace::ExternalMcp;
         request.timeout_seconds = bounded_tool_timeout(lease)?;
         return Ok(request);
@@ -527,8 +529,46 @@ fn decode_tool_request(
         .map_err(|error| AgentTurnError::Invalid(format!("invalid {name} arguments: {error}")))?;
     let timeout_seconds = bounded_tool_timeout(lease)?;
     let mut request = ToolRequest::new(task_id, summary, kind);
+    request.id = stable_tool_request_id(lease, name, arguments);
     request.timeout_seconds = timeout_seconds;
     Ok(request)
+}
+
+fn stable_tool_request_id(
+    lease: &AgentLease,
+    name: &str,
+    arguments: &str,
+) -> mcg_domain::ToolRequestId {
+    let arguments = serde_json::from_str(arguments)
+        .and_then(|value| serde_json::to_string(&canonical_json(value)))
+        .unwrap_or_else(|_| arguments.to_owned());
+    let mut hash = Sha256::new();
+    hash.update(lease.id.to_string().as_bytes());
+    hash.update([0]);
+    hash.update(name.as_bytes());
+    hash.update([0]);
+    hash.update(arguments.as_bytes());
+    let digest = hash.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    mcg_domain::ToolRequestId::from_stable_bytes(bytes)
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
 }
 
 fn bounded_tool_timeout(lease: &AgentLease) -> Result<u64, AgentTurnError> {
@@ -764,6 +804,22 @@ mod tests {
             }),
             strict: Some(true),
         }
+    }
+
+    #[test]
+    fn stable_request_identity_ignores_json_object_order() {
+        let request = turn(vec!["fs.read".into()], vec![read_tool()]);
+        let first = stable_tool_request_id(
+            &request.lease,
+            "fs.read",
+            r#"{"path":"README.md","options":{"max_bytes":4096,"mode":"text"}}"#,
+        );
+        let reordered = stable_tool_request_id(
+            &request.lease,
+            "fs.read",
+            r#"{"options":{"mode":"text","max_bytes":4096},"path":"README.md"}"#,
+        );
+        assert_eq!(first, reordered);
     }
 
     #[tokio::test]

@@ -47,6 +47,7 @@ are explicit overrides for controlled tests and alternate local clients.
 | `POST` | `/api/v1/tasks/{id}` | Apply a validated state transition |
 | `POST` | `/api/v1/tasks/{id}/launch` | Idempotently plan, start, and advance consumer work |
 | `POST` | `/api/v1/tasks/{id}/retry` | Explicitly retry bounded incomplete work for a blocked task |
+| `POST` | `/api/v1/tasks/{id}/resume` | Revalidate and continue an owner-approved local-tool turn |
 | `GET` | `/api/v1/tasks/{id}/events` | Read ordered durable task history |
 | `GET` | `/api/v1/events/stream` | Receive committed events over SSE |
 
@@ -74,6 +75,15 @@ Provider/tool failures move the task to `blocked`; retry is an explicit owner
 action and each work item is capped at its durable lease retry limit. Cancelling
 a launched task atomically cancels its run and revokes active agent instances and
 leases, so the task projection cannot leave hidden execution authority behind.
+When a local tool needs permission, desktop shows the pending request on its task
+card. Approve and continue revalidates the live lease, organization, provider
+routes, tool permissions, and current project-context fingerprint before restoring
+running authority. Tool request ids are derived from the lease plus the canonical
+model call, so replay recognizes the approved request and the broker does not
+repeat its side effect. The provider turn is currently replayed from its bounded
+initial request and can incur another model call. External MCP approval resume and
+target-scoped resumes require a persisted provider-turn checkpoint and therefore
+fail closed until that checkpoint format is implemented.
 
 ## Verification evidence
 
@@ -84,6 +94,9 @@ rejection, and an abrupt daemon-server restart followed by API projection/histor
 comparison. Consumer-launch fixtures additionally prove atomic one-run
 reservation, restart durability, deterministic project-command success
 conditions, missing-provider reporting, and retry idempotency.
+The approval fixture proves that a guided-mode write remains absent while pending,
+executes after approval, advances independent evaluation, and is not repeated by
+a later Start replay.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

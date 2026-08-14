@@ -1754,6 +1754,183 @@ impl AppRuntime {
         .await
     }
 
+    /// Resumes one approval-waiting local-tool turn after explicit owner
+    /// approval, revalidating project context, tools, routes, and live lease
+    /// before restoring durable running authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when approval is absent, authority is ambiguous/stale,
+    /// context changed, an external-tool checkpoint cannot be reconstructed, or
+    /// provider/tool execution fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn resume_approved_agent_work(
+        &self,
+        task_id: TaskId,
+        context_token_budget: u32,
+        estimated_output_tokens: u64,
+        max_model_calls: u16,
+    ) -> Result<AgentTurnCommit, RuntimeError> {
+        if context_token_budget < 64
+            || estimated_output_tokens == 0
+            || max_model_calls == 0
+            || max_model_calls > 32
+        {
+            return Err(StorageError::InvalidData("agent resume bounds are invalid".into()).into());
+        }
+        if !self
+            .approvals(Some(ApprovalState::Approved))?
+            .iter()
+            .any(|approval| approval.task_id == task_id)
+        {
+            return Err(StorageError::Conflict(
+                "consumer task has no approved tool request".into(),
+            )
+            .into());
+        }
+        let run_id = self
+            .task_launch_run_id(task_id)?
+            .ok_or_else(|| StorageError::Conflict("task has no consumer launch".into()))?;
+        let view = self.agent_run_view(run_id)?;
+        let waiting = view
+            .instances
+            .iter()
+            .filter(|instance| instance.state == AgentState::Waiting)
+            .collect::<Vec<_>>();
+        if waiting.len() != 1 {
+            return Err(StorageError::Conflict(
+                "consumer task does not have one waiting agent".into(),
+            )
+            .into());
+        }
+        let waiting = waiting[0];
+        let lease = view
+            .leases
+            .iter()
+            .find(|lease| lease.instance_id == waiting.id && lease.state == AgentLeaseState::Active)
+            .ok_or_else(|| StorageError::Conflict("waiting agent has no active lease".into()))?;
+        let task = self
+            .task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            StorageError::InvalidData("consumer task has no selected project".into())
+        })?;
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let organization = self
+            .organization_revision(view.run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                view.run.organization_revision_id,
+            ))?;
+        let role = organization
+            .roles
+            .iter()
+            .find(|role| role.id == waiting.role_id)
+            .cloned()
+            .ok_or_else(|| StorageError::InvalidData("waiting role was not found".into()))?;
+        let context =
+            self.assemble_project_context(project_id, Vec::new(), context_token_budget, None)?;
+        let context_json = serde_json::to_vec(&context)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let fingerprint = format!("sha256:{:x}", Sha256::digest(context_json));
+        if fingerprint != waiting.context_fingerprint {
+            return Err(StorageError::Conflict(
+                "project context changed while approval was pending; replan is required".into(),
+            )
+            .into());
+        }
+        let (tools, external_tools) =
+            self.resolve_agent_tools(role.kind, &lease.tool_permissions)?;
+        if !external_tools.is_empty() {
+            return Err(StorageError::Conflict(
+                "external MCP approval continuation requires a persisted turn checkpoint".into(),
+            )
+            .into());
+        }
+        let routes = self.provider_route_candidates().await;
+        if routes.is_empty() {
+            return Err(ProviderError::Configuration(
+                "no discovered provider models are available".into(),
+            )
+            .into());
+        }
+        let root = std::path::PathBuf::from(project.root);
+        let artifacts = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts)?;
+        let credentials = Arc::new(RejectingCredentialResolver);
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([root.clone()], &artifacts).map_err(runtime_tool_error)?,
+        );
+        let process = Arc::new(
+            ProcessExecutor::new([root.clone()], credentials.clone())
+                .map_err(runtime_tool_error)?,
+        );
+        let host = HostExecutor {
+            filesystem: filesystem.clone(),
+            process: process.clone(),
+            http: Arc::new(
+                HttpExecutor::new(credentials, filesystem, &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            system: Arc::new(SystemExecutor),
+            git: Arc::new(
+                GitExecutor::new(process, [root.clone()], &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            memory: Arc::new(MemoryExecutor::new(InMemoryMemoryRepository::default())),
+            external: Arc::new(RuntimeMcpExecutor {
+                store: self.store.clone(),
+                credentials: self.mcp_credentials.clone(),
+            }),
+        };
+        let mut capabilities = CapabilityPolicy::project(&root);
+        capabilities.allowed_network_origins.extend(
+            external_tools
+                .iter()
+                .map(|binding| format!("mcp://{}/{}", binding.connection_id, binding.remote_name)),
+        );
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            host,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let resumed = self
+            .store()?
+            .resume_launched_agent_turn(task_id, Utc::now())?;
+        for event in resumed.events {
+            let _ = self.event_sender.send(event);
+        }
+        let confidence = ConfidenceEstimate::new(5_000, 0)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        self.execute_agent_turn(
+            AgentTurnRequest {
+                role,
+                instance: resumed.instance,
+                lease: resumed.lease,
+                context,
+                route_candidates: routes,
+                routing_policy: RoutingPolicy::default(),
+                tools,
+                external_tools,
+                estimated_output_tokens,
+                max_model_calls,
+            },
+            &self.provider_gateway(),
+            &broker,
+            confidence,
+        )
+        .await
+    }
+
     /// Records a selected ephemeral agent instance and publishes its event.
     ///
     /// # Errors

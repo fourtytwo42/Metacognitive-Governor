@@ -1,13 +1,15 @@
 use mcg_api::{
-    CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest, LaunchTaskResponse,
-    McpListResponse, ProjectListResponse, StartOpenAiOAuthRequest, TaskEventsResponse,
-    TaskListResponse, TaskMutationResponse, TransitionTaskRequest,
+    ApprovalListResponse, CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest,
+    LaunchTaskResponse, McpListResponse, ProjectListResponse, ResolveApprovalRequest,
+    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::TaskEnvelope;
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_runtime::{McpMutation, OAuthLoginStart, ProjectMutation, ProviderMutation};
+use mcg_tools::ApprovalRequest;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -281,6 +283,67 @@ async fn retry_task(
 }
 
 #[tauri::command]
+async fn resume_task(
+    task_id: String,
+    request: LaunchTaskRequest,
+) -> Result<LaunchTaskResponse, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/resume"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Task could not resume: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task resume").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task resume response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_approvals() -> Result<ApprovalListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/approvals?state=pending"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Approvals could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Approval listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Approval list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn resolve_approval(
+    approval_id: String,
+    request: ResolveApprovalRequest,
+) -> Result<ApprovalRequest, String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/approvals/{approval_id}/resolve"
+        ))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Approval could not be resolved: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Approval resolution").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Approval response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn task_events(task_id: String) -> Result<TaskEventsResponse, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/events"))
@@ -385,6 +448,9 @@ pub fn run() {
             create_task,
             launch_task,
             retry_task,
+            resume_task,
+            list_approvals,
+            resolve_approval,
             transition_task,
             task_events,
             pick_project_directory,

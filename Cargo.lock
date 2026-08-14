@@ -2557,6 +2557,7 @@ dependencies = [
  "mcg-tools",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -2647,6 +2648,7 @@ dependencies = [
  "mcg-events",
  "mcg-mcp",
  "mcg-runtime",
+ "mcg-tools",
  "reqwest",
  "serde",
  "tauri",

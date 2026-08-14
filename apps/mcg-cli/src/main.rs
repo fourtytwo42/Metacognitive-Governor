@@ -492,6 +492,12 @@ enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Continue an approval-waiting turn after approving its tool request.
+    Resume {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// List current durable task projections.
     List {
         #[arg(long)]
@@ -673,6 +679,9 @@ async fn run_task(
         }
         TaskCommand::Retry { id, json } => {
             run_consumer_task(client, host, token, &id, "retry", json).await?;
+        }
+        TaskCommand::Resume { id, json } => {
+            run_consumer_task(client, host, token, &id, "resume", json).await?;
         }
         TaskCommand::List { json } => {
             list_tasks(client, host, token, json).await?;

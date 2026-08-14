@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import {
+  approveRequest,
   cancelOpenAiOAuth,
   completeOpenAiOAuth,
   configureMcpConnection,
@@ -8,6 +9,7 @@ import {
   discoverProject,
   discoverMcpConnection,
   listMcpConnections,
+  listApprovals,
   listProjects,
   listTasks,
   launchTask,
@@ -23,8 +25,10 @@ import {
   type ProjectModel,
   type RiskLevel,
   retryTask,
+  resumeTask,
   startOpenAiOAuth,
   type TaskEnvelope,
+  type ApprovalRequest,
   type TaskEventsResponse,
   transitionTask
 } from "./desktop-client";
@@ -70,6 +74,7 @@ export function App() {
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -90,6 +95,13 @@ export function App() {
     listProjects()
       .then((response) => {
         if (active) setProjects(response.projects);
+      })
+      .catch((error) => {
+        if (active) setTaskError(errorMessage(error));
+      });
+    listApprovals()
+      .then((response) => {
+        if (active) setApprovals(response.approvals);
       })
       .catch((error) => {
         if (active) setTaskError(errorMessage(error));
@@ -304,6 +316,24 @@ export function App() {
     }
   }
 
+  async function approveAndResume(taskId: string, approvalId: string) {
+    setTaskBusy(true);
+    setTaskError(null);
+    setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Applying approval and resuming..." }));
+    try {
+      await approveRequest(approvalId);
+      const resumed = await resumeTask(taskId);
+      replaceTask(resumed.task);
+      setApprovals((current) => current.filter((approval) => approval.id !== approvalId));
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: resumed.execution.detail }));
+    } catch (error) {
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Approval continuation failed." }));
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
   async function changeTaskState(taskId: string, state: "cancelled") {
     setTaskBusy(true);
     setTaskError(null);
@@ -472,6 +502,11 @@ export function App() {
                   {task.project_id && <span className="task-project">{projects.find((project) => project.project_id === task.project_id)?.root ?? "Linked project"}</span>}
                   {advanced && <code>{task.id}</code>}
                   {taskLaunch[task.id] && <p className="task-progress" role="status">{taskLaunch[task.id]}</p>}
+                  {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <div className="approval-summary">
+                    <strong>Permission needed</strong>
+                    <span>{approvals.find((approval) => approval.task_id === task.id)?.reason}</span>
+                    {advanced && <code>{approvals.find((approval) => approval.task_id === task.id)?.resource}</code>}
+                  </div>}
                   {taskHistory[task.id] && <ol className="event-history">
                     {taskHistory[task.id]?.events.map((event) => (
                       <li key={event.sequence}><span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}</li>
@@ -481,6 +516,7 @@ export function App() {
                 <div className="task-actions">
                   {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy || !task.project_id} title={task.project_id ? undefined : "Select a project before starting"} onClick={() => startTask(task.id)}>Start task</button>}
                   {task.state === "blocked" && <button className="primary" type="button" disabled={taskBusy} onClick={() => retryBlockedTask(task.id)}>Retry</button>}
+                  {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="primary" type="button" disabled={taskBusy} onClick={() => approveAndResume(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Approve and continue</button>}
                   {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
                   <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide history" : "History"}</button>
                 </div>

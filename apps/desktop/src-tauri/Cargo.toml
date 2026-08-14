@@ -19,6 +19,7 @@ mcg-domain = { path = "../../../crates/mcg-domain" }
 mcg-events = { path = "../../../crates/mcg-events" }
 mcg-mcp = { path = "../../../crates/mcg-mcp" }
 mcg-runtime = { path = "../../../crates/mcg-runtime" }
+mcg-tools = { path = "../../../crates/mcg-tools" }
 reqwest.workspace = true
 serde.workspace = true
 tauri.workspace = true

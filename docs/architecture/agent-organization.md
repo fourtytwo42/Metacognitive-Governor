@@ -74,6 +74,13 @@ lease for explicit resume. Other provider, tool, policy, malformed-output, and
 iteration failures fail the instance and lease with a stable reason code. Error
 details from external providers are not copied into durable failure events, and
 no unsuccessful turn creates fabricated model/tool usage or a success result.
+Local-tool resume is explicit and context-bound: runtime verifies an approved
+request, the one waiting instance and lease, the original organization role, the
+current provider routes and tools, and an unchanged project-context fingerprint.
+The model turn is replayed under the same lease; deterministic request identity
+lets the broker consume the prior approval without executing the tool twice.
+Persisted mid-turn transcripts/checkpoints remain required for external MCP tools
+and to avoid a repeated inference call.
 
 ## Authenticated Control Surface
 

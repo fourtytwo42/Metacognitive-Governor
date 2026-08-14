@@ -490,6 +490,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route("/api/v1/tasks/{task_id}/runs", post(plan_agent_run))
         .route("/api/v1/tasks/{task_id}/launch", post(launch_task))
         .route("/api/v1/tasks/{task_id}/retry", post(retry_task))
+        .route("/api/v1/tasks/{task_id}/resume", post(resume_task))
         .route(
             "/api/v1/organizations",
             get(list_organizations).post(create_default_organization),
@@ -1056,6 +1057,49 @@ async fn retry_task(
         .runtime
         .transition_task(task_id, TaskState::Active)
         .map_err(map_runtime_error)?;
+    advance_consumer_run(&state, task_id, project_id, &organization, &view, &request)
+        .await
+        .map(Json)
+}
+
+async fn resume_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<LaunchTaskRequest>,
+) -> Result<Json<LaunchTaskResponse>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    state
+        .runtime
+        .resume_approved_agent_work(
+            task_id,
+            request.context_token_budget,
+            request.estimated_output_tokens,
+            request.max_model_calls,
+        )
+        .await
+        .map_err(map_runtime_error)?;
+    let task = state
+        .runtime
+        .task(task_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::internal("resumed task disappeared"))?;
+    let project_id = task
+        .project_id
+        .ok_or_else(|| ApiError::internal("resumed task lost its project"))?;
+    let run_id = state
+        .runtime
+        .task_launch_run_id(task_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::internal("resumed task lost its run"))?;
+    let view = state
+        .runtime
+        .agent_run_view(run_id)
+        .map_err(map_runtime_error)?;
+    let organization = state
+        .runtime
+        .organization_revision(view.run.organization_revision_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::internal("resumed run organization disappeared"))?;
     advance_consumer_run(&state, task_id, project_id, &organization, &view, &request)
         .await
         .map(Json)
@@ -1903,7 +1947,7 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use mcg_agents::{ConditionResult, EvaluationEvidence, EvaluationOutcome};
-    use mcg_config::AppConfig;
+    use mcg_config::{AppConfig, AutonomyPreset};
     use mcg_domain::{ArtifactId, EvaluationId, ToolExecutionId, ToolRequestId};
     use mcg_mcp::{
         MCP_CONNECTION_CONTRACT_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpProtocolMode,
@@ -2306,6 +2350,97 @@ form.addEventListener('submit', (event) => {
             axum::serve(listener, app)
                 .await
                 .expect("website fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn approval_resume_fixture(target: &std::path::Path) -> String {
+        let target = target.to_string_lossy().into_owned();
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "approval-resume-model",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32768,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let target = target.clone();
+                    async move {
+                        let has_tool_result = body
+                            .get("input")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|item| {
+                                    item.get("type").and_then(serde_json::Value::as_str)
+                                        == Some("function_call_output")
+                                })
+                            });
+                        let names = body
+                            .get("tools")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|tool| {
+                                tool.pointer("/function/name")
+                                    .or_else(|| tool.get("name"))
+                                    .and_then(serde_json::Value::as_str)
+                            })
+                            .collect::<BTreeSet<_>>();
+                        let output = if has_tool_result {
+                            vec![serde_json::json!({
+                                "type": "message", "role": "assistant",
+                                "content": [{"type": "output_text", "text": "Approved write completed."}]
+                            })]
+                        } else if names.contains("report_ok") {
+                            vec![serde_json::json!({
+                                "type": "function_call", "call_id": "probe-call",
+                                "name": "report_ok", "arguments": "{\"ok\":true}"
+                            })]
+                        } else if names.contains("fs.write") {
+                            vec![serde_json::json!({
+                                "type": "function_call", "call_id": "approved-write",
+                                "name": "fs.write",
+                                "arguments": serde_json::to_string(&serde_json::json!({
+                                    "path": target,
+                                    "content": "approval continuation succeeded\n",
+                                    "create_new": true
+                                })).expect("arguments")
+                            })]
+                        } else {
+                            vec![serde_json::json!({
+                                "type": "message", "role": "assistant",
+                                "content": [{"type": "output_text", "text": "Independent review finished."}]
+                            })]
+                        };
+                        Json(serde_json::json!({
+                            "id": "approval-resume-response",
+                            "model": "approval-resume-model",
+                            "status": "completed",
+                            "output": output,
+                            "usage": {"input_tokens": 32, "output_tokens": 16, "total_tokens": 48}
+                        }))
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("approval fixture listener");
+        let address = listener.local_addr().expect("approval fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("approval fixture server");
         });
         format!("http://{address}/v1")
     }
@@ -3211,6 +3346,171 @@ form.addEventListener('submit', (event) => {
                 .run
                 .state,
             AgentRunState::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Public launch/approve/resume composition is one scenario.
+    async fn approved_consumer_turn_resumes_without_duplicate_side_effects() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# Approval fixture\n")
+            .expect("project fixture");
+        let mut config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        config.autonomy = AutonomyPreset::Guided;
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let target = std::path::PathBuf::from(&project.root).join("approved.txt");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "approval_resume_fixture".into(),
+                    display_name: "Approval Resume Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: approval_resume_fixture(&target).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let mut task = TaskEnvelope::new("Create the approved fixture file");
+        task.project_id = Some(project.project_id);
+        task.success_conditions = vec!["approved.txt exists with the requested content".into()];
+        runtime.create_task(&task).expect("task");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+        let launch_path = format!("/api/v1/tasks/{}/launch", task.id);
+        let launched = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&launch_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("launch response");
+        let launched: LaunchTaskResponse = serde_json::from_slice(
+            &launched
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("launch body");
+        assert_eq!(
+            launched.task.state,
+            TaskState::WaitingForApproval,
+            "unexpected launch execution: {:?}",
+            launched.execution
+        );
+        assert_eq!(launched.run.run.state, AgentRunState::Waiting);
+        assert!(matches!(
+            launched.execution,
+            LaunchExecution::AwaitingApproval { .. }
+        ));
+        assert!(!target.exists());
+        let approvals = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("pending approvals");
+        assert_eq!(approvals.len(), 1);
+        let approval_path = format!("/api/v1/approvals/{}/resolve", approvals[0].id);
+        let approved = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(approval_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"state":"approved","reason":"fixture owner approval"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("approval response");
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let resumed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}/resume", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("resume response");
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let resumed: LaunchTaskResponse = serde_json::from_slice(
+            &resumed
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("resume body");
+        assert!(matches!(
+            resumed.execution,
+            LaunchExecution::AwaitingEvaluation { .. }
+        ));
+        assert_eq!(resumed.run.results.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("approved side effect"),
+            "approval continuation succeeded\n"
+        );
+        assert_eq!(
+            runtime
+                .approvals(Some(ApprovalState::Approved))
+                .expect("approved records")
+                .len(),
+            1
+        );
+
+        let replayed = app
+            .oneshot(
+                authorized(Request::post(&launch_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay response");
+        let replayed: LaunchTaskResponse = serde_json::from_slice(
+            &replayed
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("replay body");
+        assert!(replayed.replayed);
+        assert!(matches!(
+            replayed.execution,
+            LaunchExecution::AwaitingEvaluation { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(target).expect("single approved side effect"),
+            "approval continuation succeeded\n"
         );
     }
 

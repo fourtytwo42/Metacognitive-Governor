@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
 const client = vi.hoisted(() => ({
@@ -13,6 +13,9 @@ const client = vi.hoisted(() => ({
   createTask: vi.fn(),
   launchTask: vi.fn(),
   retryTask: vi.fn(),
+  resumeTask: vi.fn(),
+  listApprovals: vi.fn(),
+  approveRequest: vi.fn(),
   transitionTask: vi.fn(),
   taskEvents: vi.fn(),
   pickProject: vi.fn(),
@@ -32,6 +35,9 @@ vi.mock("./desktop-client", () => ({
   createTask: client.createTask,
   launchTask: client.launchTask,
   retryTask: client.retryTask,
+  resumeTask: client.resumeTask,
+  listApprovals: client.listApprovals,
+  approveRequest: client.approveRequest,
   transitionTask: client.transitionTask,
   loadTaskEvents: client.taskEvents,
   pickProjectDirectory: client.pickProject,
@@ -53,6 +59,9 @@ beforeEach(() => {
   client.createTask.mockReset();
   client.launchTask.mockReset();
   client.retryTask.mockReset();
+  client.resumeTask.mockReset();
+  client.listApprovals.mockReset();
+  client.approveRequest.mockReset();
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
   client.pickProject.mockReset();
@@ -62,6 +71,7 @@ beforeEach(() => {
   client.listMcp.mockResolvedValue({ connections: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
+  client.listApprovals.mockResolvedValue({ approvals: [] });
 });
 
 test("advanced mode reveals runtime details", () => {
@@ -282,6 +292,46 @@ test("blocked task retry is explicit and reports durable progress", async () => 
   expect(client.retryTask).toHaveBeenCalledWith(blockedTask.id);
   expect(await screen.findByText("Objective checks are next.")).toBeInTheDocument();
   expect(screen.getByText("active")).toBeInTheDocument();
+});
+
+test("pending approval can be reviewed and resumed from the task card", async () => {
+  const waitingTask = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000040",
+    project_id: "00000000-0000-4000-8000-000000000041",
+    goal: "Write the approved file",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "waiting_for_approval",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  const approval = {
+    id: "00000000-0000-4000-8000-000000000042",
+    task_id: waitingTask.id,
+    action: "fs.write",
+    resource: "C:\\Projects\\sample\\approved.txt",
+    reason: "Writing a new project file requires approval in guided mode.",
+    state: "pending"
+  };
+  client.listTasks.mockResolvedValue({ tasks: [waitingTask] });
+  client.listApprovals.mockResolvedValue({ approvals: [approval] });
+  client.approveRequest.mockResolvedValue({ ...approval, state: "approved" });
+  client.resumeTask.mockResolvedValue({
+    task: { ...waitingTask, state: "active" },
+    replayed: false,
+    run: { run: { id: "00000000-0000-4000-8000-000000000043", state: "running" } },
+    execution: { state: "awaiting_evaluation", detail: "Approved work finished; checks are next." }
+  });
+  render(<App />);
+
+  expect(await screen.findByText(approval.reason)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Approve and continue" }));
+  expect(client.approveRequest).toHaveBeenCalledWith(approval.id);
+  await waitFor(() => expect(client.resumeTask).toHaveBeenCalledWith(waitingTask.id));
+  expect(await screen.findByText("Approved work finished; checks are next.")).toBeInTheDocument();
 });
 
 test("native project selection discovers the folder and associates the new task", async () => {

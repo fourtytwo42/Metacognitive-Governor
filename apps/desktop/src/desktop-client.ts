@@ -142,6 +142,19 @@ export interface LaunchTaskResponse {
   };
 }
 
+export interface ApprovalRequest {
+  id: string;
+  task_id: string;
+  action: string;
+  resource: string;
+  reason: string;
+  state: "pending" | "approved" | "denied" | "expired" | "cancelled";
+}
+
+export interface ApprovalListResponse {
+  approvals: ApprovalRequest[];
+}
+
 export function startOpenAiOAuth(method: OpenAiOAuthMethod): Promise<OAuthLoginStart> {
   return invoke("start_openai_oauth", {
     request: {
@@ -214,6 +227,29 @@ export function retryTask(taskId: string): Promise<LaunchTaskResponse> {
       estimated_output_tokens: 4096,
       max_model_calls: 8
     }
+  });
+}
+
+export function resumeTask(taskId: string): Promise<LaunchTaskResponse> {
+  return invoke("resume_task", {
+    taskId,
+    request: {
+      context_token_budget: 8192,
+      requested_tools: [],
+      estimated_output_tokens: 4096,
+      max_model_calls: 8
+    }
+  });
+}
+
+export function listApprovals(): Promise<ApprovalListResponse> {
+  return invoke("list_approvals");
+}
+
+export function approveRequest(approvalId: string): Promise<ApprovalRequest> {
+  return invoke("resolve_approval", {
+    approvalId,
+    request: { state: "approved", reason: "Approved in MCG desktop" }
   });
 }
 
