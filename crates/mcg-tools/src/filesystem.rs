@@ -119,6 +119,41 @@ impl FilesystemExecutor {
         })
     }
 
+    fn verify(&self, path: &str, max_bytes: u64) -> Result<ExecutionResult, ToolError> {
+        let (root, relative) = self.resolve(path)?;
+        let file = root.open(&relative).map_err(|error| {
+            ToolError::Execution(format!("open file for verification: {error}"))
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            ToolError::Execution(format!("inspect file for verification: {error}"))
+        })?;
+        if !metadata.is_file() {
+            return Err(ToolError::Execution(
+                "objective evidence path is not a regular file".into(),
+            ));
+        }
+        let artifact =
+            self.artifacts
+                .capture_reader(file, max_bytes, "application/octet-stream")?;
+        Ok(ExecutionResult {
+            summary: format!("verified regular file ({} bytes)", artifact.size_bytes),
+            stdout: None,
+            verification: vec![
+                VerificationEvidence {
+                    method: "sha256".into(),
+                    passed: true,
+                    detail: artifact.sha256.clone(),
+                },
+                VerificationEvidence {
+                    method: "file.size".into(),
+                    passed: true,
+                    detail: artifact.size_bytes.to_string(),
+                },
+            ],
+            artifacts: vec![artifact],
+        })
+    }
+
     fn write(
         &self,
         path: &str,
@@ -312,6 +347,7 @@ impl ToolExecutor for FilesystemExecutor {
         let started_at = Utc::now();
         let result = match &request.kind {
             ToolRequestKind::FsRead { path, max_bytes } => self.read(path, *max_bytes),
+            ToolRequestKind::FsVerify { path, max_bytes } => self.verify(path, *max_bytes),
             ToolRequestKind::FsWrite {
                 path,
                 content,
@@ -479,6 +515,43 @@ mod tests {
             .expect("read");
         assert_eq!(observed.stdout.as_deref(), Some("second"));
         assert_eq!(observed.artifacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn verify_streams_binary_evidence_without_stdout_and_enforces_limit() {
+        let (project, executor) = executor();
+        let path = project.path().join("result.bin");
+        let bytes = vec![0xa5; 160_000];
+        std::fs::write(&path, &bytes).expect("fixture");
+        let request = ToolRequest::new(
+            mcg_domain::TaskId::new(),
+            "verify",
+            ToolRequestKind::FsVerify {
+                path: path.to_string_lossy().into(),
+                max_bytes: 160_000,
+            },
+        );
+        let observed = executor
+            .execute(ToolExecutionId::new(), &request)
+            .await
+            .expect("verify");
+        assert_eq!(observed.stdout, None);
+        assert_eq!(observed.artifacts[0].sha256, sha256(&bytes));
+        assert_eq!(observed.artifacts[0].size_bytes, 160_000);
+        assert_eq!(observed.verification[1].detail, "160000");
+
+        let too_small = ToolRequest::new(
+            request.task_id,
+            "bounded verify",
+            ToolRequestKind::FsVerify {
+                path: path.to_string_lossy().into(),
+                max_bytes: 159_999,
+            },
+        );
+        assert!(matches!(
+            executor.execute(ToolExecutionId::new(), &too_small).await,
+            Err(ToolError::Unavailable(_))
+        ));
     }
 
     #[tokio::test]

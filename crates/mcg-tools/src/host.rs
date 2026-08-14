@@ -25,6 +25,7 @@ impl ToolExecutor for HostExecutor {
     ) -> Result<ToolOutcome, ToolError> {
         let executor = match &request.kind {
             ToolRequestKind::FsRead { .. }
+            | ToolRequestKind::FsVerify { .. }
             | ToolRequestKind::FsWrite { .. }
             | ToolRequestKind::FsPatch { .. }
             | ToolRequestKind::FsList { .. }

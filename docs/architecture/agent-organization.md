@@ -98,6 +98,12 @@ capability contains only the condition's credential-free origin, while the immut
 request retains the exact URL and expected status. Response bytes are content-addressed;
 the report records the observed status and artifact hash without copying the body into
 evaluation history.
+Typed file conditions retain only a normalized project-relative path and optional
+minimum-size/digest constraints. Runtime resolves that path beneath the immutable
+project authority, captures a bounded regular-file artifact through `fs.verify`,
+and records its size and digest without placing file bytes in report text. Executable
+custom conditions are limited to the canonical `COMMAND SUCCEEDS ` prefix and an
+exact current discovery match; all other custom descriptions remain unsupported.
 
 ## Authenticated Control Surface
 

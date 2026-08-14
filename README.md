@@ -113,9 +113,13 @@ with per-condition details in advanced mode. Guided mode requests one explicit
 approval for the exact supported objective batch and immutable project snapshot.
 That checkpoint survives daemon restart; denial blocks for a bounded retry with a
 fresh request identity, while approval resumes the batch without repeating model
-turns or completed checks. Natural-language and other condition types remain
-nonterminal until their objective evaluators are implemented; model
-text alone is never promoted to proof. Advanced success-condition lines can use
+turns or completed checks. Free-form conditions without a typed evaluator remain
+nonterminal; model text alone is never promoted to proof. Advanced
+success-condition lines can use `FILE EXISTS project/relative/path` to stream a
+regular file into bounded content-addressed evidence without exposing its contents
+in task history. `COMMAND SUCCEEDS exact discovered command` runs only when the
+entire command still matches project discovery; arbitrary custom text is never
+executed. Advanced lines can also use
 `HTTP STATUS URL` (for example, `HTTP 200 http://127.0.0.1:3000/health`). MCG
 performs one governed, body-bounded GET to that exact credential-free URL, captures
 the response artifact, and compares the observed status exactly, including expected

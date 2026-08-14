@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +57,96 @@ impl ArtifactStore {
                 .map_err(|_| ToolError::Execution("artifact is too large".into()))?,
             relative_path: format!("{shard}/{sha256}"),
         })
+    }
+
+    /// Streams immutable evidence into the content-addressed store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or atomically storing the artifact fails, or
+    /// if the stream exceeds `max_bytes`.
+    pub fn capture_reader(
+        &self,
+        mut reader: impl Read,
+        max_bytes: u64,
+        media_type: impl Into<String>,
+    ) -> Result<ArtifactReference, ToolError> {
+        fs::create_dir_all(&self.root).map_err(|error| {
+            ToolError::Execution(format!("restore artifact store root: {error}"))
+        })?;
+        let temporary = self
+            .root
+            .join(format!(".incoming.{}.tmp", ArtifactId::new()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let mut digest = Sha256::new();
+            let mut size_bytes = 0_u64;
+            let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+            loop {
+                let read = reader
+                    .read(&mut buffer)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                size_bytes = size_bytes
+                    .checked_add(
+                        u64::try_from(read)
+                            .map_err(|error| ToolError::Execution(error.to_string()))?,
+                    )
+                    .ok_or_else(|| ToolError::Execution("artifact size overflow".into()))?;
+                if size_bytes > max_bytes {
+                    return Err(ToolError::Unavailable(format!(
+                        "file exceeds the {max_bytes}-byte artifact evidence limit"
+                    )));
+                }
+                digest.update(&buffer[..read]);
+                file.write_all(&buffer[..read])
+                    .map_err(|error| ToolError::Execution(error.to_string()))?;
+            }
+            file.sync_all()
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            drop(file);
+
+            let sha256 = format!("{:x}", digest.finalize());
+            let shard = &sha256[..2];
+            let directory = self.root.join(shard);
+            fs::create_dir_all(&directory)
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let destination = directory.join(&sha256);
+            if destination.exists() {
+                fs::remove_file(&temporary)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?;
+            } else if let Err(error) = fs::rename(&temporary, &destination) {
+                if destination.exists() {
+                    fs::remove_file(&temporary)
+                        .map_err(|error| ToolError::Execution(error.to_string()))?;
+                } else {
+                    return Err(ToolError::Execution(error.to_string()));
+                }
+            }
+            Ok(ArtifactReference {
+                id: ArtifactId::new(),
+                sha256: sha256.clone(),
+                media_type: media_type.into(),
+                size_bytes,
+                relative_path: format!("{shard}/{sha256}"),
+            })
+        })();
+        match result {
+            Ok(artifact) => Ok(artifact),
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                Err(match error {
+                    ToolError::Unavailable(_) => error,
+                    _ => ToolError::Execution(format!("capture streamed artifact: {error}")),
+                })
+            }
+        }
     }
 
     fn write_new(destination: &Path, bytes: &[u8], digest: &str) -> Result<(), ToolError> {
@@ -203,6 +293,34 @@ mod tests {
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.relative_path, second.relative_path);
         assert!(root.path().join(first.relative_path).is_file());
+    }
+
+    #[test]
+    fn streamed_artifact_is_bounded_and_deduplicated() {
+        let root = tempdir().expect("tempdir");
+        let store = ArtifactStore::open(root.path()).expect("store");
+        let bytes = vec![0x5a; 160_000];
+        let first = store
+            .capture_reader(bytes.as_slice(), 160_000, "application/octet-stream")
+            .expect("streamed artifact");
+        let second = store
+            .capture_reader(bytes.as_slice(), 160_000, "application/octet-stream")
+            .expect("deduplicated artifact");
+        assert_eq!(first.sha256, second.sha256);
+        assert_eq!(first.size_bytes, 160_000);
+        assert_eq!(first.relative_path, second.relative_path);
+        assert!(matches!(
+            store.capture_reader(bytes.as_slice(), 159_999, "application/octet-stream"),
+            Err(ToolError::Unavailable(_))
+        ));
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("artifact root")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("incoming"))
+                .count(),
+            0
+        );
     }
 
     #[test]

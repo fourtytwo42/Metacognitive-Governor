@@ -365,17 +365,45 @@ pub enum WorkItemState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SuccessCondition {
-    Build { command: String },
-    Test { command: String },
-    StaticAnalysis { command: String },
-    HttpResponds { url: String, status: u16 },
-    PageRenders { url: String },
-    BrowserWorkflow { name: String },
-    ElementExists { selector: String },
-    ScreenshotMatches { baseline: String },
-    ServiceHealthy { endpoint: String },
-    ResearchSources { minimum: u16 },
-    Custom { description: String },
+    Build {
+        command: String,
+    },
+    Test {
+        command: String,
+    },
+    StaticAnalysis {
+        command: String,
+    },
+    FileExists {
+        path: String,
+        min_bytes: u64,
+        expected_sha256: Option<String>,
+    },
+    HttpResponds {
+        url: String,
+        status: u16,
+    },
+    PageRenders {
+        url: String,
+    },
+    BrowserWorkflow {
+        name: String,
+    },
+    ElementExists {
+        selector: String,
+    },
+    ScreenshotMatches {
+        baseline: String,
+    },
+    ServiceHealthy {
+        endpoint: String,
+    },
+    ResearchSources {
+        minimum: u16,
+    },
+    Custom {
+        description: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

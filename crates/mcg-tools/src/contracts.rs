@@ -75,6 +75,10 @@ pub enum ToolRequestKind {
         path: String,
         max_bytes: u64,
     },
+    FsVerify {
+        path: String,
+        max_bytes: u64,
+    },
     FsWrite {
         path: String,
         content: String,
@@ -213,6 +217,7 @@ impl ToolRequestKind {
     pub fn stable_name(&self) -> String {
         match self {
             Self::FsRead { .. } => "fs.read".into(),
+            Self::FsVerify { .. } => "fs.verify".into(),
             Self::FsWrite { .. } => "fs.write".into(),
             Self::FsPatch { .. } => "fs.patch".into(),
             Self::FsList { .. } => "fs.list".into(),

@@ -1310,7 +1310,8 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::StaticAnalysis { .. }
             | SuccessCondition::HttpResponds { .. }
             | SuccessCondition::PageRenders { .. }
-    )
+            | SuccessCondition::FileExists { .. }
+    ) || matches!(condition, SuccessCondition::Custom { description } if consumer_custom_command(description).is_some())
 }
 
 fn consumer_success_conditions(
@@ -1356,6 +1357,20 @@ fn consumer_success_conditions(
 
 fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
     let trimmed = description.trim();
+    if let Some(path) = consumer_directive_value(trimmed, "FILE EXISTS")
+        && let Some(path) = normalized_consumer_file_path(path)
+    {
+        return SuccessCondition::FileExists {
+            path,
+            min_bytes: 0,
+            expected_sha256: None,
+        };
+    }
+    if let Some(command) = consumer_directive_value(trimmed, "COMMAND SUCCEEDS") {
+        return SuccessCondition::Custom {
+            description: format!("COMMAND SUCCEEDS {command}"),
+        };
+    }
     let mut parts = trimmed.split_ascii_whitespace();
     let first = parts.next();
     let status = parts.next();
@@ -1392,6 +1407,42 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
     SuccessCondition::Custom {
         description: trimmed.to_owned(),
     }
+}
+
+fn consumer_directive_value<'a>(value: &'a str, directive: &str) -> Option<&'a str> {
+    let head = value.get(..directive.len())?;
+    let tail = value.get(directive.len()..)?;
+    if !head.eq_ignore_ascii_case(directive)
+        || !tail.chars().next().is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let value = tail.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn normalized_consumer_file_path(value: &str) -> Option<String> {
+    let normalized = value.replace('\\', "/");
+    let segments = normalized.split('/').collect::<Vec<_>>();
+    if normalized.starts_with('/')
+        || segments.is_empty()
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || matches!(*segment, "." | ".."))
+        || segments
+            .first()
+            .is_some_and(|segment| segment.ends_with(':'))
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn consumer_custom_command(description: &str) -> Option<&str> {
+    description
+        .strip_prefix("COMMAND SUCCEEDS ")
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
 }
 
 async fn get_agent_run(
@@ -2090,6 +2141,7 @@ mod tests {
     use mcg_tools::{
         ApprovalRepository, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditSink, ToolOutcomeStatus,
     };
+    use sha2::{Digest, Sha256};
     use tower::ServiceExt;
 
     use super::*;
@@ -2104,7 +2156,7 @@ mod tests {
     }
 
     #[test]
-    fn consumer_http_condition_parser_requires_exact_safe_syntax() {
+    fn consumer_condition_parser_requires_exact_safe_syntax() {
         assert_eq!(
             parse_consumer_success_condition("  HTTP 404 https://example.test/health?full=1  "),
             SuccessCondition::HttpResponds {
@@ -2118,6 +2170,23 @@ mod tests {
                 url: "https://example.test/app".into(),
             }
         );
+        assert_eq!(
+            parse_consumer_success_condition(" file exists dist\\release artifact.bin "),
+            SuccessCondition::FileExists {
+                path: "dist/release artifact.bin".into(),
+                min_bytes: 0,
+                expected_sha256: None,
+            }
+        );
+        assert_eq!(
+            parse_consumer_success_condition("command succeeds npm run verify-artifact"),
+            SuccessCondition::Custom {
+                description: "COMMAND SUCCEEDS npm run verify-artifact".into(),
+            }
+        );
+        assert!(is_automatable_consumer_condition(
+            &parse_consumer_success_condition("COMMAND SUCCEEDS npm run verify-artifact")
+        ));
         for unsafe_or_ambiguous in [
             "HTTP 99 https://example.test",
             "HTTP 200 https://user:secret@example.test",
@@ -2127,6 +2196,12 @@ mod tests {
             "PAGE RENDERS https://user:secret@example.test",
             "PAGE RENDERS file:///tmp/page.html",
             "PAGE RENDERS https://example.test extra",
+            "FILE EXISTS ../escape.txt",
+            "FILE EXISTS /absolute/result.txt",
+            "FILE EXISTS C:\\absolute\\result.txt",
+            "FILE EXISTS dist/./result.txt",
+            "FILE EXISTS ",
+            "COMMAND SUCCEEDS ",
         ] {
             assert!(matches!(
                 parse_consumer_success_condition(unsafe_or_ambiguous),
@@ -4242,6 +4317,168 @@ form.addEventListener('submit', (event) => {
                 .is_none()
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // File and safe custom command evidence share one public flow.
+    async fn consumer_file_and_discovered_custom_command_are_governed() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(project_root.join("dist")).expect("project output");
+        std::fs::write(project_root.join("README.md"), "# File objective fixture\n")
+            .expect("readme");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"verify-artifact":"node verify-artifact.mjs"}}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            project_root.join("verify-artifact.mjs"),
+            "import { readFileSync } from 'node:fs'; if (readFileSync('dist/result.bin').length !== 4) process.exit(3);\n",
+        )
+        .expect("verification script");
+        let bytes = [0_u8, 1, 2, 3];
+        std::fs::write(project_root.join("dist/result.bin"), bytes).expect("file evidence");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        assert!(project.commands.iter().any(|command| {
+            command.name == "verify-artifact" && command.command == "npm run verify-artifact"
+        }));
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "file_objective_fixture".into(),
+                    display_name: "File Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+
+        let mut passing_task = TaskEnvelope::new("Verify a produced binary artifact");
+        passing_task.project_id = Some(project.project_id);
+        passing_task.success_conditions = vec![
+            "FILE EXISTS dist/result.bin".into(),
+            "COMMAND SUCCEEDS npm run verify-artifact".into(),
+        ];
+        runtime.create_task(&passing_task).expect("passing task");
+        let passing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    passing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+            )
+            .await
+            .expect("passing response");
+        assert_eq!(passing.status(), StatusCode::OK);
+        let passing: LaunchTaskResponse = serde_json::from_slice(
+            &passing
+                .into_body()
+                .collect()
+                .await
+                .expect("passing body")
+                .to_bytes(),
+        )
+        .expect("passing response body");
+        assert_eq!(passing.task.state, TaskState::Completed);
+        let report = passing.run.evaluations.first().expect("passing report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert_eq!(report.conditions.len(), 2);
+        assert!(report.conditions.iter().all(|condition| condition.passed));
+        let file_evidence = report
+            .evidence
+            .iter()
+            .find(|evidence| evidence.method == "governed_file_artifact")
+            .expect("file evidence");
+        let expected_sha256 = format!("{:x}", Sha256::digest(bytes));
+        assert_eq!(
+            file_evidence.artifact_sha256.as_deref(),
+            Some(expected_sha256.as_str())
+        );
+        assert!(file_evidence.detail.contains("observed_size=4"));
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|evidence| evidence.method == "governed_process_exit")
+        );
+        let audit = runtime.tool_audit(passing_task.id).expect("file audit");
+        for tool in ["fs.verify", "process.exec"] {
+            assert!(audit.iter().any(|record| {
+                record.phase == ToolAuditPhase::Completion
+                    && record.tool == tool
+                    && record.result == Some(ToolOutcomeStatus::Succeeded)
+            }));
+        }
+
+        let mut missing_task = TaskEnvelope::new("Reject a missing release artifact");
+        missing_task.project_id = Some(project.project_id);
+        missing_task.success_conditions = vec!["FILE EXISTS dist/missing.bin".into()];
+        runtime.create_task(&missing_task).expect("missing task");
+        let missing = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    missing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("missing response");
+        assert_eq!(missing.status(), StatusCode::OK);
+        let missing: LaunchTaskResponse = serde_json::from_slice(
+            &missing
+                .into_body()
+                .collect()
+                .await
+                .expect("missing body")
+                .to_bytes(),
+        )
+        .expect("missing response body");
+        assert_eq!(missing.task.state, TaskState::Failed);
+        assert_eq!(
+            missing.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(
+            missing.run.evaluations[0].conditions[0]
+                .detail
+                .contains("objective check could not execute")
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]

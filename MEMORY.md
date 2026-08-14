@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Guided approval, HTTP status, and real Chromium rendered-page evidence are cross-platform qualified; artifact/file and custom objective evidence are next.
-- Last meaningful change: Added typed `browser.render`, exact `PAGE RENDERS URL` parsing, an ephemeral CDP renderer with pre-send origin/method interception, post-JavaScript DOM checks, and HTML/PNG evidence.
-- Next step: Add artifact/file and custom-condition evaluators, followed by research and screenshot-baseline evidence. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Current task: Guided approval, HTTP status, and real Chromium rendered-page evidence are cross-platform qualified; artifact/file and exact-discovered custom command evidence are Windows-qualified and awaiting an exact Ubuntu checkpoint.
+- Last meaningful change: Added typed `FileExists`/`fs.verify`, bounded streaming artifact capture, safe package-script discovery, `FILE EXISTS`, and exact `COMMAND SUCCEEDS` evaluation.
+- Next step: Commit and run the exact artifact/file/custom checkpoint through the complete owner-controlled Ubuntu gate, then add research and screenshot-baseline evidence. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -26,6 +26,7 @@ Durable project context lives here. Update this file whenever information should
 - Guided command evaluation stores its run/project/condition progress in SQLite and requests one approval for the immutable discovered batch. Denial blocks for bounded retry with a new request identity; approved work resumes across daemon restart without another provider turn or repeated completed check.
 - Advanced consumer condition lines accept exact `HTTP STATUS URL` syntax. Runtime grants only the parsed credential-free origin, performs a body-bounded governed GET, captures response bytes as an artifact, and compares observed status exactly; status mismatch, timeout, and connection failure become failed evaluation evidence.
 - Advanced consumer condition lines accept exact `PAGE RENDERS URL` syntax. Runtime launches a fresh local Chromium CDP session, permits only exact-origin GET/HEAD plus in-page data/blob resources, checks DOM readiness/layout after JavaScript, and captures rendered HTML plus a PNG. Missing browser runtime blocks as inconclusive; render failure is objective failure.
+- Advanced consumer condition lines accept `FILE EXISTS project/relative/path` and exact `COMMAND SUCCEEDS discovered command`. File evidence is regular-file-only, capability-confined, streamed with a 1 GiB ceiling, and records artifact size/SHA-256 without stdout. Custom commands execute only when the complete command still matches safe current project discovery; arbitrary prose remains inconclusive.
 
 ## User Preferences
 
@@ -525,6 +526,15 @@ When sources conflict, use this order:
 - Result: Windows-focused and complete Ubuntu gates prove JavaScript changes the DOM/title, two render artifacts are audited, screenshot hash reaches the independent report, a cross-origin image plus same-origin POST are blocked before network send, and missing browser is unavailable rather than false objective failure. Initial commit `4bca0c7` correctly failed on Ubuntu AppArmor; root-owned managed browser plus the path-specific profile fixed it without disabling sandbox or global restriction. Exact `20c5f81` passed all Rust, live-provider, native Tauri/GTK, frontend, and Playwright gates. No password was persisted.
 - Follow-up: Artifact/file and custom condition evaluators, then expanded browser workflow/screenshot evidence.
 
+### 2026-08-14 - Governed File And Custom Command Evidence
+
+- Context: Artifact/file conditions and custom task text could not independently settle consumer work; executing arbitrary custom prose would have created an unsafe shell boundary.
+- Decision: Add typed `FileExists` and server-owned `fs.verify`; require normalized project-relative paths and regular files; stream at most 1 GiB into content-addressed storage without exposing file bytes as stdout. Make `COMMAND SUCCEEDS` the only executable custom form and require its full command to remain an exact current discovery match. Discover all safely named package scripts as structured runner argv; leave other prose inconclusive.
+- Files: `crates/mcg-{agents,tools,projects,runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
+- Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 32 tool and 29 API tests; real binary artifact and npm custom-command public fixture; nine Vitest flows; frontend typecheck/build; Playwright; docs/diff checks.
+- Result: Windows qualification is green. Binary evidence is bounded, deduplicated, and hash/size checked; a missing file atomically fails task/run; exact discovered custom scripts pass through policy, leases, audit, and structured process execution. Ubuntu exact-commit qualification remains pending.
+- Follow-up: Commit and run complete `./scripts/verify.sh` on the owner-controlled Ubuntu VM, then continue research and screenshot-baseline evaluators.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -552,7 +562,7 @@ When sources conflict, use this order:
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
-- Expand consumer objective settlement beyond discovered commands to guided approvals plus HTTP, browser, artifact/file, research, screenshot, and custom conditions; unsupported conditions deliberately remain nonterminal.
+- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser, file, and exact-discovered custom evaluators to research and screenshot conditions; unsupported conditions deliberately remain nonterminal.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

@@ -385,7 +385,8 @@ fn discover_commands(
         let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(package_json)?)?;
         if let Some(scripts) = value.get("scripts").and_then(serde_json::Value::as_object) {
             let runner = preferred_js_runner(files);
-            for name in ["build", "test", "check", "lint", "dev", "start", "test:e2e"] {
+            let preferred = ["build", "test", "check", "lint", "dev", "start", "test:e2e"];
+            for name in preferred {
                 if scripts.contains_key(name) {
                     commands.push(command(
                         name,
@@ -393,6 +394,17 @@ fn discover_commands(
                         "package.json",
                     ));
                 }
+            }
+            for name in scripts
+                .keys()
+                .filter(|name| !preferred.contains(&name.as_str()))
+                .filter(|name| safe_package_script_name(name))
+            {
+                commands.push(command(
+                    name,
+                    &format!("{runner} run {name}"),
+                    "package.json",
+                ));
             }
         }
     }
@@ -407,6 +419,13 @@ fn discover_commands(
     });
     commands.dedup_by(|left, right| left.name == right.name && left.command == right.command);
     Ok(commands)
+}
+
+fn safe_package_script_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-'))
 }
 
 fn command(name: &str, value: &str, source: &str) -> ProjectCommand {
@@ -793,7 +812,7 @@ mod tests {
         .expect("cursor");
         fs::write(
             root.path().join("package.json"),
-            r#"{"scripts":{"build":"vite build","test":"vitest","test:e2e":"playwright test"},"devDependencies":{"vitest":"1","@playwright/test":"1"}}"#,
+            r#"{"scripts":{"build":"vite build","test":"vitest","test:e2e":"playwright test","verify-artifact":"node verify.mjs","unsafe script":"node unsafe.mjs"},"devDependencies":{"vitest":"1","@playwright/test":"1"}}"#,
         )
         .expect("package");
         fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: 9").expect("lock");
@@ -828,6 +847,15 @@ mod tests {
         assert!(first.commands.iter().any(|command| {
             command.name == "test:e2e" && command.command == "pnpm run test:e2e"
         }));
+        assert!(first.commands.iter().any(|command| {
+            command.name == "verify-artifact" && command.command == "pnpm run verify-artifact"
+        }));
+        assert!(
+            !first
+                .commands
+                .iter()
+                .any(|command| command.name == "unsafe script")
+        );
         assert_eq!(first.instructions.effective[0].value, "pnpm");
         let nested = InstructionResolver::for_target(
             &first.instructions.documents,

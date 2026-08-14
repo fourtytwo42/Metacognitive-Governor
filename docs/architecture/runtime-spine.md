@@ -106,6 +106,16 @@ continues from the stored condition index without another provider turn or repea
 completed check. Conditions without a deterministic evaluator remain visibly
 awaiting evaluation rather than accepting model self-report as objective proof.
 
+`FILE EXISTS project/relative/path` becomes a typed `FileExists` condition. Runtime
+rejects absolute, traversing, and non-normalized paths, opens only a regular file
+under the registered project capability, and streams at most 1 GiB into the
+content-addressed artifact store. The report records size and SHA-256 but not file
+contents; structured plans may additionally require a minimum size and exact digest.
+`COMMAND SUCCEEDS exact command` is the only executable custom-text form. The full
+command must still exactly match current project discovery, including safely named
+manifest scripts, and executes as structured process argv through the same policy,
+lease, approval, and audit path. Other custom prose remains inconclusive.
+
 An advanced consumer success-condition line in the exact form `HTTP STATUS URL`
 becomes a typed `HttpResponds` condition. Runtime grants only that parsed origin,
 constructs a server-owned credential-free GET with a 1 MiB body limit, and sends it
@@ -155,6 +165,10 @@ terminal failed report instead of escaping as an API error.
 The browser fixtures use real Chromium to prove JavaScript hydration, DOM/title
 mutation, HTML/PNG capture, policy/audit integration, and pre-send blocking of a
 cross-origin subresource plus same-origin POST.
+The artifact fixture proves a binary file is streamed without stdout exposure,
+deduplicated by digest, bounded by the evidence limit, and combined with an exact
+discovered custom script. A missing file atomically fails the task/run with audited
+execution evidence.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

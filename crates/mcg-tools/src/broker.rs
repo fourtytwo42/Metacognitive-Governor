@@ -347,7 +347,9 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
         )
     };
     let requests = match &request.kind {
-        ToolRequestKind::FsRead { path, .. } | ToolRequestKind::FsList { path, .. } => {
+        ToolRequestKind::FsRead { path, .. }
+        | ToolRequestKind::FsVerify { path, .. }
+        | ToolRequestKind::FsList { path, .. } => {
             vec![read_path(path)]
         }
         ToolRequestKind::FsWrite { path, .. }
@@ -588,6 +590,7 @@ fn executable_name(value: &str) -> String {
 fn primary_resource(request: &ToolRequest) -> String {
     match &request.kind {
         ToolRequestKind::FsRead { path, .. }
+        | ToolRequestKind::FsVerify { path, .. }
         | ToolRequestKind::FsWrite { path, .. }
         | ToolRequestKind::FsPatch { path, .. }
         | ToolRequestKind::FsList { path, .. }

@@ -1668,6 +1668,11 @@ impl AppRuntime {
                     viewport_width: 1_280,
                     viewport_height: 720,
                 }
+            } else if let SuccessCondition::FileExists { path, .. } = condition {
+                ToolRequestKind::FsVerify {
+                    path: objective_project_file_path(&project.root, path)?,
+                    max_bytes: 1_073_741_824,
+                }
             } else {
                 checkpoint.unsupported = checkpoint.unsupported.saturating_add(1);
                 let detail = "No deterministic evaluator is implemented for this condition yet.";
@@ -2939,8 +2944,16 @@ fn objective_command(condition: &SuccessCondition) -> Option<&str> {
         SuccessCondition::Build { command }
         | SuccessCondition::Test { command }
         | SuccessCondition::StaticAnalysis { command } => Some(command),
+        SuccessCondition::Custom { description } => objective_custom_command(description),
         _ => None,
     }
+}
+
+fn objective_custom_command(description: &str) -> Option<&str> {
+    description
+        .strip_prefix("COMMAND SUCCEEDS ")
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
 }
 
 fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
@@ -2949,10 +2962,37 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
             Some(format!("HTTP GET {url} returns {status}"))
         } else if let SuccessCondition::PageRenders { url } = condition {
             Some(format!("Page renders at {url}"))
+        } else if let SuccessCondition::FileExists { path, .. } = condition {
+            Some(format!("File exists: {path}"))
         } else {
             None
         }
     })
+}
+
+fn objective_project_file_path(project_root: &str, relative: &str) -> Result<String, RuntimeError> {
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(StorageError::InvalidData(
+            "file objective path must be normalized and project-relative".into(),
+        )
+        .into());
+    }
+    Ok(Path::new(project_root)
+        .join(relative)
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn objective_network_origin(value: &str) -> Result<String, RuntimeError> {
@@ -2974,6 +3014,7 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
     match condition {
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
+        SuccessCondition::FileExists { .. } => "governed_file_artifact",
         _ => "governed_process_exit",
     }
 }
@@ -2981,6 +3022,20 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
 fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome) -> bool {
     if let SuccessCondition::HttpResponds { status, .. } = condition {
         return observed_http_status(outcome) == Some(*status);
+    }
+    if let SuccessCondition::FileExists {
+        min_bytes,
+        expected_sha256,
+        ..
+    } = condition
+    {
+        return outcome.status == ToolOutcomeStatus::Succeeded
+            && outcome.artifacts.first().is_some_and(|artifact| {
+                artifact.size_bytes >= *min_bytes
+                    && expected_sha256
+                        .as_ref()
+                        .is_none_or(|expected| artifact.sha256.eq_ignore_ascii_case(expected))
+            });
     }
     outcome.status == ToolOutcomeStatus::Succeeded
 }
@@ -3018,6 +3073,25 @@ fn objective_condition_outcome_detail(
             .collect::<Vec<_>>()
             .join("; ");
         return format!("{}; {verification}", outcome.summary);
+    }
+    if let SuccessCondition::FileExists {
+        min_bytes,
+        expected_sha256,
+        ..
+    } = condition
+    {
+        return outcome.artifacts.first().map_or_else(
+            || format!("{}; no file artifact was captured", outcome.summary),
+            |artifact| {
+                format!(
+                    "{}; observed_size={}; minimum_size={min_bytes}; observed_sha256={}; expected_sha256={}",
+                    outcome.summary,
+                    artifact.size_bytes,
+                    artifact.sha256,
+                    expected_sha256.as_deref().unwrap_or("any")
+                )
+            },
+        );
     }
     objective_outcome_detail(outcome)
 }
@@ -3220,6 +3294,52 @@ mod tests {
         assert!(auth.verifies(TEST_TOKEN));
         assert!(!auth.verifies("wrong-token"));
         assert!(!format!("{auth:?}").contains(TEST_TOKEN));
+    }
+
+    #[test]
+    fn file_objective_requires_minimum_size_and_expected_digest() {
+        let outcome = ToolOutcome {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id: ToolExecutionId::new(),
+            request_id: ToolRequestId::new(),
+            status: ToolOutcomeStatus::Succeeded,
+            summary: "verified regular file (4 bytes)".into(),
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            artifacts: vec![mcg_tools::ArtifactReference {
+                id: mcg_domain::ArtifactId::new(),
+                sha256: "a".repeat(64),
+                media_type: "application/octet-stream".into(),
+                size_bytes: 4,
+                relative_path: "aa/fixture".into(),
+            }],
+            verification: Vec::new(),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+        };
+        let condition = SuccessCondition::FileExists {
+            path: "dist/result.bin".into(),
+            min_bytes: 4,
+            expected_sha256: Some("A".repeat(64)),
+        };
+        assert!(objective_outcome_passed(&condition, &outcome));
+        assert!(!objective_outcome_passed(
+            &SuccessCondition::FileExists {
+                path: "dist/result.bin".into(),
+                min_bytes: 5,
+                expected_sha256: Some("a".repeat(64)),
+            },
+            &outcome
+        ));
+        assert!(!objective_outcome_passed(
+            &SuccessCondition::FileExists {
+                path: "dist/result.bin".into(),
+                min_bytes: 0,
+                expected_sha256: Some("b".repeat(64)),
+            },
+            &outcome
+        ));
     }
 
     #[test]
