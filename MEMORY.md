@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; durable provider registry plus organization/run controls pass the complete Windows gate.
+- Current task: M5 organization and useful work is in progress; durable provider registry plus organization/run controls pass complete Windows and Ubuntu gates.
 - Last meaningful change: Provider credentials now use a native OS-store boundary; secret-free connections/catalogs are atomic SQLite migration 7 evidence; authenticated API/CLI configuration and restart rediscovery passed against real GPU45.
-- Next step: Qualify the provider-registry checkpoint on Ubuntu, then add safe instance/lease dispatch and execute real provider-backed website work.
+- Next step: Add safe instance/lease dispatch through the configured registry and governed tool broker, then execute real provider-backed website work.
 - Blockers: None documented.
 
 ## Current State
@@ -148,6 +148,7 @@ When sources conflict, use this order:
 - 2026-08-14: M5 runtime turn commit test used the durable runtime, organization/run/instance/lease state, a two-call provider fixture, and the real policy broker to execute typed `fs.read`. Migration 6 atomically stored one immutable final result, three usage records, assigned model, run metrics, completed instance/lease, and ordered events. Restart evidence also verifies approval waiting retains authority for resume while later failure creates no usage/result. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: Authenticated M5 API/CLI control surfaces created a consumer organization, planned atomic and dependency-ordered work, started a run, and returned its full durable evidence view. Real restart smoke found task replay's delete/reinsert strategy violated agent-run foreign keys; replay now upserts authoritative tasks and only removes unexpected orphans. The repaired database restarted into `recovering`, CLI inspection passed, and `scripts/verify.ps1` passed the full Windows Rust/frontend/docs/native/Playwright gate.
 - 2026-08-14: Configured provider registry added native OS credential-store isolation, exact registered/discovered target dispatch, SQLite migration 7 connection/catalog evidence, and authenticated `mcg provider` API/CLI operations. Failed initial discovery is atomic and leaves no connection, route, or credential slot. Full Windows verification passed. Real CLI GPU45 discovery found 10 models at `http://192-168-50-189.nip.io:30001/v1`, and restart rediscovery returned the same catalog; the temporary daemons were stopped.
+- 2026-08-14: Exact commit `8c93506` passed `scripts/verify.sh` on Ubuntu, including the Linux Secret Service/keyring dependency, all Rust gates, frontend/docs, native Tauri build, and Playwright. After explicitly building runnable binaries, a real Linux daemon/CLI configured GPU45, listed 10 models, stopped/restarted, lazily reconstructed the registry, rediscovered 10 models, and stopped cleanly.
 
 ## Decisions
 
@@ -314,7 +315,7 @@ When sources conflict, use this order:
 - Files: `crates/mcg-{providers,storage,runtime,api}/`, `apps/mcg-cli/`, `docs/architecture/provider-fabric.md`.
 - Commands/tests: `scripts/verify.ps1`; real daemon/CLI GPU45 configure/list/models/restart/discover smoke.
 - Result: Full Windows qualification passes. GPU45 returned 10 dynamically discovered models before and after restart. A wrong console URL exposed failed-setup debris and opaque CLI errors; both were fixed with atomic setup rollback and surfaced API error bodies.
-- Follow-up: Run the identical checkpoint on Ubuntu, then create bounded instances/leases and dispatch work through the real registry and tool broker.
+- Follow-up: Create bounded instances/leases and dispatch work through the real registry and tool broker.
 
 ## Known Issues
 
