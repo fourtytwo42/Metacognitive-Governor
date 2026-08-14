@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; its versioned organization/run/lease/evaluation contract foundation passes workspace tests on Windows.
-- Last meaningful change: Added `mcg-agents` with validated organization genomes, persistent role/ephemeral instance separation, work plans, bounded leases/budgets, objective success conditions, confidence/calibration, evaluation evidence, and overhead metrics.
-- Next step: Implement deterministic minimal-organization selection and dependency-aware Executive planning, then persist revisions/runs/leases/evaluations and wire real provider/tool-backed website work.
+- Current task: M5 organization and useful work is in progress; organization contracts plus deterministic minimal-role selection and dependency-aware planning pass workspace tests on Windows.
+- Last meaningful change: Added the consumer-default core organization and a structured-intent planner that avoids keyword authorization, directly dispatches atomic work, coordinates compound work, rejects dependency cycles/overhead excess, adds requested independent evaluation, and keeps child budgets within parent limits.
+- Next step: Persist organization revisions, runs, plans, agent instances/leases, evaluations, usage, and replay evidence; then wire real provider/tool-backed website work.
 - Blockers: None documented.
 
 ## Current State
@@ -141,6 +141,7 @@ When sources conflict, use this order:
 - 2026-08-14: Real Windows daemon/CLI smoke registered this repository as a project, added a plain-string claim, corrected it to `pnpm`, retrieved it in assembled context, force-stopped/restarted the daemon, and recovered both versions. The first attempt exposed PowerShell JSON-string quoting friction; CLI values now accept either valid JSON or ordinary strings, with a regression test.
 - 2026-08-14: M4 commit `41abefc` passed `scripts/verify.sh` on the owner-controlled Ubuntu VM, including native Tauri and Playwright. A real Linux daemon/CLI smoke then discovered the mirrored repository, corrected `npm` to `pnpm`, retrieved the correction in context, killed/restarted the daemon, and recovered both provenance-bearing versions.
 - 2026-08-14: M5 contract foundation added 2 focused tests for organization graph validation/round-trip, lease budget exhaustion, and objective overhead. `cargo test --workspace`, focused clippy with warnings denied, and `git diff --check` passed on Windows.
+- 2026-08-14: M5 minimal-organization planning added 4 focused tests. The consumer default has the five required core roles; atomic rename work selects only Coder with zero coordination overhead; compound site work selects only Executive/Coder/Tool Worker/Evaluator, injects independent evaluation, tracks dependencies, and preserves aggregate budgets; dependency cycles fail closed. Complete Rust workspace tests, focused strict clippy, formatting, and `git diff --check` passed on Windows.
 
 ## Decisions
 
@@ -255,6 +256,15 @@ When sources conflict, use this order:
 - Result: The M5 data boundary compiles, validates imported graph/policy invariants, and leaves all prior tests green.
 - Follow-up: Add minimal-organization selection and dependency-aware Executive planning.
 
+### 2026-08-14 - M5 Minimal Organization Planning
+
+- Context: MCG must avoid multi-agent ceremony for atomic work while safely coordinating genuinely compound tasks.
+- Decision: Accept structured task intent rather than treating prompt keywords as authority; deterministically choose one canonical persistent role per declared capability; add the Executive only for decomposition/dependencies and Evaluator only when requested by task or organization policy; reject cycles and excessive estimated overhead; distribute bounded task budgets across work items without exceeding the parent.
+- Files: `crates/mcg-agents/src/{organization,planning}.rs`, `MEMORY.md`.
+- Commands/tests: `cargo fmt --all -- --check`; `cargo clippy -p mcg-agents --all-targets -- -D warnings`; `cargo test --workspace`; `git diff --check`.
+- Result: Atomic and compound fixture plans produce the smallest sufficient organizations with explicit dependency, readiness, budget, evaluation, and overhead evidence.
+- Follow-up: Persist the complete organization/run/lease/evaluation lifecycle and its replay evidence.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -279,7 +289,7 @@ When sources conflict, use this order:
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
-- Begin M5 organization and useful end-to-end work.
+- Complete M5 durable run orchestration and useful end-to-end website/app work.
 
 ## Do Not Forget
 
