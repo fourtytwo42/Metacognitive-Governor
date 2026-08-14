@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   cancelOpenAiOAuth,
   completeOpenAiOAuth,
+  openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
   startOpenAiOAuth
@@ -33,12 +34,25 @@ export function App() {
       const started = await startOpenAiOAuth(oauthMethod);
       setLogin(started);
       setProviderStatus("Waiting for authorization");
-      window.open(started.verification_url, "_blank", "noopener,noreferrer");
+      try {
+        await openExternalUrl(started.verification_url);
+      } catch (error) {
+        setProviderError(`${errorMessage(error)}. Use “Open verification page” below.`);
+      }
     } catch (error) {
       setProviderError(errorMessage(error));
       setProviderStatus("Connection failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openVerification(url: string) {
+    try {
+      await openExternalUrl(url);
+      setProviderError(null);
+    } catch (error) {
+      setProviderError(errorMessage(error));
     }
   }
 
@@ -184,9 +198,9 @@ export function App() {
             ) : (
               <div className="oauth-card" role="status">
                 <p>Authorize MCG in the page that opened.</p>
-                <a href={login.verification_url} target="_blank" rel="noreferrer">
+                <button className="link-button" type="button" onClick={() => openVerification(login.verification_url)}>
                   Open verification page
-                </a>
+                </button>
                 {login.user_code && <p className="device-code">Code: <strong>{login.user_code}</strong></p>}
                 <div className="composer-actions">
                   <button className="secondary" type="button" disabled={busy} onClick={cancelLogin}>Cancel</button>

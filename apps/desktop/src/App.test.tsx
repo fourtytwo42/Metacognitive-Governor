@@ -4,13 +4,15 @@ import { beforeEach, expect, test, vi } from "vitest";
 const client = vi.hoisted(() => ({
   start: vi.fn(),
   complete: vi.fn(),
-  cancel: vi.fn()
+  cancel: vi.fn(),
+  open: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
   startOpenAiOAuth: client.start,
   completeOpenAiOAuth: client.complete,
-  cancelOpenAiOAuth: client.cancel
+  cancelOpenAiOAuth: client.cancel,
+  openExternalUrl: client.open
 }));
 
 import { App } from "./App";
@@ -19,7 +21,8 @@ beforeEach(() => {
   client.start.mockReset();
   client.complete.mockReset();
   client.cancel.mockReset();
-  vi.spyOn(window, "open").mockImplementation(() => null);
+  client.open.mockReset();
+  client.open.mockResolvedValue(undefined);
 });
 
 test("advanced mode reveals runtime details", () => {
@@ -50,11 +53,9 @@ test("OpenAI subscription login exposes verification then confirms connection", 
 
   fireEvent.click(screen.getByRole("button", { name: "Connect with OpenAI" }));
   expect(await screen.findByText("Code:", { exact: false })).toHaveTextContent("ABCD-1234");
-  expect(screen.getByRole("link", { name: "Open verification page" })).toHaveAttribute(
-    "href",
-    "https://auth.openai.com/codex/device"
-  );
+  expect(screen.getByRole("button", { name: "Open verification page" })).toBeInTheDocument();
   expect(client.start).toHaveBeenCalledWith("browser");
+  expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
 
   fireEvent.click(screen.getByRole("button", { name: "I’ve authorized MCG" }));
   expect(await screen.findByText("OpenAI Subscription connected")).toBeInTheDocument();

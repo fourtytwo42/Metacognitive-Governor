@@ -36,3 +36,7 @@ export function completeOpenAiOAuth(sessionId: string): Promise<ProviderMutation
 export function cancelOpenAiOAuth(sessionId: string): Promise<void> {
   return invoke("cancel_openai_oauth", { sessionId });
 }
+
+export function openExternalUrl(url: string): Promise<void> {
+  return invoke("open_external_url", { url });
+}

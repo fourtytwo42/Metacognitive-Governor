@@ -105,6 +105,23 @@ async fn refresh_openai_oauth(connection_id: String) -> Result<EventEnvelope, St
         .map_err(|error| format!("OpenAI refresh response was invalid: {error}"))
 }
 
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = validate_external_url(&url)?;
+    webbrowser::open(parsed.as_str())
+        .map_err(|error| format!("The system browser could not be opened: {error}"))
+}
+
+fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| format!("The verification URL is invalid: {error}"))?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("auth.openai.com") {
+        return Err("Only the official OpenAI authorization site may be opened".into());
+    }
+    Ok(parsed)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the native desktop application.
 ///
@@ -118,8 +135,22 @@ pub fn run() {
             start_openai_oauth,
             complete_openai_oauth,
             cancel_openai_oauth,
-            refresh_openai_oauth
+            refresh_openai_oauth,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCG desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_external_url;
+
+    #[test]
+    fn external_launcher_allows_only_official_openai_https() {
+        assert!(validate_external_url("https://auth.openai.com/authorize?client_id=test").is_ok());
+        assert!(validate_external_url("http://auth.openai.com/authorize").is_err());
+        assert!(validate_external_url("https://auth.openai.com.evil.example/authorize").is_err());
+        assert!(validate_external_url("file:///C:/secret").is_err());
+    }
 }
