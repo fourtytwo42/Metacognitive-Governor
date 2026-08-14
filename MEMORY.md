@@ -5,7 +5,7 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Local-tool approval continuation is implemented and focused-green; objective evaluation/terminal settlement is the next dependency-ordered slice.
+- Current task: Local-tool approval continuation is cross-platform qualified; objective evaluation/terminal settlement is the next dependency-ordered slice.
 - Last meaningful change: Added stable per-lease tool-request identity, context/authority-revalidated local approval resume, authenticated API/CLI/Tauri surfaces, and desktop task-card approval continuation.
 - Next step: Add denied/cancelled approval settlement, then implement objective success-condition execution and terminal task/run settlement. Persist full mid-turn checkpoints before supporting external MCP approval resume or eliminating the repeated provider inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
@@ -130,6 +130,7 @@ When sources conflict, use this order:
 - 2026-08-14: `cargo test --workspace` passed 8 initial tests covering task serialization, defaults, policy invariants, auth billing modes, SQLite migration/event append, and API health.
 - 2026-08-14: Frontend typecheck, Vitest (1 test), Vite production build, documentation/link validation, and Playwright E2E (1 test) passed.
 - 2026-08-14: Exact commit `e706ba4` passed the complete owner-controlled Ubuntu `./scripts/verify.sh` gate, including native Tauri/GTK and Playwright qualification.
+- 2026-08-14: Exact approval-continuation commit `43c63f3` passed the complete owner-controlled Ubuntu `./scripts/verify.sh` gate, including strict workspace tests/clippy, live GPU45, frontend/docs, native Tauri/GTK, and Playwright.
 - 2026-08-14: Live daemon/CLI smoke test passed for health, human status, and JSON status; the exact temporary daemon process was stopped afterward.
 - 2026-08-14: The first GitHub Actions frontend run exposed non-deterministic workspace dependency placement: Vitest was hoisted while the explicit jsdom dependency was nested. Moved jsdom 29.1.1 to the root workspace, verified a clean `npm ci`, Vitest, and Playwright run, and updated checkout/setup-node to their current v7 major releases.
 - 2026-08-14: GitHub Actions run `31771954125` passed all documentation, frontend, Ubuntu Rust, and Windows Rust jobs for commit `b02d626`.
@@ -476,8 +477,8 @@ When sources conflict, use this order:
 - Context: A consumer run could wait durably for a guided-mode tool approval, but no public task flow could safely continue it.
 - Decision: Derive each tool-request id from the lease, tool name, and canonical arguments; after owner approval, require exactly one live waiting instance/lease and revalidate organization role, project context fingerprint, tools, and provider routes before restoring running authority. Replay the bounded local-tool turn under the same lease so the broker consumes the existing approval and records the side effect once.
 - Files: `crates/mcg-{domain,agents,storage,runtime,api}/`, `apps/mcg-cli/`, `apps/desktop/`, runtime/agent documentation.
-- Commands/tests: Strict focused Rust clippy; 23 API tests including guided write approval/resume/replay; eight Vitest flows; frontend typecheck/build/docs/diff checks.
-- Result: Local guided approval is available through API, CLI, Tauri, and a desktop task-card action. The deterministic public fixture proves the file is absent while pending, written once after approval, and not repeated by Start replay.
+- Commands/tests: Strict focused Windows Rust clippy; 23 API tests including guided write approval/resume/replay; eight Vitest flows; frontend typecheck/build/docs/diff checks; exact commit `43c63f3` complete Ubuntu `./scripts/verify.sh`.
+- Result: Local guided approval is available through API, CLI, Tauri, and a desktop task-card action. The deterministic public fixture proves the file is absent while pending, written once after approval, and not repeated by Start replay. Exact Windows-focused and complete Ubuntu native qualification are green.
 - Follow-up: Denied/cancelled approvals must settle waiting task authority. Persist full mid-turn provider checkpoints before external MCP approval resume, target-scoped resume, or avoiding the repeated provider inference call; current unsupported cases fail closed.
 
 ## Known Issues
