@@ -149,6 +149,125 @@ impl MemoryLifecycle {
     pub fn retract(claim: &mut MemoryClaim) {
         claim.state = MemoryState::Retracted;
     }
+
+    /// Produces a reinforced successor version and supersedes the prior head.
+    ///
+    /// # Errors
+    ///
+    /// Terminal claim versions cannot be reinforced.
+    pub fn reinforced(
+        previous: &mut MemoryClaim,
+        provenance: ClaimProvenance,
+    ) -> Result<MemoryClaim, MemoryError> {
+        if matches!(
+            previous.state,
+            MemoryState::Retracted | MemoryState::Superseded
+        ) {
+            return Err(MemoryError::InvalidTransition(
+                previous.id,
+                previous.state,
+                MemoryState::Durable,
+            ));
+        }
+        let usefulness_count = previous.usefulness_count.saturating_add(1);
+        let correction_count = previous.correction_count;
+        let next_state = if usefulness_count >= 2 || correction_count >= 2 {
+            MemoryState::Durable
+        } else {
+            MemoryState::Working
+        };
+        Ok(successor(
+            previous,
+            next_state,
+            provenance,
+            correction_count,
+            usefulness_count,
+        ))
+    }
+
+    /// Produces a decaying successor version for unused new/working memory.
+    ///
+    /// # Errors
+    ///
+    /// Durable and terminal versions cannot decay directly.
+    pub fn decayed(
+        previous: &mut MemoryClaim,
+        provenance: ClaimProvenance,
+    ) -> Result<MemoryClaim, MemoryError> {
+        if !matches!(previous.state, MemoryState::New | MemoryState::Working) {
+            return Err(MemoryError::InvalidTransition(
+                previous.id,
+                previous.state,
+                MemoryState::Decaying,
+            ));
+        }
+        let correction_count = previous.correction_count;
+        let usefulness_count = previous.usefulness_count;
+        Ok(successor(
+            previous,
+            MemoryState::Decaying,
+            provenance,
+            correction_count,
+            usefulness_count,
+        ))
+    }
+
+    /// Produces a retracted terminal successor while retaining prior versions.
+    ///
+    /// # Errors
+    ///
+    /// Already terminal versions cannot be retracted again.
+    pub fn retracted(
+        previous: &mut MemoryClaim,
+        provenance: ClaimProvenance,
+    ) -> Result<MemoryClaim, MemoryError> {
+        if matches!(
+            previous.state,
+            MemoryState::Retracted | MemoryState::Superseded
+        ) {
+            return Err(MemoryError::InvalidTransition(
+                previous.id,
+                previous.state,
+                MemoryState::Retracted,
+            ));
+        }
+        let correction_count = previous.correction_count;
+        let usefulness_count = previous.usefulness_count;
+        Ok(successor(
+            previous,
+            MemoryState::Retracted,
+            provenance,
+            correction_count,
+            usefulness_count,
+        ))
+    }
+}
+
+fn successor(
+    previous: &mut MemoryClaim,
+    state: MemoryState,
+    provenance: ClaimProvenance,
+    correction_count: u32,
+    usefulness_count: u32,
+) -> MemoryClaim {
+    let previous_id = previous.id;
+    previous.state = MemoryState::Superseded;
+    MemoryClaim {
+        schema_version: MEMORY_CLAIM_SCHEMA_VERSION,
+        id: MemoryClaimId::new(),
+        project_id: previous.project_id,
+        namespace: previous.namespace.clone(),
+        key: previous.key.clone(),
+        value: previous.value.clone(),
+        state,
+        confidence: previous.confidence,
+        provenance,
+        observed_at: Utc::now(),
+        fresh_until: previous.fresh_until,
+        supersedes: Some(previous_id),
+        correction_count,
+        usefulness_count,
+    }
 }
 
 #[must_use]
@@ -184,17 +303,25 @@ pub fn render_managed_memory(project_id: ProjectId, claims: &[MemoryClaim]) -> S
 
 fn validate(namespace: &str, key: &str, confidence: f64) -> Result<(), MemoryError> {
     let namespace = namespace.to_ascii_lowercase();
-    if [
+    let key_lower = key.to_ascii_lowercase();
+    let reserved = [
         "secret",
         "secrets",
         "credential",
         "credentials",
         "token",
         "tokens",
-    ]
-    .iter()
-    .any(|reserved| namespace == *reserved || namespace.starts_with(&format!("{reserved}.")))
-    {
+        "api_key",
+        "private_key",
+        "password",
+    ];
+    if reserved.iter().any(|reserved| {
+        namespace == *reserved
+            || namespace.starts_with(&format!("{reserved}."))
+            || key_lower == *reserved
+            || key_lower.ends_with(&format!(".{reserved}"))
+            || key_lower.ends_with(&format!("_{reserved}"))
+    }) {
         return Err(MemoryError::SecretNamespace);
     }
     if key.trim().is_empty() {
@@ -268,5 +395,15 @@ mod tests {
             None,
         );
         assert_eq!(result, Err(MemoryError::SecretNamespace));
+        let disguised = MemoryLifecycle::create(
+            ProjectId::new(),
+            "project",
+            "provider_api_key",
+            serde_json::json!("not-a-real-secret"),
+            1.0,
+            user_provenance("fixture"),
+            None,
+        );
+        assert_eq!(disguised, Err(MemoryError::SecretNamespace));
     }
 }

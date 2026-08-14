@@ -1,6 +1,9 @@
 use std::{collections::BTreeSet, path::Path};
 
-use crate::{ContextAssembly, ContextCategory, ContextItem, ProjectModel};
+use crate::{
+    ContextAssembly, ContextCategory, ContextItem, InstructionResolution, InstructionResolver,
+    ProjectModel,
+};
 
 pub struct ContextAssembler;
 
@@ -47,8 +50,39 @@ impl ContextAssembler {
 
     #[must_use]
     pub fn from_project(model: &ProjectModel) -> Vec<ContextItem> {
+        Self::from_project_for_target(model, "")
+    }
+
+    #[must_use]
+    pub fn from_project_for_target(
+        model: &ProjectModel,
+        relative_target: &str,
+    ) -> Vec<ContextItem> {
+        let instructions =
+            InstructionResolver::for_target(&model.instructions.documents, relative_target);
+        let documents = InstructionResolver::applicable_documents(
+            &model.instructions.documents,
+            relative_target,
+        );
+        Self::from_project_resolution(model, &instructions, &documents)
+    }
+
+    fn from_project_resolution(
+        model: &ProjectModel,
+        instructions: &InstructionResolution,
+        documents: &[&crate::InstructionDocument],
+    ) -> Vec<ContextItem> {
         let mut items = Vec::new();
-        for instruction in &model.instructions.effective {
+        for document in documents {
+            items.push(ContextItem {
+                category: ContextCategory::Instruction,
+                content: document.content.clone(),
+                source: document.path.clone(),
+                priority: document.priority,
+                estimated_tokens: 0,
+            });
+        }
+        for instruction in &instructions.effective {
             items.push(ContextItem {
                 category: ContextCategory::Instruction,
                 content: format!("{}: {}", instruction.key, instruction.value),
@@ -57,7 +91,7 @@ impl ContextAssembler {
                 estimated_tokens: 0,
             });
         }
-        for conflict in &model.instructions.conflicts {
+        for conflict in &instructions.conflicts {
             items.push(ContextItem {
                 category: ContextCategory::OpenQuestion,
                 content: format!(

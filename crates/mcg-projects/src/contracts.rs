@@ -182,6 +182,14 @@ pub enum MemoryState {
     Retracted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLifecycleAction {
+    Reinforce,
+    Decay,
+    Retract,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimProvenance {
     pub source_kind: ProvenanceKind,

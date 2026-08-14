@@ -8,12 +8,18 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use mcg_config::AppConfig;
 use mcg_domain::{
-    ApprovalId, LeaseId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    ApprovalId, LeaseId, MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState,
+    ToolExecutionId, ToolRequestId,
 };
 use mcg_events::EventEnvelope;
+use mcg_projects::{
+    ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
+    MemoryError, MemoryLifecycle, MemoryLifecycleAction, ProjectDiscoverer, ProjectDiscoveryError,
+    ProjectModel, SnapshotInvalidation, render_managed_memory,
+};
 use mcg_storage::{RecoveryReport, SqliteEventStore, StorageError};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease,
@@ -51,6 +57,10 @@ pub enum RuntimeError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    ProjectDiscovery(#[from] ProjectDiscoveryError),
+    #[error(transparent)]
+    Memory(#[from] MemoryError),
     #[error("runtime storage lock was poisoned")]
     StorageLock,
     #[error("local authentication token is invalid")]
@@ -60,18 +70,71 @@ pub enum RuntimeError {
 impl RuntimeError {
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
-        matches!(self, Self::Storage(StorageError::TaskNotFound(_)))
+        matches!(
+            self,
+            Self::Storage(
+                StorageError::TaskNotFound(_)
+                    | StorageError::ProjectNotFound(_)
+                    | StorageError::MemoryClaimNotFound(_)
+            )
+        )
     }
 
     #[must_use]
     pub const fn is_invalid_request(&self) -> bool {
-        matches!(self, Self::Storage(StorageError::InvalidTransition(_)))
+        matches!(
+            self,
+            Self::Storage(StorageError::InvalidTransition(_) | StorageError::InvalidData(_))
+                | Self::ProjectDiscovery(_)
+                | Self::Memory(
+                    MemoryError::SecretNamespace
+                        | MemoryError::InvalidConfidence
+                        | MemoryError::EmptyKey
+                )
+        )
     }
 
     #[must_use]
     pub const fn is_conflict(&self) -> bool {
-        matches!(self, Self::Storage(StorageError::Conflict(_)))
+        matches!(
+            self,
+            Self::Storage(StorageError::Conflict(_))
+                | Self::Memory(MemoryError::InvalidTransition(_, _, _))
+        )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMutation {
+    pub project: ProjectModel,
+    pub event: EventEnvelope,
+    pub invalidation: Option<SnapshotInvalidationDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotInvalidationDto {
+    pub changed_inputs: Vec<String>,
+    pub invalidate_instructions: bool,
+    pub invalidate_commands: bool,
+    pub invalidate_world_model: bool,
+}
+
+impl From<SnapshotInvalidation> for SnapshotInvalidationDto {
+    fn from(value: SnapshotInvalidation) -> Self {
+        Self {
+            changed_inputs: value.changed_inputs,
+            invalidate_instructions: value.invalidate_instructions,
+            invalidate_commands: value.invalidate_commands,
+            invalidate_world_model: value.invalidate_world_model,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryClaimMutation {
+    pub claim: MemoryClaim,
+    pub previous: Option<MemoryClaim>,
+    pub event: EventEnvelope,
 }
 
 #[derive(Clone)]
@@ -302,6 +365,259 @@ impl AppRuntime {
     /// Returns an error when storage cannot be read.
     pub fn events_after(&self, sequence: u64) -> Result<Vec<EventEnvelope>, RuntimeError> {
         Ok(self.store()?.events_after(sequence)?)
+    }
+
+    /// Discovers a project from its canonical repository root and durably records
+    /// the snapshot before publishing its event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for inaccessible roots, invalid manifests, root identity
+    /// conflicts, or failed persistence.
+    pub fn discover_project(
+        &self,
+        root: &Path,
+        project_id: ProjectId,
+    ) -> Result<ProjectMutation, RuntimeError> {
+        let previous = self.store()?.project(project_id)?;
+        let project = ProjectDiscoverer::discover(root, project_id)?;
+        let invalidation = previous
+            .as_ref()
+            .map(|previous| SnapshotInvalidation::between(previous, &project).into());
+        let event = self.store()?.record_project_snapshot(&project)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(ProjectMutation {
+            project,
+            event,
+            invalidation,
+        })
+    }
+
+    /// Lists current durable project projections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn projects(&self) -> Result<Vec<ProjectModel>, RuntimeError> {
+        Ok(self.store()?.projects()?)
+    }
+
+    /// Loads one current durable project projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn project(&self, project_id: ProjectId) -> Result<Option<ProjectModel>, RuntimeError> {
+        Ok(self.store()?.project(project_id)?)
+    }
+
+    /// Loads immutable discovery history for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn project_history(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ProjectModel>, RuntimeError> {
+        Ok(self.store()?.project_history(project_id)?)
+    }
+
+    /// Creates and durably records a validated project-scoped memory claim.
+    ///
+    /// # Errors
+    ///
+    /// Invalid/secret scopes and missing projects fail without an event.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_memory_claim(
+        &self,
+        project_id: ProjectId,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        value: serde_json::Value,
+        confidence: f64,
+        provenance: ClaimProvenance,
+        fresh_until: Option<DateTime<Utc>>,
+    ) -> Result<MemoryClaimMutation, RuntimeError> {
+        let claim = MemoryLifecycle::create(
+            project_id,
+            namespace,
+            key,
+            value,
+            confidence,
+            provenance,
+            fresh_until,
+        )?;
+        let event = self.store()?.create_memory_claim(&claim)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(MemoryClaimMutation {
+            claim,
+            previous: None,
+            event,
+        })
+    }
+
+    /// Corrects the current claim version under one storage lock and records the
+    /// superseding version plus event atomically.
+    ///
+    /// # Errors
+    ///
+    /// Missing/stale versions and invalid corrected values fail without mutation.
+    pub fn correct_memory_claim(
+        &self,
+        project_id: ProjectId,
+        claim_id: MemoryClaimId,
+        value: serde_json::Value,
+        confidence: f64,
+        provenance: ClaimProvenance,
+        fresh_until: Option<DateTime<Utc>>,
+    ) -> Result<MemoryClaimMutation, RuntimeError> {
+        let (claim, previous, event) = {
+            let mut store = self.store()?;
+            let mut previous = store
+                .memory_claim(claim_id)?
+                .ok_or(StorageError::MemoryClaimNotFound(claim_id))?;
+            if previous.project_id != project_id {
+                return Err(StorageError::MemoryClaimNotFound(claim_id).into());
+            }
+            let claim = MemoryLifecycle::correct(
+                &mut previous,
+                value,
+                confidence,
+                provenance,
+                fresh_until,
+            )?;
+            let (stored_previous, event) = store.correct_memory_claim(&claim)?;
+            (claim, stored_previous, event)
+        };
+        let _ = self.event_sender.send(event.clone());
+        Ok(MemoryClaimMutation {
+            claim,
+            previous: Some(previous),
+            event,
+        })
+    }
+
+    /// Reinforces, decays, or retracts a claim by recording a successor version.
+    ///
+    /// # Errors
+    ///
+    /// Missing/stale versions and illegal lifecycle transitions fail atomically.
+    pub fn transition_memory_claim(
+        &self,
+        project_id: ProjectId,
+        claim_id: MemoryClaimId,
+        action: MemoryLifecycleAction,
+        provenance: ClaimProvenance,
+    ) -> Result<MemoryClaimMutation, RuntimeError> {
+        let (claim, previous, event) = {
+            let mut store = self.store()?;
+            let mut previous = store
+                .memory_claim(claim_id)?
+                .ok_or(StorageError::MemoryClaimNotFound(claim_id))?;
+            if previous.project_id != project_id {
+                return Err(StorageError::MemoryClaimNotFound(claim_id).into());
+            }
+            let claim = match action {
+                MemoryLifecycleAction::Reinforce => {
+                    MemoryLifecycle::reinforced(&mut previous, provenance)?
+                }
+                MemoryLifecycleAction::Decay => {
+                    MemoryLifecycle::decayed(&mut previous, provenance)?
+                }
+                MemoryLifecycleAction::Retract => {
+                    MemoryLifecycle::retracted(&mut previous, provenance)?
+                }
+            };
+            let (stored_previous, event) = store.revise_memory_claim(&claim)?;
+            (claim, stored_previous, event)
+        };
+        let _ = self.event_sender.send(event.clone());
+        Ok(MemoryClaimMutation {
+            claim,
+            previous: Some(previous),
+            event,
+        })
+    }
+
+    /// Lists current project memory heads with optional namespace/freshness filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn memory_claims(
+        &self,
+        project_id: ProjectId,
+        namespace: Option<&str>,
+        fresh_only: bool,
+    ) -> Result<Vec<MemoryClaim>, RuntimeError> {
+        Ok(self
+            .store()?
+            .memory_claims(project_id, namespace, fresh_only)?)
+    }
+
+    /// Loads every version for one scoped memory key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn memory_claim_history(
+        &self,
+        project_id: ProjectId,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Vec<MemoryClaim>, RuntimeError> {
+        Ok(self
+            .store()?
+            .memory_claim_history(project_id, namespace, key)?)
+    }
+
+    /// Assembles bounded project context from discovery facts, current fresh
+    /// memory, and caller-supplied task context.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for unknown projects or a storage read failure.
+    pub fn assemble_project_context(
+        &self,
+        project_id: ProjectId,
+        mut supplied: Vec<ContextItem>,
+        token_budget: u32,
+        relative_target: Option<&str>,
+    ) -> Result<ContextAssembly, RuntimeError> {
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        supplied.extend(ContextAssembler::from_project_for_target(
+            &project,
+            relative_target.unwrap_or(""),
+        ));
+        supplied.extend(
+            self.memory_claims(project_id, None, true)?
+                .into_iter()
+                .map(|claim| ContextItem {
+                    category: ContextCategory::Memory,
+                    content: format!("{}.{} = {}", claim.namespace, claim.key, claim.value),
+                    source: claim.provenance.source,
+                    priority: if claim.state == mcg_projects::MemoryState::Durable {
+                        800
+                    } else {
+                        500
+                    },
+                    estimated_tokens: 0,
+                }),
+        );
+        Ok(ContextAssembler::assemble(supplied, token_budget))
+    }
+
+    /// Renders current managed memory into stable human-readable Markdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when memory cannot be read.
+    pub fn managed_memory(&self, project_id: ProjectId) -> Result<String, RuntimeError> {
+        let claims = self.memory_claims(project_id, None, false)?;
+        Ok(render_managed_memory(project_id, &claims))
     }
 
     /// Lists durable approvals, optionally filtered by lifecycle state.

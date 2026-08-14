@@ -2,12 +2,16 @@ use std::{path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcg_api::{
-    ApprovalListResponse, CreateTaskRequest, ResolveApprovalRequest, TaskEventsResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest,
+    ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
+    CreateMemoryClaimRequest, CreateTaskRequest, DiscoverProjectRequest, ManagedMemoryResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, ProjectHistoryResponse,
+    ProjectListResponse, ResolveApprovalRequest, TaskEventsResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
-use mcg_domain::{TaskEnvelope, TaskId, TaskState};
-use mcg_runtime::RuntimeStatus;
+use mcg_domain::{MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState};
+use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
+use mcg_runtime::{MemoryClaimMutation, ProjectMutation, RuntimeStatus};
 use mcg_tools::{ApprovalRequest, ApprovalState};
 
 #[derive(Debug, Parser)]
@@ -40,6 +44,114 @@ enum Command {
         #[command(subcommand)]
         command: ApprovalCommand,
     },
+    /// Discover projects, assemble context, and manage durable memory.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Discover and register a project root.
+    Add {
+        root: PathBuf,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List registered projects.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the current project model.
+    Get {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-scan a registered project and report invalidated model areas.
+    Refresh {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read immutable project discovery history.
+    History { id: String },
+    /// Assemble bounded project context from current facts and memory.
+    Context {
+        id: String,
+        #[arg(long, default_value_t = 8_000)]
+        token_budget: u32,
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Manage project-scoped structured memory.
+    Memory {
+        project_id: String,
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Add a provenance-bearing claim; VALUE must be JSON.
+    Add {
+        namespace: String,
+        key: String,
+        value: String,
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+        #[arg(long, default_value = "local owner via CLI")]
+        source: String,
+    },
+    /// List current claim heads.
+    List {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        include_stale: bool,
+    },
+    /// Correct a claim with a superseding JSON value.
+    Correct {
+        claim_id: String,
+        value: String,
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+        #[arg(long, default_value = "local owner correction via CLI")]
+        source: String,
+    },
+    /// Reinforce, decay, or retract a claim with a successor version.
+    Transition {
+        claim_id: String,
+        action: MemoryActionArg,
+        #[arg(long, default_value = "local owner lifecycle action via CLI")]
+        source: String,
+    },
+    /// Read every version of one claim key.
+    History { namespace: String, key: String },
+    /// Render current working/durable memory as Markdown.
+    Managed,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MemoryActionArg {
+    Reinforce,
+    Decay,
+    Retract,
+}
+
+impl From<MemoryActionArg> for MemoryLifecycleAction {
+    fn from(value: MemoryActionArg) -> Self {
+        match value {
+            MemoryActionArg::Reinforce => Self::Reinforce,
+            MemoryActionArg::Decay => Self::Decay,
+            MemoryActionArg::Retract => Self::Retract,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Status { json } => run_status(&client, host, token.trim(), json).await?,
         Command::Task { command } => run_task(&client, host, token.trim(), command).await?,
         Command::Approval { command } => run_approval(&client, host, token.trim(), command).await?,
+        Command::Project { command } => run_project(&client, host, token.trim(), command).await?,
     }
 
     Ok(())
@@ -263,6 +376,280 @@ async fn run_task(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // CLI dispatch keeps related project subcommands discoverable.
+async fn run_project(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ProjectCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ProjectCommand::Add { root, id, json } => {
+            let project_id = id.map(|value| ProjectId::from_str(&value)).transpose()?;
+            let mutation: ProjectMutation = client
+                .post(format!("{host}/api/v1/projects"))
+                .bearer_auth(token)
+                .json(&DiscoverProjectRequest {
+                    root: root.to_string_lossy().into_owned(),
+                    project_id,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                print_project(&mutation.project);
+            }
+        }
+        ProjectCommand::List { json } => {
+            let response: ProjectListResponse = client
+                .get(format!("{host}/api/v1/projects"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.projects.is_empty() {
+                println!("No projects.");
+            } else {
+                for project in &response.projects {
+                    print_project(project);
+                }
+            }
+        }
+        ProjectCommand::Get { id, json } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let project: mcg_projects::ProjectModel = client
+                .get(format!("{host}/api/v1/projects/{project_id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&project)?);
+            } else {
+                print_project(&project);
+            }
+        }
+        ProjectCommand::Refresh { id, json } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let mutation: ProjectMutation = client
+                .post(format!("{host}/api/v1/projects/{project_id}/refresh"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                print_project(&mutation.project);
+                if let Some(invalidation) = mutation.invalidation {
+                    println!("Changed inputs: {}", invalidation.changed_inputs.len());
+                }
+            }
+        }
+        ProjectCommand::History { id } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let response: ProjectHistoryResponse = client
+                .get(format!("{host}/api/v1/projects/{project_id}/history"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        ProjectCommand::Context {
+            id,
+            token_budget,
+            target,
+        } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let response: mcg_projects::ContextAssembly = client
+                .post(format!("{host}/api/v1/projects/{project_id}/context"))
+                .bearer_auth(token)
+                .json(&AssembleContextRequest {
+                    items: Vec::new(),
+                    token_budget,
+                    target_path: target,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        ProjectCommand::Memory {
+            project_id,
+            command,
+        } => {
+            run_memory(
+                client,
+                host,
+                token,
+                ProjectId::from_str(&project_id)?,
+                command,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // CLI dispatch keeps memory lifecycle commands together.
+async fn run_memory(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_id: ProjectId,
+    command: MemoryCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let base = format!("{host}/api/v1/projects/{project_id}/memory");
+    match command {
+        MemoryCommand::Add {
+            namespace,
+            key,
+            value,
+            confidence,
+            source,
+        } => {
+            let mutation: MemoryClaimMutation = client
+                .post(&base)
+                .bearer_auth(token)
+                .json(&CreateMemoryClaimRequest {
+                    namespace,
+                    key,
+                    value: parse_cli_value(&value),
+                    confidence,
+                    provenance: owner_provenance(source),
+                    fresh_until: None,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", mutation.claim.id);
+        }
+        MemoryCommand::List {
+            namespace,
+            include_stale,
+        } => {
+            let mut request = client.get(&base).bearer_auth(token);
+            let fresh_only = (!include_stale).to_string();
+            request = request.query(&[("fresh_only", fresh_only.as_str())]);
+            if let Some(namespace) = namespace.as_deref() {
+                request = request.query(&[("namespace", namespace)]);
+            }
+            let response: MemoryClaimListResponse =
+                request.send().await?.error_for_status()?.json().await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        MemoryCommand::Correct {
+            claim_id,
+            value,
+            confidence,
+            source,
+        } => {
+            let claim_id = MemoryClaimId::from_str(&claim_id)?;
+            let mutation: MemoryClaimMutation = client
+                .post(format!("{base}/{claim_id}/correct"))
+                .bearer_auth(token)
+                .json(&CorrectMemoryClaimRequest {
+                    value: parse_cli_value(&value),
+                    confidence,
+                    provenance: owner_provenance(source),
+                    fresh_until: None,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", mutation.claim.id);
+        }
+        MemoryCommand::Transition {
+            claim_id,
+            action,
+            source,
+        } => {
+            let claim_id = MemoryClaimId::from_str(&claim_id)?;
+            let mutation: MemoryClaimMutation = client
+                .post(format!("{base}/{claim_id}/transition"))
+                .bearer_auth(token)
+                .json(&TransitionMemoryClaimRequest {
+                    action: action.into(),
+                    provenance: owner_provenance(source),
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}: {:?}", mutation.claim.id, mutation.claim.state);
+        }
+        MemoryCommand::History { namespace, key } => {
+            let response: MemoryClaimHistoryResponse = client
+                .get(format!("{base}/history"))
+                .bearer_auth(token)
+                .query(&[("namespace", namespace), ("key", key)])
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        MemoryCommand::Managed => {
+            let response: ManagedMemoryResponse = client
+                .get(format!("{base}/managed"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", response.markdown);
+        }
+    }
+    Ok(())
+}
+
+fn print_project(project: &mcg_projects::ProjectModel) {
+    println!("{}  {}", project.project_id, project.root);
+    println!(
+        "  languages: {}  commands: {}  conflicts: {}",
+        project.languages.join(", "),
+        project.commands.len(),
+        project.instructions.conflicts.len()
+    );
+}
+
+fn owner_provenance(source: String) -> ClaimProvenance {
+    ClaimProvenance {
+        source_kind: ProvenanceKind::User,
+        source,
+        task_id: None,
+        artifact_sha256: None,
+    }
+}
+
+fn parse_cli_value(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_owned()))
+}
+
 async fn run_approval(
     client: &reqwest::Client,
     host: &str,
@@ -343,4 +730,18 @@ async fn resolve_approval(
         .await?;
     println!("{}: {:?}", approval.id, approval.state);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_values_accept_plain_consumer_strings_and_structured_json() {
+        assert_eq!(parse_cli_value("pnpm"), serde_json::json!("pnpm"));
+        assert_eq!(
+            parse_cli_value(r#"{"enabled":true}"#),
+            serde_json::json!({"enabled": true})
+        );
+    }
 }

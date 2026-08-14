@@ -62,6 +62,9 @@ The implemented M2 contracts and invariants are detailed in
 [`provider-fabric.md`](provider-fabric.md).
 The implemented M3 execution boundary and durable approval/evidence lifecycle are
 detailed in [`tool-policy-plane.md`](tool-policy-plane.md).
+The implemented M4 project discovery, scoped context, watches, and versioned
+memory are detailed in
+[`project-intelligence-memory.md`](project-intelligence-memory.md).
 Provider, tool, and storage implementations depend on domain contracts; runtime
 orchestrates them through traits. API clients never reach storage directly.
 

@@ -4,9 +4,11 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    ApprovalId, LeaseId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    ApprovalId, LeaseId, MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState,
+    ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
+use mcg_projects::{MemoryClaim, MemoryState, ProjectModel};
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease, LeaseState, ToolAuditRecord,
 };
@@ -99,6 +101,58 @@ BEFORE DELETE ON tool_audit BEGIN
 END;
 ";
 
+const MIGRATION_4: &str = r"
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    root TEXT NOT NULL UNIQUE,
+    current_snapshot_id TEXT NOT NULL,
+    project_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+CREATE INDEX IF NOT EXISTS project_snapshots_history
+    ON project_snapshots(project_id, observed_at, snapshot_id);
+CREATE TRIGGER IF NOT EXISTS project_snapshots_no_update
+BEFORE UPDATE ON project_snapshots BEGIN
+    SELECT RAISE(FAIL, 'project snapshots are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS project_snapshots_no_delete
+BEFORE DELETE ON project_snapshots BEGIN
+    SELECT RAISE(FAIL, 'project snapshots are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS memory_claims (
+    claim_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    claim_key TEXT NOT NULL,
+    state TEXT NOT NULL,
+    claim_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    fresh_until TEXT,
+    supersedes TEXT UNIQUE,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(supersedes) REFERENCES memory_claims(claim_id)
+);
+CREATE INDEX IF NOT EXISTS memory_claims_project_key_history
+    ON memory_claims(project_id, namespace, claim_key, observed_at, claim_id);
+CREATE UNIQUE INDEX IF NOT EXISTS memory_claims_active_head
+    ON memory_claims(project_id, namespace, claim_key)
+    WHERE state IN ('new', 'working', 'durable', 'decaying');
+CREATE TRIGGER IF NOT EXISTS memory_claims_no_delete
+BEFORE DELETE ON memory_claims BEGIN
+    SELECT RAISE(FAIL, 'memory claim versions cannot be deleted');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -109,6 +163,10 @@ pub enum StorageError {
     InvalidData(String),
     #[error("task {0} was not found")]
     TaskNotFound(TaskId),
+    #[error("project {0} was not found")]
+    ProjectNotFound(ProjectId),
+    #[error("memory claim {0} was not found")]
+    MemoryClaimNotFound(MemoryClaimId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -172,6 +230,7 @@ impl SqliteEventStore {
             (1_i64, MIGRATION_1),
             (2_i64, MIGRATION_2),
             (3_i64, MIGRATION_3),
+            (4_i64, MIGRATION_4),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -394,6 +453,393 @@ impl SqliteEventStore {
             kind: EventKind::parse(&kind).map_err(StorageError::InvalidData)?,
             payload: serde_json::from_str(&payload)?,
         })
+    }
+
+    /// Atomically records an immutable project snapshot, updates the current
+    /// project projection, and appends its discovery event.
+    ///
+    /// # Errors
+    ///
+    /// A canonical root cannot be reassigned to another project identity.
+    pub fn record_project_snapshot(
+        &mut self,
+        model: &ProjectModel,
+    ) -> Result<EventEnvelope, StorageError> {
+        let owner = self
+            .connection
+            .query_row(
+                "SELECT project_id FROM projects WHERE root = ?1",
+                [&model.root],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if owner.is_some_and(|owner| owner != model.project_id.to_string()) {
+            return Err(StorageError::Conflict(
+                "project root is already registered to a different project".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::ProjectDiscovered,
+            None,
+            serde_json::to_value(model)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO projects(project_id, root, current_snapshot_id, project_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(project_id) DO UPDATE SET
+                root = excluded.root,
+                current_snapshot_id = excluded.current_snapshot_id,
+                project_json = excluded.project_json,
+                updated_at = excluded.updated_at",
+            params![
+                model.project_id.to_string(),
+                model.root,
+                model.id.to_string(),
+                serde_json::to_string(model)?,
+                model.observed_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO project_snapshots(
+                snapshot_id, project_id, fingerprint, snapshot_json, observed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                model.id.to_string(),
+                model.project_id.to_string(),
+                model.fingerprint,
+                serde_json::to_string(model)?,
+                model.observed_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads the current project snapshot projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn project(&self, project_id: ProjectId) -> Result<Option<ProjectModel>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT project_json FROM projects WHERE project_id = ?1",
+                [project_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    /// Lists current project projections in stable root order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn projects(&self) -> Result<Vec<ProjectModel>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT project_json FROM projects ORDER BY root, project_id")?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
+    }
+
+    /// Loads immutable discovery history for one project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn project_history(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ProjectModel>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT snapshot_json FROM project_snapshots
+             WHERE project_id = ?1 ORDER BY observed_at, snapshot_id",
+        )?;
+        let rows = statement
+            .query_map([project_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
+    }
+
+    /// Atomically records a new claim version and its event.
+    ///
+    /// # Errors
+    ///
+    /// New claims must be unlinked `new` versions and their project must exist.
+    pub fn create_memory_claim(
+        &mut self,
+        claim: &MemoryClaim,
+    ) -> Result<EventEnvelope, StorageError> {
+        if claim.state != MemoryState::New || claim.supersedes.is_some() {
+            return Err(StorageError::InvalidData(
+                "new memory claims must have new state and no predecessor".into(),
+            ));
+        }
+        if self.project(claim.project_id)?.is_none() {
+            return Err(StorageError::ProjectNotFound(claim.project_id));
+        }
+        let event = EventEnvelope::new(
+            EventKind::MemoryClaimRecorded,
+            None,
+            serde_json::to_value(claim)?,
+        );
+        let transaction = self.connection.transaction()?;
+        Self::insert_memory_claim(&transaction, claim)?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Atomically supersedes one active claim with a validated corrected version.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict for stale heads, mismatched identity/scope, or concurrent correction.
+    pub fn correct_memory_claim(
+        &mut self,
+        replacement: &MemoryClaim,
+    ) -> Result<(MemoryClaim, EventEnvelope), StorageError> {
+        self.replace_memory_claim(replacement, true)
+    }
+
+    /// Atomically records a reinforcement, decay, or retraction successor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict for stale heads and invalid data for forged transitions.
+    pub fn revise_memory_claim(
+        &mut self,
+        replacement: &MemoryClaim,
+    ) -> Result<(MemoryClaim, EventEnvelope), StorageError> {
+        self.replace_memory_claim(replacement, false)
+    }
+
+    fn replace_memory_claim(
+        &mut self,
+        replacement: &MemoryClaim,
+        correction: bool,
+    ) -> Result<(MemoryClaim, EventEnvelope), StorageError> {
+        let previous_id = replacement.supersedes.ok_or_else(|| {
+            StorageError::InvalidData("memory revision requires a predecessor".into())
+        })?;
+        let json = self
+            .connection
+            .query_row(
+                "SELECT claim_json FROM memory_claims WHERE claim_id = ?1",
+                [previous_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StorageError::MemoryClaimNotFound(previous_id))?;
+        let mut previous: MemoryClaim = serde_json::from_str(&json)?;
+        if !matches!(
+            previous.state,
+            MemoryState::New | MemoryState::Working | MemoryState::Durable | MemoryState::Decaying
+        ) {
+            return Err(StorageError::Conflict(
+                "memory claim is no longer the active version".into(),
+            ));
+        }
+        let common_invalid = replacement.project_id != previous.project_id
+            || replacement.namespace != previous.namespace
+            || replacement.key != previous.key
+            || replacement.schema_version != previous.schema_version;
+        let correction_invalid = correction
+            && (replacement.correction_count != previous.correction_count.saturating_add(1)
+                || !matches!(
+                    replacement.state,
+                    MemoryState::Working | MemoryState::Durable
+                ));
+        let lifecycle_invalid = !correction
+            && (replacement.value != previous.value
+                || replacement.confidence.to_bits() != previous.confidence.to_bits()
+                || replacement.fresh_until != previous.fresh_until
+                || replacement.correction_count != previous.correction_count
+                || !matches!(
+                    (replacement.state, replacement.usefulness_count),
+                    (MemoryState::Working | MemoryState::Durable, count)
+                        if count == previous.usefulness_count.saturating_add(1)
+                ) && !matches!(
+                    replacement.state,
+                    MemoryState::Decaying | MemoryState::Retracted
+                ));
+        if common_invalid || correction_invalid || lifecycle_invalid {
+            return Err(StorageError::InvalidData(
+                "memory revision does not preserve its version-chain invariants".into(),
+            ));
+        }
+        if !correction
+            && matches!(
+                replacement.state,
+                MemoryState::Decaying | MemoryState::Retracted
+            )
+            && replacement.usefulness_count != previous.usefulness_count
+        {
+            return Err(StorageError::InvalidData(
+                "memory lifecycle transition changed usefulness unexpectedly".into(),
+            ));
+        }
+        previous.state = MemoryState::Superseded;
+        let event = EventEnvelope::new(
+            if correction {
+                EventKind::MemoryClaimCorrected
+            } else {
+                EventKind::MemoryClaimStateChanged
+            },
+            None,
+            serde_json::json!({"previous": previous, "replacement": replacement}),
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE memory_claims SET state = 'superseded', claim_json = ?1
+             WHERE claim_id = ?2
+               AND state IN ('new', 'working', 'durable', 'decaying')",
+            params![serde_json::to_string(&previous)?, previous.id.to_string()],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "memory claim was corrected concurrently".into(),
+            ));
+        }
+        Self::insert_memory_claim(&transaction, replacement)?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((previous, event))
+    }
+
+    fn insert_memory_claim(
+        transaction: &Transaction<'_>,
+        claim: &MemoryClaim,
+    ) -> Result<(), StorageError> {
+        transaction.execute(
+            "INSERT INTO memory_claims(
+                claim_id, project_id, namespace, claim_key, state, claim_json,
+                observed_at, fresh_until, supersedes
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                claim.id.to_string(),
+                claim.project_id.to_string(),
+                claim.namespace,
+                claim.key,
+                memory_state_name(claim.state),
+                serde_json::to_string(claim)?,
+                claim.observed_at.to_rfc3339(),
+                claim.fresh_until.map(|value| value.to_rfc3339()),
+                claim.supersedes.map(|value| value.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Loads current claim heads, optionally restricted to a namespace and freshness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn memory_claims(
+        &self,
+        project_id: ProjectId,
+        namespace: Option<&str>,
+        fresh_only: bool,
+    ) -> Result<Vec<MemoryClaim>, StorageError> {
+        let (sql, namespace) = namespace.map_or_else(
+            || {
+                (
+                    "SELECT claim_json FROM memory_claims
+                     WHERE project_id = ?1
+                       AND state IN ('new', 'working', 'durable', 'decaying')
+                     ORDER BY namespace, claim_key, observed_at",
+                    None,
+                )
+            },
+            |namespace| {
+                (
+                    "SELECT claim_json FROM memory_claims
+                     WHERE project_id = ?1 AND namespace = ?2
+                       AND state IN ('new', 'working', 'durable', 'decaying')
+                     ORDER BY namespace, claim_key, observed_at",
+                    Some(namespace),
+                )
+            },
+        );
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = if let Some(namespace) = namespace {
+            statement
+                .query_map(params![project_id.to_string(), namespace], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            statement
+                .query_map([project_id.to_string()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let now = Utc::now();
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .filter(|result: &Result<MemoryClaim, StorageError>| {
+                !fresh_only || result.as_ref().is_ok_and(|claim| claim.is_fresh_at(now))
+            })
+            .collect()
+    }
+
+    /// Loads one memory claim version by identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn memory_claim(
+        &self,
+        claim_id: MemoryClaimId,
+    ) -> Result<Option<MemoryClaim>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT claim_json FROM memory_claims WHERE claim_id = ?1",
+                [claim_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    /// Loads every immutable version for one scoped claim key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn memory_claim_history(
+        &self,
+        project_id: ProjectId,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Vec<MemoryClaim>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT claim_json FROM memory_claims
+             WHERE project_id = ?1 AND namespace = ?2 AND claim_key = ?3
+             ORDER BY observed_at, claim_id",
+        )?;
+        let rows = statement
+            .query_map(params![project_id.to_string(), namespace, key], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
     }
 
     /// Persists a pending approval and its event atomically.
@@ -924,10 +1370,22 @@ const fn tool_audit_phase_name(phase: mcg_tools::ToolAuditPhase) -> &'static str
     }
 }
 
+const fn memory_state_name(state: MemoryState) -> &'static str {
+    match state {
+        MemoryState::New => "new",
+        MemoryState::Working => "working",
+        MemoryState::Durable => "durable",
+        MemoryState::Decaying => "decaying",
+        MemoryState::Superseded => "superseded",
+        MemoryState::Retracted => "retracted",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mcg_domain::{ApprovalId, ArtifactId};
+    use mcg_projects::{MemoryLifecycle, ProjectDiscoverer, user_provenance};
     use mcg_tools::{
         ArtifactReference, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolOutcomeStatus,
         VerificationEvidence,
@@ -1137,6 +1595,111 @@ mod tests {
         assert!(
             reopened
                 .finish_tool_lease(lease_id, LeaseState::Completed)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn project_snapshot_history_survives_restart_and_is_immutable() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("Cargo.toml"), "[workspace]").expect("manifest");
+        let directory = tempfile::tempdir().expect("database directory");
+        let path = directory.path().join("mcg.db");
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(project_root.path(), project_id).expect("discover");
+        {
+            let mut store = SqliteEventStore::open(&path).expect("store");
+            let event = store
+                .record_project_snapshot(&first)
+                .expect("record project");
+            assert_eq!(event.kind, EventKind::ProjectDiscovered);
+        }
+        std::fs::write(
+            project_root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []",
+        )
+        .expect("manifest update");
+        let second =
+            ProjectDiscoverer::discover(project_root.path(), project_id).expect("rediscover");
+        assert_ne!(first.fingerprint, second.fingerprint);
+
+        let mut reopened = SqliteEventStore::open(&path).expect("reopen");
+        reopened
+            .record_project_snapshot(&second)
+            .expect("record second snapshot");
+        assert_eq!(reopened.project(project_id).expect("project"), Some(second));
+        assert_eq!(
+            reopened
+                .project_history(project_id)
+                .expect("snapshot history"),
+            vec![first, reopened.project(project_id).unwrap().unwrap()]
+        );
+        assert!(
+            reopened
+                .connection
+                .execute("DELETE FROM project_snapshots", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn memory_correction_is_atomic_versioned_and_restart_durable() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("package.json"), "{}").expect("manifest");
+        let directory = tempfile::tempdir().expect("database directory");
+        let path = directory.path().join("mcg.db");
+        let project_id = ProjectId::new();
+        let project =
+            ProjectDiscoverer::discover(project_root.path(), project_id).expect("discover");
+        let mut original = MemoryLifecycle::create(
+            project_id,
+            "project",
+            "package_manager",
+            serde_json::json!("npm"),
+            0.7,
+            user_provenance("fixture"),
+            None,
+        )
+        .expect("claim");
+        {
+            let mut store = SqliteEventStore::open(&path).expect("store");
+            store
+                .record_project_snapshot(&project)
+                .expect("record project");
+            store.create_memory_claim(&original).expect("record claim");
+        }
+        let replacement = MemoryLifecycle::correct(
+            &mut original,
+            serde_json::json!("pnpm"),
+            1.0,
+            user_provenance("owner correction"),
+            None,
+        )
+        .expect("correction");
+        let mut reopened = SqliteEventStore::open(&path).expect("reopen");
+        let (superseded, event) = reopened
+            .correct_memory_claim(&replacement)
+            .expect("persist correction");
+        assert_eq!(superseded.state, MemoryState::Superseded);
+        assert_eq!(event.kind, EventKind::MemoryClaimCorrected);
+        assert!(reopened.correct_memory_claim(&replacement).is_err());
+        assert_eq!(
+            reopened
+                .memory_claims(project_id, Some("project"), true)
+                .expect("current claims"),
+            vec![replacement.clone()]
+        );
+        let history = reopened
+            .memory_claim_history(project_id, "project", "package_manager")
+            .expect("history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].state, MemoryState::Superseded);
+        assert_eq!(history[1], replacement);
+        assert_eq!(reopened.event_count().expect("events"), 3);
+        assert!(
+            reopened
+                .connection
+                .execute("DELETE FROM memory_claims", [])
                 .is_err()
         );
     }

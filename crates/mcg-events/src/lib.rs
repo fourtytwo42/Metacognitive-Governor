@@ -22,6 +22,10 @@ pub enum EventKind {
     ProviderCallCompleted,
     ToolRequested,
     ToolCompleted,
+    ProjectDiscovered,
+    MemoryClaimRecorded,
+    MemoryClaimCorrected,
+    MemoryClaimStateChanged,
     McgIntervention,
 }
 
@@ -40,6 +44,10 @@ impl EventKind {
             Self::ProviderCallCompleted => "provider_call_completed",
             Self::ToolRequested => "tool_requested",
             Self::ToolCompleted => "tool_completed",
+            Self::ProjectDiscovered => "project_discovered",
+            Self::MemoryClaimRecorded => "memory_claim_recorded",
+            Self::MemoryClaimCorrected => "memory_claim_corrected",
+            Self::MemoryClaimStateChanged => "memory_claim_state_changed",
             Self::McgIntervention => "mcg_intervention",
         }
     }
@@ -62,6 +70,12 @@ impl EventKind {
             "provider_call_completed" | "ProviderCallCompleted" => Ok(Self::ProviderCallCompleted),
             "tool_requested" | "ToolRequested" => Ok(Self::ToolRequested),
             "tool_completed" | "ToolCompleted" => Ok(Self::ToolCompleted),
+            "project_discovered" | "ProjectDiscovered" => Ok(Self::ProjectDiscovered),
+            "memory_claim_recorded" | "MemoryClaimRecorded" => Ok(Self::MemoryClaimRecorded),
+            "memory_claim_corrected" | "MemoryClaimCorrected" => Ok(Self::MemoryClaimCorrected),
+            "memory_claim_state_changed" | "MemoryClaimStateChanged" => {
+                Ok(Self::MemoryClaimStateChanged)
+            }
             "mcg_intervention" | "McgIntervention" => Ok(Self::McgIntervention),
             other => Err(other.to_owned()),
         }

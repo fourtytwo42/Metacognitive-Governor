@@ -12,10 +12,14 @@ use axum::{
 };
 use chrono::Utc;
 use mcg_domain::{
-    ApprovalId, ProjectId, RiskLevel, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId,
+    ApprovalId, MemoryClaimId, ProjectId, RiskLevel, TaskBudget, TaskEnvelope, TaskId, TaskState,
+    ThreadId,
 };
 use mcg_events::EventEnvelope;
-use mcg_runtime::{AppRuntime, RuntimeError, RuntimeStatus};
+use mcg_projects::{
+    ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
+};
+use mcg_runtime::{AppRuntime, MemoryClaimMutation, ProjectMutation, RuntimeError, RuntimeStatus};
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -84,6 +88,73 @@ pub struct ToolAuditResponse {
     pub records: Vec<ToolAuditRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverProjectRequest {
+    pub root: String,
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectListResponse {
+    pub projects: Vec<ProjectModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectHistoryResponse {
+    pub snapshots: Vec<ProjectModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateMemoryClaimRequest {
+    pub namespace: String,
+    pub key: String,
+    pub value: serde_json::Value,
+    pub confidence: f64,
+    pub provenance: ClaimProvenance,
+    #[serde(default)]
+    pub fresh_until: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorrectMemoryClaimRequest {
+    pub value: serde_json::Value,
+    pub confidence: f64,
+    pub provenance: ClaimProvenance,
+    #[serde(default)]
+    pub fresh_until: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionMemoryClaimRequest {
+    pub action: MemoryLifecycleAction,
+    pub provenance: ClaimProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryClaimListResponse {
+    pub claims: Vec<MemoryClaim>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryClaimHistoryResponse {
+    pub claims: Vec<MemoryClaim>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedMemoryResponse {
+    pub markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssembleContextRequest {
+    #[serde(default)]
+    pub items: Vec<ContextItem>,
+    pub token_budget: u32,
+    #[serde(default)]
+    pub target_path: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ApprovalListQuery {
     state: Option<ApprovalState>,
@@ -92,6 +163,23 @@ struct ApprovalListQuery {
 #[derive(Debug, Default, Deserialize)]
 struct EventStreamQuery {
     after: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MemoryListQuery {
+    namespace: Option<String>,
+    #[serde(default = "default_true")]
+    fresh_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryHistoryQuery {
+    namespace: String,
+    key: String,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -166,6 +254,43 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         )
         .route("/api/v1/tasks/{task_id}/events", get(task_events))
         .route("/api/v1/tasks/{task_id}/tool-audit", get(task_tool_audit))
+        .route(
+            "/api/v1/projects",
+            get(list_projects).post(discover_project),
+        )
+        .route("/api/v1/projects/{project_id}", get(get_project))
+        .route(
+            "/api/v1/projects/{project_id}/refresh",
+            post(refresh_project),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/history",
+            get(project_history),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/context",
+            post(assemble_project_context),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory",
+            get(list_memory_claims).post(create_memory_claim),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory/history",
+            get(memory_claim_history),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory/managed",
+            get(managed_memory),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory/{claim_id}/correct",
+            post(correct_memory_claim),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory/{claim_id}/transition",
+            post(transition_memory_claim),
+        )
         .route("/api/v1/approvals", get(list_approvals))
         .route("/api/v1/approvals/{approval_id}", get(get_approval))
         .route(
@@ -347,6 +472,205 @@ async fn task_tool_audit(
     }))
 }
 
+async fn discover_project(
+    State(state): State<ApiState>,
+    Json(request): Json<DiscoverProjectRequest>,
+) -> Result<(StatusCode, Json<ProjectMutation>), ApiError> {
+    if request.root.trim().is_empty() {
+        return Err(ApiError::bad_request("project root cannot be empty"));
+    }
+    let project_id = request.project_id.unwrap_or_default();
+    state
+        .runtime
+        .discover_project(std::path::Path::new(request.root.trim()), project_id)
+        .map(|mutation| (StatusCode::CREATED, Json(mutation)))
+        .map_err(map_runtime_error)
+}
+
+async fn list_projects(
+    State(state): State<ApiState>,
+) -> Result<Json<ProjectListResponse>, ApiError> {
+    Ok(Json(ProjectListResponse {
+        projects: state.runtime.projects()?,
+    }))
+}
+
+async fn get_project(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectModel>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .project(project_id)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))
+}
+
+async fn refresh_project(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectMutation>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let project = state
+        .runtime
+        .project(project_id)?
+        .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))?;
+    state
+        .runtime
+        .discover_project(std::path::Path::new(&project.root), project_id)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn project_history(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectHistoryResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    if state.runtime.project(project_id)?.is_none() {
+        return Err(ApiError::not_found(format!(
+            "project {project_id} was not found"
+        )));
+    }
+    Ok(Json(ProjectHistoryResponse {
+        snapshots: state.runtime.project_history(project_id)?,
+    }))
+}
+
+async fn create_memory_claim(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<CreateMemoryClaimRequest>,
+) -> Result<(StatusCode, Json<MemoryClaimMutation>), ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .create_memory_claim(
+            project_id,
+            request.namespace,
+            request.key,
+            request.value,
+            request.confidence,
+            request.provenance,
+            request.fresh_until,
+        )
+        .map(|mutation| (StatusCode::CREATED, Json(mutation)))
+        .map_err(map_runtime_error)
+}
+
+async fn correct_memory_claim(
+    State(state): State<ApiState>,
+    Path((project_id, claim_id)): Path<(String, String)>,
+    Json(request): Json<CorrectMemoryClaimRequest>,
+) -> Result<Json<MemoryClaimMutation>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let claim_id = parse_memory_claim_id(&claim_id)?;
+    state
+        .runtime
+        .correct_memory_claim(
+            project_id,
+            claim_id,
+            request.value,
+            request.confidence,
+            request.provenance,
+            request.fresh_until,
+        )
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn transition_memory_claim(
+    State(state): State<ApiState>,
+    Path((project_id, claim_id)): Path<(String, String)>,
+    Json(request): Json<TransitionMemoryClaimRequest>,
+) -> Result<Json<MemoryClaimMutation>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let claim_id = parse_memory_claim_id(&claim_id)?;
+    state
+        .runtime
+        .transition_memory_claim(project_id, claim_id, request.action, request.provenance)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn list_memory_claims(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<MemoryListQuery>,
+) -> Result<Json<MemoryClaimListResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    if state.runtime.project(project_id)?.is_none() {
+        return Err(ApiError::not_found(format!(
+            "project {project_id} was not found"
+        )));
+    }
+    Ok(Json(MemoryClaimListResponse {
+        claims: state.runtime.memory_claims(
+            project_id,
+            query.namespace.as_deref(),
+            query.fresh_only,
+        )?,
+    }))
+}
+
+async fn memory_claim_history(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<MemoryHistoryQuery>,
+) -> Result<Json<MemoryClaimHistoryResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    if state.runtime.project(project_id)?.is_none() {
+        return Err(ApiError::not_found(format!(
+            "project {project_id} was not found"
+        )));
+    }
+    Ok(Json(MemoryClaimHistoryResponse {
+        claims: state
+            .runtime
+            .memory_claim_history(project_id, &query.namespace, &query.key)?,
+    }))
+}
+
+async fn managed_memory(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ManagedMemoryResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    if state.runtime.project(project_id)?.is_none() {
+        return Err(ApiError::not_found(format!(
+            "project {project_id} was not found"
+        )));
+    }
+    Ok(Json(ManagedMemoryResponse {
+        markdown: state.runtime.managed_memory(project_id)?,
+    }))
+}
+
+async fn assemble_project_context(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<AssembleContextRequest>,
+) -> Result<Json<ContextAssembly>, ApiError> {
+    if request.token_budget == 0 || request.token_budget > 1_000_000 {
+        return Err(ApiError::bad_request(
+            "context token budget must be between 1 and 1000000",
+        ));
+    }
+    let project_id = parse_project_id(&project_id)?;
+    let target_path = request.target_path;
+    state
+        .runtime
+        .assemble_project_context(
+            project_id,
+            request.items,
+            request.token_budget,
+            target_path.as_deref(),
+        )
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 async fn list_approvals(
     State(state): State<ApiState>,
     Query(query): Query<ApprovalListQuery>,
@@ -455,6 +779,31 @@ fn parse_approval_id(value: &str) -> Result<ApprovalId, ApiError> {
     value
         .parse()
         .map_err(|_| ApiError::bad_request("approval id must be a UUID"))
+}
+
+fn parse_project_id(value: &str) -> Result<ProjectId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("project id must be a UUID"))
+}
+
+fn parse_memory_claim_id(value: &str) -> Result<MemoryClaimId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("memory claim id must be a UUID"))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn map_runtime_error(error: RuntimeError) -> ApiError {
+    if error.is_not_found() {
+        ApiError::not_found(error.to_string())
+    } else if error.is_invalid_request() {
+        ApiError::bad_request(error.to_string())
+    } else if error.is_conflict() {
+        ApiError::conflict(error.to_string())
+    } else {
+        ApiError::from(error)
+    }
 }
 
 #[cfg(test)]
@@ -731,5 +1080,213 @@ mod tests {
             .to_bytes();
         let audit: ToolAuditResponse = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(audit.records, vec![record]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn project_memory_context_lifecycle_is_authenticated_and_conflict_safe() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(
+            project_root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest"},"devDependencies":{"vitest":"1"}}"#,
+        )
+        .expect("manifest");
+        std::fs::write(
+            project_root.path().join("AGENTS.md"),
+            "Use npm for package management.",
+        )
+        .expect("instructions");
+        let app = router(test_runtime());
+        let discover_body = serde_json::to_vec(&DiscoverProjectRequest {
+            root: project_root.path().to_string_lossy().into_owned(),
+            project_id: None,
+        })
+        .expect("discover body");
+        let discovered = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(discover_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("discover");
+        assert_eq!(discovered.status(), StatusCode::CREATED);
+        let bytes = discovered
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let project: ProjectMutation = serde_json::from_slice(&bytes).expect("project response");
+        assert!(project.project.test_systems.contains(&"Vitest".to_owned()));
+
+        let provenance = ClaimProvenance {
+            source_kind: mcg_projects::ProvenanceKind::User,
+            source: "API fixture".into(),
+            task_id: None,
+            artifact_sha256: None,
+        };
+        let create_body = serde_json::to_vec(&CreateMemoryClaimRequest {
+            namespace: "project".into(),
+            key: "package_manager".into(),
+            value: serde_json::json!("npm"),
+            confidence: 0.8,
+            provenance: provenance.clone(),
+            fresh_until: None,
+        })
+        .expect("claim body");
+        let memory_path = format!("/api/v1/projects/{}/memory", project.project.project_id);
+        let created = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&memory_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(create_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("create memory");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let bytes = created
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let original: MemoryClaimMutation =
+            serde_json::from_slice(&bytes).expect("memory response");
+
+        let correct_body = serde_json::to_vec(&CorrectMemoryClaimRequest {
+            value: serde_json::json!("pnpm"),
+            confidence: 1.0,
+            provenance,
+            fresh_until: None,
+        })
+        .expect("correct body");
+        let correct_path = format!(
+            "/api/v1/projects/{}/memory/{}/correct",
+            project.project.project_id, original.claim.id
+        );
+        let corrected = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&correct_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(correct_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("correct memory");
+        assert_eq!(corrected.status(), StatusCode::OK);
+        let bytes = corrected
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let corrected: MemoryClaimMutation =
+            serde_json::from_slice(&bytes).expect("corrected response");
+        let duplicate = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&correct_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(correct_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("duplicate correction");
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+        let transition_body = serde_json::to_vec(&TransitionMemoryClaimRequest {
+            action: MemoryLifecycleAction::Reinforce,
+            provenance: ClaimProvenance {
+                source_kind: mcg_projects::ProvenanceKind::User,
+                source: "reinforcement fixture".into(),
+                task_id: None,
+                artifact_sha256: None,
+            },
+        })
+        .expect("transition body");
+        let transition_path = format!(
+            "/api/v1/projects/{}/memory/{}/transition",
+            project.project.project_id, corrected.claim.id
+        );
+        let transitioned = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&transition_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(transition_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("transition memory");
+        assert_eq!(transitioned.status(), StatusCode::OK);
+
+        let context_path = format!("/api/v1/projects/{}/context", project.project.project_id);
+        let context_body = serde_json::to_vec(&AssembleContextRequest {
+            items: vec![ContextItem {
+                category: mcg_projects::ContextCategory::Goal,
+                content: "Build the project".into(),
+                source: "owner".into(),
+                priority: 1_000,
+                estimated_tokens: 0,
+            }],
+            token_budget: 128,
+            target_path: None,
+        })
+        .expect("context body");
+        let context = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&context_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(context_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("context");
+        assert_eq!(context.status(), StatusCode::OK);
+        let bytes = context
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let context: ContextAssembly = serde_json::from_slice(&bytes).expect("context response");
+        assert!(
+            context
+                .items
+                .iter()
+                .any(|item| item.content.contains("pnpm"))
+        );
+
+        let history_path = format!(
+            "/api/v1/projects/{}/memory/history?namespace=project&key=package_manager",
+            project.project.project_id
+        );
+        let history = app
+            .oneshot(
+                authorized(Request::get(&history_path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("history");
+        assert_eq!(history.status(), StatusCode::OK);
+        let bytes = history
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let history: MemoryClaimHistoryResponse =
+            serde_json::from_slice(&bytes).expect("history response");
+        assert_eq!(history.claims.len(), 3);
+        assert_eq!(history.claims[2].value, serde_json::json!("pnpm"));
+        assert_eq!(history.claims[2].usefulness_count, 1);
     }
 }

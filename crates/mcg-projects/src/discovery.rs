@@ -13,7 +13,8 @@ use thiserror::Error;
 use crate::{
     ConflictResolution, EffectiveInstruction, InstructionConflict, InstructionDocument,
     InstructionKind, InstructionResolution, PROJECT_MODEL_SCHEMA_VERSION, ProjectCommand,
-    ProjectModel, ProjectWorldModel, RecentCommit, RepositoryModel, WorldNode, WorldNodeKind,
+    ProjectModel, ProjectWorldModel, RecentCommit, RepositoryModel, SnapshotInvalidation,
+    WorldNode, WorldNodeKind, WorldRelationship,
 };
 
 const MAX_FILES: usize = 20_000;
@@ -31,6 +32,124 @@ pub enum ProjectDiscoveryError {
 }
 
 pub struct ProjectDiscoverer;
+
+pub struct InstructionResolver;
+
+pub struct ProjectWatcher {
+    current: ProjectModel,
+}
+
+impl ProjectWatcher {
+    /// Starts a polling watch from a freshly discovered baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns project discovery errors for inaccessible/invalid roots.
+    pub fn start(root: &Path, project_id: ProjectId) -> Result<Self, ProjectDiscoveryError> {
+        Ok(Self {
+            current: ProjectDiscoverer::discover(root, project_id)?,
+        })
+    }
+
+    #[must_use]
+    pub const fn current(&self) -> &ProjectModel {
+        &self.current
+    }
+
+    /// Re-scans bounded watched inputs and returns only meaningful changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns project discovery errors without replacing the last valid model.
+    pub fn poll(
+        &mut self,
+    ) -> Result<Option<(ProjectModel, SnapshotInvalidation)>, ProjectDiscoveryError> {
+        let next =
+            ProjectDiscoverer::discover(Path::new(&self.current.root), self.current.project_id)?;
+        if next.fingerprint == self.current.fingerprint {
+            return Ok(None);
+        }
+        let invalidation = SnapshotInvalidation::between(&self.current, &next);
+        self.current = next.clone();
+        Ok(Some((next, invalidation)))
+    }
+}
+
+impl InstructionResolver {
+    #[must_use]
+    pub fn applicable_documents<'a>(
+        documents: &'a [InstructionDocument],
+        relative_target: &str,
+    ) -> Vec<&'a InstructionDocument> {
+        let target = relative_target.replace('\\', "/");
+        documents
+            .iter()
+            .filter(|document| scope_applies(&document.scope, &target))
+            .collect()
+    }
+
+    /// Resolves only documents applicable to a project-relative target path while
+    /// retaining the full discovered document inventory for inspection.
+    #[must_use]
+    pub fn for_target(
+        documents: &[InstructionDocument],
+        relative_target: &str,
+    ) -> InstructionResolution {
+        let applicable = Self::applicable_documents(documents, relative_target)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidates = package_manager_candidates(&applicable);
+        let mut effective = Vec::new();
+        let mut conflicts = Vec::new();
+        if let Some(first) = candidates.first() {
+            effective.push(EffectiveInstruction {
+                key: "package_manager".into(),
+                value: first.0.clone(),
+                source_path: first.1.path.clone(),
+                priority: first.1.priority,
+            });
+            let distinct = candidates
+                .iter()
+                .map(|(value, _)| value.clone())
+                .collect::<BTreeSet<_>>();
+            if distinct.len() > 1 {
+                let top_values = candidates
+                    .iter()
+                    .filter(|(_, document)| document.priority == first.1.priority)
+                    .map(|(value, _)| value)
+                    .collect::<BTreeSet<_>>();
+                let resolution = if top_values.len() > 1 {
+                    ConflictResolution::Unresolved
+                } else if candidates
+                    .iter()
+                    .any(|(_, document)| document.priority < first.1.priority)
+                    && candidates
+                        .iter()
+                        .any(|(_, document)| document.scope != first.1.scope)
+                {
+                    ConflictResolution::MoreSpecific
+                } else {
+                    ConflictResolution::HigherPrecedence
+                };
+                conflicts.push(InstructionConflict {
+                    key: "package_manager".into(),
+                    values: distinct.into_iter().collect(),
+                    source_paths: candidates
+                        .iter()
+                        .map(|(_, document)| document.path.clone())
+                        .collect(),
+                    resolution,
+                });
+            }
+        }
+        InstructionResolution {
+            documents: documents.to_vec(),
+            effective,
+            conflicts,
+        }
+    }
+}
 
 impl ProjectDiscoverer {
     /// Builds a stable, bounded project snapshot without following symlinks.
@@ -54,7 +173,14 @@ impl ProjectDiscoverer {
         let instructions = resolve_instructions(&root, &files)?;
         let commands = discover_commands(&root, &files)?;
         let repository = discover_repository(&root);
-        let watched_inputs = watched_inputs(&root, &files)?;
+        let mut watched_inputs = watched_inputs(&root, &files)?;
+        if let Some(head) = &repository.head {
+            watched_inputs.insert("@git/head".into(), sha256(head.as_bytes()));
+        }
+        watched_inputs.insert(
+            "@git/dirty".into(),
+            sha256(repository.dirty.to_string().as_bytes()),
+        );
         let fingerprint = fingerprint(&watched_inputs);
         let languages = discover_languages(&files);
         let build_systems = discover_build_systems(&files);
@@ -67,7 +193,8 @@ impl ProjectDiscoverer {
             .iter()
             .find(|path| relative(&root, path) == "MEMORY.md")
             .map(|_| "MEMORY.md".to_owned());
-        let world = world_model(&commands, &services, &repository);
+        let dependencies = discover_dependencies(&root, &files)?;
+        let world = world_model(&commands, &services, &repository, &dependencies);
 
         Ok(ProjectModel {
             schema_version: PROJECT_MODEL_SCHEMA_VERSION,
@@ -181,51 +308,11 @@ fn resolve_instructions(
             .cmp(&left.priority)
             .then_with(|| left.path.cmp(&right.path))
     });
-    let candidates = package_manager_candidates(&documents);
-    let mut effective = Vec::new();
-    let mut conflicts = Vec::new();
-    if let Some(first) = candidates.first() {
-        effective.push(EffectiveInstruction {
-            key: "package_manager".into(),
-            value: first.0.clone(),
-            source_path: first.1.path.clone(),
-            priority: first.1.priority,
-        });
-        let distinct = candidates
-            .iter()
-            .map(|(value, _)| value.clone())
-            .collect::<BTreeSet<_>>();
-        if distinct.len() > 1 {
-            let top_values = candidates
-                .iter()
-                .filter(|(_, document)| document.priority == first.1.priority)
-                .map(|(value, _)| value)
-                .collect::<BTreeSet<_>>();
-            let resolution = if top_values.len() > 1 {
-                ConflictResolution::Unresolved
-            } else if candidates.iter().any(|(_, document)| {
-                document.priority < first.1.priority && document.scope != first.1.scope
-            }) {
-                ConflictResolution::MoreSpecific
-            } else {
-                ConflictResolution::HigherPrecedence
-            };
-            conflicts.push(InstructionConflict {
-                key: "package_manager".into(),
-                values: distinct.into_iter().collect(),
-                source_paths: candidates
-                    .iter()
-                    .map(|(_, document)| document.path.clone())
-                    .collect(),
-                resolution,
-            });
-        }
-    }
-    Ok(InstructionResolution {
-        documents,
-        effective,
-        conflicts,
-    })
+    Ok(InstructionResolver::for_target(&documents, ""))
+}
+
+fn scope_applies(scope: &str, target: &str) -> bool {
+    scope.is_empty() || target == scope || target.starts_with(&format!("{scope}/"))
 }
 
 fn instruction_kind(path: &str) -> Option<(InstructionKind, u16)> {
@@ -532,6 +619,31 @@ fn discover_services(files: &[PathBuf]) -> Vec<String> {
     )
 }
 
+fn discover_dependencies(
+    root: &Path,
+    files: &[PathBuf],
+) -> Result<Vec<(String, String)>, ProjectDiscoveryError> {
+    let Some(package_json) = files
+        .iter()
+        .find(|path| relative(root, path) == "package.json")
+    else {
+        return Ok(Vec::new());
+    };
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(package_json)?)?;
+    let mut dependencies = BTreeSet::new();
+    for section in ["dependencies", "devDependencies"] {
+        if let Some(values) = value.get(section).and_then(serde_json::Value::as_object) {
+            dependencies.extend(
+                values
+                    .keys()
+                    .take(500)
+                    .map(|name| (name.clone(), format!("package.json#{section}"))),
+            );
+        }
+    }
+    Ok(dependencies.into_iter().collect())
+}
+
 fn discover_ci(files: &[PathBuf]) -> Vec<String> {
     let mut systems = BTreeSet::new();
     for path in files {
@@ -583,8 +695,10 @@ fn world_model(
     commands: &[ProjectCommand],
     services: &[String],
     repository: &RepositoryModel,
+    dependencies: &[(String, String)],
 ) -> ProjectWorldModel {
     let mut nodes = Vec::new();
+    let mut relationships = Vec::new();
     if repository.is_git {
         nodes.push(WorldNode {
             id: "repository".into(),
@@ -599,6 +713,14 @@ fn world_model(
         label: command.command.clone(),
         source: command.source.clone(),
     }));
+    if repository.is_git {
+        relationships.extend(commands.iter().map(|command| WorldRelationship {
+            from: "repository".into(),
+            relation: "provides".into(),
+            to: format!("command:{}", command.name),
+            source: command.source.clone(),
+        }));
+    }
     nodes.extend(
         services
             .iter()
@@ -610,9 +732,30 @@ fn world_model(
                 source: "project manifest".into(),
             }),
     );
+    nodes.extend(
+        dependencies
+            .iter()
+            .enumerate()
+            .map(|(index, (name, source))| WorldNode {
+                id: format!("dependency:{index}"),
+                kind: WorldNodeKind::Dependency,
+                label: name.clone(),
+                source: source.clone(),
+            }),
+    );
+    if repository.is_git {
+        relationships.extend(dependencies.iter().enumerate().map(|(index, (_, source))| {
+            WorldRelationship {
+                from: "repository".into(),
+                relation: "depends_on".into(),
+                to: format!("dependency:{index}"),
+                source: source.clone(),
+            }
+        }));
+    }
     ProjectWorldModel {
         nodes,
-        relationships: Vec::new(),
+        relationships,
     }
 }
 
@@ -636,6 +779,7 @@ mod tests {
     fn fixture_repository_produces_stable_model_and_surfaces_instruction_conflict() {
         let root = tempdir().expect("root");
         fs::create_dir_all(root.path().join("src")).expect("src");
+        fs::create_dir_all(root.path().join("packages/web")).expect("nested project");
         fs::create_dir_all(root.path().join(".cursor/rules")).expect("rules");
         fs::write(
             root.path().join("AGENTS.md"),
@@ -654,6 +798,11 @@ mod tests {
         .expect("package");
         fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: 9").expect("lock");
         fs::write(root.path().join("src/main.ts"), "export {};").expect("source");
+        fs::write(
+            root.path().join("packages/web/AGENTS.md"),
+            "Use bun for package management.",
+        )
+        .expect("nested agents");
 
         let project_id = ProjectId::new();
         let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
@@ -663,6 +812,13 @@ mod tests {
         assert!(first.test_systems.contains(&"Playwright".to_owned()));
         assert!(first.test_systems.contains(&"Vitest".to_owned()));
         assert!(first.package_managers.contains(&"pnpm".to_owned()));
+        assert!(
+            first
+                .world
+                .nodes
+                .iter()
+                .any(|node| node.kind == WorldNodeKind::Dependency && node.label == "vitest")
+        );
         assert_eq!(first.instructions.conflicts.len(), 1);
         assert_eq!(first.instructions.effective[0].value, "pnpm");
         assert_eq!(
@@ -672,6 +828,16 @@ mod tests {
         assert!(first.commands.iter().any(|command| {
             command.name == "test:e2e" && command.command == "pnpm run test:e2e"
         }));
+        assert_eq!(first.instructions.effective[0].value, "pnpm");
+        let nested = InstructionResolver::for_target(
+            &first.instructions.documents,
+            "packages/web/src/main.ts",
+        );
+        assert_eq!(nested.effective[0].value, "bun");
+        assert_eq!(
+            nested.conflicts[0].resolution,
+            ConflictResolution::MoreSpecific
+        );
     }
 
     #[test]
@@ -685,5 +851,27 @@ mod tests {
                 .expect("discover");
         assert_eq!(Path::new(&model.root), root.path().canonicalize().unwrap());
         assert!(model.build_systems.contains(&"Cargo".to_owned()));
+    }
+
+    #[test]
+    fn polling_watch_invalidates_only_changed_manifest_model_areas() {
+        let root = tempdir().expect("root");
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .expect("manifest");
+        let mut watcher = ProjectWatcher::start(root.path(), ProjectId::new()).expect("watch");
+        assert!(watcher.poll().expect("unchanged poll").is_none());
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest"}}"#,
+        )
+        .expect("manifest update");
+        let (model, invalidation) = watcher.poll().expect("changed poll").expect("change");
+        assert_eq!(invalidation.changed_inputs, vec!["package.json"]);
+        assert!(invalidation.invalidate_commands);
+        assert!(!invalidation.invalidate_instructions);
+        assert!(model.commands.iter().any(|command| command.name == "test"));
     }
 }
