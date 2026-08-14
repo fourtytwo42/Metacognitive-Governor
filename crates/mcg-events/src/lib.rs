@@ -35,6 +35,10 @@ pub enum EventKind {
     AgentLeaseStateChanged,
     AgentUsageRecorded,
     EvaluationRecorded,
+    AgentRunMetricsUpdated,
+    AgentTurnCompleted,
+    AgentTurnWaiting,
+    AgentTurnFailed,
     McgIntervention,
 }
 
@@ -66,6 +70,10 @@ impl EventKind {
             Self::AgentLeaseStateChanged => "agent_lease_state_changed",
             Self::AgentUsageRecorded => "agent_usage_recorded",
             Self::EvaluationRecorded => "evaluation_recorded",
+            Self::AgentRunMetricsUpdated => "agent_run_metrics_updated",
+            Self::AgentTurnCompleted => "agent_turn_completed",
+            Self::AgentTurnWaiting => "agent_turn_waiting",
+            Self::AgentTurnFailed => "agent_turn_failed",
             Self::McgIntervention => "mcg_intervention",
         }
     }
@@ -109,6 +117,12 @@ impl EventKind {
             }
             "agent_usage_recorded" | "AgentUsageRecorded" => Ok(Self::AgentUsageRecorded),
             "evaluation_recorded" | "EvaluationRecorded" => Ok(Self::EvaluationRecorded),
+            "agent_run_metrics_updated" | "AgentRunMetricsUpdated" => {
+                Ok(Self::AgentRunMetricsUpdated)
+            }
+            "agent_turn_completed" | "AgentTurnCompleted" => Ok(Self::AgentTurnCompleted),
+            "agent_turn_waiting" | "AgentTurnWaiting" => Ok(Self::AgentTurnWaiting),
+            "agent_turn_failed" | "AgentTurnFailed" => Ok(Self::AgentTurnFailed),
             "mcg_intervention" | "McgIntervention" => Ok(Self::McgIntervention),
             other => Err(other.to_owned()),
         }

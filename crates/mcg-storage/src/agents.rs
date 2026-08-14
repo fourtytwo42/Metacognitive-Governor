@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState,
-    AgentState, AgentUsageRecord, ConfidenceEstimate, EvaluationReport, OrganizationGenome,
-    OrganizationalMetrics, UsageKind, WorkPlan,
+    AgentState, AgentTurnResult, AgentUsageRecord, AssignedModel, ConfidenceEstimate,
+    EvaluationReport, OrganizationGenome, OrganizationalMetrics, UsageKind, WorkPlan,
 };
 use mcg_domain::{AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, RunId};
 use mcg_events::{EventEnvelope, EventKind};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 
 use crate::{SqliteEventStore, StorageError};
 
@@ -15,6 +16,22 @@ pub struct AgentRecoveryReport {
     pub runs_marked_recovering: u64,
     pub instances_expired: u64,
     pub leases_expired: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentTurnCommit {
+    pub run: AgentRun,
+    pub instance: AgentInstance,
+    pub lease: AgentLease,
+    pub usage: Vec<AgentUsageRecord>,
+    pub result: AgentTurnResult,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTurnDisposition {
+    Waiting,
+    Failed,
 }
 
 impl SqliteEventStore {
@@ -545,6 +562,394 @@ impl SqliteEventStore {
         Ok((lease, event))
     }
 
+    /// Atomically commits a completed model/tool turn, attributed usage, current
+    /// run metrics, and terminal instance/lease projections.
+    ///
+    /// # Errors
+    ///
+    /// The run, instance, and lease must be active and mutually consistent. Any
+    /// invalid evidence or failed write rolls back the complete turn commit.
+    #[allow(clippy::too_many_lines)] // Transaction order is the crash-safety invariant.
+    pub fn commit_agent_turn(
+        &mut self,
+        instance_id: AgentInstanceId,
+        lease_id: AgentLeaseId,
+        result: &AgentTurnResult,
+        confidence: ConfidenceEstimate,
+        at: DateTime<Utc>,
+    ) -> Result<AgentTurnCommit, StorageError> {
+        let mut instance = self
+            .agent_instance(instance_id)?
+            .ok_or(StorageError::AgentInstanceNotFound(instance_id))?;
+        let mut lease = self
+            .agent_lease(lease_id)?
+            .ok_or(StorageError::AgentLeaseNotFound(lease_id))?;
+        let mut run = self
+            .agent_run(instance.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(instance.run_id))?;
+        if instance.state != AgentState::Running
+            || lease.state != AgentLeaseState::Active
+            || lease.instance_id != instance.id
+            || run.state != AgentRunState::Running
+            || run.task_id != instance.task_id
+            || confidence.basis_points > 10_000
+            || at < lease.acquired_at
+            || result.model_calls.is_empty()
+            || result.response.id.trim().is_empty()
+            || result.response.model != result.pinned_route.target.model_id
+            || result
+                .model_calls
+                .iter()
+                .any(|call| call.target != result.pinned_route.target)
+        {
+            return Err(StorageError::InvalidData(
+                "completed agent turn authority, identity, or evidence is inconsistent".into(),
+            ));
+        }
+
+        let mut usage = Vec::new();
+        for call in &result.model_calls {
+            usage.push(AgentUsageRecord {
+                schema_version: AGENT_RUN_SCHEMA_VERSION,
+                id: mcg_domain::UsageRecordId::new(),
+                run_id: run.id,
+                task_id: run.task_id,
+                instance_id: Some(instance.id),
+                kind: UsageKind::ProviderModel,
+                provider_connection_id: Some(call.target.provider_id.clone()),
+                model_id: Some(call.target.model_id.clone()),
+                tool_execution_id: None,
+                input_tokens: call.usage.input_tokens,
+                cached_input_tokens: call.usage.cached_input_tokens,
+                output_tokens: call.usage.output_tokens,
+                cost_usd: call.cost_usd,
+                duration_ms: call.duration_ms,
+                occurred_at: at,
+            });
+        }
+        for outcome in &result.tool_outcomes {
+            let duration_ms = u64::try_from(
+                (outcome.finished_at - outcome.started_at)
+                    .num_milliseconds()
+                    .max(0),
+            )
+            .unwrap_or(u64::MAX);
+            usage.push(AgentUsageRecord {
+                schema_version: AGENT_RUN_SCHEMA_VERSION,
+                id: mcg_domain::UsageRecordId::new(),
+                run_id: run.id,
+                task_id: run.task_id,
+                instance_id: Some(instance.id),
+                kind: UsageKind::Tool,
+                provider_connection_id: None,
+                model_id: None,
+                tool_execution_id: Some(outcome.execution_id),
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None,
+                duration_ms,
+                occurred_at: outcome.finished_at,
+            });
+        }
+        if usage.iter().any(|record| {
+            record.cached_input_tokens > record.input_tokens
+                || record
+                    .cost_usd
+                    .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        }) {
+            return Err(StorageError::InvalidData(
+                "completed agent turn contains invalid usage values".into(),
+            ));
+        }
+
+        let turn_tokens = result
+            .model_calls
+            .iter()
+            .map(|call| call.usage.total_tokens)
+            .sum::<u64>();
+        let turn_cost = result
+            .model_calls
+            .iter()
+            .filter_map(|call| call.cost_usd)
+            .sum::<f64>();
+        let elapsed_seconds =
+            u64::try_from((at - lease.acquired_at).num_seconds().max(0)).unwrap_or(u64::MAX);
+        lease.state = AgentLeaseState::Completed;
+        lease.budget.consumed_tokens = lease.budget.consumed_tokens.saturating_add(turn_tokens);
+        lease.budget.consumed_cost_usd += turn_cost;
+        lease.budget.elapsed_seconds = lease.budget.elapsed_seconds.max(elapsed_seconds);
+        lease.heartbeat_at = at;
+        instance.state = AgentState::Completed;
+        instance.model = Some(AssignedModel {
+            provider_connection_id: result.pinned_route.target.provider_id.clone(),
+            model_id: result.pinned_route.target.model_id.clone(),
+            route_reason: "pinned by the bounded route plan".into(),
+        });
+        instance.confidence = confidence;
+        instance.updated_at = at;
+        run.metrics.model_calls = run
+            .metrics
+            .model_calls
+            .saturating_add(u32::try_from(result.model_calls.len()).unwrap_or(u32::MAX));
+        run.metrics.tool_calls = run
+            .metrics
+            .tool_calls
+            .saturating_add(u32::try_from(result.tool_outcomes.len()).unwrap_or(u32::MAX));
+        run.metrics.tokens = run.metrics.tokens.saturating_add(turn_tokens);
+        run.metrics.cost_usd += turn_cost;
+        run.metrics.useful_work_seconds = run
+            .metrics
+            .useful_work_seconds
+            .saturating_add(elapsed_seconds);
+        run.updated_at = at;
+        if !metrics_valid(&run.metrics) || !lease.budget.consumed_cost_usd.is_finite() {
+            return Err(StorageError::InvalidData(
+                "completed agent turn exceeds numeric storage bounds".into(),
+            ));
+        }
+
+        let transaction = self.connection.transaction()?;
+        let mut events = Vec::new();
+        for record in &usage {
+            insert_agent_usage(&transaction, record)?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentUsageRecorded,
+                    Some(run.task_id),
+                    serde_json::to_value(record)?,
+                ),
+            )?);
+        }
+        transaction.execute(
+            "INSERT INTO agent_turn_results(
+                lease_id, run_id, instance_id, task_id, result_json, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                lease.id.to_string(),
+                run.id.to_string(),
+                instance.id.to_string(),
+                run.task_id.to_string(),
+                serde_json::to_string(result)?,
+                at.to_rfc3339(),
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE agent_leases SET state = 'completed', lease_json = ?1, heartbeat_at = ?2
+             WHERE lease_id = ?3 AND state = 'active'",
+            params![
+                serde_json::to_string(&lease)?,
+                at.to_rfc3339(),
+                lease.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent lease changed before turn commit")?;
+        let changed = transaction.execute(
+            "UPDATE agent_instances SET state = 'completed', instance_json = ?1, updated_at = ?2
+             WHERE instance_id = ?3 AND state = 'running'",
+            params![
+                serde_json::to_string(&instance)?,
+                at.to_rfc3339(),
+                instance.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent instance changed before turn commit")?;
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET run_json = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND state = 'running'",
+            params![
+                serde_json::to_string(&run)?,
+                at.to_rfc3339(),
+                run.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent run changed before turn commit")?;
+        for (kind, payload) in [
+            (
+                EventKind::AgentLeaseStateChanged,
+                serde_json::to_value(&lease)?,
+            ),
+            (
+                EventKind::AgentInstanceStateChanged,
+                serde_json::to_value(&instance)?,
+            ),
+            (
+                EventKind::AgentRunMetricsUpdated,
+                serde_json::to_value(&run)?,
+            ),
+            (EventKind::AgentTurnCompleted, serde_json::to_value(result)?),
+        ] {
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(kind, Some(run.task_id), payload),
+            )?);
+        }
+        transaction.commit()?;
+        Ok(AgentTurnCommit {
+            run,
+            instance,
+            lease,
+            usage,
+            result: result.clone(),
+            events,
+        })
+    }
+
+    /// Loads the immutable completed turn result for an agent lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid persisted JSON.
+    pub fn agent_turn_result(
+        &self,
+        lease_id: AgentLeaseId,
+    ) -> Result<Option<AgentTurnResult>, StorageError> {
+        self.read_optional_json(
+            "SELECT result_json FROM agent_turn_results WHERE lease_id = ?1",
+            &lease_id.to_string(),
+        )
+    }
+
+    /// Atomically settles a turn that could not complete, without inventing
+    /// provider/tool usage or a successful result.
+    ///
+    /// # Errors
+    ///
+    /// The instance and lease must still hold active authority. Waiting retains
+    /// the lease for explicit approval resume; failed work terminates it.
+    #[allow(clippy::too_many_lines)] // State and evidence writes form one visible transaction.
+    pub fn settle_agent_turn_error(
+        &mut self,
+        instance_id: AgentInstanceId,
+        lease_id: AgentLeaseId,
+        disposition: AgentTurnDisposition,
+        reason_code: &str,
+        at: DateTime<Utc>,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        if reason_code.trim().is_empty() || reason_code.len() > 100 {
+            return Err(StorageError::InvalidData(
+                "agent turn failure reason code is invalid".into(),
+            ));
+        }
+        let mut instance = self
+            .agent_instance(instance_id)?
+            .ok_or(StorageError::AgentInstanceNotFound(instance_id))?;
+        let mut lease = self
+            .agent_lease(lease_id)?
+            .ok_or(StorageError::AgentLeaseNotFound(lease_id))?;
+        let mut run = self
+            .agent_run(instance.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(instance.run_id))?;
+        if instance.state != AgentState::Running
+            || lease.state != AgentLeaseState::Active
+            || lease.instance_id != instance.id
+            || run.state != AgentRunState::Running
+            || at < lease.acquired_at
+        {
+            return Err(StorageError::Conflict(
+                "agent turn authority changed before error settlement".into(),
+            ));
+        }
+        let (instance_state, lease_state, run_state, event_kind) = match disposition {
+            AgentTurnDisposition::Waiting => (
+                AgentState::Waiting,
+                AgentLeaseState::Active,
+                AgentRunState::Waiting,
+                EventKind::AgentTurnWaiting,
+            ),
+            AgentTurnDisposition::Failed => (
+                AgentState::Failed,
+                AgentLeaseState::Failed,
+                AgentRunState::Running,
+                EventKind::AgentTurnFailed,
+            ),
+        };
+        instance.state = instance_state;
+        instance.updated_at = at;
+        lease.state = lease_state;
+        lease.heartbeat_at = at;
+        run.state = run_state;
+        run.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agent_instances SET state = ?1, instance_json = ?2, updated_at = ?3
+             WHERE instance_id = ?4 AND state = 'running'",
+            params![
+                instance_state_name(instance.state),
+                serde_json::to_string(&instance)?,
+                at.to_rfc3339(),
+                instance.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent instance changed before error settlement")?;
+        let changed = transaction.execute(
+            "UPDATE agent_leases SET state = ?1, lease_json = ?2, heartbeat_at = ?3
+             WHERE lease_id = ?4 AND state = 'active'",
+            params![
+                lease_state_name(lease.state),
+                serde_json::to_string(&lease)?,
+                at.to_rfc3339(),
+                lease.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent lease changed before error settlement")?;
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = ?1, run_json = ?2, updated_at = ?3
+             WHERE run_id = ?4 AND state = 'running'",
+            params![
+                run_state_name(run.state),
+                serde_json::to_string(&run)?,
+                at.to_rfc3339(),
+                run.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent run changed before error settlement")?;
+        let mut events = Vec::new();
+        events.push(Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::AgentInstanceStateChanged,
+                Some(run.task_id),
+                serde_json::to_value(&instance)?,
+            ),
+        )?);
+        if disposition == AgentTurnDisposition::Failed {
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentLeaseStateChanged,
+                    Some(run.task_id),
+                    serde_json::to_value(&lease)?,
+                ),
+            )?);
+        } else {
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(run.task_id),
+                    serde_json::to_value(&run)?,
+                ),
+            )?);
+        }
+        events.push(Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                event_kind,
+                Some(run.task_id),
+                serde_json::json!({
+                    "run_id": run.id,
+                    "instance_id": instance.id,
+                    "lease_id": lease.id,
+                    "reason_code": reason_code,
+                }),
+            ),
+        )?);
+        transaction.commit()?;
+        Ok(events)
+    }
+
     /// Records immutable provider, tool, or coordination usage evidence.
     ///
     /// # Errors
@@ -602,17 +1007,7 @@ impl SqliteEventStore {
             serde_json::to_value(usage)?,
         );
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO agent_usage(usage_id, run_id, task_id, usage_json, occurred_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                usage.id.to_string(),
-                usage.run_id.to_string(),
-                usage.task_id.to_string(),
-                serde_json::to_string(usage)?,
-                usage.occurred_at.to_rfc3339(),
-            ],
-        )?;
+        insert_agent_usage(&transaction, usage)?;
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
@@ -881,6 +1276,24 @@ impl SqliteEventStore {
             .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
             .collect()
     }
+}
+
+fn insert_agent_usage(
+    transaction: &Transaction<'_>,
+    usage: &AgentUsageRecord,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "INSERT INTO agent_usage(usage_id, run_id, task_id, usage_json, occurred_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            usage.id.to_string(),
+            usage.run_id.to_string(),
+            usage.task_id.to_string(),
+            serde_json::to_string(usage)?,
+            usage.occurred_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn budgets_within_parent(plan: &WorkPlan, parent: &mcg_domain::TaskBudget) -> bool {
@@ -1160,13 +1573,19 @@ mod tests {
             reopened
                 .organization_history(genome.organization_id)
                 .expect("history"),
-            vec![genome]
+            vec![genome.clone()]
         );
-        assert_eq!(reopened.work_plan(run.id).expect("plan"), Some(plan));
-        assert_eq!(reopened.agent_usage(run.id).expect("usage"), vec![usage]);
+        assert_eq!(
+            reopened.work_plan(run.id).expect("plan"),
+            Some(plan.clone())
+        );
+        assert_eq!(
+            reopened.agent_usage(run.id).expect("usage"),
+            vec![usage.clone()]
+        );
         assert_eq!(
             reopened.evaluations(run.id).expect("evaluations"),
-            vec![report]
+            vec![report.clone()]
         );
 
         let recovery = reopened
@@ -1225,5 +1644,115 @@ mod tests {
                 && event.payload.get("reason").and_then(|value| value.as_str())
                     == Some("daemon_restart")
         }));
+
+        reopened
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                now + Duration::seconds(31),
+            )
+            .expect("resume recovering run");
+        let retry_instance = AgentInstance {
+            id: AgentInstanceId::new(),
+            state: AgentState::Created,
+            created_at: now + Duration::seconds(31),
+            updated_at: now + Duration::seconds(31),
+            ..instance.clone()
+        };
+        reopened
+            .record_agent_instance(&retry_instance)
+            .expect("retry instance");
+        reopened
+            .transition_agent_instance(
+                retry_instance.id,
+                AgentState::Running,
+                retry_instance.confidence,
+                now + Duration::seconds(31),
+            )
+            .expect("start retry instance");
+        let retry_lease = AgentLease {
+            id: AgentLeaseId::new(),
+            instance_id: retry_instance.id,
+            state: AgentLeaseState::Active,
+            acquired_at: now + Duration::seconds(31),
+            expires_at: now + Duration::minutes(15),
+            heartbeat_at: now + Duration::seconds(31),
+            ..lease.clone()
+        };
+        reopened
+            .record_agent_lease(&retry_lease)
+            .expect("retry lease");
+        reopened
+            .settle_agent_turn_error(
+                retry_instance.id,
+                retry_lease.id,
+                AgentTurnDisposition::Waiting,
+                "approval_required",
+                now + Duration::seconds(32),
+            )
+            .expect("wait for approval");
+        assert_eq!(
+            reopened
+                .agent_run(run.id)
+                .expect("run")
+                .expect("present")
+                .state,
+            AgentRunState::Waiting
+        );
+        assert_eq!(
+            reopened
+                .agent_lease(retry_lease.id)
+                .expect("lease")
+                .expect("present")
+                .state,
+            AgentLeaseState::Active
+        );
+        reopened
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                now + Duration::seconds(33),
+            )
+            .expect("resume approved run");
+        reopened
+            .transition_agent_instance(
+                retry_instance.id,
+                AgentState::Running,
+                retry_instance.confidence,
+                now + Duration::seconds(33),
+            )
+            .expect("resume approved instance");
+        reopened
+            .settle_agent_turn_error(
+                retry_instance.id,
+                retry_lease.id,
+                AgentTurnDisposition::Failed,
+                "provider_failure",
+                now + Duration::seconds(34),
+            )
+            .expect("settle failure");
+        assert_eq!(
+            reopened
+                .agent_instance(retry_instance.id)
+                .expect("instance")
+                .expect("present")
+                .state,
+            AgentState::Failed
+        );
+        assert_eq!(
+            reopened
+                .agent_lease(retry_lease.id)
+                .expect("lease")
+                .expect("present")
+                .state,
+            AgentLeaseState::Failed
+        );
+        assert_eq!(reopened.agent_usage(run.id).expect("usage"), vec![usage]);
+        assert_eq!(
+            reopened.agent_turn_result(retry_lease.id).expect("result"),
+            None
+        );
     }
 }

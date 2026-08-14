@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 mod agents;
 
-pub use agents::AgentRecoveryReport;
+pub use agents::{AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
@@ -268,6 +268,30 @@ CREATE TRIGGER IF NOT EXISTS evaluations_no_delete
 BEFORE DELETE ON evaluations BEGIN SELECT RAISE(FAIL, 'evaluations are immutable'); END;
 ";
 
+const MIGRATION_6: &str = r"
+CREATE TABLE IF NOT EXISTS agent_turn_results (
+    lease_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(instance_id) REFERENCES agent_instances(instance_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS agent_turn_results_run
+    ON agent_turn_results(run_id, completed_at, lease_id);
+CREATE TRIGGER IF NOT EXISTS agent_turn_results_no_update
+BEFORE UPDATE ON agent_turn_results BEGIN
+    SELECT RAISE(FAIL, 'agent turn results are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS agent_turn_results_no_delete
+BEFORE DELETE ON agent_turn_results BEGIN
+    SELECT RAISE(FAIL, 'agent turn results are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -355,6 +379,7 @@ impl SqliteEventStore {
             (3_i64, MIGRATION_3),
             (4_i64, MIGRATION_4),
             (5_i64, MIGRATION_5),
+            (6_i64, MIGRATION_6),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

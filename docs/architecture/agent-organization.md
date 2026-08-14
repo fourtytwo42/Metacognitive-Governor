@@ -62,3 +62,15 @@ through the supplied policy broker. The model receives the broker's bounded,
 redacted `ToolOutcome` as a canonical Responses `function_call_output`. Unknown,
 unexposed, unleased, duplicate, or malformed tool calls fail before the executor
 is invoked. Model calls and total tool calls have hard iteration limits.
+
+Runtime rechecks the supplied instance, lease, role, run, and organization
+revision against current durable state before releasing the storage lock and
+performing external work. On success, SQLite migration 6 commits the immutable
+final turn result, provider/tool usage, assigned model, run metrics, completed
+instance, completed lease, and all events in one transaction.
+
+An approval-required tool pauses the run and instance while retaining the active
+lease for explicit resume. Other provider, tool, policy, malformed-output, and
+iteration failures fail the instance and lease with a stable reason code. Error
+details from external providers are not copied into durable failure events, and
+no unsuccessful turn creates fabricated model/tool usage or a success result.

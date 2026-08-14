@@ -2393,6 +2393,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "mcg-agents",
  "mcg-config",
  "mcg-domain",
  "mcg-events",

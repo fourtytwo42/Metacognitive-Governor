@@ -9,6 +9,11 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use mcg_agents::{
+    AgentInstance, AgentLease, AgentModelGateway, AgentRun, AgentRunState, AgentState,
+    AgentToolGateway, AgentTurnEngine, AgentTurnError, AgentTurnRequest, ConfidenceEstimate,
+    OrganizationGenome, OrganizationalMetrics, WorkPlan,
+};
 use mcg_config::AppConfig;
 use mcg_domain::{
     ApprovalId, LeaseId, MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState,
@@ -20,7 +25,10 @@ use mcg_projects::{
     MemoryError, MemoryLifecycle, MemoryLifecycleAction, ProjectDiscoverer, ProjectDiscoveryError,
     ProjectModel, SnapshotInvalidation, render_managed_memory,
 };
-use mcg_storage::{AgentRecoveryReport, RecoveryReport, SqliteEventStore, StorageError};
+use mcg_storage::{
+    AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, RecoveryReport, SqliteEventStore,
+    StorageError,
+};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease,
     ExecutionLeaseRepository, LeaseState, ToolAuditRecord, ToolAuditSink, ToolError,
@@ -64,6 +72,8 @@ pub enum RuntimeError {
     ProjectDiscovery(#[from] ProjectDiscoveryError),
     #[error(transparent)]
     Memory(#[from] MemoryError),
+    #[error(transparent)]
+    AgentTurn(#[from] AgentTurnError),
     #[error("runtime storage lock was poisoned")]
     StorageLock,
     #[error("local authentication token is invalid")]
@@ -79,6 +89,10 @@ impl RuntimeError {
                 StorageError::TaskNotFound(_)
                     | StorageError::ProjectNotFound(_)
                     | StorageError::MemoryClaimNotFound(_)
+                    | StorageError::OrganizationRevisionNotFound(_)
+                    | StorageError::AgentRunNotFound(_)
+                    | StorageError::AgentInstanceNotFound(_)
+                    | StorageError::AgentLeaseNotFound(_)
             )
         )
     }
@@ -94,6 +108,7 @@ impl RuntimeError {
                         | MemoryError::InvalidConfidence
                         | MemoryError::EmptyKey
                 )
+                | Self::AgentTurn(AgentTurnError::Invalid(_))
         )
     }
 
@@ -634,6 +649,186 @@ impl AppRuntime {
         Ok(render_managed_memory(project_id, &claims))
     }
 
+    /// Records a validated immutable organization revision and publishes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid or non-head revisions and failed persistence.
+    pub fn record_organization_revision(
+        &self,
+        genome: &OrganizationGenome,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let event = self.store()?.record_organization_revision(genome)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
+    }
+
+    /// Loads a current organization projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn organization(
+        &self,
+        organization_id: mcg_domain::OrganizationId,
+    ) -> Result<Option<OrganizationGenome>, RuntimeError> {
+        Ok(self.store()?.organization(organization_id)?)
+    }
+
+    /// Atomically records a planned run and immutable work plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when task, organization, plan, or budget invariants fail.
+    pub fn create_agent_run(
+        &self,
+        run: &AgentRun,
+        plan: &WorkPlan,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let event = self.store()?.create_agent_run(run, plan)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
+    }
+
+    /// Transitions a durable agent run and publishes its event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown runs, invalid metrics, or illegal transitions.
+    pub fn transition_agent_run(
+        &self,
+        run_id: mcg_domain::RunId,
+        next: AgentRunState,
+        metrics: OrganizationalMetrics,
+    ) -> Result<AgentRun, RuntimeError> {
+        let (run, event) = self
+            .store()?
+            .transition_agent_run(run_id, next, metrics, Utc::now())?;
+        let _ = self.event_sender.send(event);
+        Ok(run)
+    }
+
+    /// Records a selected ephemeral agent instance and publishes its event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the instance does not match its run and selected role.
+    pub fn record_agent_instance(
+        &self,
+        instance: &AgentInstance,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let event = self.store()?.record_agent_instance(instance)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
+    }
+
+    /// Transitions a current agent instance with measured confidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown instances or illegal transitions.
+    pub fn transition_agent_instance(
+        &self,
+        instance_id: mcg_domain::AgentInstanceId,
+        next: AgentState,
+        confidence: ConfidenceEstimate,
+    ) -> Result<AgentInstance, RuntimeError> {
+        let (instance, event) =
+            self.store()?
+                .transition_agent_instance(instance_id, next, confidence, Utc::now())?;
+        let _ = self.event_sender.send(event);
+        Ok(instance)
+    }
+
+    /// Records a bounded active agent lease and publishes its event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease does not match active selected work.
+    pub fn record_agent_lease(&self, lease: &AgentLease) -> Result<EventEnvelope, RuntimeError> {
+        let event = self.store()?.record_agent_lease(lease)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
+    }
+
+    /// Executes one bounded provider/tool turn and atomically commits its result,
+    /// usage, run metrics, completed instance, and completed lease.
+    ///
+    /// # Errors
+    ///
+    /// Stale runtime authority, route/provider errors, policy/tool errors, and
+    /// failed atomic persistence are returned without fabricating completion.
+    pub async fn execute_agent_turn<M: AgentModelGateway, T: AgentToolGateway>(
+        &self,
+        request: AgentTurnRequest,
+        models: &M,
+        tools: &T,
+        confidence: ConfidenceEstimate,
+    ) -> Result<AgentTurnCommit, RuntimeError> {
+        {
+            let store = self.store()?;
+            let stored_instance = store
+                .agent_instance(request.instance.id)?
+                .ok_or(StorageError::AgentInstanceNotFound(request.instance.id))?;
+            let stored_lease = store
+                .agent_lease(request.lease.id)?
+                .ok_or(StorageError::AgentLeaseNotFound(request.lease.id))?;
+            let run = store
+                .agent_run(request.instance.run_id)?
+                .ok_or(StorageError::AgentRunNotFound(request.instance.run_id))?;
+            let genome = store
+                .organization_revision(run.organization_revision_id)?
+                .ok_or(StorageError::OrganizationRevisionNotFound(
+                    run.organization_revision_id,
+                ))?;
+            let role_matches = genome
+                .roles
+                .iter()
+                .any(|role| role == &request.role && role.id == stored_instance.role_id);
+            if stored_instance != request.instance
+                || stored_lease != request.lease
+                || run.state != AgentRunState::Running
+                || !role_matches
+            {
+                return Err(StorageError::Conflict(
+                    "agent turn request uses stale or mismatched durable authority".into(),
+                )
+                .into());
+            }
+        }
+        let result = match AgentTurnEngine
+            .execute(request.clone(), models, tools)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let (disposition, reason_code) = classify_agent_turn_error(&error);
+                let events = self.store()?.settle_agent_turn_error(
+                    request.instance.id,
+                    request.lease.id,
+                    disposition,
+                    reason_code,
+                    Utc::now(),
+                )?;
+                for event in events {
+                    let _ = self.event_sender.send(event);
+                }
+                return Err(error.into());
+            }
+        };
+        let commit = self.store()?.commit_agent_turn(
+            request.instance.id,
+            request.lease.id,
+            &result,
+            confidence,
+            Utc::now(),
+        )?;
+        for event in &commit.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(commit)
+    }
+
     /// Lists durable approvals, optionally filtered by lifecycle state.
     ///
     /// # Errors
@@ -767,6 +962,28 @@ fn tool_storage_error(error: StorageError) -> ToolError {
     ToolError::Execution(format!("durable tool control failed: {error}"))
 }
 
+fn classify_agent_turn_error(error: &AgentTurnError) -> (AgentTurnDisposition, &'static str) {
+    match error {
+        AgentTurnError::Tool(ToolError::ApprovalRequired { .. }) => {
+            (AgentTurnDisposition::Waiting, "approval_required")
+        }
+        AgentTurnError::Invalid(_) => (AgentTurnDisposition::Failed, "invalid_turn"),
+        AgentTurnError::IterationLimit => (AgentTurnDisposition::Failed, "iteration_limit"),
+        AgentTurnError::Provider(mcg_providers::ProviderError::Authentication(_)) => {
+            (AgentTurnDisposition::Failed, "provider_authentication")
+        }
+        AgentTurnError::Provider(mcg_providers::ProviderError::RateLimited { .. }) => {
+            (AgentTurnDisposition::Failed, "provider_rate_limited")
+        }
+        AgentTurnError::Provider(_) => (AgentTurnDisposition::Failed, "provider_failure"),
+        AgentTurnError::Tool(ToolError::Denied(_)) => (AgentTurnDisposition::Failed, "tool_denied"),
+        AgentTurnError::Tool(ToolError::TimedOut) => {
+            (AgentTurnDisposition::Failed, "tool_timed_out")
+        }
+        AgentTurnError::Tool(_) => (AgentTurnDisposition::Failed, "tool_failure"),
+    }
+}
+
 #[cfg(unix)]
 fn restrict_to_owner(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
@@ -781,10 +998,27 @@ fn restrict_to_owner(_path: &Path, _mode: u32) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use super::*;
+    use mcg_agents::{
+        AGENT_RUN_SCHEMA_VERSION, AgentTurnRequest, ExecutivePlanner, LeaseBudget, PlannedWork,
+        PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
+    };
+    use mcg_domain::{AgentInstanceId, AgentLeaseId, RunId, TaskBudget};
     use mcg_policy::{CapabilityPolicy, OwnerConstitution};
+    use mcg_projects::{ContextAssembly, ContextCategory, ContextItem};
+    use mcg_providers::{
+        CONTRACT_VERSION, ContentPart, MessageRole, ModelCapabilities, ModelDescriptor,
+        ModelResponse, OutputItem, ProviderError, ProviderModelRef, RouteCandidate, RoutingPolicy,
+        ToolDefinition, Usage,
+    };
     use mcg_tools::{
         BrokerControls, OutputRedactor, TOOL_SCHEMA_VERSION, ToolBroker, ToolExecutor, ToolOutcome,
         ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
@@ -897,6 +1131,261 @@ mod tests {
         assert_eq!(
             audit.last().and_then(|record| record.result),
             Some(ToolOutcomeStatus::Succeeded)
+        );
+    }
+
+    struct TurnModels {
+        responses: Mutex<VecDeque<ModelResponse>>,
+    }
+
+    #[async_trait]
+    impl AgentModelGateway for TurnModels {
+        async fn create_response(
+            &self,
+            _target: &ProviderModelRef,
+            _request: mcg_providers::ModelRequest,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Incompatible("missing fixture response".into()))
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full runtime/provider/broker/storage boundary fixture.
+    async fn completed_agent_turn_commits_usage_result_and_terminal_authority_atomically() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        let root = tempfile::tempdir().expect("project root");
+        let fixture_path = root.path().join("fixture.txt");
+        std::fs::write(&fixture_path, "fixture").expect("fixture file");
+        let mut task = TaskEnvelope::new("Read the fixture through the agent organization");
+        task.budget = TaskBudget {
+            max_tokens: Some(10_000),
+            max_cost_usd: Some(2.0),
+            max_duration_seconds: Some(600),
+        };
+        runtime.create_task(&task).expect("task");
+        let now = Utc::now();
+        let genome = OrganizationGenome::consumer_default(now);
+        runtime
+            .record_organization_revision(&genome)
+            .expect("organization");
+        let planned = PlannedWork::atomic(
+            "Read the fixture",
+            RoleKind::Coder,
+            vec![SuccessCondition::Custom {
+                description: "fixture content returned".into(),
+            }],
+        );
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![planned],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &planning, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        runtime.create_agent_run(&run, &plan).expect("run");
+        runtime
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+            )
+            .expect("start run");
+        let role = genome
+            .roles
+            .iter()
+            .find(|role| role.kind == RoleKind::Coder)
+            .expect("coder role")
+            .clone();
+        let created = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: role.id,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:runtime-fixture".into(),
+            confidence: ConfidenceEstimate::new(8_000, 1).expect("confidence"),
+            created_at: now,
+            updated_at: now,
+        };
+        runtime.record_agent_instance(&created).expect("instance");
+        let instance = runtime
+            .transition_agent_instance(created.id, AgentState::Running, created.confidence)
+            .expect("start instance");
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: vec!["fs.read".into()],
+            reporting_interval_seconds: 30,
+            max_retries: 1,
+            escalation_conditions: Vec::new(),
+            state: mcg_agents::AgentLeaseState::Active,
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            heartbeat_at: Utc::now(),
+        };
+        runtime.record_agent_lease(&lease).expect("lease");
+
+        let arguments = serde_json::json!({
+            "path": fixture_path.to_string_lossy(),
+            "max_bytes": 4096
+        })
+        .to_string();
+        let models = TurnModels {
+            responses: Mutex::new(VecDeque::from([
+                ModelResponse {
+                    contract_version: CONTRACT_VERSION,
+                    id: "response-tool".into(),
+                    model: "fixture-model".into(),
+                    status: Some("completed".into()),
+                    output: vec![OutputItem::ToolCall {
+                        id: "call-read".into(),
+                        name: "fs.read".into(),
+                        arguments,
+                    }],
+                    usage: Usage {
+                        input_tokens: 50,
+                        output_tokens: 10,
+                        total_tokens: 60,
+                        ..Usage::default()
+                    },
+                    provider_metadata: serde_json::Value::Null,
+                },
+                ModelResponse {
+                    contract_version: CONTRACT_VERSION,
+                    id: "response-final".into(),
+                    model: "fixture-model".into(),
+                    status: Some("completed".into()),
+                    output: vec![OutputItem::Message {
+                        role: MessageRole::Assistant,
+                        content: vec![ContentPart::Text {
+                            text: "The fixture was read.".into(),
+                        }],
+                    }],
+                    usage: Usage {
+                        input_tokens: 80,
+                        output_tokens: 8,
+                        total_tokens: 88,
+                        ..Usage::default()
+                    },
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ])),
+        };
+        let control = runtime.tool_control();
+        let broker = ToolBroker::new(
+            CountingExecutor(Arc::new(AtomicUsize::new(0))),
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: mcg_config::AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities: CapabilityPolicy::project(root.path()),
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let turn = AgentTurnRequest {
+            role,
+            instance,
+            lease: lease.clone(),
+            context: ContextAssembly {
+                items: vec![ContextItem {
+                    category: ContextCategory::Goal,
+                    content: task.goal.clone(),
+                    source: "task".into(),
+                    priority: 1_000,
+                    estimated_tokens: 12,
+                }],
+                omitted_items: 0,
+                estimated_tokens: 12,
+                compression_round: 0,
+            },
+            route_candidates: vec![RouteCandidate {
+                target: ProviderModelRef {
+                    provider_id: "fixture-provider".into(),
+                    model_id: "fixture-model".into(),
+                },
+                model: ModelDescriptor {
+                    id: "fixture-model".into(),
+                    display_name: "Fixture".into(),
+                    owned_by: None,
+                    context_window: Some(8_192),
+                    capabilities: ModelCapabilities {
+                        tools: Some(true),
+                        ..ModelCapabilities::default()
+                    },
+                    price: None,
+                    metadata: serde_json::Value::Null,
+                },
+                preference: 0,
+            }],
+            routing_policy: RoutingPolicy::default(),
+            tools: vec![ToolDefinition {
+                name: "fs.read".into(),
+                description: Some("Read a bounded project file".into()),
+                parameters: serde_json::json!({"type":"object"}),
+                strict: Some(true),
+            }],
+            estimated_output_tokens: 200,
+            max_model_calls: 4,
+        };
+        let commit = runtime
+            .execute_agent_turn(
+                turn,
+                &models,
+                &broker,
+                ConfidenceEstimate::new(9_000, 1).expect("confidence"),
+            )
+            .await
+            .expect("execute and commit turn");
+        assert_eq!(commit.instance.state, AgentState::Completed);
+        assert_eq!(commit.lease.state, mcg_agents::AgentLeaseState::Completed);
+        assert_eq!(commit.usage.len(), 3);
+        assert_eq!(commit.run.metrics.model_calls, 2);
+        assert_eq!(commit.run.metrics.tool_calls, 1);
+        let store = runtime.store().expect("store");
+        assert_eq!(
+            store.agent_turn_result(lease.id).expect("result"),
+            Some(commit.result.clone())
+        );
+        assert_eq!(store.agent_usage(run.id).expect("usage").len(), 3);
+        drop(store);
+        assert!(
+            runtime
+                .task_events(task.id)
+                .expect("events")
+                .iter()
+                .any(|event| event.kind == mcg_events::EventKind::AgentTurnCompleted)
         );
     }
 }
