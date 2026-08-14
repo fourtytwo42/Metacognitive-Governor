@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M4 projects, context, and durable memory is complete and qualified on Windows and Ubuntu. M5 organization and useful work is next.
-- Last meaningful change: Pushed M4 implementation `41abefc`, passed both complete owner-machine verifiers, and completed real daemon/CLI correction-and-restart smoke workflows on Windows and Ubuntu.
-- Next step: Design and implement M5 organization genome, roles/instances, Executive decomposition, leases/budgets/confidence/success conditions, minimal-organization selection, and the first complete provider-backed website projects.
+- Current task: M5 organization and useful work is in progress; its versioned organization/run/lease/evaluation contract foundation passes workspace tests on Windows.
+- Last meaningful change: Added `mcg-agents` with validated organization genomes, persistent role/ephemeral instance separation, work plans, bounded leases/budgets, objective success conditions, confidence/calibration, evaluation evidence, and overhead metrics.
+- Next step: Implement deterministic minimal-organization selection and dependency-aware Executive planning, then persist revisions/runs/leases/evaluations and wire real provider/tool-backed website work.
 - Blockers: None documented.
 
 ## Current State
@@ -101,6 +101,7 @@ When sources conflict, use this order:
 - The local API rejects non-loopback binds. All routes except health require a generated persistent bearer token; SSE reconnects can replay from `after` or `Last-Event-ID`.
 - M3 implements typed filesystem, process/shell, HTTP/download, system, Git/worktree/patch, and memory primitives behind one policy broker. SQLite durably stores approval state, execution leases, immutable tool audit, artifact registrations, and associated task events.
 - M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
+- M5 uses a separate `mcg-agents` boundary for versioned organization genomes, roles/instances, work plans, agent leases, success conditions, evaluation evidence, confidence/calibration, and organizational-cost metrics.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
 - M3 policy evaluates canonical resources, not prompt claims. Invalid or weakened owner constitutions fail closed on every broker request; audit and secret-isolation requirements cannot be disabled. Denied or approval-pending requests are audited before return and never reach a host executor.
@@ -139,6 +140,7 @@ When sources conflict, use this order:
 - 2026-08-14: M4 SQLite migration 4 and authenticated interfaces passed 7 project tests, 9 storage tests, 8 API tests, and the full Windows verifier. Evidence covers immutable snapshots, root identity conflicts, target-scoped instructions, polling invalidation, atomic correction/lifecycle successors, secret-like key rejection, bounded context, and restart durability.
 - 2026-08-14: Real Windows daemon/CLI smoke registered this repository as a project, added a plain-string claim, corrected it to `pnpm`, retrieved it in assembled context, force-stopped/restarted the daemon, and recovered both versions. The first attempt exposed PowerShell JSON-string quoting friction; CLI values now accept either valid JSON or ordinary strings, with a regression test.
 - 2026-08-14: M4 commit `41abefc` passed `scripts/verify.sh` on the owner-controlled Ubuntu VM, including native Tauri and Playwright. A real Linux daemon/CLI smoke then discovered the mirrored repository, corrected `npm` to `pnpm`, retrieved the correction in context, killed/restarted the daemon, and recovered both provenance-bearing versions.
+- 2026-08-14: M5 contract foundation added 2 focused tests for organization graph validation/round-trip, lease budget exhaustion, and objective overhead. `cargo test --workspace`, focused clippy with warnings denied, and `git diff --check` passed on Windows.
 
 ## Decisions
 
@@ -243,6 +245,15 @@ When sources conflict, use this order:
 - Commands/tests: `scripts/verify.ps1`; real `mcg-daemon` + `mcg project` CLI restart smoke on Windows.
 - Result: Full Windows qualification passes. A real CLI usability defect with quoted string values was found and fixed during smoke testing.
 - Follow-up: M4 later passed identical Ubuntu qualification and live smoke; begin M5 organization and useful work.
+
+### 2026-08-14 - M5 Organization Contract Foundation
+
+- Context: Agent orchestration must be durable, budgeted, measurable, and replayable before model calls or host tools are attached to it.
+- Decision: Create `mcg-agents` with exportable/versioned genomes; explicit Executive, Conversation, Coder, Evaluator, Tool Worker, Researcher, Tester, and temporary-specialist roles; persistent role definitions separated from ephemeral instances; acyclic delegation validation; bounded work leases; typed success conditions/evidence; basis-point confidence; calibration buckets; and an explicit coordination-overhead ratio.
+- Files: `crates/mcg-agents/`, `crates/mcg-domain/src/lib.rs`, `Cargo.toml`.
+- Commands/tests: `cargo test -p mcg-agents`; `cargo clippy -p mcg-agents --all-targets -- -D warnings`; `cargo test --workspace`; `git diff --check`.
+- Result: The M5 data boundary compiles, validates imported graph/policy invariants, and leaves all prior tests green.
+- Follow-up: Add minimal-organization selection and dependency-aware Executive planning.
 
 ## Known Issues
 

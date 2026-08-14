@@ -9,7 +9,9 @@ pub const TASK_SCHEMA_VERSION: u16 = 1;
 
 macro_rules! domain_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         #[serde(transparent)]
         pub struct $name(Uuid);
 
@@ -54,6 +56,13 @@ domain_id!(ArtifactId);
 domain_id!(ManagedProcessId);
 domain_id!(ProjectSnapshotId);
 domain_id!(MemoryClaimId);
+domain_id!(OrganizationId);
+domain_id!(OrganizationRevisionId);
+domain_id!(RoleId);
+domain_id!(AgentInstanceId);
+domain_id!(AgentLeaseId);
+domain_id!(WorkItemId);
+domain_id!(EvaluationId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
