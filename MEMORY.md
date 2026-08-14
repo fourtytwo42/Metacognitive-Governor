@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The modern MCP server now includes read/query tools plus retry-safe governed single-turn agent execution.
-- Last meaningful change: Added `mcg_run_agent`, `mcg_query_run`, and SQLite migration 8. One transaction creates the idempotency record, task, consumer organization, immutable plan, active task, and running run; exact retries reuse durable evidence and conflicting input cannot duplicate authority.
-- Next step: Qualify the governed MCP mutation on Ubuntu, then implement the MCP client/configuration/discovery/namespace/policy boundary while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
+- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The modern MCP server now includes cross-platform-qualified read/query tools plus retry-safe governed single-turn agent execution.
+- Last meaningful change: Exact commit `c14fef2` passed the complete owner-controlled Ubuntu verification gate, including strict Rust checks/tests, docs, frontend tests/build, native Tauri build, and Playwright.
+- Next step: Implement the MCP client configuration, protected authentication, discovery/cache, namespace, and policy gateway while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
 - Blockers: None documented.
 
 ## Current State
@@ -131,6 +131,7 @@ When sources conflict, use this order:
 - 2026-08-14: Disabled GitHub Actions at the repository setting and removed `.github/workflows/ci.yml` plus `.github/dependabot.yml`; all future builds/tests run only on owner-controlled machines.
 - 2026-08-14: Installed Rust 1.93, Node 24.14, npm, Tauri/WebKit native libraries, and Playwright Chromium on owner-controlled Ubuntu 24.04 VM `192.168.50.109`; no VM password was stored in repository files or memory.
 - 2026-08-14: Windows and Ubuntu local verification scripts passed Rust fmt/clippy/tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E.
+- 2026-08-14: Exact governed MCP mutation commit `c14fef2` passed `./scripts/verify.sh` from fresh archive `/home/hendo420/mcg-worktree-c14fef2` on the owner-controlled Ubuntu VM; a `set -e` confirmation emitted `__VERIFY_PASSED__` after all Rust, docs, frontend, native Tauri, and Playwright gates.
 - 2026-08-14: Windows and Ubuntu live daemon/CLI smoke tests created and transitioned a task, terminated the daemon, restarted it, and recovered the same projection with two ordered events; Ubuntu token mode verified as `0600`.
 - 2026-08-14: M2 provider fixture tests passed for model discovery, canonical response/stream normalization, bounded transient retry, credential redaction, and OAuth/API billing-boundary enforcement; opt-in live GPU45 discovery and Responses inference passed against the dynamically reported active model.
 - 2026-08-14: Complete Windows and Ubuntu local verification passed with M2: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. The common live GPU45 discovery/buffered/streaming probe also passed independently from both platforms.
@@ -369,8 +370,8 @@ When sources conflict, use this order:
 - Decision: Require a safe caller request key, hash canonical tool arguments, and use migration 8 to atomically persist the key, pending task, consumer organization revision, immutable plan, active task, and running run. Execute only a single bounded work item through existing runtime authority and policy. Exact success retries return existing evidence; non-success authority is returned as an MCP tool error; changed input under the same key conflicts.
 - Files: `crates/mcg-{storage,runtime,api}/`, `docs/architecture/{agent-organization,mcp}.md`, `README.md`.
 - Commands/tests: `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test -p mcg-storage -p mcg-runtime -p mcg-api`; `npm run check:docs`; `git diff --check`.
-- Result: Focused Windows qualification is green. The mutation never grants an implicit Coder/Tool Worker tool set and does not mark the task/run complete from model self-report alone.
-- Follow-up: Complete Ubuntu qualification, then implement MCP client configuration, protected auth, modern/legacy negotiation, discovery/cache, tool namespaces, agent-policy execution, interoperability, and UI/CLI management.
+- Result: Focused Windows qualification is green, and exact commit `c14fef2` passed the complete owner-controlled Ubuntu gate. The mutation never grants an implicit Coder/Tool Worker tool set and does not mark the task/run complete from model self-report alone.
+- Follow-up: Implement MCP client configuration, protected auth, modern/legacy negotiation, discovery/cache, tool namespaces, agent-policy execution, interoperability, and UI/CLI management.
 
 ## Known Issues
 
