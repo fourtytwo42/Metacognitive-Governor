@@ -90,20 +90,21 @@
   custom-provider prices remain explicitly unknown; users may enter overrides.
 - Routing begins with explainable policy and capability filters, then incorporates
   measured success, latency, and cost. Users can pin models and providers.
-- ChatGPT subscription authentication is a required provider path, not an optional
-  substitute for API keys. Official OpenAI documentation supports browser-based
-  ChatGPT sign-in for local Codex clients and a beta device-code flow for headless
-  clients. MCG should offer both, preferring the browser callback in the desktop
-  UI and device code when callbacks are unavailable.
+- ChatGPT subscription authentication is an optional but encouraged provider path.
+  OpenAI API keys are an equally supported, explicit alternative. Official OpenAI
+  documentation supports browser-based ChatGPT sign-in for local Codex clients
+  and a beta device-code flow for headless clients. MCG should offer both OAuth
+  flows, preferring the browser callback in the desktop UI and device code when
+  callbacks are unavailable.
 - Implement ChatGPT/Codex authentication as an isolated Rust adapter derived from
   reviewed, license-compatible open-source components such as OpenAI's
   `codex-login` crate and OpenClaw's integration. Reusing an auth component does
   not make MCG dependent on the Codex agent runtime. The adapter owns secure token
   storage, refresh, revocation, account display, and conformance tests.
-- API-key access remains a separately supported OpenAI provider mode, but it is not
-  considered an acceptable replacement if subscription OAuth temporarily breaks.
-  OAuth compatibility failures block that provider mode and surface a precise
-  recovery message rather than silently changing the user's billing path.
+- API-key access is a separately supported OpenAI provider mode. OAuth failures
+  block only the affected OAuth connection and surface a precise recovery message.
+  MCG never silently changes an existing connection from subscription OAuth to API
+  billing; the user must explicitly add or select an API-key connection.
 - Development integration targets include the owner's OpenAI OAuth account and
   local OpenAI-compatible provider `gpu45`. Hostnames, tokens, and credentials are
   configuration, never committed repository data.
@@ -189,4 +190,3 @@ The repository remains private. A public-source license is intentionally deferre
 until public distribution is considered. Product naming, detailed visual design,
 and the exact macOS support disclaimer require later decisions; no schedule or
 spending constraint is currently imposed.
-

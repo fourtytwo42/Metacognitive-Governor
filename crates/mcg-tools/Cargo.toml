@@ -1,0 +1,16 @@
+[package]
+name = "mcg-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+mcg-domain = { path = "../mcg-domain" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+

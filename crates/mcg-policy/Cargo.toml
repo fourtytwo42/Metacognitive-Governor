@@ -1,0 +1,15 @@
+[package]
+name = "mcg-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mcg-config = { path = "../mcg-config" }
+mcg-domain = { path = "../mcg-domain" }
+serde.workspace = true
+
+[lints]
+workspace = true
+

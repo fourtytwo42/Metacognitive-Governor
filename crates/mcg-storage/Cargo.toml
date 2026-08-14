@@ -1,0 +1,16 @@
+[package]
+name = "mcg-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mcg-events = { path = "../mcg-events" }
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+

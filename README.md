@@ -24,6 +24,12 @@ and will be delivered incrementally through tested, end-to-end milestones.
 Start with the [product requirements](MCG_PRD.md) and the
 [product and engineering baseline](docs/decisions/0001-product-engineering-baseline.md).
 
+Implementation planning:
+
+- [System architecture](docs/architecture/system.md)
+- [Dependency-ordered milestones](docs/roadmap/milestones.md)
+- [Automated testing strategy](docs/testing/strategy.md)
+
 ## Repository documents
 
 - `MCG_PRD.md` — canonical requirements index
@@ -35,7 +41,28 @@ Start with the [product requirements](MCG_PRD.md) and the
 
 ## Development
 
-The application workspace has not yet been scaffolded. Planned implementation:
-Rust, Tokio, SQLite, Tauri, TypeScript/React, and Playwright, with unit,
-integration, contract, scenario, and end-to-end testing treated as product
-infrastructure rather than a final release phase.
+Prerequisites: Rust 1.93+ and Node.js 24+.
+
+```powershell
+npm install
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+npm run check
+npm run test
+npm run build
+npm run test:e2e
+```
+
+Run the daemon and CLI in separate terminals:
+
+```powershell
+cargo run -p mcg-daemon
+cargo run -p mcg-cli -- status
+```
+
+Start the browser-hosted desktop frontend during UI development:
+
+```powershell
+npm run dev
+```

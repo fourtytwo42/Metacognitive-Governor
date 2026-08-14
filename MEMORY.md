@@ -4,18 +4,18 @@ Durable project context lives here. Update this file whenever information should
 
 ## Active Handoff
 
-- Current task: Product discovery is complete enough to begin implementation architecture and scaffolding.
-- Last meaningful change: Incorporated the owner's remaining decisions and documented the verified GPU45 development-provider contract.
-- Next step: Produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
+- Current task: M0 repository and engineering foundations are implemented and verified; ready to begin M1 runtime spine.
+- Last meaningful change: Added the implementation architecture, complete dependency-ordered roadmap, testing strategy, Rust workspace, daemon/CLI, Tauri/React desktop shell, CI, and initial invariant/E2E tests.
+- Next step: Implement durable task creation, SQLite event/projection transactions, daemon restart recovery, local client authentication, and API event streaming from M1.
 - Blockers: None documented.
 
 ## Current State
 
-- MCG is currently a documentation-only project describing a native, cross-platform metacognitive AI harness/runtime.
+- MCG now has a compilable implementation foundation alongside its product specifications.
 - The complete vision remains in scope and will be delivered through integrated, end-to-end milestones rather than a throwaway narrow prototype.
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
-- There is no application scaffold yet.
+- The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
 
 ## User Preferences
 
@@ -33,7 +33,7 @@ Durable project context lives here. Update this file whenever information should
 - Default to meaningful autonomy with configurable presets and advanced capability controls.
 - Do not include built-in remote harness access initially.
 - Use a simple-by-default UI that blends consumer chat, coding workspace, and operations views, with an advanced mode inspired by LM Studio.
-- OpenAI subscription OAuth is required; API-key access is supported separately but is not an acceptable silent fallback for broken OAuth.
+- OpenAI subscription OAuth is optional but encouraged; API-key access is equally supported when explicitly configured. Never silently switch an OAuth connection to API billing.
 
 ## Source Of Truth
 
@@ -57,7 +57,13 @@ When sources conflict, use this order:
 
 ## Setup And Commands
 
-- No build, test, or development commands exist yet because implementation has not been scaffolded.
+- Prerequisites (last verified 2026-08-14): Rust 1.93+, Node.js 24+, and npm 10+.
+- Install frontend dependencies: `npm install` (use `npm ci` in CI).
+- Rust checks: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- Frontend checks: `npm run check`, `npm run test`, `npm run build`, `npm run test:e2e`.
+- Documentation check: `npm run check:docs`.
+- Run daemon: `cargo run -p mcg-daemon`; query it with `cargo run -p mcg-cli -- status`.
+- Run UI development server: `npm run dev`.
 
 ## Project Map
 
@@ -68,11 +74,22 @@ When sources conflict, use this order:
   - `AGENTS.md`: repository-local agent workflow and memory rules.
   - `MEMORY.md`: durable context store.
   - `MCG_PRD.md`: current product requirements and phased vision.
+  - `docs/architecture/system.md`: implementation architecture and boundaries.
+  - `docs/roadmap/milestones.md`: full dependency-ordered delivery plan.
+  - `docs/testing/strategy.md`: automated evidence and release test strategy.
+  - `Cargo.toml`: Rust workspace and shared dependency/lint policy.
+  - `apps/mcg-daemon`: persistent local runtime process.
+  - `apps/mcg-cli`: `mcg` terminal client.
+  - `apps/desktop`: React/Tauri desktop application.
+  - `crates/`: domain, events, config, policy, providers, tools, storage, runtime, and API boundaries.
 
 ## Architecture Notes
 
 - Proposed stack in the PRD: Rust/Tokio/Serde/SQLite daemon, Tauri desktop UI, typed tool broker, event bus, filesystem artifact storage, and optional WASM/WASI sandboxed plugins.
 - Architectural invariants: owner constitution outranks MCG; agents never bypass the execution plane; meaningful self-modification is versioned, measurable, and reversible; objective evaluation is preferred over self-reported success.
+- Workspace dependency direction: stable domain/config/events at the center; policy/providers/tools/storage implement boundaries; runtime orchestrates; API and GUI/CLI are adapters.
+- Initial daemon API binds to `127.0.0.1:7777`; built-in remote harness access is out of initial scope.
+- Provider auth modes are explicit and billing-aware: browser OAuth, device-code OAuth, API key, bearer token, or none. OAuth failure never mutates a connection into API-key billing.
 
 ## Verification Ledger
 
@@ -84,6 +101,11 @@ When sources conflict, use this order:
 - 2026-08-13: Initialized Git on `main`, created root commit `e5e053d` (`Establish MCG product baseline`), created private repository `fourtytwo42/Metacognitive-Governor`, and pushed `main`.
 - 2026-08-13: Verified official OpenAI documentation supports browser ChatGPT login and beta device-code login (`codex login --device-auth`) for local Codex clients; OpenAI's repository exposes this through the Rust `codex-login` crate.
 - 2026-08-13: Read GPU45 `/llms.txt`, `/api/version`, `/api/health/summary`, and inference `/v1/models`; documented the connection at `docs/integrations/gpu45.md`.
+- 2026-08-14: Verified Rust 1.93.0, Cargo 1.93.0, Node 24.14.0, and npm 10.8.2; pinned jsdom 29.1.1 for Node 24 compatibility.
+- 2026-08-14: `cargo check --workspace --all-targets`, Rust format, and clippy with warnings denied passed.
+- 2026-08-14: `cargo test --workspace` passed 8 initial tests covering task serialization, defaults, policy invariants, auth billing modes, SQLite migration/event append, and API health.
+- 2026-08-14: Frontend typecheck, Vitest (1 test), Vite production build, documentation/link validation, and Playwright E2E (1 test) passed.
+- 2026-08-14: Live daemon/CLI smoke test passed for health, human status, and JSON status; the exact temporary daemon process was stopped afterward.
 
 ## Decisions
 
@@ -100,6 +122,15 @@ When sources conflict, use this order:
 - Result: Consumer audience, full interface set, provider strategy, security defaults, runtime boundaries, memory behavior, testing layers, and delivery sequence are now explicit.
 - Follow-up: Resolve the short list of owner-level choices covering license/visibility, platform release order, OAuth risk posture, remote/multi-user scope, local provider connection, and visual direction.
 
+### 2026-08-14 - Implementation Foundation
+
+- Context: The owner authorized moving from product discovery into architecture, milestones, testing, and scaffolding.
+- Decision: Use the crate/process boundaries in `docs/architecture/system.md` and delivery order in `docs/roadmap/milestones.md`.
+- Files: `Cargo.toml`, `apps/`, `crates/`, `.github/workflows/ci.yml`, `package.json`, `docs/architecture/`, `docs/roadmap/`, `docs/testing/`.
+- Commands/tests: Rust check/fmt/clippy/test; npm documentation/typecheck/unit/build/E2E; live daemon/CLI smoke.
+- Result: M0 foundation is compilable, tested, and ready for durable M1 behavior.
+- Follow-up: Build M1 runtime spine without collapsing established interface boundaries.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -110,6 +141,7 @@ When sources conflict, use this order:
 
 - 2026-07-12: Reset stale project-specific memory while retaining the durable memory-management logic.
 - 2026-08-13: Split and repaired the PRD, added the product/engineering baseline and repository hygiene files, initialized Git, and published the private GitHub repository.
+- 2026-08-14: Completed and verified M0 architecture, roadmap, test strategy, Rust/Tauri/React workspace, CI, daemon/CLI smoke path, and initial UI/invariant tests.
 
 ## Open Follow-ups
 
@@ -117,7 +149,7 @@ When sources conflict, use this order:
 - Research and document the exact license/security boundary for a standalone Rust ChatGPT/Codex OAuth adapter using browser callback and device-code flows.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add macOS CI and real-device qualification when capacity becomes available.
-- Produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
+- Implement M1 durable task/event/projection/recovery contracts, local client authentication, and streaming API.
 
 ## Do Not Forget
 

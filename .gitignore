@@ -6,10 +6,12 @@
 /node_modules/
 **/node_modules/
 /.turbo/
-/dist/
+**/dist/
 /coverage/
 /playwright-report/
 /test-results/
+*.tsbuildinfo
+**/src-tauri/gen/
 
 # Application state and secrets
 /.env
@@ -31,4 +33,3 @@ Thumbs.db
 # Local MCG development state
 /.mcg/
 /artifacts/
-

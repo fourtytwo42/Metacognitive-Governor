@@ -1,0 +1,7 @@
+[alias]
+mcg-check = "check --workspace --all-targets"
+mcg-test = "test --workspace"
+
+[env]
+RUST_BACKTRACE = "1"
+
