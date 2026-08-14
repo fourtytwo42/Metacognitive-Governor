@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Screenshot-baseline evidence is Windows-qualified and awaiting an exact Ubuntu checkpoint; research provenance evidence follows.
+- Current task: Screenshot-baseline evidence is cross-platform qualified; provenance-backed research evidence is next.
 - Last meaningful change: Added immutable `SCREENSHOT MATCHES`, governed browser/file capability composition, bounded PNG decoding, decoded-pixel tolerances, and actual/baseline artifact provenance.
-- Next step: Commit and run the exact screenshot checkpoint through the complete owner-controlled Ubuntu gate, then implement provenance-backed research evidence. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Implement provenance-backed research evidence, then expand representative workflows and UI depth. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -189,6 +189,7 @@ When sources conflict, use this order:
 - 2026-08-14: Exact MCP server commit `63d3dd4` passed complete owner-controlled Ubuntu `scripts/verify.sh` from a fresh Git archive: strict full-workspace Rust checks/tests including 19 API/MCP tests and live GPU45, documentation, frontend type/unit/build, native Linux Tauri debug build, and Playwright all passed in 215 seconds. No GitHub-hosted automation ran. The fresh mirror is `/home/hendo420/mcg-worktree-63d3dd4`; the older canonical mirror was left untouched because destructive replacement was denied.
 - 2026-08-14: Governed MCP mutation checkpoint passed Windows focused qualification: full-workspace clippy, 19 API tests, 4 runtime tests, 12 storage tests, docs, formatting, and diff hygiene. A provider-backed MCP call creates and executes one durable run; exact retry returns the same one result/instance, a changed-input key conflicts, and `mcg_query_run` replays evidence. The file-backed migration-8 fixture proves atomic creation, restart replay, immutable key conflict, and zero duplicate events.
 - 2026-08-14: Exact file/custom evidence commit `4238ec5` passed an isolated complete `./scripts/verify.sh` in `/home/hendo420/mcg-worktree-4238ec5` with `verify-final.exit=0`: strict Rust workspace gates including 32 tool and 29 API tests, live GPU45, docs, frontend checks/build, sandboxed real Chromium, native Linux Tauri/GTK build, and Playwright. No GitHub-hosted automation ran.
+- 2026-08-14: Exact screenshot-baseline commit `4e5c432` passed complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`, including 33 tool/30 API tests, decoded-pixel Chromium comparison, live GPU45, docs/frontend, native Tauri/GTK, and Playwright. The first exact code commit proved a small 404 change was correctly within the 1% tolerance; the corrected full-viewport fixture passed. A later attempt exhausted disk while both generated snapshots remained; the failed snapshot was path-verified and removed, the exact rerun passed, and the superseded qualified `4238ec5` snapshot was removed after verifying both markers. Source remains in Git; 14 GB VM headroom remained.
 
 ## Decisions
 
@@ -543,8 +544,8 @@ When sources conflict, use this order:
 - Decision: Add typed `BrowserScreenshotMatches` with URL, project-relative baseline, launch-bound baseline SHA-256, fixed viewport, per-channel threshold, and maximum changed-pixel basis points. Require both network-origin and file-read capabilities; decode only bounded PNGs; compare RGBA pixels; retain HTML, actual PNG, and baseline PNG as content-addressed evidence. Default consumer tolerance is channel delta 8 and 1% changed pixels.
 - Files: workspace/tool manifests and lock, `crates/mcg-{agents,tools,runtime,api}/`, `README.md`, and runtime/agent/testing documentation.
 - Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 33 tool and 30 API tests; real Chromium pass/mismatch/mutation scenario; nine Vitest flows; frontend typecheck/build; Playwright; docs/diff checks.
-- Result: Windows qualification is green. Missing baselines stop before model calls; identical real renders pass; a full-viewport visual mismatch fails; dimension and area thresholds are exact; baseline mutation after launch is rejected. Initial exact commit `4ca6465` correctly showed that the former small 404 fixture changed fewer than the allowed 1% of pixels on Linux; the fixture now uses a deterministic full-viewport contrast and awaits requalification.
-- Follow-up: Commit and run complete `./scripts/verify.sh` on the owner-controlled Ubuntu VM, then implement research evidence.
+- Result: Windows qualification is green. Exact commit `4e5c432` also passed complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`. Missing baselines stop before model calls; identical real renders pass; a full-viewport visual mismatch fails; dimension and area thresholds are exact; baseline mutation after launch is rejected. Initial exact commit `4ca6465` correctly showed that the former small 404 fixture changed fewer than the allowed 1% of pixels on Linux.
+- Follow-up: Implement provenance-backed research evidence.
 
 ## Known Issues
 
@@ -573,7 +574,7 @@ When sources conflict, use this order:
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
-- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser, file, exact-discovered custom, and Windows-qualified screenshot evaluators to provenance-backed research conditions; unsupported conditions deliberately remain nonterminal.
+- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser, file, exact-discovered custom, and screenshot evaluators to provenance-backed research conditions; unsupported conditions deliberately remain nonterminal.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget
