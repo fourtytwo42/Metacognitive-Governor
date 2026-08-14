@@ -4,7 +4,7 @@ use crate::{
     CHATGPT_CODEX_BASE_URL, ModelDescriptor, ModelProbeReport, ModelProvider, ModelRequest,
     ModelResponse, OAuthTokenSet, OpenAiCompatibleProviderBuilder, ProviderAuthMode,
     ProviderConnection, ProviderCredentialStore, ProviderError, ProviderKind, ProviderModelRef,
-    ProviderSecretSlot, RouteCandidate, probe_model,
+    ProviderSecretSlot, ProviderStream, RouteCandidate, probe_model,
 };
 
 #[derive(Default)]
@@ -217,6 +217,31 @@ impl ProviderRegistry {
         }
         request.model.clone_from(&target.model_id);
         provider.create_response(request).await
+    }
+
+    /// Streams a response from the exact registered and discovered target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown targets or provider stream failure.
+    pub async fn stream_response(
+        &self,
+        target: &ProviderModelRef,
+        mut request: ModelRequest,
+    ) -> Result<ProviderStream, ProviderError> {
+        let provider = self.provider(&target.provider_id)?;
+        let known_model = self
+            .discovered
+            .get(&target.provider_id)
+            .is_some_and(|models| models.iter().any(|model| model.id == target.model_id));
+        if !known_model {
+            return Err(ProviderError::Configuration(format!(
+                "model {} has not been discovered for provider {}",
+                target.model_id, target.provider_id
+            )));
+        }
+        request.model.clone_from(&target.model_id);
+        provider.stream_response(request).await
     }
 
     fn provider(&self, provider_id: &str) -> Result<Arc<dyn ModelProvider>, ProviderError> {

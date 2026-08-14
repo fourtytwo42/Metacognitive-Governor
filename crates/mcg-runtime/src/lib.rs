@@ -217,6 +217,25 @@ pub struct RuntimeProviderGateway {
     registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
 }
 
+impl RuntimeProviderGateway {
+    /// Streams from one exact route selected by the caller-side router.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider configuration, authentication, transport, or protocol errors.
+    pub async fn stream_response(
+        &self,
+        target: &ProviderModelRef,
+        request: ModelRequest,
+    ) -> Result<mcg_providers::ProviderStream, ProviderError> {
+        self.registry
+            .read()
+            .await
+            .stream_response(target, request)
+            .await
+    }
+}
+
 impl std::fmt::Debug for RuntimeProviderGateway {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

@@ -1,5 +1,7 @@
 //! Versioned authenticated loopback HTTP and streaming surface.
 
+mod provider_proxy;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     convert::Infallible,
@@ -505,6 +507,12 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             post(resolve_approval),
         )
         .route("/api/v1/events/stream", get(stream_events))
+        .route("/v1/models", get(provider_proxy::models))
+        .route("/v1/responses", post(provider_proxy::responses))
+        .route(
+            "/v1/chat/completions",
+            post(provider_proxy::chat_completions),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()
@@ -1451,6 +1459,35 @@ mod tests {
     }
 
     async fn model_discovery_fixture() -> String {
+        async fn response(Json(body): Json<serde_json::Value>) -> Response {
+            if body.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
+                return (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/event-stream",
+                    )],
+                    concat!(
+                        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-stream\",\"model\":\"fixture-model\"}}\n\n",
+                        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"message-1\",\"delta\":\"fixture\"}\n\n",
+                        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-stream\",\"model\":\"fixture-model\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"fixture\"}]}],\"usage\":{\"input_tokens\":8,\"output_tokens\":1,\"total_tokens\":9}}}\n\n"
+                    ),
+                )
+                    .into_response();
+            }
+            Json(serde_json::json!({
+                "id": "fixture-response",
+                "model": "fixture-model",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "fixture complete"}]
+                }],
+                "usage": {"input_tokens": 32, "output_tokens": 4, "total_tokens": 36}
+            }))
+            .into_response()
+        }
+
         let app = Router::new()
             .route(
                 "/v1/models",
@@ -1466,28 +1503,63 @@ mod tests {
                     }))
                 }),
             )
-            .route(
-                "/v1/responses",
-                post(|| async {
-                    Json(serde_json::json!({
-                        "id": "fixture-response",
-                        "model": "fixture-model",
-                        "status": "completed",
-                        "output": [{
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "fixture complete"}]
-                        }],
-                        "usage": {"input_tokens": 32, "output_tokens": 4, "total_tokens": 36}
-                    }))
-                }),
-            );
+            .route("/v1/responses", post(response));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("fixture listener");
         let address = listener.local_addr().expect("fixture address");
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn caller_tool_fixture() -> String {
+        async fn response(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let name = body
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|tools| tools.first())
+                .and_then(|tool| tool.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("caller_tool");
+            Json(serde_json::json!({
+                "id": "caller-tool-response",
+                "model": "caller-tool-model",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "caller-call-1",
+                    "name": name,
+                    "arguments": "{\"value\":\"fixture\"}"
+                }],
+                "usage": {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}
+            }))
+        }
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "caller-tool-model",
+                            "owned_by": "fixture",
+                            "context_window": 16384,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route("/v1/responses", post(response));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("caller tool fixture listener");
+        let address = listener.local_addr().expect("caller tool fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("caller tool fixture server");
         });
         format!("http://{address}/v1")
     }
@@ -2909,6 +2981,319 @@ form.addEventListener('submit', (event) => {
                 .any(|result| result == &evaluator_commit.result)
         );
         assert_eq!(durable.evaluations, vec![report]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Complete external provider compatibility contract.
+    async fn openai_provider_proxy_is_authenticated_routed_and_streamable() {
+        let runtime = test_runtime();
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "proxy_fixture".into(),
+                    display_name: "Proxy Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: model_discovery_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "tool_proxy_fixture".into(),
+                    display_name: "Caller Tool Proxy Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: caller_tool_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("tool provider");
+        let app = router(runtime);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/models")
+                    .body(Body::empty())
+                    .expect("models request"),
+            )
+            .await
+            .expect("unauthorized models");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let models = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/v1/models"))
+                    .body(Body::empty())
+                    .expect("models request"),
+            )
+            .await
+            .expect("models response");
+        assert_eq!(models.status(), StatusCode::OK);
+        let models: serde_json::Value = serde_json::from_slice(
+            &models
+                .into_body()
+                .collect()
+                .await
+                .expect("models body")
+                .to_bytes(),
+        )
+        .expect("models json");
+        assert_eq!(models.pointer("/object"), Some(&serde_json::json!("list")));
+        assert!(
+            models
+                .pointer("/data")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|models| models.iter().any(|model| {
+                    model.get("id").and_then(serde_json::Value::as_str) == Some("mcg:auto")
+                        && model.pointer("/metadata/available") == Some(&serde_json::json!(true))
+                }))
+        );
+
+        let buffered = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"model":"mcg:auto","input":"hello"}).to_string(),
+                    ))
+                    .expect("responses request"),
+            )
+            .await
+            .expect("responses response");
+        assert_eq!(buffered.status(), StatusCode::OK);
+        let buffered: serde_json::Value = serde_json::from_slice(
+            &buffered
+                .into_body()
+                .collect()
+                .await
+                .expect("responses body")
+                .to_bytes(),
+        )
+        .expect("responses json");
+        assert_eq!(
+            buffered.pointer("/model"),
+            Some(&serde_json::json!("mcg:auto"))
+        );
+        assert_eq!(
+            buffered.pointer("/mcg_route/provider_id"),
+            Some(&serde_json::json!("proxy_fixture"))
+        );
+        assert_eq!(
+            buffered.pointer("/usage/total_tokens"),
+            Some(&serde_json::json!(36))
+        );
+
+        let chat = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/chat/completions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"mcg:local",
+                            "messages":[{"role":"user","content":"hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("chat request"),
+            )
+            .await
+            .expect("chat response");
+        assert_eq!(chat.status(), StatusCode::OK);
+        let chat: serde_json::Value = serde_json::from_slice(
+            &chat
+                .into_body()
+                .collect()
+                .await
+                .expect("chat body")
+                .to_bytes(),
+        )
+        .expect("chat json");
+        assert_eq!(
+            chat.pointer("/object"),
+            Some(&serde_json::json!("chat.completion"))
+        );
+        assert_eq!(
+            chat.pointer("/choices/0/message/content"),
+            Some(&serde_json::json!("fixture complete"))
+        );
+
+        let streaming = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"mcg:auto",
+                            "input":"stream",
+                            "stream":true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("stream request"),
+            )
+            .await
+            .expect("stream response");
+        assert_eq!(streaming.status(), StatusCode::OK);
+        assert_eq!(
+            streaming
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let streaming = String::from_utf8(
+            streaming
+                .into_body()
+                .collect()
+                .await
+                .expect("stream body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("stream utf8");
+        assert!(streaming.contains("event: response.output_text.delta"));
+        assert!(streaming.contains("event: response.completed"));
+        assert!(streaming.contains("mcg:auto"));
+
+        let caller_tool = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"mcg:auto",
+                            "input":"look it up",
+                            "tools":[{
+                                "type":"function",
+                                "name":"caller::lookup",
+                                "description":"A caller-owned lookup",
+                                "parameters":{"type":"object","properties":{}}
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("caller tool request"),
+            )
+            .await
+            .expect("caller tool response");
+        assert_eq!(caller_tool.status(), StatusCode::OK);
+        let caller_tool: serde_json::Value = serde_json::from_slice(
+            &caller_tool
+                .into_body()
+                .collect()
+                .await
+                .expect("caller tool body")
+                .to_bytes(),
+        )
+        .expect("caller tool json");
+        assert_eq!(
+            caller_tool.pointer("/output/0/name"),
+            Some(&serde_json::json!("caller::lookup"))
+        );
+        assert_eq!(
+            caller_tool.pointer("/mcg_route/provider_id"),
+            Some(&serde_json::json!("tool_proxy_fixture"))
+        );
+
+        let reserved_tool = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"mcg:auto",
+                            "input":"read host",
+                            "tools":[{
+                                "type":"function",
+                                "name":"host::fs.read",
+                                "parameters":{"type":"object"}
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("reserved tool request"),
+            )
+            .await
+            .expect("reserved tool response");
+        assert_eq!(reserved_tool.status(), StatusCode::BAD_REQUEST);
+
+        let chat_stream = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/chat/completions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"mcg:auto",
+                            "messages":[{"role":"user","content":"stream"}],
+                            "stream":true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("chat stream request"),
+            )
+            .await
+            .expect("chat stream response");
+        assert_eq!(chat_stream.status(), StatusCode::OK);
+        let chat_stream = String::from_utf8(
+            chat_stream
+                .into_body()
+                .collect()
+                .await
+                .expect("chat stream body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("chat stream utf8");
+        assert!(chat_stream.contains("chat.completion.chunk"));
+        assert!(chat_stream.contains("\"content\":\"fixture\""));
+
+        let cheap = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"model":"mcg:cheap","input":"hello"}).to_string(),
+                    ))
+                    .expect("cheap request"),
+            )
+            .await
+            .expect("cheap response");
+        assert_eq!(cheap.status(), StatusCode::BAD_REQUEST);
+
+        let unknown = app
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"model":"mcg:missing","input":"hello"}).to_string(),
+                    ))
+                    .expect("unknown request"),
+            )
+            .await
+            .expect("unknown response");
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

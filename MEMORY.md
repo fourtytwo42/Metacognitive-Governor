@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress. The governed website scenario now includes a real Evaluator instance, objective report policy, authenticated API recording, CLI file submission, and durable replay. Live OpenAI callback/model/tool UAT still awaits the owner's manual authentication.
-- Last meaningful change: Closed the evaluation authoring/policy gap: independent-review plans reject reports without a same-run Evaluator identity, while valid evidence is immutable and available through runtime, API, CLI, and run inspection.
-- Next step: Complete the Windows half of evaluation-checkpoint qualification after the visible OAuth handoff is idle, then finish live OAuth callback/model probing and repeat representative website work with the subscription provider.
+- Current task: M6 interface-family work has started while M5 live OAuth UAT waits for owner authentication. The first OpenAI-compatible provider proxy checkpoint now exposes authenticated Models, Responses, and Chat Completions routing with buffered/stream adapters and caller-owned tool semantics.
+- Last meaningful change: Added `mcg:auto`, `mcg:coder`, `mcg:reasoner`, `mcg:cheap`, and `mcg:local` aliases over the configured provider registry. Unknown costs/locality and reserved host/MCG tool namespaces fail honestly instead of silently weakening policy.
+- Next step: Complete full Windows/Ubuntu proxy qualification after the visible OAuth handoff is idle, then finish the live subscription callback/model/tool website UAT and continue remaining M6 interfaces.
 - Blockers: None documented.
 
 ## Current State
@@ -102,6 +102,7 @@ When sources conflict, use this order:
 - M3 implements typed filesystem, process/shell, HTTP/download, system, Git/worktree/patch, and memory primitives behind one policy broker. SQLite durably stores approval state, execution leases, immutable tool audit, artifact registrations, and associated task events.
 - M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
 - M5 uses a separate `mcg-agents` boundary for versioned organization genomes, roles/instances, work plans, agent leases, success conditions, evaluation evidence, confidence/calibration, and organizational-cost metrics.
+- The M6 provider proxy is authenticated by the installation bearer token and never executes externally supplied caller tools. `/v1/responses` and `/v1/chat/completions` share exact provider routing/fallback rules; authentication errors cannot cross provider or billing boundaries. `mcg:cheap` requires known cost and `mcg:local` accepts only loopback/private endpoints.
 - M5 SQLite migration 5 makes organization revisions, plans, usage, and evaluations immutable evidence while runs, instances, and leases are event-backed current projections. Startup never resumes stale authority: interrupted runs become `recovering` and active instances/leases expire before reassignment.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
@@ -159,6 +160,7 @@ When sources conflict, use this order:
 - 2026-08-14: Exact commit `f573cff` passed `scripts/verify.sh` on the owner-controlled Ubuntu VM: strict Rust format/clippy/workspace tests including the governed website and live GPU45 scenarios, documentation, frontend unit/type/build, native Linux Tauri build, and Playwright all passed. The first SSH invocation lacked login-shell toolchain paths and the next transport window expired mid-build; rerunning through the configured login shell with a sufficient local timeout completed successfully. No GitHub-hosted automation ran.
 - 2026-08-14: M5 evaluation authoring checkpoint (full cross-platform qualification pending): runtime/API/CLI can record immutable `EvaluationReport` files; plan- or genome-required independent review now requires a same-run Evaluator instance. The governed website fixture executes Coder and Evaluator turns, rejects unauthenticated and evaluator-less reports, stores three objective write hashes, and replays both turn results plus the report. Focused strict clippy and 30 API/CLI/runtime/storage tests passed while the visible OAuth UAT daemon/app remained running; complete verifier is intentionally deferred until that owner handoff is idle.
 - 2026-08-14: Exact evaluation commit `8e3188a` passed complete owner-controlled Ubuntu `scripts/verify.sh`: strict Rust format/clippy/workspace tests, the independent-evaluator website scenario, live GPU45, docs, frontend unit/type/build, native Linux Tauri build, and Playwright all passed. Windows full verification remains deferred only to preserve the visible uncompleted OAuth browser session; focused Windows strict checks for changed packages are green.
+- 2026-08-14: Initial M6 OpenAI-compatible proxy checkpoint (full cross-platform qualification pending) added authenticated `/v1/models`, `/v1/responses`, and `/v1/chat/completions`; deterministic alias/capability/cost/local routing; bounded retriable fallback; Responses and Chat buffered/stream normalization; Chat `[DONE]`; usage and physical-route evidence; standard null-content tool history; caller-owned function-call passthrough; and fail-closed `host::`/`mcg::` handling. Three proxy tests plus strict API/provider/runtime clippy and 43 focused tests passed on Windows while the OAuth UAT app remained open.
 
 ## Decisions
 
@@ -369,6 +371,7 @@ When sources conflict, use this order:
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
 - Complete M5 durable run orchestration and useful end-to-end website/app work.
+- Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 

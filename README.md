@@ -90,6 +90,13 @@ never accepted as command-line arguments. Use `mcg provider list`, `models`, and
 PROVIDER MODEL` to explicitly test and persist live Responses, streaming, and
 required function-call behavior before assigning tool-using work.
 
+External local harnesses can use MCG itself as an OpenAI-compatible provider at
+`/v1/models`, `/v1/responses`, and `/v1/chat/completions` with the installation
+bearer token. Initial aliases are `mcg:auto`, `mcg:coder`, `mcg:reasoner`,
+`mcg:cheap`, and `mcg:local`; see
+[`docs/architecture/provider-proxy.md`](docs/architecture/provider-proxy.md) for
+routing, streaming, cost, and caller-owned tool semantics.
+
 Start the browser-hosted desktop frontend during UI development:
 
 ```powershell
