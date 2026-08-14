@@ -107,6 +107,7 @@ When sources conflict, use this order:
 - 2026-08-14: Frontend typecheck, Vitest (1 test), Vite production build, documentation/link validation, and Playwright E2E (1 test) passed.
 - 2026-08-14: Live daemon/CLI smoke test passed for health, human status, and JSON status; the exact temporary daemon process was stopped afterward.
 - 2026-08-14: The first GitHub Actions frontend run exposed non-deterministic workspace dependency placement: Vitest was hoisted while the explicit jsdom dependency was nested. Moved jsdom 29.1.1 to the root workspace, verified a clean `npm ci`, Vitest, and Playwright run, and updated checkout/setup-node to their current v7 major releases.
+- 2026-08-14: GitHub Actions run `31771954125` passed all documentation, frontend, Ubuntu Rust, and Windows Rust jobs for commit `b02d626`.
 
 ## Decisions
 
@@ -139,7 +140,7 @@ When sources conflict, use this order:
 - Files: `package.json`, `apps/desktop/package.json`, `package-lock.json`, `.github/workflows/ci.yml`.
 - Commands/tests: Clean `npm ci`, `npm run test`, and `npm run test:e2e` passed locally.
 - Result: Frontend unit-test environment installation is deterministic across supported CI platforms.
-- Follow-up: Verify the replacement GitHub Actions run is fully green.
+- Follow-up: Begin M1 durable runtime spine implementation.
 
 ## Known Issues
 
