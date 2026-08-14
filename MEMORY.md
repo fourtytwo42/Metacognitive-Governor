@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M4 projects, context, and durable memory is implementation-complete and Windows-qualified; Ubuntu qualification remains before milestone closure.
-- Last meaningful change: Added SQLite migration 4, authenticated runtime/API/CLI project and memory surfaces, target-scoped instructions, polling invalidation, versioned lifecycle transitions, and a real daemon/CLI restart smoke workflow.
-- Next step: Commit/push the Windows-green M4 revision, run the identical owner-controlled Ubuntu verifier and live daemon/CLI restart smoke, fix platform defects, then close M4 and begin M5.
+- Current task: M4 projects, context, and durable memory is complete and qualified on Windows and Ubuntu. M5 organization and useful work is next.
+- Last meaningful change: Pushed M4 implementation `41abefc`, passed both complete owner-machine verifiers, and completed real daemon/CLI correction-and-restart smoke workflows on Windows and Ubuntu.
+- Next step: Design and implement M5 organization genome, roles/instances, Executive decomposition, leases/budgets/confidence/success conditions, minimal-organization selection, and the first complete provider-backed website projects.
 - Blockers: None documented.
 
 ## Current State
@@ -138,6 +138,7 @@ When sources conflict, use this order:
 - 2026-08-14: M4 foundation added 6 tests for stable fixture discovery, Git-root resolution, instruction precedence/conflict surfacing, protected context compression, correction-driven durability, and secret-namespace rejection. Full Rust workspace tests and clippy with warnings denied passed on Windows.
 - 2026-08-14: M4 SQLite migration 4 and authenticated interfaces passed 7 project tests, 9 storage tests, 8 API tests, and the full Windows verifier. Evidence covers immutable snapshots, root identity conflicts, target-scoped instructions, polling invalidation, atomic correction/lifecycle successors, secret-like key rejection, bounded context, and restart durability.
 - 2026-08-14: Real Windows daemon/CLI smoke registered this repository as a project, added a plain-string claim, corrected it to `pnpm`, retrieved it in assembled context, force-stopped/restarted the daemon, and recovered both versions. The first attempt exposed PowerShell JSON-string quoting friction; CLI values now accept either valid JSON or ordinary strings, with a regression test.
+- 2026-08-14: M4 commit `41abefc` passed `scripts/verify.sh` on the owner-controlled Ubuntu VM, including native Tauri and Playwright. A real Linux daemon/CLI smoke then discovered the mirrored repository, corrected `npm` to `pnpm`, retrieved the correction in context, killed/restarted the daemon, and recovered both provenance-bearing versions.
 
 ## Decisions
 
@@ -241,7 +242,7 @@ When sources conflict, use this order:
 - Files: `crates/mcg-projects/`, `crates/mcg-events/`, `crates/mcg-storage/`, `crates/mcg-runtime/`, `crates/mcg-api/`, `apps/mcg-cli/`, `docs/architecture/project-intelligence-memory.md`.
 - Commands/tests: `scripts/verify.ps1`; real `mcg-daemon` + `mcg project` CLI restart smoke on Windows.
 - Result: Full Windows qualification passes. A real CLI usability defect with quoted string values was found and fixed during smoke testing.
-- Follow-up: Run identical Ubuntu qualification and live smoke before closing M4.
+- Follow-up: M4 later passed identical Ubuntu qualification and live smoke; begin M5 organization and useful work.
 
 ## Known Issues
 
@@ -258,6 +259,7 @@ When sources conflict, use this order:
 - 2026-08-14: Completed and verified the requested M1 runtime spine on Windows and Ubuntu, then disabled and removed GitHub-hosted automation.
 - 2026-08-14: Completed and verified M2 provider fabric on Windows and Ubuntu, including standalone OAuth fixtures and live GPU45 conformance on both platforms.
 - 2026-08-14: Completed and verified M3 typed tools, constitutional capability enforcement, durable approvals/leases/audit/artifacts, worktree isolation, API/CLI control surfaces, and adversarial cross-platform qualification on Windows and Ubuntu.
+- 2026-08-14: Completed and verified M4 project discovery, target-scoped instruction resolution, polling invalidation, bounded context assembly, immutable snapshots, and versioned provenance-bearing memory across Windows and Ubuntu, including real daemon/CLI restart workflows.
 
 ## Open Follow-ups
 
@@ -266,7 +268,7 @@ When sources conflict, use this order:
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
-- Complete Ubuntu M4 qualification and live restart smoke, then begin M5 organization and useful work.
+- Begin M5 organization and useful end-to-end work.
 
 ## Do Not Forget
 

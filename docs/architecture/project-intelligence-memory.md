@@ -1,6 +1,6 @@
 # M4 Project Intelligence and Memory
 
-- Status: Implemented; cross-platform qualification pending.
+- Status: Implemented and locally qualified on Windows and Linux.
 - Date: 2026-08-14.
 - Governing milestone: M4 in `docs/roadmap/milestones.md`.
 
@@ -89,7 +89,7 @@ compression, secret rejection, correction-driven durability, immutable snapshot
 history, atomic claim versioning, concurrent/stale correction rejection, API
 lifecycle behavior, and restart recovery.
 
-Complete owner-machine verification remains:
+Complete owner-machine verification uses:
 
 ```powershell
 .\scripts\verify.ps1
