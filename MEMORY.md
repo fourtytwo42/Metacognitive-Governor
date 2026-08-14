@@ -543,7 +543,7 @@ When sources conflict, use this order:
 - Decision: Add typed `BrowserScreenshotMatches` with URL, project-relative baseline, launch-bound baseline SHA-256, fixed viewport, per-channel threshold, and maximum changed-pixel basis points. Require both network-origin and file-read capabilities; decode only bounded PNGs; compare RGBA pixels; retain HTML, actual PNG, and baseline PNG as content-addressed evidence. Default consumer tolerance is channel delta 8 and 1% changed pixels.
 - Files: workspace/tool manifests and lock, `crates/mcg-{agents,tools,runtime,api}/`, `README.md`, and runtime/agent/testing documentation.
 - Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 33 tool and 30 API tests; real Chromium pass/mismatch/mutation scenario; nine Vitest flows; frontend typecheck/build; Playwright; docs/diff checks.
-- Result: Windows qualification is green. Missing baselines stop before model calls; identical real renders pass; a different page fails; dimension and area thresholds are exact; baseline mutation after launch is rejected. Exact Ubuntu qualification remains pending.
+- Result: Windows qualification is green. Missing baselines stop before model calls; identical real renders pass; a full-viewport visual mismatch fails; dimension and area thresholds are exact; baseline mutation after launch is rejected. Initial exact commit `4ca6465` correctly showed that the former small 404 fixture changed fewer than the allowed 1% of pixels on Linux; the fixture now uses a deterministic full-viewport contrast and awaits requalification.
 - Follow-up: Commit and run complete `./scripts/verify.sh` on the owner-controlled Ubuntu VM, then implement research evidence.
 
 ## Known Issues

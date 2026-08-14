@@ -2842,6 +2842,14 @@ form.addEventListener('submit', (event) => {
                         "<!doctype html><html><head><title>Before</title></head><body><main id='app'></main><script>document.title='MCG Render Fixture'; document.querySelector('#app').textContent='Rendered by JavaScript';</script></body></html>",
                     )
                 }),
+            )
+            .route(
+                "/render-mismatch",
+                get(|| async {
+                    Html(
+                        "<!doctype html><html><head><title>Visual mismatch</title><style>html,body{margin:0;width:100%;height:100%;background:#d40000;color:#fff}main{width:100%;height:100%;display:grid;place-items:center;font:700 48px sans-serif}</style></head><body><main>Different page</main></body></html>",
+                    )
+                }),
             );
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -4694,7 +4702,7 @@ form.addEventListener('submit', (event) => {
         .expect("readme");
         let fixture = objective_http_fixture().await;
         let matching_url = format!("{fixture}/render");
-        let mismatch_url = format!("{fixture}/expected-missing");
+        let mismatch_url = format!("{fixture}/render-mismatch");
         let preflight_artifacts = directory.path().join("preflight-artifacts");
         let renderer = BrowserExecutor::new(
             std::env::var_os("MCG_BROWSER_EXECUTABLE").map(std::path::PathBuf::from),
