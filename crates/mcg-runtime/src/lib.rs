@@ -16,11 +16,11 @@ use chrono::{DateTime, Duration, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
     AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnEngine, AgentTurnError,
-    AgentTurnRequest, AgentTurnResult, AgentUsageRecord, ConfidenceEstimate, EvaluationReport,
-    ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics, RoleKind,
-    WorkPlan,
+    AgentTurnRequest, AgentTurnResult, AgentUsageRecord, ConditionResult, ConfidenceEstimate,
+    EvaluationEvidence, EvaluationOutcome, EvaluationReport, ExternalToolBinding, LeaseBudget,
+    OrganizationGenome, OrganizationalMetrics, RoleKind, SuccessCondition, WorkPlan,
 };
-use mcg_config::AppConfig;
+use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, ProjectId, RunId,
     TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
@@ -52,9 +52,9 @@ use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
     ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor,
     HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
-    ProcessExecutor, RejectingCredentialResolver, SystemExecutor, TOOL_SCHEMA_VERSION,
-    ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
-    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
+    ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver, SystemExecutor,
+    TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor,
+    ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1334,6 +1334,220 @@ impl AppRuntime {
         Ok(event)
     }
 
+    /// Executes supported consumer success conditions through the governed
+    /// tool broker, records objective evidence, and atomically settles the
+    /// launched task/run from the resulting independent evaluation report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable authority is incomplete or inconsistent,
+    /// a discovered command drifts, or governed process execution cannot run.
+    #[allow(clippy::too_many_lines)] // Keep evidence construction adjacent to governed execution.
+    pub async fn evaluate_and_settle_consumer_run(
+        &self,
+        task_id: TaskId,
+    ) -> Result<EvaluationReport, RuntimeError> {
+        let task = self
+            .task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            StorageError::InvalidData("consumer evaluation requires a selected project".into())
+        })?;
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let run_id = self
+            .task_launch_run_id(task_id)?
+            .ok_or_else(|| StorageError::Conflict("task has no consumer launch".into()))?;
+        let view = self.agent_run_view(run_id)?;
+        let organization = self
+            .organization_revision(view.run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                view.run.organization_revision_id,
+            ))?;
+        let evaluator_roles = organization
+            .roles
+            .iter()
+            .filter(|role| role.kind == RoleKind::Evaluator)
+            .map(|role| role.id)
+            .collect::<Vec<_>>();
+        let evaluator_instance_id = view
+            .instances
+            .iter()
+            .find(|instance| {
+                instance.state == AgentState::Completed
+                    && evaluator_roles.contains(&instance.role_id)
+            })
+            .map(|instance| instance.id)
+            .ok_or_else(|| {
+                StorageError::Conflict(
+                    "consumer evaluation requires a completed independent evaluator".into(),
+                )
+            })?;
+        let mut conditions = Vec::new();
+        for item in &view.plan.items {
+            for condition in &item.success_conditions {
+                if !conditions.contains(condition) {
+                    conditions.push(condition.clone());
+                }
+            }
+        }
+        if conditions.is_empty() {
+            return Err(StorageError::InvalidData(
+                "consumer run has no success conditions to evaluate".into(),
+            )
+            .into());
+        }
+        let root = std::path::PathBuf::from(&project.root);
+        let process = ProcessExecutor::new([root.clone()], Arc::new(RejectingCredentialResolver))
+            .map_err(runtime_tool_error)?;
+        let mut capabilities = CapabilityPolicy::project(&root);
+        for command in &project.commands {
+            if let Some(executable) = command
+                .command
+                .split_ascii_whitespace()
+                .next()
+                .map(platform_process_executable)
+                && !capabilities
+                    .allowed_executables
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&executable))
+            {
+                capabilities.allowed_executables.push(executable);
+            }
+        }
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            process,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let mut results = Vec::new();
+        let mut evidence = Vec::new();
+        let mut regressions = Vec::new();
+        let mut objective_failures = 0_u32;
+        let mut unsupported = 0_u32;
+        let mut executed = 0_u32;
+        for (index, condition) in conditions.iter().enumerate() {
+            let Some(command) = objective_command(condition) else {
+                unsupported = unsupported.saturating_add(1);
+                let detail = "No deterministic evaluator is implemented for this condition yet.";
+                results.push(ConditionResult {
+                    condition: condition.clone(),
+                    passed: false,
+                    detail: detail.into(),
+                });
+                evidence.push(EvaluationEvidence {
+                    method: "unsupported_condition".into(),
+                    artifact_sha256: None,
+                    event_sequence: None,
+                    detail: detail.into(),
+                });
+                continue;
+            };
+            if self.config.autonomy == AutonomyPreset::Guided {
+                unsupported = unsupported.saturating_add(1);
+                let detail = "Guided mode does not run build/test checks without a dedicated evaluation approval.";
+                results.push(ConditionResult {
+                    condition: condition.clone(),
+                    passed: false,
+                    detail: detail.into(),
+                });
+                evidence.push(EvaluationEvidence {
+                    method: "guided_evaluation_deferred".into(),
+                    artifact_sha256: None,
+                    event_sequence: None,
+                    detail: detail.into(),
+                });
+                continue;
+            }
+            if !project
+                .commands
+                .iter()
+                .any(|discovered| discovered.command == command)
+            {
+                return Err(StorageError::Conflict(
+                    "planned objective command no longer matches project discovery".into(),
+                )
+                .into());
+            }
+            let options = objective_process_options(command, &project.root)?;
+            let mut request = ToolRequest::new(
+                task_id,
+                format!("Objectively evaluate: {command}"),
+                ToolRequestKind::ProcessExec { options },
+            );
+            request.id = objective_request_id(run_id, index, condition)?;
+            request.timeout_seconds = task
+                .budget
+                .max_duration_seconds
+                .unwrap_or(1_800)
+                .clamp(1, 86_400);
+            let outcome = broker.execute(&request).await.map_err(runtime_tool_error)?;
+            executed = executed.saturating_add(1);
+            let passed = outcome.status == ToolOutcomeStatus::Succeeded;
+            if !passed {
+                objective_failures = objective_failures.saturating_add(1);
+            }
+            let detail = objective_outcome_detail(&outcome);
+            if !passed {
+                regressions.push(format!("{command}: {detail}"));
+            }
+            results.push(ConditionResult {
+                condition: condition.clone(),
+                passed,
+                detail: detail.clone(),
+            });
+            evidence.push(EvaluationEvidence {
+                method: "governed_process_exit".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: format!("{command}: {detail}"),
+            });
+        }
+        let outcome = if objective_failures > 0 {
+            EvaluationOutcome::Failed
+        } else if unsupported > 0 {
+            EvaluationOutcome::Inconclusive
+        } else {
+            EvaluationOutcome::Passed
+        };
+        let confidence = ConfidenceEstimate::new(
+            if outcome == EvaluationOutcome::Inconclusive {
+                5_000
+            } else {
+                9_500
+            },
+            executed,
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: mcg_domain::EvaluationId::new(),
+            run_id,
+            task_id,
+            evaluator_instance_id: Some(evaluator_instance_id),
+            conditions: results,
+            outcome,
+            confidence,
+            regressions,
+            evidence,
+            evaluated_at: Utc::now(),
+        };
+        let events = self.store()?.settle_consumer_evaluation(&report)?;
+        for event in events {
+            let _ = self.event_sender.send(event);
+        }
+        Ok(report)
+    }
+
     /// Atomically records a planned run and immutable work plan.
     ///
     /// # Errors
@@ -2085,7 +2299,20 @@ impl AppRuntime {
         &self,
         resolution: &ApprovalResolution,
     ) -> Result<ApprovalRequest, RuntimeError> {
-        let (approval, event) = self.store()?.resolve_approval(resolution)?;
+        let mut store = self.store()?;
+        if matches!(
+            resolution.state,
+            ApprovalState::Denied | ApprovalState::Cancelled
+        ) && let Some((approval, events)) = store.reject_waiting_agent_approval(resolution)?
+        {
+            drop(store);
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            return Ok(approval);
+        }
+        let (approval, event) = store.resolve_approval(resolution)?;
+        drop(store);
         let _ = self.event_sender.send(event);
         Ok(approval)
     }
@@ -2387,6 +2614,82 @@ fn tool_definition(name: &str) -> Result<ToolDefinition, StorageError> {
 
 fn runtime_tool_error(error: ToolError) -> RuntimeError {
     AgentTurnError::Tool(error).into()
+}
+
+fn objective_command(condition: &SuccessCondition) -> Option<&str> {
+    match condition {
+        SuccessCondition::Build { command }
+        | SuccessCondition::Test { command }
+        | SuccessCondition::StaticAnalysis { command } => Some(command),
+        _ => None,
+    }
+}
+
+fn objective_process_options(
+    command: &str,
+    project_root: &str,
+) -> Result<ProcessOptions, RuntimeError> {
+    let mut parts = command.split_ascii_whitespace();
+    let executable = parts
+        .next()
+        .ok_or_else(|| StorageError::InvalidData("objective command has no executable".into()))?;
+    Ok(ProcessOptions {
+        executable: platform_process_executable(executable),
+        argv: parts.map(str::to_owned).collect(),
+        cwd: project_root.into(),
+        env: Vec::new(),
+        stdin: ProcessStream::Null,
+        stdin_data: None,
+        stdout: ProcessStream::Piped,
+        stderr: ProcessStream::Piped,
+    })
+}
+
+fn platform_process_executable(executable: &str) -> String {
+    #[cfg(target_os = "windows")]
+    if matches!(executable, "npm" | "npx" | "pnpm" | "yarn" | "bun") {
+        return format!("{executable}.cmd");
+    }
+    executable.into()
+}
+
+fn objective_request_id(
+    run_id: RunId,
+    index: usize,
+    condition: &SuccessCondition,
+) -> Result<ToolRequestId, RuntimeError> {
+    let mut hash = Sha256::new();
+    hash.update(run_id.to_string().as_bytes());
+    hash.update([0]);
+    hash.update(index.to_le_bytes());
+    hash.update([0]);
+    hash.update(
+        serde_json::to_vec(condition)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    );
+    let digest = hash.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ok(ToolRequestId::from_stable_bytes(bytes))
+}
+
+fn objective_outcome_detail(outcome: &ToolOutcome) -> String {
+    let mut detail = format!(
+        "{}; exit_code={}",
+        outcome.summary,
+        outcome
+            .exit_code
+            .map_or_else(|| "none".into(), |code| code.to_string())
+    );
+    if let Some(stdout) = &outcome.stdout {
+        detail.push_str("; stdout=");
+        detail.extend(stdout.chars().take(1_000));
+    }
+    if let Some(stderr) = &outcome.stderr {
+        detail.push_str("; stderr=");
+        detail.extend(stderr.chars().take(1_000));
+    }
+    detail
 }
 
 fn save_mcp_credential(

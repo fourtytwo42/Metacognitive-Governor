@@ -82,6 +82,14 @@ lets the broker consume the prior approval without executing the tool twice.
 Persisted mid-turn transcripts/checkpoints remain required for external MCP tools
 and to avoid a repeated inference call.
 
+Consumer terminal settlement is evidence-driven. Completing the Evaluator model
+turn is necessary but insufficient: supported build/test/static-analysis
+conditions are rerun by the harness through governed typed processes. Only a
+report tied to the completed Evaluator instance and covering every planned
+condition may settle the task and run. Passed reports atomically complete both;
+failed reports atomically fail both; inconclusive reports block the task without
+inventing terminal success.
+
 ## Authenticated Control Surface
 
 The loopback API can create and list safe consumer-default organizations, load

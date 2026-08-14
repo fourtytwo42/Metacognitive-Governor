@@ -129,7 +129,16 @@ export interface TaskMutationResponse {
 }
 
 export interface TaskEventsResponse {
-  events: Array<{ sequence: number; kind: string; occurred_at: string }>;
+  events: Array<{
+    sequence: number;
+    kind: string;
+    occurred_at: string;
+    payload?: {
+      outcome?: "passed" | "failed" | "inconclusive";
+      conditions?: Array<{ passed: boolean; detail: string }>;
+      evidence?: Array<{ method: string; detail: string }>;
+    };
+  }>;
 }
 
 export interface LaunchTaskResponse {
@@ -137,7 +146,7 @@ export interface LaunchTaskResponse {
   replayed: boolean;
   run: { run: { id: string; state: string } };
   execution: {
-    state: "not_started" | "awaiting_approval" | "awaiting_evaluation" | "blocked";
+    state: "not_started" | "awaiting_approval" | "awaiting_evaluation" | "blocked" | "completed" | "failed";
     detail: string;
   };
 }
@@ -250,6 +259,13 @@ export function approveRequest(approvalId: string): Promise<ApprovalRequest> {
   return invoke("resolve_approval", {
     approvalId,
     request: { state: "approved", reason: "Approved in MCG desktop" }
+  });
+}
+
+export function denyRequest(approvalId: string): Promise<ApprovalRequest> {
+  return invoke("resolve_approval", {
+    approvalId,
+    request: { state: "denied", reason: "Denied in MCG desktop" }
   });
 }
 

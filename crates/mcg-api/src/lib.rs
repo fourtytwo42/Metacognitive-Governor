@@ -282,6 +282,8 @@ pub enum LaunchExecution {
     AwaitingApproval { detail: String },
     AwaitingEvaluation { detail: String },
     Blocked { detail: String },
+    Completed { detail: String },
+    Failed { detail: String },
 }
 
 #[derive(Deserialize)]
@@ -1105,6 +1107,7 @@ async fn resume_task(
         .map(Json)
 }
 
+#[allow(clippy::too_many_lines)] // Agent advancement and immediate objective settlement form one public operation.
 async fn advance_consumer_run(
     state: &ApiState,
     task_id: TaskId,
@@ -1177,6 +1180,46 @@ async fn advance_consumer_run(
             break;
         }
     }
+    let advanced_view = state
+        .runtime
+        .agent_run_view(view.run.id)
+        .map_err(map_runtime_error)?;
+    let all_turns_completed = advanced_view.plan.items.iter().all(|item| {
+        advanced_view.leases.iter().any(|lease| {
+            lease.work_item_id == item.id && lease.state == mcg_agents::AgentLeaseState::Completed
+        })
+    });
+    let conditions_are_automatable = advanced_view
+        .plan
+        .items
+        .iter()
+        .flat_map(|item| &item.success_conditions)
+        .all(is_automatable_consumer_condition);
+    if all_turns_completed
+        && conditions_are_automatable
+        && state
+            .runtime
+            .task(task_id)
+            .map_err(map_runtime_error)?
+            .is_some_and(|task| task.state == TaskState::Active)
+    {
+        let report = state
+            .runtime
+            .evaluate_and_settle_consumer_run(task_id)
+            .await
+            .map_err(map_runtime_error)?;
+        execution = match report.outcome {
+            mcg_agents::EvaluationOutcome::Passed => LaunchExecution::Completed {
+                detail: "All planned work and objective checks passed.".into(),
+            },
+            mcg_agents::EvaluationOutcome::Failed => LaunchExecution::Failed {
+                detail: "One or more objective checks failed; inspect evaluation evidence.".into(),
+            },
+            mcg_agents::EvaluationOutcome::Inconclusive => LaunchExecution::Blocked {
+                detail: "Objective checks were inconclusive; configuration or additional evidence is required.".into(),
+            },
+        };
+    }
     Ok(LaunchTaskResponse {
         task: state
             .runtime
@@ -1193,7 +1236,18 @@ async fn advance_consumer_run(
 }
 
 fn observe_launched_run(task: &TaskEnvelope, view: &AgentRunView) -> LaunchExecution {
-    if task.state == TaskState::WaitingForApproval || view.run.state == AgentRunState::Waiting {
+    if task.state == TaskState::Completed || view.run.state == AgentRunState::Completed {
+        LaunchExecution::Completed {
+            detail: "The task and run completed with recorded objective evaluation evidence."
+                .into(),
+        }
+    } else if task.state == TaskState::Failed || view.run.state == AgentRunState::Failed {
+        LaunchExecution::Failed {
+            detail: "The task failed an objective evaluation; no duplicate work was issued.".into(),
+        }
+    } else if task.state == TaskState::WaitingForApproval
+        || view.run.state == AgentRunState::Waiting
+    {
         LaunchExecution::AwaitingApproval {
             detail: "This run is waiting for owner approval; no duplicate model work was issued."
                 .into(),
@@ -1219,6 +1273,15 @@ fn observe_launched_run(task: &TaskEnvelope, view: &AgentRunView) -> LaunchExecu
             detail: "This task was already launched; no duplicate model work was issued.".into(),
         }
     }
+}
+
+fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
+    matches!(
+        condition,
+        SuccessCondition::Build { .. }
+            | SuccessCondition::Test { .. }
+            | SuccessCondition::StaticAnalysis { .. }
+    )
 }
 
 fn consumer_success_conditions(
@@ -1946,7 +2009,7 @@ mod tests {
 
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
-    use mcg_agents::{ConditionResult, EvaluationEvidence, EvaluationOutcome};
+    use mcg_agents::{AgentState, ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::{AppConfig, AutonomyPreset};
     use mcg_domain::{ArtifactId, EvaluationId, ToolExecutionId, ToolRequestId};
     use mcg_mcp::{
@@ -2441,6 +2504,62 @@ form.addEventListener('submit', (event) => {
             axum::serve(listener, app)
                 .await
                 .expect("approval fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn objective_model_fixture(calls: Arc<AtomicUsize>) -> String {
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "objective-model",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32768,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                post(move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "id": "objective-response",
+                            "model": "objective-model",
+                            "status": "completed",
+                            "output": [{
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "Work turn finished; objective checks decide completion."
+                                }]
+                            }],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 8,
+                                "total_tokens": 32
+                            }
+                        }))
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("objective fixture listener");
+        let address = listener.local_addr().expect("objective fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("objective fixture server");
         });
         format!("http://{address}/v1")
     }
@@ -3351,7 +3470,7 @@ form.addEventListener('submit', (event) => {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // Public launch/approve/resume composition is one scenario.
-    async fn approved_consumer_turn_resumes_without_duplicate_side_effects() {
+    async fn consumer_approval_resume_and_rejection_settle_authority_safely() {
         let directory = tempfile::tempdir().expect("temporary runtime");
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -3486,10 +3605,11 @@ form.addEventListener('submit', (event) => {
         );
 
         let replayed = app
+            .clone()
             .oneshot(
                 authorized(Request::post(&launch_path))
                     .header("content-type", "application/json")
-                    .body(Body::from(body))
+                    .body(Body::from(body.clone()))
                     .expect("request"),
             )
             .await
@@ -3509,9 +3629,300 @@ form.addEventListener('submit', (event) => {
             LaunchExecution::AwaitingEvaluation { .. }
         ));
         assert_eq!(
-            std::fs::read_to_string(target).expect("single approved side effect"),
+            std::fs::read_to_string(&target).expect("single approved side effect"),
             "approval continuation succeeded\n"
         );
+
+        std::fs::remove_file(&target).expect("reset side effect fixture");
+        let mut denied_task = TaskEnvelope::new("Do not write without permission");
+        denied_task.project_id = Some(project.project_id);
+        denied_task.success_conditions = vec!["approved.txt must remain absent when denied".into()];
+        runtime.create_task(&denied_task).expect("denied task");
+        let denied_launch_path = format!("/api/v1/tasks/{}/launch", denied_task.id);
+        let denied_launch = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&denied_launch_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("denied launch response");
+        assert_eq!(denied_launch.status(), StatusCode::OK);
+        assert_eq!(
+            runtime
+                .task(denied_task.id)
+                .expect("denied task read")
+                .expect("denied task present")
+                .state,
+            TaskState::WaitingForApproval
+        );
+        let pending = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("denied pending approval");
+        assert_eq!(pending.len(), 1);
+        let rejected_id = pending[0].id;
+        let rejected = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/approvals/{rejected_id}/resolve"
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"state":"denied","reason":"fixture owner denied"}"#,
+                ))
+                .expect("request"),
+            )
+            .await
+            .expect("deny response");
+        assert_eq!(rejected.status(), StatusCode::OK);
+        assert!(!target.exists());
+        let denied_projection = runtime
+            .task(denied_task.id)
+            .expect("denied task read")
+            .expect("denied task present");
+        assert_eq!(denied_projection.state, TaskState::Blocked);
+        let denied_run_id = runtime
+            .task_launch_run_id(denied_task.id)
+            .expect("denied run lookup")
+            .expect("denied run");
+        let denied_view = runtime.agent_run_view(denied_run_id).expect("denied view");
+        assert_eq!(denied_view.run.state, AgentRunState::Running);
+        assert!(
+            denied_view
+                .instances
+                .iter()
+                .any(|instance| instance.state == AgentState::Failed)
+        );
+        assert!(
+            denied_view
+                .leases
+                .iter()
+                .any(|lease| lease.state == mcg_agents::AgentLeaseState::Failed)
+        );
+        assert!(
+            runtime
+                .approvals(Some(ApprovalState::Pending))
+                .expect("no stale pending approval")
+                .is_empty()
+        );
+
+        let retried = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/retry",
+                    denied_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("retry response");
+        assert_eq!(retried.status(), StatusCode::OK);
+        assert!(!target.exists());
+        let retry_approval = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("retry pending approval");
+        assert_eq!(retry_approval.len(), 1);
+        assert_ne!(retry_approval[0].id, rejected_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Success, replay, and failure share one real process-evidence fixture.
+    async fn consumer_objective_checks_atomically_settle_success_and_failure() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# Objective fixture\n").expect("readme");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"build":"node build.mjs","test":"node test.mjs","check":"node check.mjs"}}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            project_root.join("build.mjs"),
+            "import { mkdirSync } from 'node:fs'; mkdirSync('dist', { recursive: true });\n",
+        )
+        .expect("build script");
+        std::fs::write(
+            project_root.join("test.mjs"),
+            "import { existsSync } from 'node:fs'; if (!existsSync('README.md')) process.exit(2);\n",
+        )
+        .expect("test script");
+        std::fs::write(project_root.join("check.mjs"), "process.exit(0);\n").expect("check script");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        assert_eq!(project.commands.len(), 3);
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "objective_fixture".into(),
+                    display_name: "Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let mut passing_task = TaskEnvelope::new("Run the objective project gates");
+        passing_task.project_id = Some(project.project_id);
+        runtime.create_task(&passing_task).expect("passing task");
+        let app = router(runtime.clone());
+        let passing_path = format!("/api/v1/tasks/{}/launch", passing_task.id);
+        let passing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&passing_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("passing response");
+        assert_eq!(passing.status(), StatusCode::OK);
+        let passing: LaunchTaskResponse = serde_json::from_slice(
+            &passing
+                .into_body()
+                .collect()
+                .await
+                .expect("passing body")
+                .to_bytes(),
+        )
+        .expect("passing response body");
+        assert_eq!(passing.task.state, TaskState::Completed);
+        assert_eq!(passing.run.run.state, AgentRunState::Completed);
+        assert!(matches!(
+            passing.execution,
+            LaunchExecution::Completed { .. }
+        ));
+        assert_eq!(passing.run.evaluations.len(), 1);
+        assert_eq!(
+            passing.run.evaluations[0].outcome,
+            EvaluationOutcome::Passed
+        );
+        assert_eq!(passing.run.evaluations[0].conditions.len(), 3);
+        assert!(
+            passing.run.evaluations[0]
+                .conditions
+                .iter()
+                .all(|condition| condition.passed)
+        );
+        assert!(project_root.join("dist").is_dir());
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        let passing_audit = runtime.tool_audit(passing_task.id).expect("passing audit");
+        assert_eq!(
+            passing_audit
+                .iter()
+                .filter(|record| record.phase == ToolAuditPhase::Completion)
+                .count(),
+            3
+        );
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&passing_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("passing replay");
+        let replay: LaunchTaskResponse = serde_json::from_slice(
+            &replay
+                .into_body()
+                .collect()
+                .await
+                .expect("replay body")
+                .to_bytes(),
+        )
+        .expect("replay response body");
+        assert!(replay.replayed);
+        assert!(matches!(
+            replay.execution,
+            LaunchExecution::Completed { .. }
+        ));
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            runtime.tool_audit(passing_task.id).expect("replay audit"),
+            passing_audit
+        );
+
+        std::fs::write(project_root.join("test.mjs"), "process.exit(7);\n")
+            .expect("failing test script");
+        let mut failing_task = TaskEnvelope::new("Prove a failing objective gate blocks release");
+        failing_task.project_id = Some(project.project_id);
+        runtime.create_task(&failing_task).expect("failing task");
+        let failing = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    failing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("failing response");
+        assert_eq!(failing.status(), StatusCode::OK);
+        let failing: LaunchTaskResponse = serde_json::from_slice(
+            &failing
+                .into_body()
+                .collect()
+                .await
+                .expect("failing body")
+                .to_bytes(),
+        )
+        .expect("failing response body");
+        assert_eq!(failing.task.state, TaskState::Failed);
+        assert_eq!(failing.run.run.state, AgentRunState::Failed);
+        assert!(matches!(failing.execution, LaunchExecution::Failed { .. }));
+        assert_eq!(failing.run.evaluations.len(), 1);
+        assert_eq!(
+            failing.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(
+            failing.run.evaluations[0]
+                .conditions
+                .iter()
+                .any(|condition| !condition.passed)
+        );
+        assert!(
+            failing.run.evaluations[0]
+                .evidence
+                .iter()
+                .all(|evidence| evidence.method == "governed_process_exit")
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]

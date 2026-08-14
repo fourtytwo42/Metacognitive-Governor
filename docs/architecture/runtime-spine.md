@@ -75,6 +75,10 @@ Provider/tool failures move the task to `blocked`; retry is an explicit owner
 action and each work item is capped at its durable lease retry limit. Cancelling
 a launched task atomically cancels its run and revokes active agent instances and
 leases, so the task projection cannot leave hidden execution authority behind.
+Denied or cancelled approvals are also one atomic authority settlement: the
+approval becomes terminal, the waiting instance and retained lease fail, the run
+returns to its retryable running state, and the task becomes blocked with ordered
+events in the same SQLite transaction.
 When a local tool needs permission, desktop shows the pending request on its task
 card. Approve and continue revalidates the live lease, organization, provider
 routes, tool permissions, and current project-context fingerprint before restoring
@@ -84,6 +88,20 @@ repeat its side effect. The provider turn is currently replayed from its bounded
 initial request and can incur another model call. External MCP approval resume and
 target-scoped resumes require a persisted provider-turn checkpoint and therefore
 fail closed until that checkpoint format is implemented.
+
+After all planned Coder and independent Evaluator turns complete, command-based
+`Build`, `Test`, and `StaticAnalysis` conditions are executed immediately through
+typed `process.exec` requests. Runtime accepts only commands that still exactly
+match current project discovery, gives each condition a stable run-scoped request
+identity, and routes it through capability policy, immutable tool audit, and
+durable execution leases. A validated independent `EvaluationReport` carries the
+redacted exit evidence. SQLite records that report and changes the task/run to
+completed or failed in one transaction; an inconclusive report blocks the task
+while leaving the run retryable. Start replay observes terminal evidence and never
+reissues model or objective work. Guided mode currently defers these process checks
+as inconclusive until a dedicated evaluation-approval checkpoint is implemented.
+Non-command conditions remain visibly awaiting evaluation rather than accepting
+model self-report as objective proof.
 
 ## Verification evidence
 
@@ -97,6 +115,10 @@ conditions, missing-provider reporting, and retry idempotency.
 The approval fixture proves that a guided-mode write remains absent while pending,
 executes after approval, advances independent evaluation, and is not repeated by
 a later Start replay.
+The objective fixture uses real cross-platform Node/npm processes to prove passing
+build/test/check conditions atomically complete a task, a nonzero test exit
+atomically fails it, evidence is durable, and terminal replay adds neither model
+calls nor tool audit records.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

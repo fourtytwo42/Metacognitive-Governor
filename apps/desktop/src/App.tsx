@@ -6,6 +6,7 @@ import {
   completeOpenAiOAuth,
   configureMcpConnection,
   createTask,
+  denyRequest,
   discoverProject,
   discoverMcpConnection,
   listMcpConnections,
@@ -334,6 +335,26 @@ export function App() {
     }
   }
 
+  async function denyApprovalRequest(taskId: string, approvalId: string) {
+    setTaskBusy(true);
+    setTaskError(null);
+    setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Denying request and revoking waiting authority..." }));
+    try {
+      await denyRequest(approvalId);
+      const current = await listTasks();
+      const settled = current.tasks.find((task) => task.id === taskId);
+      if (!settled) throw new Error("Denied task disappeared from durable task listing");
+      replaceTask(settled);
+      setApprovals((approvals) => approvals.filter((approval) => approval.id !== approvalId));
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Request denied; task is blocked and can be retried." }));
+    } catch (error) {
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Approval denial failed." }));
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
   async function changeTaskState(taskId: string, state: "cancelled") {
     setTaskBusy(true);
     setTaskError(null);
@@ -509,7 +530,14 @@ export function App() {
                   </div>}
                   {taskHistory[task.id] && <ol className="event-history">
                     {taskHistory[task.id]?.events.map((event) => (
-                      <li key={event.sequence}><span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}</li>
+                      <li key={event.sequence}>
+                        <span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}
+                        {event.kind === "evaluation_recorded" && event.payload?.outcome && <div className="evaluation-summary">
+                          <strong>Objective result: {event.payload.outcome}</strong>
+                          <span>{event.payload.conditions?.filter((condition) => condition.passed).length ?? 0} of {event.payload.conditions?.length ?? 0} checks passed</span>
+                          {advanced && event.payload.conditions?.map((condition, index) => <small key={`${event.sequence}-${index}`}>{condition.passed ? "Pass" : "Fail"}: {condition.detail}</small>)}
+                        </div>}
+                      </li>
                     ))}
                   </ol>}
                 </div>
@@ -517,6 +545,7 @@ export function App() {
                   {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy || !task.project_id} title={task.project_id ? undefined : "Select a project before starting"} onClick={() => startTask(task.id)}>Start task</button>}
                   {task.state === "blocked" && <button className="primary" type="button" disabled={taskBusy} onClick={() => retryBlockedTask(task.id)}>Retry</button>}
                   {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="primary" type="button" disabled={taskBusy} onClick={() => approveAndResume(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Approve and continue</button>}
+                  {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => denyApprovalRequest(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Deny</button>}
                   {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
                   <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide history" : "History"}</button>
                 </div>

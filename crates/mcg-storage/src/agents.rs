@@ -9,6 +9,7 @@ use mcg_domain::{
     TaskState,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
+use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +64,201 @@ pub struct AgentResumeReceipt {
 }
 
 impl SqliteEventStore {
+    /// Atomically resolves a denied/cancelled approval for a launched waiting
+    /// turn and revokes all authority retained for that turn.
+    ///
+    /// Returns `None` when the approval is not associated with a launched task,
+    /// allowing ordinary standalone tool approvals to use the generic resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the approval is pending and unexpired and its
+    /// task has exactly one waiting instance with one active lease.
+    #[allow(clippy::too_many_lines)] // Approval and authority settlement must remain one transaction.
+    pub fn reject_waiting_agent_approval(
+        &mut self,
+        resolution: &ApprovalResolution,
+    ) -> Result<Option<(ApprovalRequest, Vec<EventEnvelope>)>, StorageError> {
+        if !matches!(
+            resolution.state,
+            ApprovalState::Denied | ApprovalState::Cancelled
+        ) {
+            return Err(StorageError::InvalidData(
+                "waiting agent approval rejection must be denied or cancelled".into(),
+            ));
+        }
+        let mut approval = self
+            .approval(resolution.approval_id)?
+            .ok_or_else(|| StorageError::Conflict("approval was not found".into()))?;
+        let Some(run_id) = self.task_launch_run_id(approval.task_id)? else {
+            return Ok(None);
+        };
+        if approval.state != ApprovalState::Pending || approval.expires_at <= resolution.resolved_at
+        {
+            return Err(StorageError::Conflict(
+                "approval is no longer pending and unexpired".into(),
+            ));
+        }
+        let mut task = self
+            .load_task(approval.task_id)?
+            .ok_or(StorageError::TaskNotFound(approval.task_id))?;
+        let mut run = self
+            .agent_run(run_id)?
+            .ok_or(StorageError::AgentRunNotFound(run_id))?;
+        let mut instances: Vec<AgentInstance> = self.read_json_rows(
+            "SELECT instance_json FROM agent_instances
+             WHERE run_id = ?1 AND state = 'waiting' ORDER BY instance_id",
+            &run_id.to_string(),
+        )?;
+        if task.state != TaskState::WaitingForApproval
+            || run.state != AgentRunState::Waiting
+            || instances.len() != 1
+        {
+            return Err(StorageError::Conflict(
+                "approval task does not have one waiting agent turn".into(),
+            ));
+        }
+        let Some(mut instance) = instances.pop() else {
+            return Err(StorageError::Conflict(
+                "approval task does not have one waiting agent turn".into(),
+            ));
+        };
+        let mut leases: Vec<AgentLease> = self.read_json_rows(
+            "SELECT lease_json FROM agent_leases
+             WHERE instance_id = ?1 AND state = 'active' ORDER BY lease_id",
+            &instance.id.to_string(),
+        )?;
+        if leases.len() != 1 {
+            return Err(StorageError::Conflict(
+                "waiting approval agent does not have one active lease".into(),
+            ));
+        }
+        let Some(mut lease) = leases.pop() else {
+            return Err(StorageError::Conflict(
+                "waiting approval agent does not have one active lease".into(),
+            ));
+        };
+        let at = resolution.resolved_at;
+        approval.state = resolution.state;
+        task.transition_to(TaskState::Blocked)?;
+        task.updated_at = at;
+        let previous_run = run.state;
+        run.state = AgentRunState::Running;
+        run.updated_at = at;
+        let previous_instance = instance.state;
+        instance.state = AgentState::Failed;
+        instance.updated_at = at;
+        lease.state = AgentLeaseState::Failed;
+        lease.heartbeat_at = at;
+        let reason_code = if resolution.state == ApprovalState::Denied {
+            "approval_denied"
+        } else {
+            "approval_cancelled"
+        };
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE approvals SET state = ?1, approval_json = ?2, resolved_at = ?3
+             WHERE approval_id = ?4 AND state = 'pending'",
+            params![
+                crate::approval_state_name(approval.state),
+                serde_json::to_string(&approval)?,
+                at.to_rfc3339(),
+                approval.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "approval changed before rejection settlement")?;
+        let changed = transaction.execute(
+            "UPDATE agent_instances SET state = 'failed', instance_json = ?1, updated_at = ?2
+             WHERE instance_id = ?3 AND state = 'waiting'",
+            params![
+                serde_json::to_string(&instance)?,
+                at.to_rfc3339(),
+                instance.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(
+            changed,
+            "waiting instance changed before approval rejection",
+        )?;
+        let changed = transaction.execute(
+            "UPDATE agent_leases SET state = 'failed', lease_json = ?1, heartbeat_at = ?2
+             WHERE lease_id = ?3 AND state = 'active'",
+            params![
+                serde_json::to_string(&lease)?,
+                at.to_rfc3339(),
+                lease.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "active lease changed before approval rejection")?;
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND state = 'waiting'",
+            params![
+                serde_json::to_string(&run)?,
+                at.to_rfc3339(),
+                run.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "waiting run changed before approval rejection")?;
+        let mut events = vec![
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::ApprovalResolved,
+                    Some(task.id),
+                    serde_json::json!({"approval": approval, "resolution": resolution}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentInstanceStateChanged,
+                    Some(task.id),
+                    serde_json::json!({"from": previous_instance, "to": AgentState::Failed, "instance": &instance, "reason": reason_code}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentLeaseStateChanged,
+                    Some(task.id),
+                    serde_json::json!({"lease": &lease, "reason": reason_code}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(task.id),
+                    serde_json::json!({"from": previous_run, "to": AgentRunState::Running, "run": &run, "reason": reason_code}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentTurnFailed,
+                    Some(task.id),
+                    serde_json::json!({"run_id": run.id, "instance_id": instance.id, "lease_id": lease.id, "reason_code": reason_code}),
+                ),
+            )?,
+        ];
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(task.id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::WaitingForApproval,
+                    to: TaskState::Blocked,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok(Some((approval, events)))
+    }
+
     /// Atomically restores one approval-waiting consumer task/run/instance to
     /// running while retaining its original active lease.
     ///
@@ -2060,6 +2256,162 @@ impl SqliteEventStore {
         &mut self,
         report: &EvaluationReport,
     ) -> Result<EventEnvelope, StorageError> {
+        self.validate_evaluation_report(report)?;
+        let event = EventEnvelope::new(
+            EventKind::EvaluationRecorded,
+            Some(report.task_id),
+            serde_json::to_value(report)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO evaluations(
+                evaluation_id, run_id, task_id, evaluation_json, evaluated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                report.id.to_string(),
+                report.run_id.to_string(),
+                report.task_id.to_string(),
+                serde_json::to_string(report)?,
+                report.evaluated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Atomically records objective evaluation evidence and settles the
+    /// consumer task/run projection from that evidence.
+    ///
+    /// Passed and failed reports terminally settle the run and task.
+    /// Inconclusive reports leave the run retryable and block the task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless this is a running launched task whose every
+    /// planned work item has completed durable agent authority.
+    #[allow(clippy::too_many_lines)] // Evidence and all terminal projections are one transaction.
+    pub fn settle_consumer_evaluation(
+        &mut self,
+        report: &EvaluationReport,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        let (mut run, plan) = self.validate_evaluation_report(report)?;
+        if self.task_launch_run_id(report.task_id)? != Some(run.id) {
+            return Err(StorageError::Conflict(
+                "evaluation run is not the task's consumer launch".into(),
+            ));
+        }
+        let mut task = self
+            .load_task(report.task_id)?
+            .ok_or(StorageError::TaskNotFound(report.task_id))?;
+        if task.state != TaskState::Active || run.state != AgentRunState::Running {
+            return Err(StorageError::Conflict(
+                "consumer evaluation requires an active task and running run".into(),
+            ));
+        }
+        let completed_leases: Vec<AgentLease> = self.read_json_rows(
+            "SELECT agent_leases.lease_json FROM agent_leases
+             INNER JOIN agent_instances
+                ON agent_instances.instance_id = agent_leases.instance_id
+             WHERE agent_instances.run_id = ?1 AND agent_leases.state = 'completed'
+             ORDER BY agent_leases.acquired_at, agent_leases.lease_id",
+            &run.id.to_string(),
+        )?;
+        let completed_work = completed_leases
+            .iter()
+            .map(|lease| lease.work_item_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !plan
+            .items
+            .iter()
+            .all(|item| completed_work.contains(&item.id))
+        {
+            return Err(StorageError::Conflict(
+                "consumer evaluation cannot settle before every planned turn completes".into(),
+            ));
+        }
+        let at = report.evaluated_at;
+        let previous_run = run.state;
+        let next_task = match report.outcome {
+            mcg_agents::EvaluationOutcome::Passed => {
+                run.state = AgentRunState::Completed;
+                run.completed_at = Some(at);
+                TaskState::Completed
+            }
+            mcg_agents::EvaluationOutcome::Failed => {
+                run.state = AgentRunState::Failed;
+                run.completed_at = Some(at);
+                TaskState::Failed
+            }
+            mcg_agents::EvaluationOutcome::Inconclusive => TaskState::Blocked,
+        };
+        run.updated_at = at;
+        task.transition_to(next_task)?;
+        task.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO evaluations(
+                evaluation_id, run_id, task_id, evaluation_json, evaluated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                report.id.to_string(),
+                report.run_id.to_string(),
+                report.task_id.to_string(),
+                serde_json::to_string(report)?,
+                at.to_rfc3339(),
+            ],
+        )?;
+        let mut events = vec![Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::EvaluationRecorded,
+                Some(report.task_id),
+                serde_json::to_value(report)?,
+            ),
+        )?];
+        if run.state != previous_run {
+            let changed = transaction.execute(
+                "UPDATE agent_runs SET state = ?1, run_json = ?2, updated_at = ?3,
+                        completed_at = ?4 WHERE run_id = ?5 AND state = 'running'",
+                params![
+                    run_state_name(run.state),
+                    serde_json::to_string(&run)?,
+                    at.to_rfc3339(),
+                    run.completed_at.map(|value| value.to_rfc3339()),
+                    run.id.to_string(),
+                ],
+            )?;
+            ensure_single_change(changed, "consumer run changed before evaluation settlement")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(report.task_id),
+                    serde_json::json!({"from": previous_run, "to": run.state, "run": &run, "reason": "objective_evaluation"}),
+                ),
+            )?);
+        }
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(report.task_id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::Active,
+                    to: next_task,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok(events)
+    }
+
+    fn validate_evaluation_report(
+        &self,
+        report: &EvaluationReport,
+    ) -> Result<(AgentRun, WorkPlan), StorageError> {
         let run = self
             .agent_run(report.run_id)?
             .ok_or(StorageError::AgentRunNotFound(report.run_id))?;
@@ -2129,27 +2481,7 @@ impl SqliteEventStore {
                 ));
             }
         }
-        let event = EventEnvelope::new(
-            EventKind::EvaluationRecorded,
-            Some(report.task_id),
-            serde_json::to_value(report)?,
-        );
-        let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO evaluations(
-                evaluation_id, run_id, task_id, evaluation_json, evaluated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                report.id.to_string(),
-                report.run_id.to_string(),
-                report.task_id.to_string(),
-                serde_json::to_string(report)?,
-                report.evaluated_at.to_rfc3339(),
-            ],
-        )?;
-        let event = Self::insert_event(&transaction, &event)?;
-        transaction.commit()?;
-        Ok(event)
+        Ok((run, plan))
     }
 
     /// Lists immutable evaluation reports for a run.

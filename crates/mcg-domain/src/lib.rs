@@ -113,9 +113,10 @@ impl TaskState {
                         | Self::Cancelled
                 )
                 | (
-                    Self::WaitingForApproval | Self::Blocked,
-                    Self::Active | Self::Failed | Self::Cancelled
+                    Self::WaitingForApproval,
+                    Self::Active | Self::Blocked | Self::Failed | Self::Cancelled
                 )
+                | (Self::Blocked, Self::Active | Self::Failed | Self::Cancelled)
         )
     }
 }
@@ -213,5 +214,6 @@ mod tests {
     fn terminal_task_states_cannot_restart() {
         assert!(!TaskState::Completed.can_transition_to(TaskState::Active));
         assert!(TaskState::Pending.can_transition_to(TaskState::Active));
+        assert!(TaskState::WaitingForApproval.can_transition_to(TaskState::Blocked));
     }
 }

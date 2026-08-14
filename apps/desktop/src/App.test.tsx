@@ -16,6 +16,7 @@ const client = vi.hoisted(() => ({
   resumeTask: vi.fn(),
   listApprovals: vi.fn(),
   approveRequest: vi.fn(),
+  denyRequest: vi.fn(),
   transitionTask: vi.fn(),
   taskEvents: vi.fn(),
   pickProject: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock("./desktop-client", () => ({
   resumeTask: client.resumeTask,
   listApprovals: client.listApprovals,
   approveRequest: client.approveRequest,
+  denyRequest: client.denyRequest,
   transitionTask: client.transitionTask,
   loadTaskEvents: client.taskEvents,
   pickProjectDirectory: client.pickProject,
@@ -62,6 +64,7 @@ beforeEach(() => {
   client.resumeTask.mockReset();
   client.listApprovals.mockReset();
   client.approveRequest.mockReset();
+  client.denyRequest.mockReset();
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
   client.pickProject.mockReset();
@@ -234,7 +237,20 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   client.taskEvents.mockResolvedValue({
     events: [
       { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at },
-      { sequence: 2, kind: "task_transitioned", occurred_at: pendingTask.created_at }
+      { sequence: 2, kind: "task_transitioned", occurred_at: pendingTask.created_at },
+      {
+        sequence: 3,
+        kind: "evaluation_recorded",
+        occurred_at: pendingTask.created_at,
+        payload: {
+          outcome: "passed",
+          conditions: [
+            { passed: true, detail: "npm test exited with code 0" },
+            { passed: true, detail: "npm run build exited with code 0" }
+          ],
+          evidence: [{ method: "governed_process_exit", detail: "exit code 0" }]
+        }
+      }
     ]
   });
   render(<App />);
@@ -262,6 +278,8 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
 
   fireEvent.click(screen.getByRole("button", { name: "History" }));
   expect(await screen.findByText("task transitioned")).toBeInTheDocument();
+  expect(screen.getByText("Objective result: passed")).toBeInTheDocument();
+  expect(screen.getByText("2 of 2 checks passed")).toBeInTheDocument();
   expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
 });
 
@@ -332,6 +350,42 @@ test("pending approval can be reviewed and resumed from the task card", async ()
   expect(client.approveRequest).toHaveBeenCalledWith(approval.id);
   await waitFor(() => expect(client.resumeTask).toHaveBeenCalledWith(waitingTask.id));
   expect(await screen.findByText("Approved work finished; checks are next.")).toBeInTheDocument();
+});
+
+test("pending approval can be denied into a retryable blocked task", async () => {
+  const waitingTask = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000050",
+    project_id: "00000000-0000-4000-8000-000000000051",
+    goal: "Do not write without permission",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "waiting_for_approval",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  const approval = {
+    id: "00000000-0000-4000-8000-000000000052",
+    task_id: waitingTask.id,
+    action: "fs.write",
+    resource: "C:\\Projects\\sample\\denied.txt",
+    reason: "Writing a project file requires approval.",
+    state: "pending"
+  };
+  client.listTasks
+    .mockResolvedValueOnce({ tasks: [waitingTask] })
+    .mockResolvedValueOnce({ tasks: [{ ...waitingTask, state: "blocked" }] });
+  client.listApprovals.mockResolvedValue({ approvals: [approval] });
+  client.denyRequest.mockResolvedValue({ ...approval, state: "denied" });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Deny" }));
+  expect(client.denyRequest).toHaveBeenCalledWith(approval.id);
+  expect(await screen.findByText("blocked")).toBeInTheDocument();
+  expect(screen.getByText("Request denied; task is blocked and can be retried.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
 });
 
 test("native project selection discovers the folder and associates the new task", async () => {

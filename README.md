@@ -102,6 +102,16 @@ Guided local-tool requests appear on the task card. Approval resumes through the
 same durable run after revalidating context and authority; stable request identity
 prevents the approved side effect from being duplicated. The CLI equivalent is
 `mcg approval approve ID` followed by `mcg task resume TASK_ID`.
+Denied/cancelled requests atomically revoke the waiting agent lease and block the
+task for an explicit bounded retry.
+
+For projects with discovered build, test, or static-analysis commands, Start now
+runs those checks through the governed tool broker after the independent Evaluator
+turn. Passing evidence atomically completes the task/run; a nonzero exit atomically
+fails them. Task History exposes the durable objective result and check counts,
+with per-condition details in advanced mode. Natural-language, browser, HTTP, and
+other condition types remain nonterminal until their objective evaluators are
+implemented; model text alone is never promoted to proof.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

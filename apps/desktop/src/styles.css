@@ -74,6 +74,9 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .event-history { margin: 14px 0 0; padding: 12px 12px 12px 35px; background: #070b12; color: #aebed0; font-size: .8rem; }
 .event-history li { padding: 3px 0; }
 .event-history span { display: inline-block; min-width: 28px; color: #65788e; }
+.event-history .evaluation-summary { display: grid; gap: 3px; margin: 6px 0 8px 28px; padding: 8px 10px; border-left: 2px solid #55c996; color: #c8d7e8; }
+.event-history .evaluation-summary span { color: #90a4ba; }
+.event-history .evaluation-summary small { display: block; color: #90a4ba; line-height: 1.35; }
 .selected-project { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 12px; border: 1px solid #2d756d; background: #42d9c80b; }
 .selected-project div { min-width: 0; display: grid; gap: 4px; }
 .selected-project strong { color: #dffaf6; }
