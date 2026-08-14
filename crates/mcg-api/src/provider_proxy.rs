@@ -37,7 +37,11 @@ struct ProxyRequest {
 }
 
 pub(super) async fn models(State(state): State<ApiState>) -> Json<Value> {
-    let available = !state.runtime.provider_route_candidates().await.is_empty();
+    let available = state
+        .runtime
+        .provider_route_candidates()
+        .await
+        .is_ok_and(|candidates| !candidates.is_empty());
     Json(json!({
         "object": "list",
         "data": MODEL_ALIASES.iter().map(|(id, description)| json!({
@@ -103,7 +107,11 @@ async fn route(state: &ApiState, proxy: &ProxyRequest) -> Result<RoutePlan, ApiE
             proxy.alias
         )));
     }
-    let mut candidates = state.runtime.provider_route_candidates().await;
+    let mut candidates = state
+        .runtime
+        .provider_route_candidates()
+        .await
+        .map_err(ApiError::from)?;
     if proxy.alias == "mcg:local" {
         let local_ids = state
             .runtime

@@ -77,10 +77,12 @@ no unsuccessful turn creates fabricated model/tool usage or a success result.
 Local-tool resume is explicit and context-bound: runtime verifies an approved
 request, the one waiting instance and lease, the original organization role, the
 current provider routes and tools, and an unchanged project-context fingerprint.
-The model turn is replayed under the same lease; deterministic request identity
-lets the broker consume the prior approval without executing the tool twice.
-Persisted mid-turn transcripts/checkpoints remain required for external MCP tools
-and to avoid a repeated inference call.
+The engine persists a bounded continuation after each provider response and
+before/after each governed tool call. Deterministic request identity lets the
+broker consume the exact approval, while the persisted response and conversation
+continue the pinned turn without another pre-approval inference. Waiting local
+and external MCP turns retain authority across daemon restart only when the
+checkpoint, approval, lease, and task/run projections all agree and remain live.
 
 Consumer terminal settlement is evidence-driven. Completing the Evaluator model
 turn is necessary but insufficient: supported build/test/static-analysis

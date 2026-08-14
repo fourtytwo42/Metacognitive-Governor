@@ -380,6 +380,24 @@ CREATE INDEX IF NOT EXISTS consumer_evaluation_checkpoints_state
     ON consumer_evaluation_checkpoints(state, updated_at);
 ";
 
+const MIGRATION_12: &str = r"
+CREATE TABLE IF NOT EXISTS agent_turn_checkpoints (
+    lease_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL,
+    pending_tool_request_id TEXT,
+    checkpoint_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(lease_id) REFERENCES agent_leases(lease_id),
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(instance_id) REFERENCES agent_instances(instance_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS agent_turn_checkpoints_task
+    ON agent_turn_checkpoints(task_id, updated_at);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -473,6 +491,7 @@ impl SqliteEventStore {
             (9_i64, MIGRATION_9),
             (10_i64, MIGRATION_10),
             (11_i64, MIGRATION_11),
+            (12_i64, MIGRATION_12),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

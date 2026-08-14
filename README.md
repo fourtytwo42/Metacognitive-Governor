@@ -117,7 +117,14 @@ with per-condition and governed-tool details in advanced mode. Guided mode reque
 approval for the exact supported objective batch and immutable project snapshot.
 That checkpoint survives daemon restart; denial blocks for a bounded retry with a
 fresh request identity, while approval resumes the batch without repeating model
-turns or completed checks. Free-form conditions without a typed evaluator remain
+turns or completed checks.
+
+Tool-loop approvals retain a separate bounded provider-turn checkpoint containing
+the pinned route, response, conversation position, redacted tool outcomes, and
+exact pending request. After restart, approving a local or external MCP action
+continues from that point without replaying the pre-approval model request; the
+governed action remains exactly-once and the checkpoint is removed atomically when
+its authority ends. Free-form conditions without a typed evaluator remain
 nonterminal; model text alone is never promoted to proof. Advanced
 success-condition lines can use `FILE EXISTS project/relative/path` to stream a
 regular file into bounded content-addressed evidence without exposing its contents

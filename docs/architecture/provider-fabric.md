@@ -87,8 +87,10 @@ discovered model catalog. Initial discovery must succeed before the connection,
 catalog, and two global events commit atomically. A failed setup unregisters the
 candidate and clears any newly written credential slots. The runtime registry
 accepts only exact registered provider identities and exact discovered model
-targets; it reconstructs a durable provider lazily after daemon restart and
-refreshes its catalog through authenticated API/CLI operations.
+targets. After daemon restart it lazily reconstructs provider transports from
+protected credentials and restores the validated secret-free catalog without a
+network call, so pinned work can continue immediately. Explicit authenticated
+discovery operations remain the only way to refresh that durable catalog.
 
 ## Routing and accounting
 

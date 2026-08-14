@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState,
-    AgentState, AgentTurnResult, AgentUsageRecord, AssignedModel, ConfidenceEstimate,
-    EvaluationReport, OrganizationGenome, OrganizationalMetrics, UsageKind, WorkPlan,
+    AgentState, AgentTurnCheckpoint, AgentTurnResult, AgentUsageRecord, AssignedModel,
+    ConfidenceEstimate, EvaluationReport, OrganizationGenome, OrganizationalMetrics, UsageKind,
+    WorkPlan,
 };
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, ProjectSnapshotId,
@@ -627,6 +628,10 @@ impl SqliteEventStore {
             "approval_cancelled"
         };
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM agent_turn_checkpoints WHERE lease_id = ?1",
+            [lease.id.to_string()],
+        )?;
         let changed = transaction.execute(
             "UPDATE approvals SET state = ?1, approval_json = ?2, resolved_at = ?3
              WHERE approval_id = ?4 AND state = 'pending'",
@@ -946,6 +951,10 @@ impl SqliteEventStore {
             &run_id.to_string(),
         )?;
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM agent_turn_checkpoints WHERE task_id = ?1",
+            [task_id.to_string()],
+        )?;
         let mut events = Vec::new();
         for instance in &mut instances {
             let previous = instance.state;
@@ -2400,6 +2409,10 @@ impl SqliteEventStore {
                 at.to_rfc3339(),
             ],
         )?;
+        transaction.execute(
+            "DELETE FROM agent_turn_checkpoints WHERE lease_id = ?1",
+            [lease.id.to_string()],
+        )?;
         let changed = transaction.execute(
             "UPDATE agent_leases SET state = 'completed', lease_json = ?1, heartbeat_at = ?2
              WHERE lease_id = ?3 AND state = 'active'",
@@ -2472,6 +2485,76 @@ impl SqliteEventStore {
     ) -> Result<Option<AgentTurnResult>, StorageError> {
         self.read_optional_json(
             "SELECT result_json FROM agent_turn_results WHERE lease_id = ?1",
+            &lease_id.to_string(),
+        )
+    }
+
+    /// Replaces the live durable continuation point for one active agent lease.
+    ///
+    /// # Errors
+    ///
+    /// The checkpoint must match one active instance/lease/run authority chain.
+    pub fn save_agent_turn_checkpoint(
+        &mut self,
+        checkpoint: &AgentTurnCheckpoint,
+    ) -> Result<(), StorageError> {
+        let instance = self.agent_instance(checkpoint.request.instance.id)?.ok_or(
+            StorageError::AgentInstanceNotFound(checkpoint.request.instance.id),
+        )?;
+        let lease = self.agent_lease(checkpoint.request.lease.id)?.ok_or(
+            StorageError::AgentLeaseNotFound(checkpoint.request.lease.id),
+        )?;
+        let run = self
+            .agent_run(instance.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(instance.run_id))?;
+        if checkpoint.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || lease.instance_id != instance.id
+            || checkpoint.request.instance.run_id != run.id
+            || checkpoint.request.instance.task_id != run.task_id
+            || checkpoint.request.lease.instance_id != instance.id
+            || !matches!(instance.state, AgentState::Running | AgentState::Waiting)
+            || lease.state != AgentLeaseState::Active
+            || !matches!(run.state, AgentRunState::Running | AgentRunState::Waiting)
+            || checkpoint.model_calls.is_empty()
+            || checkpoint.response.model != checkpoint.pinned_route.target.model_id
+        {
+            return Err(StorageError::InvalidData(
+                "agent turn checkpoint authority or provider evidence is inconsistent".into(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO agent_turn_checkpoints(
+                lease_id, run_id, instance_id, task_id, pending_tool_request_id,
+                checkpoint_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(lease_id) DO UPDATE SET
+                pending_tool_request_id = excluded.pending_tool_request_id,
+                checkpoint_json = excluded.checkpoint_json,
+                updated_at = excluded.updated_at",
+            params![
+                lease.id.to_string(),
+                run.id.to_string(),
+                instance.id.to_string(),
+                run.task_id.to_string(),
+                checkpoint.pending_tool_request_id.map(|id| id.to_string()),
+                serde_json::to_string(checkpoint)?,
+                checkpoint.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Loads the current continuation point for an agent lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid persisted JSON.
+    pub fn agent_turn_checkpoint(
+        &self,
+        lease_id: AgentLeaseId,
+    ) -> Result<Option<AgentTurnCheckpoint>, StorageError> {
+        self.read_optional_json(
+            "SELECT checkpoint_json FROM agent_turn_checkpoints WHERE lease_id = ?1",
             &lease_id.to_string(),
         )
     }
@@ -2549,6 +2632,12 @@ impl SqliteEventStore {
             task_transition = Some((task, next));
         }
         let transaction = self.connection.transaction()?;
+        if disposition == AgentTurnDisposition::Failed {
+            transaction.execute(
+                "DELETE FROM agent_turn_checkpoints WHERE lease_id = ?1",
+                [lease.id.to_string()],
+            )?;
+        }
         let changed = transaction.execute(
             "UPDATE agent_instances SET state = ?1, instance_json = ?2, updated_at = ?3
              WHERE instance_id = ?4 AND state = 'running'",
@@ -3005,10 +3094,48 @@ impl SqliteEventStore {
     /// # Errors
     ///
     /// Recovery is atomic and fails without partial state changes.
+    #[allow(clippy::too_many_lines)] // Recovery classification and projection changes share one transaction.
     pub fn recover_agent_work(
         &mut self,
         at: DateTime<Utc>,
     ) -> Result<AgentRecoveryReport, StorageError> {
+        let checkpoints = self.read_all_json::<AgentTurnCheckpoint>(
+            "SELECT checkpoint_json FROM agent_turn_checkpoints ORDER BY lease_id",
+        )?;
+        let approvals = self.read_all_json::<ApprovalRequest>(
+            "SELECT approval_json FROM approvals WHERE state IN ('pending', 'approved') ORDER BY approval_id",
+        )?;
+        let resumable = checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint
+                    .pending_tool_request_id
+                    .is_some_and(|request_id| {
+                        approvals.iter().any(|approval| {
+                            approval.tool_request_id == request_id
+                                && approval.task_id == checkpoint.request.instance.task_id
+                                && matches!(
+                                    approval.state,
+                                    ApprovalState::Pending | ApprovalState::Approved
+                                )
+                                && approval.expires_at > at
+                        })
+                    })
+                    && checkpoint.request.lease.expires_at > at
+            })
+            .collect::<Vec<_>>();
+        let resumable_runs = resumable
+            .iter()
+            .map(|checkpoint| checkpoint.request.instance.run_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let resumable_instances = resumable
+            .iter()
+            .map(|checkpoint| checkpoint.request.instance.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let resumable_leases = resumable
+            .iter()
+            .map(|checkpoint| checkpoint.request.lease.id)
+            .collect::<std::collections::BTreeSet<_>>();
         let mut runs = self.read_all_json::<AgentRun>(
             "SELECT run_json FROM agent_runs WHERE state IN ('running', 'waiting') ORDER BY run_id",
         )?;
@@ -3019,6 +3146,11 @@ impl SqliteEventStore {
         let mut leases = self.read_all_json::<AgentLease>(
             "SELECT lease_json FROM agent_leases WHERE state = 'active' ORDER BY lease_id",
         )?;
+        runs.retain(|run| run.state != AgentRunState::Waiting || !resumable_runs.contains(&run.id));
+        instances.retain(|instance| {
+            instance.state != AgentState::Waiting || !resumable_instances.contains(&instance.id)
+        });
+        leases.retain(|lease| !resumable_leases.contains(&lease.id));
         let lease_instance_tasks = self
             .read_all_json::<AgentInstance>(
                 "SELECT DISTINCT agent_instances.instance_json FROM agent_instances

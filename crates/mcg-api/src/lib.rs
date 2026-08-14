@@ -2560,9 +2560,9 @@ mod tests {
         format!("http://{address}/v1")
     }
 
-    async fn governed_mcp_tool_fixture(calls: Arc<AtomicUsize>) -> String {
+    async fn governed_mcp_tool_fixture(calls: Arc<AtomicUsize>, destructive: bool) -> String {
         async fn response(
-            State(calls): State<Arc<AtomicUsize>>,
+            State((calls, destructive)): State<(Arc<AtomicUsize>, bool)>,
             Json(body): Json<serde_json::Value>,
         ) -> Json<serde_json::Value> {
             let result = match body["method"].as_str().expect("method") {
@@ -2577,9 +2577,9 @@ mod tests {
                         "description": "Read deterministic fixture data",
                         "inputSchema": {"type": "object", "additionalProperties": false},
                         "annotations": {
-                            "readOnlyHint": true,
-                            "destructiveHint": false,
-                            "openWorldHint": false
+                            "readOnlyHint": !destructive,
+                            "destructiveHint": destructive,
+                            "openWorldHint": destructive
                         }
                     }],
                     "serverInfo": {"name": "governed-fixture"}
@@ -2608,7 +2608,7 @@ mod tests {
                 listener,
                 Router::new()
                     .route("/mcp", post(response))
-                    .with_state(calls),
+                    .with_state((calls, destructive)),
             )
             .await
             .expect("serve MCP");
@@ -2616,8 +2616,12 @@ mod tests {
         format!("http://{address}/mcp")
     }
 
-    async fn governed_mcp_model_fixture() -> String {
-        async fn response(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    async fn governed_mcp_model_fixture(calls: Arc<AtomicUsize>) -> String {
+        async fn response(
+            State(calls): State<Arc<AtomicUsize>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            calls.fetch_add(1, Ordering::SeqCst);
             let has_result = body.to_string().contains("function_call_output");
             let output = if has_result {
                 serde_json::json!([{
@@ -2625,19 +2629,24 @@ mod tests {
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": "Remote evidence received"}]
                 }])
-            } else {
-                let name = body
-                    .get("tools")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|tools| tools.first())
-                    .and_then(|tool| tool.get("name"))
-                    .and_then(serde_json::Value::as_str)
-                    .expect("exposed MCP tool");
+            } else if let Some(name) = body
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|tools| tools.first())
+                .and_then(|tool| tool.get("name"))
+                .and_then(serde_json::Value::as_str)
+            {
                 serde_json::json!([{
                     "type": "function_call",
                     "call_id": "mcp-call-1",
                     "name": name,
                     "arguments": "{}"
+                }])
+            } else {
+                serde_json::json!([{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Independent review finished"}]
                 }])
             };
             Json(serde_json::json!({
@@ -2663,7 +2672,8 @@ mod tests {
                     }))
                 }),
             )
-            .route("/v1/responses", post(response));
+            .route("/v1/responses", post(response))
+            .with_state(calls);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind model");
         let address = listener.local_addr().expect("model address");
         tokio::spawn(async move {
@@ -2835,7 +2845,7 @@ form.addEventListener('submit', (event) => {
         format!("http://{address}/v1")
     }
 
-    async fn approval_resume_fixture(target: &std::path::Path) -> String {
+    async fn approval_resume_fixture(target: &std::path::Path, calls: Arc<AtomicUsize>) -> String {
         let target = target.to_string_lossy().into_owned();
         let app = Router::new()
             .route(
@@ -2857,7 +2867,9 @@ form.addEventListener('submit', (event) => {
                 "/v1/responses",
                 post(move |Json(body): Json<serde_json::Value>| {
                     let target = target.clone();
+                    let calls = calls.clone();
                     async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
                         let has_tool_result = body
                             .get("input")
                             .and_then(serde_json::Value::as_array)
@@ -3932,14 +3944,20 @@ form.addEventListener('submit', (event) => {
             .expect("project fixture");
         let mut config = AppConfig::default().with_data_directory(directory.path().join("data"));
         config.autonomy = AutonomyPreset::Guided;
-        let runtime = Arc::new(
-            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
-        );
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime should open"));
+        let token = std::fs::read_to_string(config.auth_token_path())
+            .expect("auth token")
+            .trim()
+            .to_owned();
+        let authorized = |request: axum::http::request::Builder| {
+            request.header("authorization", format!("Bearer {token}"))
+        };
         let project = runtime
             .discover_project(&project_root, ProjectId::new())
             .expect("discover project")
             .project;
         let target = std::path::PathBuf::from(&project.root).join("approved.txt");
+        let model_calls = Arc::new(AtomicUsize::new(0));
         runtime
             .configure_provider(
                 ProviderConnection {
@@ -3947,7 +3965,7 @@ form.addEventListener('submit', (event) => {
                     id: "approval_resume_fixture".into(),
                     display_name: "Approval Resume Fixture".into(),
                     kind: ProviderKind::OpenAiCompatible,
-                    base_url: approval_resume_fixture(&target).await,
+                    base_url: approval_resume_fixture(&target, model_calls.clone()).await,
                     auth_mode: ProviderAuthMode::None,
                     organization: None,
                     project: None,
@@ -3957,6 +3975,7 @@ form.addEventListener('submit', (event) => {
             )
             .await
             .expect("provider");
+        let discovery_model_calls = model_calls.load(Ordering::SeqCst);
         let mut task = TaskEnvelope::new("Create the approved fixture file");
         task.project_id = Some(project.project_id);
         task.success_conditions = vec!["approved.txt exists with the requested content".into()];
@@ -4001,6 +4020,11 @@ form.addEventListener('submit', (event) => {
             launched.execution,
             LaunchExecution::AwaitingApproval { .. }
         ));
+        assert_eq!(
+            model_calls.load(Ordering::SeqCst),
+            discovery_model_calls + 1,
+            "initial provider response must be checkpointed before approval"
+        );
         assert!(!target.exists());
         let approvals = runtime
             .approvals(Some(ApprovalState::Pending))
@@ -4021,6 +4045,31 @@ form.addEventListener('submit', (event) => {
             .expect("approval response");
         assert_eq!(approved.status(), StatusCode::OK);
 
+        drop(app);
+        drop(runtime);
+        let runtime = Arc::new(AppRuntime::open(config).expect("reopen waiting turn"));
+        let recovered = runtime
+            .agent_run_view(launched.run.run.id)
+            .expect("recovered waiting run");
+        assert_eq!(recovered.run.state, AgentRunState::Waiting);
+        assert_eq!(
+            recovered
+                .instances
+                .iter()
+                .filter(|instance| instance.state == AgentState::Waiting)
+                .count(),
+            1
+        );
+        assert_eq!(
+            recovered
+                .leases
+                .iter()
+                .filter(|lease| lease.state == mcg_agents::AgentLeaseState::Active)
+                .count(),
+            1
+        );
+        let app = router(runtime.clone());
+
         let resumed = app
             .clone()
             .oneshot(
@@ -4031,21 +4080,31 @@ form.addEventListener('submit', (event) => {
             )
             .await
             .expect("resume response");
-        assert_eq!(resumed.status(), StatusCode::OK);
-        let resumed: LaunchTaskResponse = serde_json::from_slice(
-            &resumed
-                .into_body()
-                .collect()
-                .await
-                .expect("body")
-                .to_bytes(),
-        )
-        .expect("resume body");
+        let resumed_status = resumed.status();
+        let resumed_bytes = resumed
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(
+            resumed_status,
+            StatusCode::OK,
+            "resume failed: {}",
+            String::from_utf8_lossy(&resumed_bytes)
+        );
+        let resumed: LaunchTaskResponse =
+            serde_json::from_slice(&resumed_bytes).expect("resume body");
         assert!(matches!(
             resumed.execution,
             LaunchExecution::AwaitingEvaluation { .. }
         ));
         assert_eq!(resumed.run.results.len(), 2);
+        assert_eq!(
+            model_calls.load(Ordering::SeqCst),
+            discovery_model_calls + 3,
+            "resume must call only the pinned continuation and independent evaluator"
+        );
         assert_eq!(
             std::fs::read_to_string(&target).expect("approved side effect"),
             "approval continuation succeeded\n"
@@ -6949,7 +7008,14 @@ form.addEventListener('submit', (event) => {
         let mutation: ProviderMutation = serde_json::from_slice(&body).expect("mutation");
         assert_eq!(mutation.catalog.models[0].id, "fixture-model");
         assert_eq!(mutation.catalog.models[0].capabilities.tools, None);
-        assert_eq!(runtime.provider_route_candidates().await.len(), 1);
+        assert_eq!(
+            runtime
+                .provider_route_candidates()
+                .await
+                .expect("provider routes")
+                .len(),
+            1
+        );
 
         let probed = app
             .clone()
@@ -7012,7 +7078,14 @@ form.addEventListener('submit', (event) => {
             runtime.provider_connections().expect("connections").len(),
             1
         );
-        assert_eq!(runtime.provider_route_candidates().await.len(), 1);
+        assert_eq!(
+            runtime
+                .provider_route_candidates()
+                .await
+                .expect("provider routes")
+                .len(),
+            1
+        );
 
         let response = app
             .oneshot(
@@ -7168,7 +7241,7 @@ form.addEventListener('submit', (event) => {
                     id: "mcp_agent_provider".into(),
                     display_name: "MCP Agent Provider".into(),
                     kind: ProviderKind::OpenAiCompatible,
-                    base_url: governed_mcp_model_fixture().await,
+                    base_url: governed_mcp_model_fixture(Arc::new(AtomicUsize::new(0))).await,
                     auth_mode: ProviderAuthMode::None,
                     organization: None,
                     project: None,
@@ -7186,7 +7259,7 @@ form.addEventListener('submit', (event) => {
                     id: "governed".into(),
                     display_name: "Governed Fixture".into(),
                     transport: McpTransport::StreamableHttp {
-                        url: governed_mcp_tool_fixture(remote_calls.clone()).await,
+                        url: governed_mcp_tool_fixture(remote_calls.clone(), false).await,
                     },
                     auth_mode: McpAuthMode::None,
                     protocol_mode: McpProtocolMode::Auto,
@@ -7241,5 +7314,185 @@ form.addEventListener('submit', (event) => {
                 .is_some_and(|name| name.starts_with("mcp_governed_lookup_"))
         );
         assert!(runtime.approvals(None).expect("approvals").is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Restart, approval, provider continuation, and MCP side effect are one boundary.
+    async fn external_mcp_approval_resumes_from_checkpoint_without_repeating_inference() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# MCP approval fixture\n")
+            .expect("fixture file");
+        let mut config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        config.autonomy = AutonomyPreset::Guided;
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime"));
+        let token = std::fs::read_to_string(config.auth_token_path())
+            .expect("auth token")
+            .trim()
+            .to_owned();
+        let authorized = |request: axum::http::request::Builder| {
+            request.header("authorization", format!("Bearer {token}"))
+        };
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "mcp_approval_provider".into(),
+                    display_name: "MCP Approval Provider".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: governed_mcp_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+        let discovery_calls = model_calls.load(Ordering::SeqCst);
+        let remote_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_mcp(
+                McpConnection {
+                    contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+                    id: "approval_mcp".into(),
+                    display_name: "Approval MCP".into(),
+                    transport: McpTransport::StreamableHttp {
+                        url: governed_mcp_tool_fixture(remote_calls.clone(), true).await,
+                    },
+                    auth_mode: McpAuthMode::None,
+                    protocol_mode: McpProtocolMode::Auto,
+                    enabled: true,
+                },
+                None,
+            )
+            .await
+            .expect("configure MCP");
+        let mut task = TaskEnvelope::new("Run the approved remote operation once");
+        task.project_id = Some(project.project_id);
+        task.success_conditions = vec!["Review the durable remote evidence".into()];
+        runtime.create_task(&task).expect("task");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: vec!["mcp::approval_mcp::lookup".into()],
+            estimated_output_tokens: 256,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+        let waiting = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}/launch", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("launch request"),
+            )
+            .await
+            .expect("launch response");
+        assert_eq!(waiting.status(), StatusCode::OK);
+        assert_eq!(remote_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(model_calls.load(Ordering::SeqCst), discovery_calls + 1);
+        let approval = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("approvals")
+            .pop()
+            .expect("pending MCP approval");
+        assert_eq!(approval.action, "mcp::approval_mcp::lookup");
+        let approved = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/approvals/{}/resolve",
+                    approval.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"state":"approved","reason":"approve exact remote call"}"#,
+                ))
+                .expect("approval request"),
+            )
+            .await
+            .expect("approval response");
+        assert_eq!(approved.status(), StatusCode::OK);
+        let run_id = runtime
+            .task_launch_run_id(task.id)
+            .expect("run lookup")
+            .expect("run");
+        let waiting_lease_id = runtime
+            .agent_run_view(run_id)
+            .expect("waiting run view")
+            .leases
+            .into_iter()
+            .find(|lease| lease.state == mcg_agents::AgentLeaseState::Active)
+            .expect("active waiting lease")
+            .id;
+        assert!(
+            runtime
+                .has_agent_turn_checkpoint(waiting_lease_id)
+                .expect("checkpoint status")
+        );
+        drop(runtime);
+
+        let runtime = Arc::new(AppRuntime::open(config).expect("reopen runtime"));
+        assert_eq!(
+            runtime.agent_run_view(run_id).expect("run view").run.state,
+            AgentRunState::Waiting
+        );
+        let resumed = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}/resume", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("resume request"),
+            )
+            .await
+            .expect("resume response");
+        let status = resumed.status();
+        let bytes = resumed
+            .into_body()
+            .collect()
+            .await
+            .expect("resume body")
+            .to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "resume failed: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let resumed: LaunchTaskResponse =
+            serde_json::from_slice(&bytes).expect("resume response body");
+        assert!(matches!(resumed.execution, LaunchExecution::Blocked { .. }));
+        assert_eq!(remote_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !runtime
+                .has_agent_turn_checkpoint(waiting_lease_id)
+                .expect("consumed checkpoint status")
+        );
+        assert_eq!(
+            model_calls.load(Ordering::SeqCst),
+            discovery_calls + 3,
+            "resume must not replay the paid pre-approval provider call"
+        );
+        assert_eq!(
+            runtime
+                .tool_audit(task.id)
+                .expect("tool audit")
+                .iter()
+                .filter(|record| {
+                    record.phase == ToolAuditPhase::Completion
+                        && record.tool == "mcp::approval_mcp::lookup"
+                })
+                .count(),
+            1
+        );
     }
 }

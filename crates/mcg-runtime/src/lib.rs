@@ -16,10 +16,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
-    AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnEngine, AgentTurnError,
-    AgentTurnRequest, AgentTurnResult, AgentUsageRecord, ConditionResult, ConfidenceEstimate,
-    EvaluationEvidence, EvaluationOutcome, EvaluationReport, ExternalToolBinding, LeaseBudget,
-    OrganizationGenome, OrganizationalMetrics, RoleKind, SuccessCondition, WorkPlan,
+    AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnCheckpoint,
+    AgentTurnCheckpointSink, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
+    AgentUsageRecord, ConditionResult, ConfidenceEstimate, EvaluationEvidence, EvaluationOutcome,
+    EvaluationReport, ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics,
+    RoleKind, SuccessCondition, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
@@ -1078,9 +1079,51 @@ impl AppRuntime {
         }
     }
 
-    /// Returns the currently discovered in-memory routes available to agent turns.
-    pub async fn provider_route_candidates(&self) -> Vec<RouteCandidate> {
-        self.provider_registry.read().await.route_candidates()
+    /// Returns discovered routes, lazily restoring durable provider metadata and
+    /// catalogs after daemon restart without issuing a discovery/model request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protected-credential, provider-validation, or storage error.
+    pub async fn provider_route_candidates(&self) -> Result<Vec<RouteCandidate>, RuntimeError> {
+        let durable = {
+            let store = self.store()?;
+            store
+                .provider_connections()?
+                .into_iter()
+                .map(|connection| {
+                    let catalog = store.provider_catalog(&connection.id)?;
+                    Ok((connection, catalog))
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?
+        };
+        let mut registry = self.provider_registry.write().await;
+        let mut first_error = None;
+        for (connection, catalog) in durable {
+            if !registry
+                .provider_ids()
+                .iter()
+                .any(|id| id == &connection.id)
+                && let Err(error) = registry
+                    .register_connection(connection.clone(), self.provider_credentials.as_ref())
+            {
+                first_error.get_or_insert(error);
+                continue;
+            }
+            if registry.models(&connection.id).is_none()
+                && let Some(catalog) = catalog
+                && let Err(error) = registry.restore_catalog(&connection.id, catalog.models)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        let routes = registry.route_candidates();
+        if routes.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error.into());
+        }
+        Ok(routes)
     }
 
     /// Creates a provider connection, stores credentials only in the protected
@@ -2328,7 +2371,7 @@ impl AppRuntime {
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let context_fingerprint = format!("sha256:{:x}", Sha256::digest(context_json));
         let (tools, external_tools) = self.resolve_agent_tools(role.kind, &spec.requested_tools)?;
-        let routes = self.provider_route_candidates().await;
+        let routes = self.provider_route_candidates().await?;
         if routes.is_empty() {
             return Err(ProviderError::Configuration(
                 "no discovered provider models are available".into(),
@@ -2611,16 +2654,6 @@ impl AppRuntime {
         {
             return Err(StorageError::InvalidData("agent resume bounds are invalid".into()).into());
         }
-        if !self
-            .approvals(Some(ApprovalState::Approved))?
-            .iter()
-            .any(|approval| approval.task_id == task_id)
-        {
-            return Err(StorageError::Conflict(
-                "consumer task has no approved tool request".into(),
-            )
-            .into());
-        }
         let run_id = self
             .task_launch_run_id(task_id)?
             .ok_or_else(|| StorageError::Conflict("task has no consumer launch".into()))?;
@@ -2642,6 +2675,29 @@ impl AppRuntime {
             .iter()
             .find(|lease| lease.instance_id == waiting.id && lease.state == AgentLeaseState::Active)
             .ok_or_else(|| StorageError::Conflict("waiting agent has no active lease".into()))?;
+        let checkpoint = self
+            .store()?
+            .agent_turn_checkpoint(lease.id)?
+            .ok_or_else(|| {
+                StorageError::Conflict(
+                    "approval-waiting turn has no durable provider checkpoint".into(),
+                )
+            })?;
+        let pending_request_id = checkpoint.pending_tool_request_id.ok_or_else(|| {
+            StorageError::Conflict("approval-waiting checkpoint has no pending tool request".into())
+        })?;
+        if !self
+            .approvals(Some(ApprovalState::Approved))?
+            .iter()
+            .any(|approval| {
+                approval.task_id == task_id && approval.tool_request_id == pending_request_id
+            })
+        {
+            return Err(StorageError::Conflict(
+                "checkpointed tool request has not been approved".into(),
+            )
+            .into());
+        }
         let task = self
             .task(task_id)?
             .ok_or(StorageError::TaskNotFound(task_id))?;
@@ -2673,15 +2729,25 @@ impl AppRuntime {
             )
             .into());
         }
-        let (tools, external_tools) =
-            self.resolve_agent_tools(role.kind, &lease.tool_permissions)?;
-        if !external_tools.is_empty() {
-            return Err(StorageError::Conflict(
-                "external MCP approval continuation requires a persisted turn checkpoint".into(),
-            )
-            .into());
-        }
-        let routes = self.provider_route_candidates().await;
+        let requested_tools = lease
+            .tool_permissions
+            .iter()
+            .map(|permission| {
+                checkpoint
+                    .request
+                    .external_tools
+                    .iter()
+                    .find(|binding| binding.exposed_name == *permission)
+                    .map_or_else(
+                        || permission.clone(),
+                        |binding| {
+                            format!("mcp::{}::{}", binding.connection_id, binding.remote_name)
+                        },
+                    )
+            })
+            .collect::<Vec<_>>();
+        let (tools, external_tools) = self.resolve_agent_tools(role.kind, &requested_tools)?;
+        let routes = self.provider_route_candidates().await?;
         if routes.is_empty() {
             return Err(ProviderError::Configuration(
                 "no discovered provider models are available".into(),
@@ -2760,8 +2826,8 @@ impl AppRuntime {
                 routing_policy: RoutingPolicy::default(),
                 tools,
                 external_tools,
-                estimated_output_tokens,
-                max_model_calls,
+                estimated_output_tokens: checkpoint.request.estimated_output_tokens,
+                max_model_calls: checkpoint.request.max_model_calls,
             },
             &self.provider_gateway(),
             &broker,
@@ -2858,8 +2924,12 @@ impl AppRuntime {
                 .into());
             }
         }
+        let checkpoint = self.store()?.agent_turn_checkpoint(request.lease.id)?;
+        let checkpoint_sink = DurableAgentTurnCheckpointSink {
+            store: self.store.clone(),
+        };
         let result = match AgentTurnEngine
-            .execute(request.clone(), models, tools)
+            .execute_resumable(request.clone(), checkpoint, models, tools, &checkpoint_sink)
             .await
         {
             Ok(result) => result,
@@ -2963,6 +3033,16 @@ impl AppRuntime {
         Ok(self.store()?.tool_audit_for_task(task_id)?)
     }
 
+    /// Reports whether a lease currently retains a resumable provider-turn
+    /// checkpoint without exposing the private transcript itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable storage cannot be read or decoded.
+    pub fn has_agent_turn_checkpoint(&self, lease_id: AgentLeaseId) -> Result<bool, RuntimeError> {
+        Ok(self.store()?.agent_turn_checkpoint(lease_id)?.is_some())
+    }
+
     #[must_use]
     pub fn tool_control(&self) -> DurableToolControl {
         DurableToolControl {
@@ -2981,6 +3061,21 @@ impl AppRuntime {
 pub struct DurableToolControl {
     store: Arc<Mutex<SqliteEventStore>>,
     event_sender: broadcast::Sender<EventEnvelope>,
+}
+
+#[derive(Clone)]
+struct DurableAgentTurnCheckpointSink {
+    store: Arc<Mutex<SqliteEventStore>>,
+}
+
+impl AgentTurnCheckpointSink for DurableAgentTurnCheckpointSink {
+    fn save(&self, checkpoint: &AgentTurnCheckpoint) -> Result<(), String> {
+        self.store
+            .lock()
+            .map_err(|_| "runtime storage lock was poisoned".to_owned())?
+            .save_agent_turn_checkpoint(checkpoint)
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl DurableToolControl {
@@ -3642,6 +3737,7 @@ fn classify_agent_turn_error(error: &AgentTurnError) -> (AgentTurnDisposition, &
             (AgentTurnDisposition::Waiting, "approval_required")
         }
         AgentTurnError::Invalid(_) => (AgentTurnDisposition::Failed, "invalid_turn"),
+        AgentTurnError::Checkpoint(_) => (AgentTurnDisposition::Failed, "checkpoint_failure"),
         AgentTurnError::IterationLimit => (AgentTurnDisposition::Failed, "iteration_limit"),
         AgentTurnError::Provider(mcg_providers::ProviderError::Authentication(_)) => {
             (AgentTurnDisposition::Failed, "provider_authentication")

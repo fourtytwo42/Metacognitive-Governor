@@ -84,10 +84,17 @@ card. Approve and continue revalidates the live lease, organization, provider
 routes, tool permissions, and current project-context fingerprint before restoring
 running authority. Tool request ids are derived from the lease plus the canonical
 model call, so replay recognizes the approved request and the broker does not
-repeat its side effect. The provider turn is currently replayed from its bounded
-initial request and can incur another model call. External MCP approval resume and
-target-scoped resumes require a persisted provider-turn checkpoint and therefore
-fail closed until that checkpoint format is implemented.
+repeat its side effect. SQLite migration 12 checkpoints the exact bounded model
+request/response, pinned route, attributed model calls, redacted completed tool
+outcomes, next tool position, and pending request identity before approval can
+pause the turn. Restart preserves only waiting authority backed by that checkpoint
+and a matching unexpired pending/approved request. Resume revalidates current
+project context, role, catalog, tool schema/classification, and exact approval,
+then continues from the checkpoint without replaying the paid provider call.
+Local and external MCP tools use the same continuation path; completion,
+rejection, failure, and cancellation remove the checkpoint atomically.
+Checkpoints are private local working data and can contain bounded project/model
+content, but never provider credentials or authorization headers.
 
 After all planned Coder and independent Evaluator turns complete, command-based
 `Build`, `Test`, and `StaticAnalysis` conditions are executed immediately through

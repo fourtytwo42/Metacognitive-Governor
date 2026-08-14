@@ -189,11 +189,17 @@ executes exactly one read-only external MCP call through the broker, returns its
 result to the model, and verifies the durable lease alias plus succeeded tool
 evidence with no approval record.
 
+A second file-backed consumer fixture uses a destructive/open-world external MCP
+tool in guided mode. It proves the remote call remains at zero before approval,
+reopens the daemon while waiting, restores provider/catalog and agent authority,
+executes the remote side effect exactly once, and continues the pinned model turn
+without repeating the paid pre-approval inference.
+
 This is the MCP server plus HTTP/stdio client foundation, not the completed MCP feature family. Remaining
 M6 work includes:
 
-- expanded MCP run decomposition, independent evaluation, approval-resume,
-  completion, and cancellation contracts;
+- expanded MCP run decomposition, independent evaluation, completion, and
+  cancellation contracts beyond the qualified checkpointed consumer resume;
 - request-scoped SSE progress and opt-in subscription streams where useful;
 - interoperability fixtures against representative third-party MCP SDKs and
   both-platform native desktop UAT.

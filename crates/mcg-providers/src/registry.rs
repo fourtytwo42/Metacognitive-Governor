@@ -177,6 +177,35 @@ impl ProviderRegistry {
         self.discovered.get(provider_id).cloned()
     }
 
+    /// Restores a previously validated, secret-free durable model catalog for
+    /// an already registered provider without making a network request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown provider, mismatched identity, or
+    /// malformed/duplicate model identifiers.
+    pub fn restore_catalog(
+        &mut self,
+        provider_id: &str,
+        mut models: Vec<ModelDescriptor>,
+    ) -> Result<(), ProviderError> {
+        if !self.providers.contains_key(provider_id) {
+            return Err(ProviderError::Configuration(format!(
+                "provider connection {provider_id} is not registered"
+            )));
+        }
+        models.sort_by(|left, right| left.id.cmp(&right.id));
+        if models.iter().any(|model| model.id.trim().is_empty())
+            || models.windows(2).any(|pair| pair[0].id == pair[1].id)
+        {
+            return Err(ProviderError::Incompatible(
+                "durable model catalog contains duplicate or empty identities".into(),
+            ));
+        }
+        self.discovered.insert(provider_id.to_owned(), models);
+        Ok(())
+    }
+
     #[must_use]
     pub fn route_candidates(&self) -> Vec<RouteCandidate> {
         self.discovered

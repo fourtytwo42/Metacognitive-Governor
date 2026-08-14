@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{AgentInstance, AgentLease, AgentLeaseState, RoleDefinition};
+use crate::{AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, RoleDefinition};
 
 #[async_trait]
 pub trait AgentModelGateway: Send + Sync {
@@ -88,6 +88,40 @@ pub struct AgentTurnResult {
     pub tool_outcomes: Vec<ToolOutcome>,
 }
 
+/// Durable, credential-free private execution state captured after every provider response
+/// and before/after each governed tool call. It is sufficient to resume a
+/// pinned turn without repeating an already-paid provider request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentTurnCheckpoint {
+    pub schema_version: u16,
+    pub request: AgentTurnRequest,
+    pub pinned_route: PlannedRoute,
+    pub model_request: ModelRequest,
+    pub response: ModelResponse,
+    pub model_calls: Vec<ModelCallEvidence>,
+    pub tool_outcomes: Vec<ToolOutcome>,
+    pub next_tool_call_index: usize,
+    pub pending_tool_request_id: Option<mcg_domain::ToolRequestId>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+pub trait AgentTurnCheckpointSink: Send + Sync {
+    /// Replaces the current checkpoint for this lease durably.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted storage failure description.
+    fn save(&self, checkpoint: &AgentTurnCheckpoint) -> Result<(), String>;
+}
+
+struct NoopCheckpointSink;
+
+impl AgentTurnCheckpointSink for NoopCheckpointSink {
+    fn save(&self, _checkpoint: &AgentTurnCheckpoint) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AgentTurnError {
     #[error("agent turn request is invalid: {0}")]
@@ -96,6 +130,8 @@ pub enum AgentTurnError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Tool(#[from] ToolError),
+    #[error("agent turn checkpoint failed: {0}")]
+    Checkpoint(String),
     #[error("agent exceeded its bounded model/tool iteration limit")]
     IterationLimit,
 }
@@ -119,12 +155,56 @@ impl AgentTurnEngine {
         models: &M,
         tools: &T,
     ) -> Result<AgentTurnResult, AgentTurnError> {
+        self.execute_resumable(request, None, models, tools, &NoopCheckpointSink)
+            .await
+    }
+
+    /// Executes or resumes a bounded turn while durably exposing each safe
+    /// continuation point to the supplied checkpoint sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, routing, provider, checkpoint, tool, approval, or
+    /// bounded-iteration failures without bypassing the supplied gateways.
+    #[allow(clippy::too_many_lines)] // The state-machine ordering is the crash/replay safety invariant.
+    pub async fn execute_resumable<
+        M: AgentModelGateway,
+        T: AgentToolGateway,
+        C: AgentTurnCheckpointSink,
+    >(
+        &self,
+        request: AgentTurnRequest,
+        checkpoint: Option<AgentTurnCheckpoint>,
+        models: &M,
+        tools: &T,
+        checkpoints: &C,
+    ) -> Result<AgentTurnResult, AgentTurnError> {
         validate_turn(&request)?;
+        let checkpoint_tokens = checkpoint.as_ref().map_or(0, |checkpoint| {
+            checkpoint
+                .model_calls
+                .iter()
+                .map(|call| call.usage.total_tokens)
+                .sum::<u64>()
+        });
+        let checkpoint_cost = checkpoint.as_ref().map_or(0.0, |checkpoint| {
+            checkpoint
+                .model_calls
+                .iter()
+                .filter_map(|call| call.cost_usd)
+                .sum::<f64>()
+        });
+        if !checkpoint_cost.is_finite() || checkpoint_cost < 0.0 {
+            return Err(AgentTurnError::Invalid(
+                "checkpoint contains invalid provider cost evidence".into(),
+            ));
+        }
         let input_tokens = estimated_input_tokens(&request);
         if request.lease.budget.limit.max_tokens.is_some_and(|limit| {
             input_tokens
                 .saturating_add(request.estimated_output_tokens)
                 .saturating_add(request.lease.budget.consumed_tokens)
+                .saturating_add(checkpoint_tokens)
                 > limit
         }) {
             return Err(AgentTurnError::Invalid(
@@ -159,7 +239,8 @@ impl AgentTurnEngine {
             routing_policy.max_fallbacks = 0;
         }
         if let Some(limit) = request.lease.budget.limit.max_cost_usd {
-            let remaining = (limit - request.lease.budget.consumed_cost_usd).max(0.0);
+            let remaining =
+                (limit - request.lease.budget.consumed_cost_usd - checkpoint_cost).max(0.0);
             routing_policy.max_estimated_cost_usd = Some(
                 routing_policy
                     .max_estimated_cost_usd
@@ -196,35 +277,72 @@ impl AgentTurnEngine {
             ));
         }
 
-        let mut model_request = initial_model_request(&request);
-        let mut routes =
-            std::iter::once(route_plan.pinned.clone()).chain(route_plan.fallbacks.iter().cloned());
-        let mut first_response = None;
-        let mut selected = None;
-        let mut model_calls = Vec::new();
-        let mut last_retriable = None;
-        for route in &mut routes {
-            model_request.model = route.target.model_id.clone();
-            match call_model(models, &route, model_request.clone(), &candidates).await {
-                Ok((response, evidence)) => {
-                    first_response = Some(response);
-                    model_calls.push(evidence);
-                    selected = Some(route);
-                    break;
+        let (
+            mut model_request,
+            selected,
+            mut response,
+            mut model_calls,
+            mut tool_outcomes,
+            mut next_tool_call_index,
+        ) = if let Some(checkpoint) = checkpoint {
+            validate_checkpoint(&request, &checkpoint)?;
+            (
+                checkpoint.model_request,
+                checkpoint.pinned_route,
+                checkpoint.response,
+                checkpoint.model_calls,
+                checkpoint.tool_outcomes,
+                checkpoint.next_tool_call_index,
+            )
+        } else {
+            let mut model_request = initial_model_request(&request);
+            let mut routes = std::iter::once(route_plan.pinned.clone())
+                .chain(route_plan.fallbacks.iter().cloned());
+            let mut first_response = None;
+            let mut selected = None;
+            let mut model_calls = Vec::new();
+            let mut last_retriable = None;
+            for route in &mut routes {
+                model_request.model = route.target.model_id.clone();
+                match call_model(models, &route, model_request.clone(), &candidates).await {
+                    Ok((response, evidence)) => {
+                        first_response = Some(response);
+                        model_calls.push(evidence);
+                        selected = Some(route);
+                        break;
+                    }
+                    Err(error) if should_fallback(&error) => last_retriable = Some(error),
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) if should_fallback(&error) => last_retriable = Some(error),
-                Err(error) => return Err(error.into()),
             }
-        }
-        let selected = selected.ok_or_else(|| {
-            last_retriable.unwrap_or_else(|| {
-                ProviderError::Configuration("route plan produced no callable route".into())
-            })
-        })?;
-        let mut response = first_response.ok_or_else(|| {
-            AgentTurnError::Invalid("selected route produced no initial response".into())
-        })?;
-        let mut tool_outcomes = Vec::new();
+            let selected = selected.ok_or_else(|| {
+                last_retriable.unwrap_or_else(|| {
+                    ProviderError::Configuration("route plan produced no callable route".into())
+                })
+            })?;
+            let response = first_response.ok_or_else(|| {
+                AgentTurnError::Invalid("selected route produced no initial response".into())
+            })?;
+            save_checkpoint(
+                checkpoints,
+                &request,
+                &selected,
+                &model_request,
+                &response,
+                &model_calls,
+                &[],
+                0,
+                None,
+            )?;
+            (
+                model_request,
+                selected,
+                response,
+                model_calls,
+                Vec::new(),
+                0,
+            )
+        };
 
         loop {
             let tool_calls = response
@@ -247,6 +365,11 @@ impl AgentTurnEngine {
                     tool_outcomes,
                 });
             }
+            if next_tool_call_index > tool_calls.len() {
+                return Err(AgentTurnError::Invalid(
+                    "checkpoint tool position exceeds the provider response".into(),
+                ));
+            }
             if model_calls.len() >= usize::from(request.max_model_calls)
                 || tool_calls.len() > 32
                 || tool_outcomes.len().saturating_add(tool_calls.len()) > 128
@@ -259,7 +382,11 @@ impl AgentTurnEngine {
                     "model emitted duplicate tool call identities".into(),
                 ));
             }
-            for (call_id, name, arguments) in tool_calls {
+            for (index, (call_id, name, arguments)) in tool_calls
+                .into_iter()
+                .enumerate()
+                .skip(next_tool_call_index)
+            {
                 if !allowed.contains(&name) || !exposed.contains(&name) {
                     return Err(AgentTurnError::Invalid(format!(
                         "model requested unleased or unexposed tool {name}"
@@ -276,6 +403,17 @@ impl AgentTurnEngine {
                     &arguments,
                     &request.lease,
                     binding,
+                )?;
+                save_checkpoint(
+                    checkpoints,
+                    &request,
+                    &selected,
+                    &model_request,
+                    &response,
+                    &model_calls,
+                    &tool_outcomes,
+                    index,
+                    Some(tool_request.id),
                 )?;
                 let outcome = tools.execute(&tool_request).await?;
                 if outcome.request_id != tool_request.id {
@@ -302,14 +440,97 @@ impl AgentTurnEngine {
                     },
                 ]);
                 tool_outcomes.push(outcome);
+                next_tool_call_index = index.saturating_add(1);
+                save_checkpoint(
+                    checkpoints,
+                    &request,
+                    &selected,
+                    &model_request,
+                    &response,
+                    &model_calls,
+                    &tool_outcomes,
+                    next_tool_call_index,
+                    None,
+                )?;
             }
             model_request.model = selected.target.model_id.clone();
             let (next, evidence) =
                 call_model(models, &selected, model_request.clone(), &candidates).await?;
             response = next;
             model_calls.push(evidence);
+            next_tool_call_index = 0;
+            save_checkpoint(
+                checkpoints,
+                &request,
+                &selected,
+                &model_request,
+                &response,
+                &model_calls,
+                &tool_outcomes,
+                0,
+                None,
+            )?;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_checkpoint<C: AgentTurnCheckpointSink>(
+    sink: &C,
+    request: &AgentTurnRequest,
+    pinned_route: &PlannedRoute,
+    model_request: &ModelRequest,
+    response: &ModelResponse,
+    model_calls: &[ModelCallEvidence],
+    tool_outcomes: &[ToolOutcome],
+    next_tool_call_index: usize,
+    pending_tool_request_id: Option<mcg_domain::ToolRequestId>,
+) -> Result<(), AgentTurnError> {
+    sink.save(&AgentTurnCheckpoint {
+        schema_version: AGENT_RUN_SCHEMA_VERSION,
+        request: request.clone(),
+        pinned_route: pinned_route.clone(),
+        model_request: model_request.clone(),
+        response: response.clone(),
+        model_calls: model_calls.to_vec(),
+        tool_outcomes: tool_outcomes.to_vec(),
+        next_tool_call_index,
+        pending_tool_request_id,
+        updated_at: Utc::now(),
+    })
+    .map_err(AgentTurnError::Checkpoint)
+}
+
+fn validate_checkpoint(
+    request: &AgentTurnRequest,
+    checkpoint: &AgentTurnCheckpoint,
+) -> Result<(), AgentTurnError> {
+    if checkpoint.schema_version != AGENT_RUN_SCHEMA_VERSION
+        || checkpoint.request.instance.id != request.instance.id
+        || checkpoint.request.lease.id != request.lease.id
+        || checkpoint.request.role != request.role
+        || checkpoint.request.context != request.context
+        || checkpoint.request.tools != request.tools
+        || checkpoint.request.external_tools != request.external_tools
+        || checkpoint.request.estimated_output_tokens != request.estimated_output_tokens
+        || checkpoint.request.max_model_calls != request.max_model_calls
+        || checkpoint.model_calls.is_empty()
+        || checkpoint.model_calls.len() > usize::from(request.max_model_calls)
+        || checkpoint.response.model != checkpoint.pinned_route.target.model_id
+        || !request
+            .route_candidates
+            .iter()
+            .any(|candidate| candidate.target == checkpoint.pinned_route.target)
+        || checkpoint
+            .model_calls
+            .iter()
+            .any(|call| call.target != checkpoint.pinned_route.target)
+    {
+        return Err(AgentTurnError::Invalid(
+            "persisted agent turn checkpoint does not match live authority".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_turn(request: &AgentTurnRequest) -> Result<(), AgentTurnError> {

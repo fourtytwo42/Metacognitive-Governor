@@ -61,6 +61,9 @@ The first real-project suite includes:
 - restart the daemon during a long task and resume without duplicate modifications;
 - restart while a guided objective batch awaits approval and resume without a
   repeated model call, completed check, or broadened command authority;
+- restart while local or external MCP work awaits approval and prove the exact
+  pinned continuation runs without replaying the paid provider response or
+  duplicating the governed side effect;
 - require approval for deployment while allowing autonomous local build/test work;
 - exercise a fake provider failure, model escalation, budget stop, and user steering;
 - compare active and shadow models while accepting output only from the active run.
