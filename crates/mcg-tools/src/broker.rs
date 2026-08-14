@@ -588,6 +588,12 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ResourceKind::Memory,
             key.clone(),
         )],
+        ToolRequestKind::ComputerActions { session_id, .. } => vec![make(
+            ActionClass::ComputerInput,
+            CapabilityEffect::Execute,
+            ResourceKind::ComputerSession,
+            computer_session_resource(*session_id),
+        )],
         ToolRequestKind::McpCall {
             connection_id,
             tool_name,
@@ -684,6 +690,9 @@ fn primary_resource(request: &ToolRequest) -> String {
             tool_name,
             ..
         } => format!("mcp://{connection_id}/{tool_name}"),
+        ToolRequestKind::ComputerActions { session_id, .. } => {
+            computer_session_resource(*session_id)
+        }
         ToolRequestKind::GitStatus { repository }
         | ToolRequestKind::GitDiff { repository, .. }
         | ToolRequestKind::GitCommit { repository, .. }
@@ -693,6 +702,10 @@ fn primary_resource(request: &ToolRequest) -> String {
         | ToolRequestKind::GitApplyPatch { repository, .. } => repository.clone(),
         _ => request.kind.stable_name(),
     }
+}
+
+fn computer_session_resource(session_id: mcg_domain::PlatformSessionId) -> String {
+    format!("computer://session/{session_id}")
 }
 
 fn sanitized_url_resource(value: &str) -> String {
@@ -780,11 +793,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use mcg_domain::TaskId;
+    use mcg_domain::{ComputerActionBatchId, PlatformSessionId, TaskId};
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{LeaseRegistry, ToolNamespace, VerificationEvidence};
+    use crate::{ComputerUseAction, LeaseRegistry, ToolNamespace, VerificationEvidence};
 
     struct CountingExecutor(Arc<AtomicUsize>);
 
@@ -946,6 +959,78 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
         approvals.set_state(request.id, ApprovalState::Approved);
         assert!(broker.execute(&request).await.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn computer_input_is_session_scoped_and_guided_before_execution() {
+        let root = tempdir().expect("tempdir");
+        let session_id = PlatformSessionId::new();
+        let tool_request = request(
+            TaskId::new(),
+            ToolRequestKind::ComputerActions {
+                batch_id: ComputerActionBatchId::new(),
+                session_id,
+                expected_frame_sha256: "0".repeat(64),
+                actions: vec![ComputerUseAction::Move { x: 1, y: 1 }],
+            },
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        let denied = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            InMemoryApprovalRepository::default(),
+            InMemoryAuditSink::default(),
+            BrokerControls {
+                preset: AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities: CapabilityPolicy::project(root.path()),
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        assert!(matches!(
+            denied.execute(&tool_request).await,
+            Err(ToolError::Denied(_))
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        let resource = format!("computer://session/{session_id}");
+        let mut capabilities = CapabilityPolicy::project(root.path());
+        capabilities.allowed_computer_sessions.push(resource);
+        let guided = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            InMemoryApprovalRepository::default(),
+            InMemoryAuditSink::default(),
+            BrokerControls {
+                preset: AutonomyPreset::Guided,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities: capabilities.clone(),
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        assert!(matches!(
+            guided.execute(&tool_request).await,
+            Err(ToolError::ApprovalRequired { .. })
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        let autonomous = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            InMemoryApprovalRepository::default(),
+            InMemoryAuditSink::default(),
+            BrokerControls {
+                preset: AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        autonomous
+            .execute(&tool_request)
+            .await
+            .expect("bounded autonomous input");
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

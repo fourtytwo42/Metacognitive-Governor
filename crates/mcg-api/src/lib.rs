@@ -4754,7 +4754,14 @@ form.addEventListener('submit', (event) => {
         if !mcg_tools::computer_use_runtime_available() {
             return;
         }
-        let app = router(test_runtime());
+        let config = AppConfig {
+            autonomy: AutonomyPreset::Guided,
+            ..AppConfig::default()
+        };
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let app = router(runtime.clone());
         let session_id = PlatformSessionId::new();
         let create = authorized(Request::post("/api/v1/platform/sessions"))
             .header("content-type", "application/json")
@@ -4811,25 +4818,67 @@ form.addEventListener('submit', (event) => {
                 .pointer("/result/structuredContent/frame/png_base64")
                 .is_none()
         );
-        let stale = mcp_tool_response(
+        let batch_id = mcg_domain::ComputerActionBatchId::new();
+        let stale_arguments = serde_json::json!({
+            "session_id": session_id,
+            "batch_id": batch_id,
+            "expected_frame_sha256": "0".repeat(64),
+            "actions": [{"type": "move", "x": 0, "y": 0}]
+        });
+        let waiting = mcp_tool_response(
             app.clone(),
             208,
             "mcg_computer_actions",
-            serde_json::json!({
-                "session_id": session_id,
-                "batch_id": mcg_domain::ComputerActionBatchId::new(),
-                "expected_frame_sha256": "0".repeat(64),
-                "actions": [{"type": "move", "x": 0, "y": 0}]
-            }),
+            stale_arguments.clone(),
         )
         .await;
+        assert_eq!(
+            waiting.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        let pending = runtime
+            .approvals(Some(mcg_tools::ApprovalState::Pending))
+            .expect("pending computer approval");
+        assert_eq!(pending.len(), 1);
+        let authority_task_id = pending[0].task_id;
+        assert_ne!(authority_task_id.to_string(), session_id.to_string());
+        assert_eq!(pending[0].action, "computer.actions");
+        assert_eq!(
+            pending[0].resource,
+            format!("computer://session/{session_id}")
+        );
+        runtime
+            .resolve_approval(&mcg_tools::ApprovalResolution {
+                approval_id: pending[0].id,
+                state: mcg_tools::ApprovalState::Approved,
+                resolved_by: "computer interface fixture".into(),
+                reason: Some("exercise approved bounded input".into()),
+                resolved_at: Utc::now(),
+            })
+            .expect("approve bounded computer input");
+        let stale =
+            mcp_tool_response(app.clone(), 209, "mcg_computer_actions", stale_arguments).await;
         assert_eq!(
             stale.pointer("/result/isError"),
             Some(&serde_json::json!(true))
         );
+        let audit = runtime
+            .tool_audit(authority_task_id)
+            .expect("computer action audit");
+        assert_eq!(audit.len(), 3);
+        assert!(audit.iter().all(|record| {
+            record.tool == "computer.actions"
+                && record.resource == format!("computer://session/{session_id}")
+        }));
+        assert_eq!(audit[0].phase, ToolAuditPhase::Decision);
+        assert!(audit[0].decision.starts_with("require_approval:"));
+        assert_eq!(audit[1].phase, ToolAuditPhase::Decision);
+        assert!(audit[1].decision.starts_with("allow:"));
+        assert_eq!(audit[2].phase, ToolAuditPhase::Completion);
+        assert_eq!(audit[2].result, Some(ToolOutcomeStatus::Failed));
         let handed_off = mcp_tool_response(
             app.clone(),
-            209,
+            210,
             "mcg_computer_handoff",
             serde_json::json!({"session_id": session_id}),
         )
@@ -4840,7 +4889,7 @@ form.addEventListener('submit', (event) => {
         );
         let denied_capture = mcp_tool_response(
             app.clone(),
-            210,
+            211,
             "mcg_computer_capture",
             serde_json::json!({"session_id": session_id}),
         )
@@ -4851,7 +4900,7 @@ form.addEventListener('submit', (event) => {
         );
         let reclaimed = mcp_tool_response(
             app.clone(),
-            211,
+            212,
             "mcg_computer_reclaim",
             serde_json::json!({"session_id": session_id}),
         )

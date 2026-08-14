@@ -120,6 +120,16 @@ conflict. A crash after claim can leave the side effect unknowable, so startup
 converts `executing` to `uncertain` and never automatically replays it. Request
 hashes and durable records contain action structure but never typed text or pixels.
 
+Input uses the same durable policy broker as every other host mutation. The exact
+computer session is an explicit capability resource, Guided mode creates a durable
+approval before any action-batch claim or host input, and Balanced/Autonomous modes
+may proceed only inside that grant. Policy decisions, leases, failed execution, and
+successful completion are written to the immutable tool audit. The caller batch UUID
+is mapped into a namespaced stable tool-request identity, so approval retries remain
+idempotent without allowing a caller-owned UUID to collide with another tool request.
+When a session is not task-bound, its audit uses a namespaced synthetic authority
+subject until the storage schema supports first-class non-task audit subjects.
+
 Windows uses the native capture/input backends. The initially qualified Linux path
 is an owner-session X11 display with `DISPLAY` available to the daemon; a headless
 daemon truthfully reports computer use unavailable, and Wayland input remains
@@ -149,5 +159,6 @@ do not duplicate host-control management semantics.
 ## Next dependency
 
 Sites and typed SSH reuse this authority contract rather than inventing separate
-lifecycle rules. Computer control still requires full native Windows/Linux UAT and
-policy-broker integration before its M8 exit evidence is complete.
+lifecycle rules. Computer control has passed native Windows/Linux automated
+qualification and agent-performed UAT, including durable policy, approval, lease,
+audit, exact replay, handoff privacy, and crash-recovery boundaries.

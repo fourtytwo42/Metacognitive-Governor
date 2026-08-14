@@ -1,12 +1,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    ApprovalId, ArtifactId, LeaseId, ManagedProcessId, TaskId, ToolExecutionId, ToolRequestId,
+    ApprovalId, ArtifactId, ComputerActionBatchId, LeaseId, ManagedProcessId, PlatformSessionId,
+    TaskId, ToolExecutionId, ToolRequestId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
+
+use crate::computer_use::ComputerUseAction;
 
 pub const TOOL_SCHEMA_VERSION: u16 = 1;
 pub const RESEARCH_EVIDENCE_SCHEMA_VERSION: u16 = 1;
@@ -384,6 +387,12 @@ pub enum ToolRequestKind {
         key: String,
         value: Value,
     },
+    ComputerActions {
+        batch_id: ComputerActionBatchId,
+        session_id: PlatformSessionId,
+        expected_frame_sha256: String,
+        actions: Vec<ComputerUseAction>,
+    },
     McpCall {
         connection_id: String,
         tool_name: String,
@@ -433,6 +442,7 @@ impl ToolRequestKind {
             Self::MemorySearch { .. } => "memory.search".into(),
             Self::MemoryRead { .. } => "memory.read".into(),
             Self::MemoryWrite { .. } => "memory.write".into(),
+            Self::ComputerActions { .. } => "computer.actions".into(),
             Self::McpCall {
                 connection_id,
                 tool_name,
@@ -481,6 +491,7 @@ impl ToolRequestKind {
                     ..
                 }
                 | Self::MemoryWrite { .. }
+                | Self::ComputerActions { .. }
         )
     }
 }

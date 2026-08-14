@@ -62,6 +62,11 @@ impl ToolExecutor for HostExecutor {
             ToolRequestKind::MemorySearch { .. }
             | ToolRequestKind::MemoryRead { .. }
             | ToolRequestKind::MemoryWrite { .. } => &self.memory,
+            ToolRequestKind::ComputerActions { .. } => {
+                return Err(ToolError::Unavailable(
+                    "computer actions require the runtime-bound computer executor".into(),
+                ));
+            }
             ToolRequestKind::McpCall { .. } => &self.external,
         };
         executor.execute(execution_id, request).await

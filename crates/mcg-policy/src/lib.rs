@@ -24,6 +24,7 @@ pub enum ActionClass {
     Purchase,
     PrivilegeElevation,
     ConstitutionChange,
+    ComputerInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +60,7 @@ pub enum ResourceKind {
     Memory,
     Constitution,
     Credential,
+    ComputerSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +97,8 @@ pub struct CapabilityPolicy {
     #[serde(default)]
     pub allowed_environment_variables: Vec<String>,
     #[serde(default)]
+    pub allowed_computer_sessions: Vec<String>,
+    #[serde(default)]
     pub memory_read_prefixes: Vec<String>,
     #[serde(default)]
     pub memory_write_prefixes: Vec<String>,
@@ -128,6 +132,7 @@ impl CapabilityPolicy {
             ],
             allowed_network_origins: Vec::new(),
             allowed_environment_variables: Vec::new(),
+            allowed_computer_sessions: Vec::new(),
             memory_read_prefixes: vec!["project/".into(), "task/".into()],
             memory_write_prefixes: vec!["project/".into(), "task/".into()],
             allow_shell: false,
@@ -247,8 +252,8 @@ impl PolicyDecision {
 #[must_use]
 pub fn evaluate(preset: AutonomyPreset, request: &PolicyRequest) -> PolicyDecision {
     use ActionClass::{
-        BuildOrTest, ConstitutionChange, CredentialAccess, DestructiveDelete, ExternalPublication,
-        PrivilegeElevation, ProjectRead, Purchase, ReversibleProjectWrite,
+        BuildOrTest, ComputerInput, ConstitutionChange, CredentialAccess, DestructiveDelete,
+        ExternalPublication, PrivilegeElevation, ProjectRead, Purchase, ReversibleProjectWrite,
     };
 
     match request.action {
@@ -264,6 +269,14 @@ pub fn evaluate(preset: AutonomyPreset, request: &PolicyRequest) -> PolicyDecisi
         ProjectRead => {
             PolicyDecision::allow("project-scoped reads are allowed", "preset.project_read")
         }
+        ComputerInput if preset == AutonomyPreset::Guided => PolicyDecision::approval(
+            "guided autonomy asks before bounded computer input",
+            "preset.guided_computer_input",
+        ),
+        ComputerInput => PolicyDecision::allow(
+            "the selected autonomy preset permits bounded computer input",
+            "preset.bounded_computer_input",
+        ),
         ReversibleProjectWrite | BuildOrTest if preset == AutonomyPreset::Guided => {
             PolicyDecision::approval(
                 "guided autonomy asks before project mutations",
@@ -421,6 +434,10 @@ fn capability_contains(policy: &CapabilityPolicy, request: &CapabilityRequest) -
                 .iter()
                 .any(|prefix| request.resource.starts_with(prefix))
         }
+        ResourceKind::ComputerSession => policy
+            .allowed_computer_sessions
+            .iter()
+            .any(|session| session == &request.resource),
         ResourceKind::Constitution | ResourceKind::Credential => false,
     }
 }
@@ -578,5 +595,48 @@ mod tests {
             );
             assert!(matches!(decision, PolicyDecision::Deny { .. }));
         }
+    }
+
+    #[test]
+    fn computer_input_requires_exact_session_capability_and_respects_autonomy() {
+        let resource = "computer://session/018f7f18-76e3-7b2a-9cc6-5bf2518f5750";
+        let request = capability_request(
+            ActionClass::ComputerInput,
+            CapabilityEffect::Execute,
+            ResourceKind::ComputerSession,
+            resource,
+        );
+        let mut capabilities = CapabilityPolicy::project("/project");
+        let constitution = OwnerConstitution::secure_defaults();
+
+        assert!(matches!(
+            evaluate_capability(
+                AutonomyPreset::Autonomous,
+                &constitution,
+                &capabilities,
+                &request,
+            ),
+            PolicyDecision::Deny { .. }
+        ));
+
+        capabilities.allowed_computer_sessions.push(resource.into());
+        assert!(matches!(
+            evaluate_capability(
+                AutonomyPreset::Autonomous,
+                &constitution,
+                &capabilities,
+                &request,
+            ),
+            PolicyDecision::Allow { .. }
+        ));
+        assert!(matches!(
+            evaluate_capability(
+                AutonomyPreset::Guided,
+                &constitution,
+                &capabilities,
+                &request,
+            ),
+            PolicyDecision::RequireApproval { .. }
+        ));
     }
 }

@@ -1055,89 +1055,74 @@ impl AppRuntime {
     ) -> Result<PlatformComputerActionMutation, RuntimeError> {
         let now = Utc::now();
         self.settle_expired_platform_sessions(now).await?;
-        self.load_platform_session(session_id)?;
+        let session = self.load_platform_session(session_id)?;
         let action_count = u16::try_from(actions.len())
             .map_err(|_| ToolError::Invalid("too many computer actions".into()))?;
-        let request_hash = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(session_id, expected_frame_sha256, actions))
-                    .map_err(StorageError::from)?,
-            )
-        );
-        let claimed = ComputerActionBatch {
-            schema_version: PLATFORM_SCHEMA_VERSION,
-            id: batch_id,
-            session_id,
-            request_hash,
-            state: ComputerActionBatchState::Executing,
-            action_count,
-            result_frame_sha256: None,
-            detail: String::new(),
-            created_at: now,
-            updated_at: now,
-        };
-        let (batch, created) = self.store()?.claim_computer_action_batch(&claimed)?;
-        if !created {
-            return match batch.state {
-                ComputerActionBatchState::Succeeded => Ok(PlatformComputerActionMutation {
-                    batch,
-                    replayed: true,
-                    result: None,
-                }),
-                ComputerActionBatchState::Executing => Err(ToolError::Denied(
-                    "computer input batch is already executing".into(),
+        let request_hash =
+            computer_action_request_hash(session_id, expected_frame_sha256, actions)?;
+        if let Some(batch) = self.store()?.computer_action_batch(batch_id)? {
+            if batch.session_id != session_id
+                || batch.request_hash != request_hash
+                || batch.action_count != action_count
+            {
+                return Err(StorageError::Conflict(
+                    "computer action batch identity was reused with a different request".into(),
                 )
-                .into()),
-                ComputerActionBatchState::Rejected | ComputerActionBatchState::Uncertain => {
-                    Err(ToolError::Denied(format!(
-                        "computer input batch will not be replayed: {}",
-                        batch.detail
-                    ))
-                    .into())
-                }
-            };
-        }
-        let result = self
-            .computer_sessions
-            .apply(session_id, expected_frame_sha256, actions)
-            .await;
-        match result {
-            Ok(result) => {
-                let batch = self.store()?.finish_computer_action_batch(
-                    batch_id,
-                    ComputerActionBatchState::Succeeded,
-                    Some(result.frame.sha256.clone()),
-                    "computer input batch completed",
-                    Utc::now(),
-                )?;
-                Ok(PlatformComputerActionMutation {
-                    batch,
-                    replayed: false,
-                    result: Some(result),
-                })
+                .into());
             }
-            Err(error) => {
-                let (state, detail) = match &error {
-                    ToolError::Invalid(_) | ToolError::Denied(_) | ToolError::Unavailable(_) => (
-                        ComputerActionBatchState::Rejected,
-                        "computer input batch was rejected before host input",
-                    ),
-                    _ => (
-                        ComputerActionBatchState::Uncertain,
-                        "computer input outcome is uncertain and will not be replayed",
-                    ),
-                };
-                self.store()?.finish_computer_action_batch(
-                    batch_id,
-                    state,
-                    None,
-                    detail,
-                    Utc::now(),
-                )?;
-                Err(error.into())
-            }
+            return settled_computer_action_replay(batch);
         }
+        require_computer_authority(
+            &session,
+            PlatformSessionState::Active,
+            PlatformSessionOwner::Mcg,
+        )?;
+        let task_id = session
+            .task_id
+            .unwrap_or_else(|| computer_authority_task_id(session_id));
+        let tool_request_id = computer_action_tool_request_id(batch_id);
+        let kind = ToolRequestKind::ComputerActions {
+            batch_id,
+            session_id,
+            expected_frame_sha256: expected_frame_sha256.into(),
+            actions: actions.to_vec(),
+        };
+        let mut request = ToolRequest::new(
+            task_id,
+            format!("Apply {action_count} bounded computer actions"),
+            kind,
+        );
+        request.id = tool_request_id;
+        let result = Arc::new(Mutex::new(None));
+        let executor = ComputerActionExecutor {
+            store: self.store.clone(),
+            computer_sessions: self.computer_sessions.clone(),
+            result: result.clone(),
+        };
+        let resource = computer_session_resource(session_id);
+        let mut capabilities = CapabilityPolicy::project(&self.config.data_directory);
+        capabilities.allowed_computer_sessions.push(resource);
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            executor,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        broker.execute(&request).await?;
+        result
+            .lock()
+            .map_err(|_| RuntimeError::StorageLock)?
+            .take()
+            .ok_or_else(|| {
+                ToolError::Execution("computer action executor returned no mutation".into()).into()
+            })
     }
 
     /// Hands attached computer authority to the local owner.
@@ -3920,6 +3905,222 @@ fn require_computer_authority(
         .into());
     }
     Ok(())
+}
+
+fn computer_action_request_hash(
+    session_id: PlatformSessionId,
+    expected_frame_sha256: &str,
+    actions: &[ComputerUseAction],
+) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(session_id, expected_frame_sha256, actions))
+                .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn computer_session_resource(session_id: PlatformSessionId) -> String {
+    format!("computer://session/{session_id}")
+}
+
+fn computer_authority_task_id(session_id: PlatformSessionId) -> TaskId {
+    TaskId::from_stable_bytes(stable_authority_bytes(
+        "mcg:computer-session-authority:v1",
+        session_id,
+    ))
+}
+
+fn computer_action_tool_request_id(batch_id: ComputerActionBatchId) -> ToolRequestId {
+    ToolRequestId::from_stable_bytes(stable_authority_bytes(
+        "mcg:computer-action-request:v1",
+        batch_id,
+    ))
+}
+
+fn stable_authority_bytes(namespace: &str, id: impl std::fmt::Display) -> [u8; 16] {
+    let digest = Sha256::digest(format!("{namespace}\0{id}").as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes
+}
+
+fn settled_computer_action_replay(
+    batch: ComputerActionBatch,
+) -> Result<PlatformComputerActionMutation, RuntimeError> {
+    match batch.state {
+        ComputerActionBatchState::Succeeded => Ok(PlatformComputerActionMutation {
+            batch,
+            replayed: true,
+            result: None,
+        }),
+        ComputerActionBatchState::Executing => {
+            Err(ToolError::Denied("computer input batch is already executing".into()).into())
+        }
+        ComputerActionBatchState::Rejected | ComputerActionBatchState::Uncertain => {
+            Err(ToolError::Denied(format!(
+                "computer input batch will not be replayed: {}",
+                batch.detail
+            ))
+            .into())
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ComputerActionExecutor {
+    store: Arc<Mutex<SqliteEventStore>>,
+    computer_sessions: Arc<ComputerUseManager>,
+    result: Arc<Mutex<Option<PlatformComputerActionMutation>>>,
+}
+
+impl ComputerActionExecutor {
+    fn store(&self) -> Result<MutexGuard<'_, SqliteEventStore>, ToolError> {
+        self.store
+            .lock()
+            .map_err(|_| ToolError::Execution("runtime storage lock was poisoned".into()))
+    }
+
+    fn save_result(&self, result: PlatformComputerActionMutation) -> Result<(), ToolError> {
+        *self.result.lock().map_err(|_| {
+            ToolError::Execution("computer action result lock was poisoned".into())
+        })? = Some(result);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ComputerActionExecutor {
+    async fn execute(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+    ) -> Result<ToolOutcome, ToolError> {
+        let ToolRequestKind::ComputerActions {
+            batch_id,
+            session_id,
+            expected_frame_sha256,
+            actions,
+        } = &request.kind
+        else {
+            return Err(ToolError::Invalid(
+                "computer executor received a different tool kind".into(),
+            ));
+        };
+        let started_at = Utc::now();
+        let action_count = u16::try_from(actions.len())
+            .map_err(|_| ToolError::Invalid("too many computer actions".into()))?;
+        let request_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(*session_id, expected_frame_sha256, actions))
+                    .map_err(|error| ToolError::Invalid(error.to_string()))?,
+            )
+        );
+        let claimed = ComputerActionBatch {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: *batch_id,
+            session_id: *session_id,
+            request_hash,
+            state: ComputerActionBatchState::Executing,
+            action_count,
+            result_frame_sha256: None,
+            detail: String::new(),
+            created_at: started_at,
+            updated_at: started_at,
+        };
+        let (batch, created) = self
+            .store()?
+            .claim_computer_action_batch(&claimed)
+            .map_err(tool_storage_error)?;
+        if !created {
+            let replay = settled_computer_action_replay(batch)
+                .map_err(|error| ToolError::Denied(error.to_string()))?;
+            self.save_result(replay)?;
+            return Ok(computer_action_tool_outcome(
+                execution_id,
+                request,
+                started_at,
+                true,
+            ));
+        }
+        let execution = self
+            .computer_sessions
+            .apply(*session_id, expected_frame_sha256, actions)
+            .await;
+        match execution {
+            Ok(execution) => {
+                let batch = self
+                    .store()?
+                    .finish_computer_action_batch(
+                        *batch_id,
+                        ComputerActionBatchState::Succeeded,
+                        Some(execution.frame.sha256.clone()),
+                        "computer input batch completed",
+                        Utc::now(),
+                    )
+                    .map_err(tool_storage_error)?;
+                self.save_result(PlatformComputerActionMutation {
+                    batch,
+                    replayed: false,
+                    result: Some(execution),
+                })?;
+                Ok(computer_action_tool_outcome(
+                    execution_id,
+                    request,
+                    started_at,
+                    false,
+                ))
+            }
+            Err(error) => {
+                let (state, detail) = match &error {
+                    ToolError::Invalid(_) | ToolError::Denied(_) | ToolError::Unavailable(_) => (
+                        ComputerActionBatchState::Rejected,
+                        "computer input batch was rejected before host input",
+                    ),
+                    _ => (
+                        ComputerActionBatchState::Uncertain,
+                        "computer input outcome is uncertain and will not be replayed",
+                    ),
+                };
+                self.store()?
+                    .finish_computer_action_batch(*batch_id, state, None, detail, Utc::now())
+                    .map_err(tool_storage_error)?;
+                Err(error)
+            }
+        }
+    }
+}
+
+fn computer_action_tool_outcome(
+    execution_id: ToolExecutionId,
+    request: &ToolRequest,
+    started_at: DateTime<Utc>,
+    replayed: bool,
+) -> ToolOutcome {
+    ToolOutcome {
+        schema_version: TOOL_SCHEMA_VERSION,
+        execution_id,
+        request_id: request.id,
+        status: ToolOutcomeStatus::Succeeded,
+        summary: if replayed {
+            "computer action batch was already durably settled".into()
+        } else {
+            "bounded computer action batch completed".into()
+        },
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        artifacts: Vec::new(),
+        verification: vec![VerificationEvidence {
+            method: "exact_frame_digest".into(),
+            passed: true,
+            detail: "captured pixels matched immediately before bounded input".into(),
+        }],
+        started_at,
+        finished_at: Utc::now(),
+    }
 }
 
 #[derive(Clone)]
