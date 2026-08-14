@@ -7,7 +7,7 @@ Durable project context lives here. Update this file whenever information should
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M5 organization and useful work is in progress. A deterministic tool-capable provider now builds a complete three-file interactive website through the authenticated API, real governed `fs.write` broker, and durable result/audit path. Live OpenAI callback/model/tool UAT still awaits the owner's manual authentication.
 - Last meaningful change: Added a Windows-qualified end-to-end website build contract that verifies project-confined writes, accessible HTML, responsive CSS, JavaScript interaction, SHA-256 read-after-write evidence, immutable audit records, and durable run replay.
-- Next step: Qualify the website build checkpoint on Ubuntu, then continue live OAuth callback/model probe and repeat representative website work with the subscription provider after owner authentication.
+- Next step: Continue live OAuth callback/model probe and repeat representative website work with the subscription provider after owner authentication; then add independent browser/evaluator evidence as M5 progresses.
 - Blockers: None documented.
 
 ## Current State
@@ -156,6 +156,7 @@ When sources conflict, use this order:
 - 2026-08-14: Configured provider registry added native OS credential-store isolation, exact registered/discovered target dispatch, SQLite migration 7 connection/catalog evidence, and authenticated `mcg provider` API/CLI operations. Failed initial discovery is atomic and leaves no connection, route, or credential slot. Full Windows verification passed. Real CLI GPU45 discovery found 10 models at `http://192-168-50-189.nip.io:30001/v1`, and restart rediscovery returned the same catalog; the temporary daemons were stopped.
 - 2026-08-14: Exact commit `8c93506` passed `scripts/verify.sh` on Ubuntu, including the Linux Secret Service/keyring dependency, all Rust gates, frontend/docs, native Tauri build, and Playwright. After explicitly building runnable binaries, a real Linux daemon/CLI configured GPU45, listed 10 models, stopped/restarted, lazily reconstructed the registry, rediscovered 10 models, and stopped cleanly.
 - 2026-08-14: The deterministic M5 website scenario passed the complete Windows `scripts/verify.ps1` gate. A tool-capable provider emitted three `fs.write` calls for accessible HTML, responsive CSS, and interactive JavaScript; the real policy broker confined and atomically verified each write, six immutable decision/completion audits were stored, and the terminal two-call provider result replayed from the durable run view. Strict Rust, live GPU45, docs, frontend unit/build, native Tauri, and Playwright checks all passed locally; no GitHub-hosted automation ran.
+- 2026-08-14: Exact commit `f573cff` passed `scripts/verify.sh` on the owner-controlled Ubuntu VM: strict Rust format/clippy/workspace tests including the governed website and live GPU45 scenarios, documentation, frontend unit/type/build, native Linux Tauri build, and Playwright all passed. The first SSH invocation lacked login-shell toolchain paths and the next transport window expired mid-build; rerunning through the configured login shell with a sufficient local timeout completed successfully. No GitHub-hosted automation ran.
 
 ## Decisions
 
@@ -366,7 +367,7 @@ When sources conflict, use this order:
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
 - Complete M5 durable run orchestration and useful end-to-end website/app work.
-- Repeat the deterministic governed website checkpoint on Ubuntu and add independent browser/evaluator evidence as M5 progresses.
+- Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget
