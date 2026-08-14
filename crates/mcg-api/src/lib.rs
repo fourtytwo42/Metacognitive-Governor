@@ -1464,6 +1464,146 @@ mod tests {
         format!("http://{address}/v1")
     }
 
+    #[allow(clippy::too_many_lines)] // Complete generated website stays readable as one fixture.
+    async fn website_builder_fixture(project_root: &std::path::Path) -> String {
+        const INDEX_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LaunchPad</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">A tiny project planner</p>
+    <h1>Turn today’s idea into a clear next step.</h1>
+    <form id="task-form">
+      <label for="task">What do you want to ship?</label>
+      <div class="controls">
+        <input id="task" name="task" required maxlength="80" autocomplete="off">
+        <button type="submit">Add next step</button>
+      </div>
+    </form>
+    <p id="status" role="status" aria-live="polite">No steps yet.</p>
+    <ul id="task-list" aria-label="Project steps"></ul>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
+"#;
+        const STYLES_CSS: &str = r":root { color-scheme: light; font-family: system-ui, sans-serif; background: #f4f1ea; color: #17201b; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+main { width: min(42rem, calc(100% - 2rem)); background: #fffdf8; padding: clamp(1.5rem, 5vw, 3.5rem); border-radius: 1.5rem; box-shadow: 0 1rem 3rem #1833231f; }
+.eyebrow { color: #24734b; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+h1 { font-size: clamp(2rem, 6vw, 3.6rem); line-height: 1; max-width: 12ch; }
+label { display: block; font-weight: 700; margin-bottom: .5rem; }
+.controls { display: flex; gap: .6rem; flex-wrap: wrap; }
+input { flex: 1 1 16rem; border: 2px solid #9aab9f; border-radius: .7rem; padding: .8rem; font: inherit; }
+button { border: 0; border-radius: .7rem; padding: .8rem 1rem; background: #195f3d; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 3px solid #e39d27; outline-offset: 2px; }
+li { margin-block: .7rem; padding: .8rem 1rem; background: #eef5ef; border-radius: .7rem; }
+";
+        const APP_JS: &str = r"const form = document.querySelector('#task-form');
+const input = document.querySelector('#task');
+const list = document.querySelector('#task-list');
+const status = document.querySelector('#status');
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const value = input.value.trim();
+  if (!value) return;
+  const item = document.createElement('li');
+  item.textContent = value;
+  list.append(item);
+  input.value = '';
+  status.textContent = `${list.children.length} step${list.children.length === 1 ? '' : 's'} ready.`;
+  input.focus();
+});
+";
+
+        let tool_calls = Arc::new(
+            [
+                ("write-index", "index.html", INDEX_HTML),
+                ("write-styles", "styles.css", STYLES_CSS),
+                ("write-script", "app.js", APP_JS),
+            ]
+            .into_iter()
+            .map(|(id, path, content)| {
+                serde_json::json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": "fs.write",
+                    "arguments": serde_json::to_string(&serde_json::json!({
+                        "path": project_root.join(path).to_string_lossy(),
+                        "content": content,
+                        "create_new": true
+                    })).expect("tool arguments")
+                })
+            })
+            .collect::<Vec<_>>(),
+        );
+
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "website-builder",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32768,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let tool_calls = tool_calls.clone();
+                    async move {
+                        let has_tool_result = body
+                            .get("input")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|item| {
+                                    item.get("type").and_then(serde_json::Value::as_str)
+                                        == Some("function_call_output")
+                                })
+                            });
+                        let output = if has_tool_result {
+                            vec![serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "LaunchPad was built and is ready to open."}]
+                            })]
+                        } else {
+                            (*tool_calls).clone()
+                        };
+                        Json(serde_json::json!({
+                            "id": if has_tool_result { "website-complete" } else { "website-tools" },
+                            "model": "website-builder",
+                            "status": "completed",
+                            "output": output,
+                            "usage": {"input_tokens": 64, "output_tokens": 32, "total_tokens": 96}
+                        }))
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("website fixture listener");
+        let address = listener.local_addr().expect("website fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("website fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
     async fn device_oauth_fixture() -> String {
         let app = Router::new()
             .route(
@@ -2404,6 +2544,159 @@ mod tests {
             durable.leases[0].state,
             mcg_agents::AgentLeaseState::Completed
         );
+        assert_eq!(durable.results, vec![commit.result]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full provider -> governed tools -> durable evidence contract.
+    async fn coder_builds_complete_website_through_governed_tools() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("launchpad");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# LaunchPad\n").expect("project fixture");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let mut task =
+            TaskEnvelope::new("Build an accessible interactive project-planning website");
+        task.project_id = Some(project.project_id);
+        task.budget = TaskBudget {
+            max_tokens: Some(20_000),
+            max_cost_usd: Some(2.0),
+            max_duration_seconds: Some(300),
+        };
+        runtime.create_task(&task).expect("task");
+        let now = Utc::now();
+        let organization = OrganizationGenome::consumer_default(now);
+        runtime
+            .record_organization_revision(&organization)
+            .expect("organization");
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "Build the complete LaunchPad website",
+                RoleKind::Coder,
+                vec![SuccessCondition::Custom {
+                    description:
+                        "responsive HTML, CSS, and interactive JavaScript are written and verified"
+                            .into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&organization, &planning, now)
+            .expect("work plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: organization.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        runtime.create_agent_run(&run, &plan).expect("run");
+        runtime
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+            )
+            .expect("start run");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "website_fixture".into(),
+                    display_name: "Website Builder Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: website_builder_fixture(std::path::Path::new(&project.root)).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+
+        let endpoint = format!("/api/v1/runs/{}/work/{}/execute", run.id, plan.items[0].id);
+        let body = serde_json::to_vec(&ExecuteAgentWorkRequest {
+            project_id: project.project_id,
+            target_path: None,
+            context_token_budget: 1_024,
+            requested_tools: vec!["fs.write".into()],
+            estimated_output_tokens: 512,
+            max_model_calls: 2,
+        })
+        .expect("request body");
+        let response = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(&endpoint))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("execution response");
+        let response_status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        assert_eq!(
+            response_status,
+            StatusCode::OK,
+            "execution failed: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let commit: AgentTurnCommit = serde_json::from_slice(&bytes).expect("turn commit");
+
+        assert_eq!(commit.result.response.id, "website-complete");
+        assert_eq!(commit.result.model_calls.len(), 2);
+        assert_eq!(commit.result.tool_outcomes.len(), 3);
+        assert!(commit.result.tool_outcomes.iter().all(|outcome| {
+            outcome.status == ToolOutcomeStatus::Succeeded
+                && outcome
+                    .verification
+                    .iter()
+                    .any(|evidence| evidence.method == "sha256.read_after_write" && evidence.passed)
+        }));
+        let html = std::fs::read_to_string(project_root.join("index.html")).expect("website HTML");
+        let css = std::fs::read_to_string(project_root.join("styles.css")).expect("website CSS");
+        let javascript =
+            std::fs::read_to_string(project_root.join("app.js")).expect("website JavaScript");
+        assert!(html.contains("<html lang=\"en\">"));
+        assert!(html.contains("role=\"status\""));
+        assert!(html.contains("styles.css") && html.contains("app.js"));
+        assert!(css.contains(":focus-visible") && css.contains("clamp("));
+        assert!(javascript.contains("addEventListener('submit'"));
+        assert!(javascript.contains("document.createElement('li')"));
+
+        let audit = runtime.tool_audit(task.id).expect("tool audit");
+        assert_eq!(audit.len(), 6);
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|record| record.phase == ToolAuditPhase::Completion)
+                .count(),
+            3
+        );
+        assert!(audit.iter().all(|record| record.tool == "fs.write"));
+        let durable = runtime.agent_run_view(run.id).expect("durable run");
         assert_eq!(durable.results, vec![commit.result]);
     }
 
