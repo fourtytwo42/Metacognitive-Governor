@@ -575,7 +575,11 @@ mod tests {
             axum::serve(listener, app).await.expect("fixture server");
         });
         let profiles = tempfile::tempdir().expect("profiles");
-        let manager = PersistentBrowserManager::new(None, profiles.path()).expect("manager");
+        let manager = PersistentBrowserManager::new(
+            std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
+            profiles.path(),
+        )
+        .expect("manager");
         let session_id = PlatformSessionId::new();
         let origin = format!("http://{address}");
         let attached = manager
