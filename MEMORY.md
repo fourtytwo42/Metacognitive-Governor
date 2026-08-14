@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Durable guided objective-batch approval is Windows-qualified and awaits exact-commit Ubuntu qualification; HTTP and rendered-page objective evidence are next.
+- Current task: Durable guided objective-batch approval is cross-platform qualified; HTTP and rendered-page objective evidence are next.
 - Last meaningful change: Added a condition-indexed SQLite evaluation checkpoint, one exact-batch guided approval, denial/retry identity rotation, restart-safe resume, and atomic checkpoint deletion with terminal settlement.
-- Next step: Qualify this exact commit on Ubuntu, then add authenticated HTTP-status and rendered-page evaluators before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Add authenticated HTTP-status and rendered-page evaluators before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -500,9 +500,9 @@ When sources conflict, use this order:
 - Context: Guided mode could not run harness-owned build/test/static-analysis checks because approval state and partial evaluation evidence did not survive a daemon restart.
 - Decision: Persist one condition-indexed evaluation checkpoint per consumer run; request a single approval bound to the exact discovered command batch, attempt, and immutable project snapshot; rotate identity after denial/retry; and treat approval as delegation only for that batch. Resume restores a recovering run without replaying provider turns or completed checks, and terminal settlement deletes the checkpoint atomically with its report and projections.
 - Files: `crates/mcg-{events,storage,runtime,api}/`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`, `README.md`.
-- Commands/tests: Strict focused Windows Rust clippy; focused Rust suites including 25 API tests; nine Vitest flows; frontend typecheck/build; documentation and diff checks.
-- Result: A file-backed API fixture proves wait, denial, bounded retry with fresh identity, approval, daemon restart into recovery, exact resume, three real npm/Node checks, terminal completion, checkpoint cleanup, two total model calls, and no duplicate tool completion.
-- Follow-up: Complete exact-commit Ubuntu qualification, then implement HTTP-status and rendered-page objective evaluators.
+- Commands/tests: Strict focused Windows Rust clippy; focused Rust suites including 25 API tests; nine Vitest flows; frontend typecheck/build; documentation and diff checks; exact commit `6e5f92e` complete Ubuntu `./scripts/verify.sh`.
+- Result: A file-backed API fixture proves wait, denial, bounded retry with fresh identity, approval, daemon restart into recovery, exact resume, three real npm/Node checks, terminal completion, checkpoint cleanup, two total model calls, and no duplicate tool completion. Exact Windows-focused and complete Ubuntu native/Tauri/Playwright qualification are green.
+- Follow-up: Implement HTTP-status and rendered-page objective evaluators.
 
 ## Known Issues
 
