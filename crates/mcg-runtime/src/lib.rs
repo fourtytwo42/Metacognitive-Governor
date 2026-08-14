@@ -11,8 +11,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use mcg_agents::{
     AgentInstance, AgentLease, AgentModelGateway, AgentRun, AgentRunState, AgentState,
-    AgentToolGateway, AgentTurnEngine, AgentTurnError, AgentTurnRequest, ConfidenceEstimate,
-    OrganizationGenome, OrganizationalMetrics, WorkPlan,
+    AgentToolGateway, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
+    AgentUsageRecord, ConfidenceEstimate, EvaluationReport, OrganizationGenome,
+    OrganizationalMetrics, WorkPlan,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -153,6 +154,17 @@ pub struct MemoryClaimMutation {
     pub claim: MemoryClaim,
     pub previous: Option<MemoryClaim>,
     pub event: EventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunView {
+    pub run: AgentRun,
+    pub plan: WorkPlan,
+    pub instances: Vec<AgentInstance>,
+    pub leases: Vec<AgentLease>,
+    pub usage: Vec<AgentUsageRecord>,
+    pub evaluations: Vec<EvaluationReport>,
+    pub results: Vec<AgentTurnResult>,
 }
 
 #[derive(Clone)]
@@ -673,6 +685,62 @@ impl AppRuntime {
         organization_id: mcg_domain::OrganizationId,
     ) -> Result<Option<OrganizationGenome>, RuntimeError> {
         Ok(self.store()?.organization(organization_id)?)
+    }
+
+    /// Lists current organization projections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn organizations(&self) -> Result<Vec<OrganizationGenome>, RuntimeError> {
+        Ok(self.store()?.organizations()?)
+    }
+
+    /// Loads one immutable organization revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn organization_revision(
+        &self,
+        revision_id: mcg_domain::OrganizationRevisionId,
+    ) -> Result<Option<OrganizationGenome>, RuntimeError> {
+        Ok(self.store()?.organization_revision(revision_id)?)
+    }
+
+    /// Loads the full inspectable durable view of one agent run.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for unknown runs or invalid persisted evidence.
+    pub fn agent_run_view(&self, run_id: mcg_domain::RunId) -> Result<AgentRunView, RuntimeError> {
+        let store = self.store()?;
+        let run = store
+            .agent_run(run_id)?
+            .ok_or(StorageError::AgentRunNotFound(run_id))?;
+        let plan = store
+            .work_plan(run_id)?
+            .ok_or_else(|| StorageError::InvalidData("agent run has no work plan".into()))?;
+        let instances = store.agent_instances(run_id)?;
+        let leases = store.agent_leases_for_run(run_id)?;
+        let usage = store.agent_usage(run_id)?;
+        let evaluations = store.evaluations(run_id)?;
+        let results = leases
+            .iter()
+            .map(|lease| store.agent_turn_result(lease.id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(AgentRunView {
+            run,
+            plan,
+            instances,
+            leases,
+            usage,
+            evaluations,
+            results,
+        })
     }
 
     /// Atomically records a planned run and immutable work plan.

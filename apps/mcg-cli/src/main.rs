@@ -1,17 +1,22 @@
 use std::{path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
-    CreateMemoryClaimRequest, CreateTaskRequest, DiscoverProjectRequest, ManagedMemoryResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, ProjectHistoryResponse,
-    ProjectListResponse, ResolveApprovalRequest, TaskEventsResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
+    ManagedMemoryResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    ProjectHistoryResponse, ProjectListResponse, ResolveApprovalRequest, TaskEventsResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
-use mcg_domain::{MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState};
+use mcg_domain::{
+    MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, TaskEnvelope, TaskId, TaskState,
+};
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
-use mcg_runtime::{MemoryClaimMutation, ProjectMutation, RuntimeStatus};
+use mcg_runtime::{AgentRunView, MemoryClaimMutation, ProjectMutation, RuntimeStatus};
 use mcg_tools::{ApprovalRequest, ApprovalState};
 
 #[derive(Debug, Parser)]
@@ -49,6 +54,83 @@ enum Command {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Create and inspect versioned agent organizations.
+    Organization {
+        #[command(subcommand)]
+        command: OrganizationCommand,
+    },
+    /// Plan, inspect, start, and cancel durable agent runs.
+    Run {
+        #[command(subcommand)]
+        command: RunCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OrganizationCommand {
+    /// Create the safe simple-by-default core organization.
+    Default {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List current organizations.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect one current organization.
+    Get { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunCommand {
+    /// Plan one atomic work item with a minimal organization.
+    PlanAtomic {
+        task_id: String,
+        organization_revision_id: String,
+        goal: String,
+        #[arg(long, value_enum, default_value_t = RoleArg::Coder)]
+        role: RoleArg,
+        #[arg(long, default_value = "Goal completed with objective evidence")]
+        check: String,
+        #[arg(long)]
+        independent_evaluation: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan compound work from a `PlanAgentRunRequest` JSON file.
+    PlanFile { task_id: String, file: PathBuf },
+    /// Inspect a run, plan, instances, leases, usage, evaluations, and results.
+    Get { id: String },
+    /// Start or resume a planned/waiting/recovering run.
+    Start { id: String },
+    /// Cancel a run.
+    Cancel { id: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RoleArg {
+    Conversation,
+    Coder,
+    Evaluator,
+    ToolWorker,
+    Researcher,
+    Tester,
+}
+
+impl From<RoleArg> for RoleKind {
+    fn from(value: RoleArg) -> Self {
+        match value {
+            RoleArg::Conversation => Self::Conversation,
+            RoleArg::Coder => Self::Coder,
+            RoleArg::Evaluator => Self::Evaluator,
+            RoleArg::ToolWorker => Self::ToolWorker,
+            RoleArg::Researcher => Self::Researcher,
+            RoleArg::Tester => Self::Tester,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -259,6 +341,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Task { command } => run_task(&client, host, token.trim(), command).await?,
         Command::Approval { command } => run_approval(&client, host, token.trim(), command).await?,
         Command::Project { command } => run_project(&client, host, token.trim(), command).await?,
+        Command::Organization { command } => {
+            run_organization(&client, host, token.trim(), command).await?;
+        }
+        Command::Run { command } => run_agent(&client, host, token.trim(), command).await?,
     }
 
     Ok(())
@@ -373,6 +459,179 @@ async fn run_task(
             println!("{}: {}", task.id, task.state);
         }
     }
+    Ok(())
+}
+
+async fn run_organization(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: OrganizationCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        OrganizationCommand::Default { name, json } => {
+            let mutation: OrganizationMutationResponse = client
+                .post(format!("{host}/api/v1/organizations"))
+                .bearer_auth(token)
+                .json(&CreateOrganizationRequest { name })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  revision {}  {}",
+                    mutation.organization.organization_id,
+                    mutation.organization.revision_id,
+                    mutation.organization.name
+                );
+            }
+        }
+        OrganizationCommand::List { json } => {
+            let response: OrganizationListResponse = client
+                .get(format!("{host}/api/v1/organizations"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.organizations.is_empty() {
+                println!("No organizations.");
+            } else {
+                for organization in response.organizations {
+                    println!(
+                        "{}  revision {}  {}",
+                        organization.organization_id, organization.revision, organization.name
+                    );
+                }
+            }
+        }
+        OrganizationCommand::Get { id } => {
+            let response: mcg_agents::OrganizationGenome = client
+                .get(format!("{host}/api/v1/organizations/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+    }
+    Ok(())
+}
+
+async fn run_agent(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: RunCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        RunCommand::PlanAtomic {
+            task_id,
+            organization_revision_id,
+            goal,
+            role,
+            check,
+            independent_evaluation,
+            json,
+        } => {
+            let task_id = TaskId::from_str(&task_id)?;
+            let organization_revision_id =
+                OrganizationRevisionId::from_str(&organization_revision_id)?;
+            let request = PlanAgentRunRequest {
+                organization_revision_id,
+                complexity: TaskComplexity::Atomic,
+                work: vec![PlanWorkRequest {
+                    key: "work".into(),
+                    goal,
+                    role: role.into(),
+                    dependencies: Vec::new(),
+                    success_conditions: vec![SuccessCondition::Custom { description: check }],
+                    risk_notes: Vec::new(),
+                    budget_weight: 1,
+                    estimated_useful_seconds: 60,
+                }],
+                require_independent_evaluation: independent_evaluation,
+            };
+            let view = post_plan(client, host, token, task_id, &request).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                println!("{}: {:?}", view.run.id, view.run.state);
+            }
+        }
+        RunCommand::PlanFile { task_id, file } => {
+            let task_id = TaskId::from_str(&task_id)?;
+            let request: PlanAgentRunRequest = serde_json::from_slice(&std::fs::read(file)?)?;
+            let view = post_plan(client, host, token, task_id, &request).await?;
+            println!("{}", serde_json::to_string_pretty(&view)?);
+        }
+        RunCommand::Get { id } => {
+            let run_id = RunId::from_str(&id)?;
+            let view: AgentRunView = client
+                .get(format!("{host}/api/v1/runs/{run_id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&view)?);
+        }
+        RunCommand::Start { id } => {
+            transition_run(client, host, token, &id, AgentRunState::Running).await?;
+        }
+        RunCommand::Cancel { id } => {
+            transition_run(client, host, token, &id, AgentRunState::Cancelled).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn post_plan(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    task_id: TaskId,
+    request: &PlanAgentRunRequest,
+) -> Result<AgentRunView, Box<dyn std::error::Error>> {
+    Ok(client
+        .post(format!("{host}/api/v1/tasks/{task_id}/runs"))
+        .bearer_auth(token)
+        .json(request)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+async fn transition_run(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+    state: AgentRunState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_id = RunId::from_str(id)?;
+    let view: AgentRunView = client
+        .post(format!("{host}/api/v1/runs/{run_id}/transition"))
+        .bearer_auth(token)
+        .json(&TransitionAgentRunRequest { state })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    println!("{}: {:?}", view.run.id, view.run.state);
     Ok(())
 }
 

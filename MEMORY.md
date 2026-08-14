@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; contracts, minimal planning, SQLite run evidence, and evented daemon-restart recovery pass workspace tests on Windows.
-- Last meaningful change: Runtime now revalidates durable turn authority, executes the bounded engine with a real policy broker, and uses SQLite migration 6 to atomically commit final response, attributed usage, assigned model, metrics, instance, lease, and events. Approval pauses and failures settle without false success evidence.
-- Next step: Add configured provider/broker registries and authenticated API/CLI run-control surfaces, then exercise real provider-backed website work.
+- Current task: M5 organization and useful work is in progress; durable planning/execution evidence and authenticated organization/run API and CLI surfaces pass the complete Windows gate.
+- Last meaningful change: Organization creation/list/inspection and stable-key run planning/inspection/start/resume/cancel are authenticated and durable. A real daemon restart smoke exposed and fixed task-projection replay deleting rows referenced by agent runs.
+- Next step: Add configured provider/broker registries plus safe instance/lease dispatch, then exercise real provider-backed website work and qualify the checkpoint on Ubuntu.
 - Blockers: None documented.
 
 ## Current State
@@ -146,6 +146,7 @@ When sources conflict, use this order:
 - 2026-08-14: M5 migration 5 file-backed qualification persisted an organization, planned/run state, instance, active lease, attributed provider usage, and objective evaluation; after close/reopen it recovered the run/instance/lease to explicit safe states and retained ordered event evidence. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: M5 bounded turn tests route a context-constrained Coder through a priced capable model, decode `fs.read` into the typed tool plane, feed its broker outcome back using exact Responses function-call items, and return a final response. Authentication failure makes one provider call with no fallback; an unleased `fs.write` produces zero tool calls. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: M5 runtime turn commit test used the durable runtime, organization/run/instance/lease state, a two-call provider fixture, and the real policy broker to execute typed `fs.read`. Migration 6 atomically stored one immutable final result, three usage records, assigned model, run metrics, completed instance/lease, and ordered events. Restart evidence also verifies approval waiting retains authority for resume while later failure creates no usage/result. Complete workspace tests and strict workspace clippy passed on Windows.
+- 2026-08-14: Authenticated M5 API/CLI control surfaces created a consumer organization, planned atomic and dependency-ordered work, started a run, and returned its full durable evidence view. Real restart smoke found task replay's delete/reinsert strategy violated agent-run foreign keys; replay now upserts authoritative tasks and only removes unexpected orphans. The repaired database restarted into `recovering`, CLI inspection passed, and `scripts/verify.ps1` passed the full Windows Rust/frontend/docs/native/Playwright gate.
 
 ## Decisions
 
@@ -295,6 +296,15 @@ When sources conflict, use this order:
 - Commands/tests: `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `git diff --check`.
 - Result: Runtime fixture executes a two-call model loop through the real policy broker and verifies the complete atomic projection/evidence result; storage restart fixture verifies waiting/resume/failure settlement.
 - Follow-up: Register configured real providers and host broker capabilities, then expose organization/run control through authenticated API and CLI.
+
+### 2026-08-14 - M5 Authenticated Organization And Run Control
+
+- Context: Real users and scripts need safe durable control of organizations and work plans before configured providers can execute them.
+- Decision: Expose authenticated loopback organization create/list/get and run plan/get/start-resume/cancel operations; accept stable client work keys and resolve them to typed dependency identities; prohibit external completion claims. Rebuild task projections with upserts so dependent run evidence remains foreign-key valid during restart.
+- Files: `crates/mcg-{storage,runtime,api}/`, `apps/mcg-cli/`, `docs/architecture/agent-organization.md`, `README.md`.
+- Commands/tests: Real daemon/CLI create-plan-start-restart-inspect smoke; `scripts/verify.ps1`.
+- Result: The full Windows gate passes, including 9 API tests, 10 storage tests, all workspace tests/clippy, documentation, frontend, native Tauri build, and Playwright E2E. The interrupted run recovered with its plan intact.
+- Follow-up: Build configured provider/broker registries and safe instance/lease dispatch, then repeat full qualification on Ubuntu.
 
 ## Known Issues
 

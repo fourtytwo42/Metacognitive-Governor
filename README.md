@@ -66,6 +66,12 @@ cargo run -p mcg-daemon
 cargo run -p mcg-cli -- status
 ```
 
+The authenticated organization and run-control surface is available through the
+same daemon. Create a consumer-default organization, list it, plan work for an
+existing task, and inspect or control the resulting run with `mcg organization`
+and `mcg run`. Run `mcg organization --help` or `mcg run --help` for the exact
+commands and JSON-file schema.
+
 Start the browser-hosted desktop frontend during UI development:
 
 ```powershell

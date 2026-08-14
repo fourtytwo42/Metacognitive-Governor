@@ -74,3 +74,21 @@ lease for explicit resume. Other provider, tool, policy, malformed-output, and
 iteration failures fail the instance and lease with a stable reason code. Error
 details from external providers are not copied into durable failure events, and
 no unsuccessful turn creates fabricated model/tool usage or a success result.
+
+## Authenticated Control Surface
+
+The loopback API can create and list safe consumer-default organizations, load
+current or immutable revisions, plan a run against stable client work keys,
+inspect the complete durable run view, and start, resume, or cancel a run. The
+external transition boundary intentionally cannot claim completion; only runtime
+settlement and evaluation may produce terminal success evidence. All routes use
+the same persistent local bearer authentication as the rest of the daemon.
+
+The CLI exposes these operations through `mcg organization` and `mcg run`.
+Human output stays concise for creation and transitions, while inspection and
+plan-file operations return the complete JSON evidence needed by scripts.
+
+Task replay upserts authoritative event-derived projections before removing
+unexpected orphan projections. It does not delete referenced task rows during
+normal replay, so organization/run evidence remains foreign-key valid while a
+daemon restart moves interrupted work to `recovering`.

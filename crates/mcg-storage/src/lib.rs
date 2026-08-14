@@ -1467,9 +1467,24 @@ impl SqliteEventStore {
         }
 
         let transaction = self.connection.transaction()?;
-        transaction.execute("DELETE FROM tasks", [])?;
         for (task, sequence) in tasks.values() {
             Self::upsert_task(&transaction, task, *sequence)?;
+        }
+        let projected_task_ids = {
+            let mut statement = transaction.prepare("SELECT task_id FROM tasks")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for projected_task_id in projected_task_ids {
+            let task_id = projected_task_id.parse::<TaskId>().map_err(|error| {
+                StorageError::InvalidData(format!(
+                    "invalid task projection identifier {projected_task_id}: {error}"
+                ))
+            })?;
+            if !tasks.contains_key(&task_id) {
+                transaction.execute("DELETE FROM tasks WHERE task_id = ?1", [projected_task_id])?;
+            }
         }
         transaction.commit()?;
         Ok(RecoveryReport {

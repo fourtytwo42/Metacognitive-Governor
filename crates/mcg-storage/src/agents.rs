@@ -122,6 +122,15 @@ impl SqliteEventStore {
         )
     }
 
+    /// Lists current organization projections in stable identity order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row cannot be decoded.
+    pub fn organizations(&self) -> Result<Vec<OrganizationGenome>, StorageError> {
+        self.read_all_json("SELECT organization_json FROM organizations ORDER BY organization_id")
+    }
+
     /// Loads one immutable organization revision.
     ///
     /// # Errors
@@ -374,6 +383,19 @@ impl SqliteEventStore {
         )
     }
 
+    /// Lists current agent instances for a run in creation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row cannot be decoded.
+    pub fn agent_instances(&self, run_id: RunId) -> Result<Vec<AgentInstance>, StorageError> {
+        self.read_json_rows(
+            "SELECT instance_json FROM agent_instances WHERE run_id = ?1
+             ORDER BY created_at, instance_id",
+            &run_id.to_string(),
+        )
+    }
+
     /// Transitions an agent instance and records confidence at that boundary.
     ///
     /// # Errors
@@ -502,6 +524,22 @@ impl SqliteEventStore {
         self.read_optional_json(
             "SELECT lease_json FROM agent_leases WHERE lease_id = ?1",
             &lease_id.to_string(),
+        )
+    }
+
+    /// Lists current leases for every instance in one run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row cannot be decoded.
+    pub fn agent_leases_for_run(&self, run_id: RunId) -> Result<Vec<AgentLease>, StorageError> {
+        self.read_json_rows(
+            "SELECT agent_leases.lease_json FROM agent_leases
+             INNER JOIN agent_instances
+                ON agent_instances.instance_id = agent_leases.instance_id
+             WHERE agent_instances.run_id = ?1
+             ORDER BY agent_leases.acquired_at, agent_leases.lease_id",
+            &run_id.to_string(),
         )
     }
 
@@ -1569,6 +1607,10 @@ mod tests {
         drop(store);
 
         let mut reopened = SqliteEventStore::open(&database).expect("reopen store");
+        let projection_recovery = reopened
+            .recover_projections()
+            .expect("rebuild task projections with dependent agent rows");
+        assert_eq!(projection_recovery.tasks_rebuilt, 1);
         assert_eq!(
             reopened
                 .organization_history(genome.organization_id)

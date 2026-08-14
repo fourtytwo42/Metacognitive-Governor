@@ -2260,6 +2260,7 @@ dependencies = [
  "axum",
  "chrono",
  "http-body-util",
+ "mcg-agents",
  "mcg-config",
  "mcg-domain",
  "mcg-events",
@@ -2281,6 +2282,7 @@ name = "mcg-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "mcg-agents",
  "mcg-api",
  "mcg-config",
  "mcg-domain",

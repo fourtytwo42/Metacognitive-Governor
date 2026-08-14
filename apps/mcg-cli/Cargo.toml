@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+mcg-agents = { path = "../../crates/mcg-agents" }
 mcg-api = { path = "../../crates/mcg-api" }
 mcg-config = { path = "../../crates/mcg-config" }
 mcg-domain = { path = "../../crates/mcg-domain" }

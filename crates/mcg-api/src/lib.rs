@@ -1,6 +1,13 @@
 //! Versioned authenticated loopback HTTP and streaming surface.
 
-use std::{convert::Infallible, future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    future::Future,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -11,15 +18,22 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use mcg_agents::{
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, OrganizationGenome,
+    OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, SuccessCondition,
+    TaskComplexity,
+};
 use mcg_domain::{
-    ApprovalId, MemoryClaimId, ProjectId, RiskLevel, TaskBudget, TaskEnvelope, TaskId, TaskState,
-    ThreadId,
+    ApprovalId, MemoryClaimId, OrganizationId, OrganizationRevisionId, ProjectId, RiskLevel, RunId,
+    TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
 };
-use mcg_runtime::{AppRuntime, MemoryClaimMutation, ProjectMutation, RuntimeError, RuntimeStatus};
+use mcg_runtime::{
+    AgentRunView, AppRuntime, MemoryClaimMutation, ProjectMutation, RuntimeError, RuntimeStatus,
+};
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -155,6 +169,61 @@ pub struct AssembleContextRequest {
     pub target_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOrganizationRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationMutationResponse {
+    pub organization: OrganizationGenome,
+    pub event: EventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationListResponse {
+    pub organizations: Vec<OrganizationGenome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanAgentRunRequest {
+    pub organization_revision_id: OrganizationRevisionId,
+    pub complexity: TaskComplexity,
+    pub work: Vec<PlanWorkRequest>,
+    #[serde(default)]
+    pub require_independent_evaluation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanWorkRequest {
+    pub key: String,
+    pub goal: String,
+    pub role: RoleKind,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    pub success_conditions: Vec<SuccessCondition>,
+    #[serde(default)]
+    pub risk_notes: Vec<String>,
+    #[serde(default = "default_budget_weight")]
+    pub budget_weight: u32,
+    #[serde(default = "default_estimated_useful_seconds")]
+    pub estimated_useful_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionAgentRunRequest {
+    pub state: AgentRunState,
+}
+
+const fn default_budget_weight() -> u32 {
+    1
+}
+
+const fn default_estimated_useful_seconds() -> u64 {
+    60
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ApprovalListQuery {
     state: Option<ApprovalState>,
@@ -254,6 +323,20 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         )
         .route("/api/v1/tasks/{task_id}/events", get(task_events))
         .route("/api/v1/tasks/{task_id}/tool-audit", get(task_tool_audit))
+        .route("/api/v1/tasks/{task_id}/runs", post(plan_agent_run))
+        .route(
+            "/api/v1/organizations",
+            get(list_organizations).post(create_default_organization),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}",
+            get(get_organization),
+        )
+        .route("/api/v1/runs/{run_id}", get(get_agent_run))
+        .route(
+            "/api/v1/runs/{run_id}/transition",
+            post(transition_agent_run),
+        )
         .route(
             "/api/v1/projects",
             get(list_projects).post(discover_project),
@@ -470,6 +553,193 @@ async fn task_tool_audit(
     Ok(Json(ToolAuditResponse {
         records: state.runtime.tool_audit(task_id)?,
     }))
+}
+
+async fn create_default_organization(
+    State(state): State<ApiState>,
+    Json(request): Json<CreateOrganizationRequest>,
+) -> Result<(StatusCode, Json<OrganizationMutationResponse>), ApiError> {
+    let mut organization = OrganizationGenome::consumer_default(Utc::now());
+    if let Some(name) = request.name {
+        if name.trim().is_empty() || name.chars().count() > 100 {
+            return Err(ApiError::bad_request(
+                "organization name must contain 1-100 characters",
+            ));
+        }
+        organization.name = name.trim().into();
+    }
+    let event = state
+        .runtime
+        .record_organization_revision(&organization)
+        .map_err(map_runtime_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(OrganizationMutationResponse {
+            organization,
+            event,
+        }),
+    ))
+}
+
+async fn list_organizations(
+    State(state): State<ApiState>,
+) -> Result<Json<OrganizationListResponse>, ApiError> {
+    Ok(Json(OrganizationListResponse {
+        organizations: state.runtime.organizations().map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_organization(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+) -> Result<Json<OrganizationGenome>, ApiError> {
+    let organization_id = parse_organization_id(&organization_id)?;
+    state
+        .runtime
+        .organization(organization_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("organization {organization_id} was not found")))
+}
+
+#[allow(clippy::too_many_lines)] // Stable-key dependency conversion is one validation boundary.
+async fn plan_agent_run(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<PlanAgentRunRequest>,
+) -> Result<(StatusCode, Json<AgentRunView>), ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    let task = state
+        .runtime
+        .task(task_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::not_found(format!("task {task_id} was not found")))?;
+    let organization = state
+        .runtime
+        .organization_revision(request.organization_revision_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "organization revision {} was not found",
+                request.organization_revision_id
+            ))
+        })?;
+    if request.work.is_empty() {
+        return Err(ApiError::bad_request("run plan must contain work"));
+    }
+    let keys = request
+        .work
+        .iter()
+        .map(|work| work.key.trim())
+        .collect::<BTreeSet<_>>();
+    if keys.len() != request.work.len()
+        || keys.iter().any(|key| key.is_empty())
+        || request.work.iter().any(|work| {
+            work.dependencies
+                .iter()
+                .any(|key| !keys.contains(key.trim()))
+        })
+    {
+        return Err(ApiError::bad_request(
+            "work keys must be unique/non-empty and dependencies must reference known keys",
+        ));
+    }
+    let identities = request
+        .work
+        .iter()
+        .map(|work| (work.key.trim().to_owned(), WorkItemId::new()))
+        .collect::<BTreeMap<_, _>>();
+    let work = request
+        .work
+        .into_iter()
+        .map(|work| PlannedWork {
+            id: identities[work.key.trim()],
+            goal: work.goal,
+            role: work.role,
+            dependencies: work
+                .dependencies
+                .iter()
+                .map(|key| identities[key.trim()])
+                .collect(),
+            success_conditions: work.success_conditions,
+            risk_notes: work.risk_notes,
+            budget_weight: work.budget_weight,
+            estimated_useful_seconds: work.estimated_useful_seconds,
+        })
+        .collect();
+    let now = Utc::now();
+    let run_id = RunId::new();
+    let planning = PlanningRequest {
+        run_id,
+        task: task.clone(),
+        complexity: request.complexity,
+        work,
+        require_independent_evaluation: request.require_independent_evaluation,
+    };
+    let plan = ExecutivePlanner::default()
+        .plan(&organization, &planning, now)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let run = AgentRun {
+        schema_version: AGENT_RUN_SCHEMA_VERSION,
+        id: run_id,
+        task_id,
+        organization_revision_id: organization.revision_id,
+        state: AgentRunState::Planned,
+        metrics: OrganizationalMetrics::default(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    state
+        .runtime
+        .create_agent_run(&run, &plan)
+        .map_err(map_runtime_error)?;
+    let view = state
+        .runtime
+        .agent_run_view(run_id)
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn get_agent_run(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<AgentRunView>, ApiError> {
+    let run_id = parse_run_id(&run_id)?;
+    state
+        .runtime
+        .agent_run_view(run_id)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn transition_agent_run(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    Json(request): Json<TransitionAgentRunRequest>,
+) -> Result<Json<AgentRunView>, ApiError> {
+    if !matches!(
+        request.state,
+        AgentRunState::Running | AgentRunState::Cancelled
+    ) {
+        return Err(ApiError::bad_request(
+            "external run transition may only start/resume or cancel",
+        ));
+    }
+    let run_id = parse_run_id(&run_id)?;
+    let current = state
+        .runtime
+        .agent_run_view(run_id)
+        .map_err(map_runtime_error)?;
+    state
+        .runtime
+        .transition_agent_run(run_id, request.state, current.run.metrics)
+        .map_err(map_runtime_error)?;
+    state
+        .runtime
+        .agent_run_view(run_id)
+        .map(Json)
+        .map_err(map_runtime_error)
 }
 
 async fn discover_project(
@@ -773,6 +1043,18 @@ fn parse_task_id(value: &str) -> Result<TaskId, ApiError> {
     value
         .parse()
         .map_err(|_| ApiError::bad_request("task id must be a UUID"))
+}
+
+fn parse_organization_id(value: &str) -> Result<OrganizationId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("organization id must be a UUID"))
+}
+
+fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("run id must be a UUID"))
 }
 
 fn parse_approval_id(value: &str) -> Result<ApprovalId, ApiError> {
@@ -1288,5 +1570,119 @@ mod tests {
         assert_eq!(history.claims.len(), 3);
         assert_eq!(history.claims[2].value, serde_json::json!("pnpm"));
         assert_eq!(history.claims[2].usefulness_count, 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Complete authenticated organization/run HTTP workflow.
+    async fn organization_and_dependency_plan_are_authenticated_durable_and_inspectable() {
+        let runtime = test_runtime();
+        let app = router(runtime.clone());
+        let organization_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/organizations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Consumer Fixture"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("organization response");
+        assert_eq!(organization_response.status(), StatusCode::CREATED);
+        let bytes = organization_response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let organization: OrganizationMutationResponse =
+            serde_json::from_slice(&bytes).expect("organization body");
+        assert_eq!(organization.organization.name, "Consumer Fixture");
+
+        let mut task = TaskEnvelope::new("Build then test a fixture site");
+        task.budget = TaskBudget {
+            max_tokens: Some(20_000),
+            max_cost_usd: Some(4.0),
+            max_duration_seconds: Some(900),
+        };
+        runtime.create_task(&task).expect("task");
+        let plan_body = serde_json::to_vec(&PlanAgentRunRequest {
+            organization_revision_id: organization.organization.revision_id,
+            complexity: TaskComplexity::Compound,
+            work: vec![
+                PlanWorkRequest {
+                    key: "build".into(),
+                    goal: "Build the fixture".into(),
+                    role: RoleKind::Coder,
+                    dependencies: Vec::new(),
+                    success_conditions: vec![SuccessCondition::Build {
+                        command: "npm run build".into(),
+                    }],
+                    risk_notes: Vec::new(),
+                    budget_weight: 2,
+                    estimated_useful_seconds: 120,
+                },
+                PlanWorkRequest {
+                    key: "test".into(),
+                    goal: "Test the fixture".into(),
+                    role: RoleKind::ToolWorker,
+                    dependencies: vec!["build".into()],
+                    success_conditions: vec![SuccessCondition::Test {
+                        command: "npm test".into(),
+                    }],
+                    risk_notes: Vec::new(),
+                    budget_weight: 1,
+                    estimated_useful_seconds: 60,
+                },
+            ],
+            require_independent_evaluation: true,
+        })
+        .expect("plan body");
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}/runs", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(plan_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("plan response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let view: AgentRunView = serde_json::from_slice(&bytes).expect("run view");
+        assert_eq!(view.run.state, AgentRunState::Planned);
+        assert_eq!(view.plan.items.len(), 3);
+        assert_eq!(
+            view.plan
+                .items
+                .iter()
+                .filter(|item| item.dependencies.is_empty())
+                .count(),
+            1
+        );
+
+        let response = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/runs/{}/transition",
+                    view.run.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"running"}"#))
+                .expect("request"),
+            )
+            .await
+            .expect("start response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let durable = runtime
+            .agent_run_view(view.run.id)
+            .expect("durable run view");
+        assert_eq!(durable.run.state, AgentRunState::Running);
+        assert_eq!(durable.plan, view.plan);
     }
 }
