@@ -10,9 +10,13 @@ mod contracts;
 mod credentials;
 mod legacy;
 mod negotiation;
+mod stdio;
+mod unified;
 
 pub use client::*;
 pub use contracts::*;
 pub use credentials::*;
 pub use legacy::*;
 pub use negotiation::*;
+pub use stdio::*;
+pub use unified::*;

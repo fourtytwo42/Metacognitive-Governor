@@ -27,9 +27,9 @@ use mcg_domain::{
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
-    LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpConnection, McpCredential,
-    McpCredentialStore, McpError, McpProtocolMode, McpToolCatalog, MemoryMcpCredentialStore,
-    NegotiatingHttpMcpClient, OsMcpCredentialStore,
+    LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpClient, McpConnection,
+    McpCredential, McpCredentialStore, McpError, McpProtocolMode, McpToolCatalog,
+    MemoryMcpCredentialStore, OsMcpCredentialStore,
 };
 use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
@@ -295,7 +295,7 @@ impl ToolExecutor for RuntimeMcpExecutor {
             .map_err(|error| ToolError::Execution(error.to_string()))?;
         connection.protocol_mode = protocol_mode_for_catalog(&protocol_version)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let client = NegotiatingHttpMcpClient::new(connection, credential)
+        let client = McpClient::new(connection, credential)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
         let started_at = Utc::now();
         let result = client
@@ -961,7 +961,7 @@ impl AppRuntime {
         Ok(self.store()?.mcp_catalog(connection_id)?)
     }
 
-    /// Creates a modern HTTP MCP connection, stores any bearer credential only
+    /// Creates an HTTP or stdio MCP connection, stores any bearer credential only
     /// in the protected operating-system store, discovers tools, and persists
     /// secret-free evidence atomically.
     ///
@@ -982,7 +982,7 @@ impl AppRuntime {
         }
         save_mcp_credential(self.mcp_credentials.as_ref(), &connection, credential)?;
         let client_credential = load_mcp_credential(self.mcp_credentials.as_ref(), &connection)?;
-        let client = match NegotiatingHttpMcpClient::new(connection.clone(), client_credential) {
+        let client = match McpClient::new(connection.clone(), client_credential) {
             Ok(client) => client,
             Err(error) => {
                 let _ = self.mcp_credentials.delete(&connection.id);
@@ -1016,7 +1016,7 @@ impl AppRuntime {
         })
     }
 
-    /// Rediscovers tools for one durable modern HTTP MCP connection.
+    /// Rediscovers tools for one durable HTTP or stdio MCP connection.
     ///
     /// # Errors
     /// Returns not-found, credential-store, transport, negotiation, response, or
@@ -1029,9 +1029,7 @@ impl AppRuntime {
                 StorageError::InvalidData(format!("MCP connection {connection_id} was not found"))
             })?;
         let credential = load_mcp_credential(self.mcp_credentials.as_ref(), &connection)?;
-        let catalog = NegotiatingHttpMcpClient::new(connection, credential)?
-            .discover()
-            .await?;
+        let catalog = McpClient::new(connection, credential)?.discover().await?;
         let event = self.store()?.record_mcp_catalog(&catalog)?;
         let _ = self.event_sender.send(event);
         Ok(catalog)

@@ -21,12 +21,17 @@ export interface ProviderMutation {
 
 export type McpAuthMode = "none" | "bearer_token";
 export type McpProtocolMode = "auto" | "modern20260728" | "legacy";
+export type McpTransportKind = "streamable_http" | "stdio";
+
+export type McpTransport =
+  | { kind: "streamable_http"; url: string }
+  | { kind: "stdio"; command: string; args: string[] };
 
 export interface McpConnection {
   contract_version: number;
   id: string;
   display_name: string;
-  transport: { kind: "streamable_http"; url: string };
+  transport: McpTransport;
   auth_mode: McpAuthMode;
   protocol_mode: McpProtocolMode;
   enabled: boolean;

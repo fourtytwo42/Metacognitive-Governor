@@ -135,6 +135,21 @@ enum McpCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Add a directly executed stdio server and immediately discover its tools.
+    AddStdio {
+        id: String,
+        name: String,
+        executable: String,
+        #[arg(long, value_enum, default_value_t = McpProtocolArg::Auto)]
+        protocol: McpProtocolArg,
+        #[arg(long)]
+        disabled: bool,
+        #[arg(long)]
+        json: bool,
+        /// Arguments passed directly to the executable (no shell expansion).
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// List configured MCP servers and their latest tool catalogs.
     List {
         #[arg(long)]
@@ -1007,52 +1022,36 @@ async fn run_mcp(
                 },
                 credential,
             };
-            let response = client
-                .post(format!("{host}/api/v1/mcp/connections"))
-                .bearer_auth(token)
-                .json(&payload)
-                .send()
-                .await?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let detail = response.text().await?;
-                return Err(format!("MCP setup failed ({status}): {detail}").into());
-            }
-            let mutation: McpMutation = response.json().await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&mutation)?);
-            } else {
-                println!(
-                    "{}: {} tool(s) discovered",
-                    mutation.connection.id,
-                    mutation.catalog.tools.len()
-                );
-            }
+            post_mcp_configuration(client, host, token, &payload, json).await?;
+        }
+        McpCommand::AddStdio {
+            id,
+            name,
+            executable,
+            protocol,
+            disabled,
+            json,
+            args,
+        } => {
+            let payload = McpConfigurePayload {
+                connection: McpConnection {
+                    contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+                    id,
+                    display_name: name,
+                    transport: McpTransport::Stdio {
+                        command: executable,
+                        args,
+                    },
+                    auth_mode: McpAuthMode::None,
+                    protocol_mode: protocol.into(),
+                    enabled: !disabled,
+                },
+                credential: None,
+            };
+            post_mcp_configuration(client, host, token, &payload, json).await?;
         }
         McpCommand::List { json } => {
-            let response: McpListResponse = client
-                .get(format!("{host}/api/v1/mcp/connections"))
-                .bearer_auth(token)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&response)?);
-            } else if response.connections.is_empty() {
-                println!("No MCP servers configured.");
-            } else {
-                for item in response.connections {
-                    println!(
-                        "{}  {}  {:?}  {} tool(s)",
-                        item.connection.id,
-                        item.connection.display_name,
-                        item.connection.auth_mode,
-                        item.catalog.map_or(0, |catalog| catalog.tools.len())
-                    );
-                }
-            }
+            list_mcp_configurations(client, host, token, json).await?;
         }
         McpCommand::Tools { id } => {
             let catalog: McpToolCatalog = client
@@ -1076,6 +1075,69 @@ async fn run_mcp(
                 .await?;
             println!("{}: {} tool(s)", catalog.connection_id, catalog.tools.len());
         }
+    }
+    Ok(())
+}
+
+async fn list_mcp_configurations(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response: McpListResponse = client
+        .get(format!("{host}/api/v1/mcp/connections"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else if response.connections.is_empty() {
+        println!("No MCP servers configured.");
+    } else {
+        for item in response.connections {
+            println!(
+                "{}  {}  {:?}  {} tool(s)",
+                item.connection.id,
+                item.connection.display_name,
+                item.connection.auth_mode,
+                item.catalog.map_or(0, |catalog| catalog.tools.len())
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn post_mcp_configuration(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    payload: &McpConfigurePayload,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .post(format!("{host}/api/v1/mcp/connections"))
+        .bearer_auth(token)
+        .json(payload)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await?;
+        return Err(format!("MCP setup failed ({status}): {detail}").into());
+    }
+    let mutation: McpMutation = response.json().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&mutation)?);
+    } else {
+        println!(
+            "{}: {} tool(s) discovered",
+            mutation.connection.id,
+            mutation.catalog.tools.len()
+        );
     }
     Ok(())
 }

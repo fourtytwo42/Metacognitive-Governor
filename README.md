@@ -106,16 +106,19 @@ memory, run-query, and idempotent governed agent-run tools under strict MCP
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
 the remaining interoperability and expanded run-control work.
 
-MCG can also connect to current stateless Streamable HTTP MCP servers. Use
+MCG can also connect to Streamable HTTP or local stdio MCP servers. Use
 `mcg mcp add-http ID NAME URL`; select `--auth bearer-token` and pipe the secret
 on standard input when needed. `mcg mcp list`, `tools`, and `discover` inspect
 the secret-free durable catalog. Public endpoints require HTTPS, credentials are
 stored only in the operating-system credential store, and configuration is not
 committed unless live discovery succeeds. HTTP automatic mode probes the current
 protocol first and can fall back to the `2025-11-25` initialize/session flow;
-strict current and legacy pins are available. Stdio transport remains the next
-MCP client integration slice. The desktop includes simple
-URL-first setup plus advanced id/protocol/bearer controls and durable tool counts.
+strict current and legacy pins are available. Local servers use
+`mcg mcp add-stdio ID NAME EXECUTABLE -- ARG...`; the executable is spawned
+without shell expansion, receives a minimal environment, and uses the same
+five-second current probe with same-process legacy fallback. The desktop includes
+simple URL-first setup plus advanced HTTP/stdio, id, protocol, bearer, command,
+and one-argument-per-line controls with durable tool counts.
 Agent work can explicitly request a
 discovered tool as `mcp::SERVER_ID::REMOTE_TOOL`; MCG exposes a provider-safe
 alias only within that lease and executes the call through its normal policy,

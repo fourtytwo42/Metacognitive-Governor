@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP current HTTP management is available through API, CLI, and native desktop; remote tools execute through governed agent leases.
-- Last meaningful change: Added current-first HTTP negotiation with structured fallback to a bounded `2025-11-25` initialize/session flow, optional session headers, initialized notification, JSON/SSE response decoding, strict era pins, and catalog-era execution pinning.
-- Next step: Add stdio current probe/same-process legacy fallback, then qualify the complete MCP slice on Windows/Ubuntu and perform native MCP UAT. Preserve the visible OAuth handoff.
+- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP HTTP/stdio management is available through API, CLI, and native desktop; remote tools execute through governed agent leases.
+- Last meaningful change: Added bounded stdio process transport with a five-second current probe, same-process legacy fallback, strict pins, deterministic cleanup, unified governed execution, CLI configuration, and advanced desktop controls.
+- Next step: Qualify the complete MCP slice on Windows/Ubuntu, add representative third-party interoperability fixtures, and perform native MCP UAT. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -19,7 +19,7 @@ Durable project context lives here. Update this file whenever information should
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
-- M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. MCP client support and expanded run-control/evaluation contracts remain in scope.
+- M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. Its client supports current/legacy HTTP and stdio configuration/discovery/calls through API, CLI, and desktop; expanded run-control/evaluation contracts remain in scope.
 
 ## User Preferences
 
@@ -106,6 +106,7 @@ When sources conflict, use this order:
 - The M6 provider proxy is authenticated by the installation bearer token and never executes externally supplied caller tools. `/v1/responses` and `/v1/chat/completions` share exact provider routing/fallback rules; authentication errors cannot cross provider or billing boundaries. `mcg:cheap` requires known cost and `mcg:local` accepts only loopback/private endpoints.
 - The M6 MCP server uses one stateless `POST /mcp`; it requires per-request protocol/capability metadata and matching `MCP-Protocol-Version`, `Mcp-Method`, and tool `Mcp-Name` headers. Present Origins must be literal loopback/localhost and are rejected before authentication otherwise. Read/query tools return private-cache structured evidence; the agent-run mutation is explicitly marked destructive/open-world and remains policy-governed.
 - The `mcg-mcp` client boundary stores only secret-free connection metadata/catalogs in migration 9 and bearer secrets under a separate OS credential-store service. Current HTTP configuration performs `server/discover` and `tools/list` before committing; public plaintext endpoints and URL-embedded credentials are rejected. Explicit remote agent tools use canonical `mcp::connection::tool` requests, per-lease aliases, immutable internal bindings, conservative catalog annotations, and the existing policy/approval/audit/execution-lease broker; the executor revalidates enabled catalog identity/classification before every call.
+- Stdio MCP operations spawn a direct child with a minimal environment, bounded line/request sizes, deterministic termination, a five-second current discovery probe, and same-process `2025-11-25` initialize fallback. Stdio accepts no bearer credential; CLI arguments are a direct vector and advanced desktop arguments are one per line.
 - Migration 8 atomically reserves interface-owned runs under an immutable request key/SHA-256 input hash. `mcg_run_agent` requires explicit Coder/Tool Worker tool lists, executes through the existing provider/policy broker, never treats a model response as objective completion, and returns existing success/non-success evidence rather than duplicating work on retry.
 - M5 SQLite migration 5 makes organization revisions, plans, usage, and evaluations immutable evidence while runs, instances, and leases are event-backed current projections. Startup never resumes stale authority: interrupted runs become `recovering` and active instances/leases expire before reassignment.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
@@ -418,6 +419,15 @@ When sources conflict, use this order:
 - Commands/tests: strict MCP/runtime clippy and tests; dual-era fixture with current rejection, legacy session assertion, discovery ordering, and tool call.
 - Result: Automatic HTTP compatibility reaches a legacy session without relaunching or leaking credentials; strict modes remain explicit and current HTTP behavior stays green.
 - Follow-up: Implement the stdio process lifecycle with a five-second current probe and same-process initialize fallback.
+
+### 2026-08-14 - Bounded Stdio MCP Client
+
+- Context: Local MCP servers need first-class cross-platform support without shell interpolation, unbounded process output, or an era change after agent authority is issued.
+- Decision: Add one-child-per-operation stdio transport with a minimal environment, piped newline JSON-RPC, a 4 MiB line cap, request timeouts, kill-on-drop cleanup, five-second current discovery, and structured same-process legacy fallback. Route HTTP and stdio through one runtime client; expose stdio in CLI and advanced desktop only.
+- Files: `crates/mcg-mcp/src/{stdio,unified}.rs`, `crates/mcg-runtime/src/lib.rs`, `apps/mcg-cli/src/main.rs`, `apps/desktop/src/{App,App.test,desktop-client}.tsx`, `docs/architecture/mcp.md`, `README.md`.
+- Commands/tests: Modern and legacy spawned-process fixtures; focused Rust compile/tests; desktop Vitest and production build; CLI help smoke.
+- Result: Modern stdio discovery/call and same-process automatic legacy fallback pass on Windows; governed runtime configuration/execution now dispatches by durable transport, and all primary management interfaces accept stdio without persisting a credential.
+- Follow-up: Run strict complete local gates on Windows/Ubuntu and add third-party SDK interoperability plus native UAT.
 
 ## Known Issues
 

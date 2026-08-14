@@ -99,8 +99,8 @@ Unexpected storage details are not reflected to the client.
 ## MCP client foundation
 
 The `mcg-mcp` crate owns secret-free server connection contracts, redacting
-credentials, current stateless Streamable HTTP discovery/call transport, and
-normalized tool catalogs/results. Connection ids are stable and bounded. Public
+credentials, current stateless Streamable HTTP and bounded stdio discovery/call
+transports, and normalized tool catalogs/results. Connection ids are stable and bounded. Public
 HTTP endpoints are rejected unless they use HTTPS; unencrypted HTTP is limited
 to `localhost` or literal loopback addresses. URLs cannot embed credentials or
 fragments. Bearer values live under a separate MCP service in the native OS
@@ -115,6 +115,15 @@ sends `notifications/initialized`, and supports JSON or SSE JSON-RPC responses.
 The negotiated era is stored in the catalog; agent execution pins directly to
 that era so it cannot silently renegotiate to a different contract after
 authority was issued.
+
+Stdio servers are executed directly with piped stdin/stdout, null stderr, no
+shell expansion, a minimal inherited environment, a 4 MiB line limit, bounded
+request timeouts, and kill-on-drop cleanup. Automatic mode gives
+`server/discover` five seconds, then performs legacy initialization on the same
+child process only for a timeout or structured unsupported-protocol response.
+Current-only and legacy-only pins do not silently cross eras. Each discovery or
+tool call owns one child lifecycle, so no process or negotiated authority
+survives beyond the bounded operation.
 
 SQLite migration 9 persists connection metadata and the latest deterministic
 tool catalog. Configuration follows a discover-before-commit transaction shape:
@@ -132,13 +141,15 @@ Authenticated management endpoints are:
 | `GET /api/v1/mcp/connections/{id}/tools` | Read the latest durable tool catalog. |
 | `POST /api/v1/mcp/connections/{id}/discover` | Refresh live discovery and atomically replace the catalog. |
 
-The CLI exposes the same foundation through `mcg mcp add-http`, `list`, `tools`,
-and `discover`.
+The CLI exposes the same foundation through `mcg mcp add-http`, `add-stdio`,
+`list`, `tools`, and `discover`. Stdio arguments after `--` are passed as an
+argument vector rather than parsed by a shell.
 
 The native desktop exposes the same authenticated daemon boundary. Simple mode
 asks only for a display name and URL and uses automatic current protocol with no
-authentication. Advanced mode reveals the stable connection id, protocol pin,
-and optional bearer field. The submitted secret is cleared from React state
+authentication. Advanced mode reveals HTTP/stdio transport, the stable connection
+id, protocol pin, optional bearer field, and local executable arguments. Stdio
+arguments are entered one per line to keep boundaries explicit. The submitted secret is cleared from React state
 after successful configuration and is never returned in the durable connection
 list. Connection cards show discovered tool counts and support explicit refresh.
 
@@ -178,10 +189,9 @@ executes exactly one read-only external MCP call through the broker, returns its
 result to the model, and verifies the durable lease alias plus succeeded tool
 evidence with no approval record.
 
-This is the MCP server plus HTTP client foundation, not the completed MCP feature family. Remaining
+This is the MCP server plus HTTP/stdio client foundation, not the completed MCP feature family. Remaining
 M6 work includes:
 
-- stdio transport with bounded current probe and same-process legacy fallback;
 - expanded MCP run decomposition, independent evaluation, approval-resume,
   completion, and cancellation contracts;
 - request-scoped SSE progress and opt-in subscription streams where useful;

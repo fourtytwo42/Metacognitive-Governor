@@ -112,3 +112,46 @@ test("simple MCP setup discovers a server without exposing advanced credentials"
     undefined
   );
 });
+
+test("advanced MCP setup passes stdio executable arguments without a credential", async () => {
+  client.configureMcp.mockResolvedValue({
+    connection: {
+      contract_version: 1,
+      id: "local_tools",
+      display_name: "Local Tools",
+      transport: { kind: "stdio", command: "npx", args: ["-y", "fixture-server"] },
+      auth_mode: "none",
+      protocol_mode: "auto",
+      enabled: true
+    },
+    catalog: {
+      connection_id: "local_tools",
+      protocol_version: "2026-07-28",
+      server_info: { name: "fixture" },
+      tools: [],
+      discovered_at: "2026-08-14T00:00:00Z",
+      expires_at: "2026-08-14T00:05:00Z"
+    }
+  });
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  fireEvent.change(screen.getByLabelText("Transport"), { target: { value: "stdio" } });
+  expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Authentication")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Server name"), { target: { value: "Local Tools" } });
+  fireEvent.change(screen.getByLabelText("Executable"), { target: { value: "npx" } });
+  fireEvent.change(screen.getByLabelText("Arguments (one per line)"), {
+    target: { value: "-y\nfixture-server" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add server" }));
+
+  expect(await screen.findByRole("heading", { name: "Local Tools" })).toBeInTheDocument();
+  expect(client.configureMcp).toHaveBeenCalledWith(
+    expect.objectContaining({
+      transport: { kind: "stdio", command: "npx", args: ["-y", "fixture-server"] },
+      auth_mode: "none"
+    }),
+    undefined
+  );
+});

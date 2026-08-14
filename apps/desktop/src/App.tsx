@@ -9,6 +9,7 @@ import {
   type McpAuthMode,
   type McpListItem,
   type McpProtocolMode,
+  type McpTransportKind,
   openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
@@ -36,6 +37,9 @@ export function App() {
   const [mcpName, setMcpName] = useState("");
   const [mcpId, setMcpId] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpTransport, setMcpTransport] = useState<McpTransportKind>("streamable_http");
+  const [mcpCommand, setMcpCommand] = useState("");
+  const [mcpArgs, setMcpArgs] = useState("");
   const [mcpAuth, setMcpAuth] = useState<McpAuthMode>("none");
   const [mcpProtocol, setMcpProtocol] = useState<McpProtocolMode>("auto");
   const [mcpCredential, setMcpCredential] = useState("");
@@ -123,11 +127,12 @@ export function App() {
   }
 
   async function addMcpServer() {
-    if (!mcpName.trim() || !mcpUrl.trim()) {
-      setMcpError("Server name and URL are required.");
+    const stdio = advanced && mcpTransport === "stdio";
+    if (!mcpName.trim() || (stdio ? !mcpCommand.trim() : !mcpUrl.trim())) {
+      setMcpError(stdio ? "Server name and executable are required." : "Server name and URL are required.");
       return;
     }
-    if (advanced && mcpAuth === "bearer_token" && !mcpCredential) {
+    if (!stdio && advanced && mcpAuth === "bearer_token" && !mcpCredential) {
       setMcpError("Enter the bearer token for this server.");
       return;
     }
@@ -139,12 +144,18 @@ export function App() {
           contract_version: 1,
           id: generatedMcpId(),
           display_name: mcpName.trim(),
-          transport: { kind: "streamable_http", url: mcpUrl.trim() },
-          auth_mode: advanced ? mcpAuth : "none",
+          transport: stdio
+            ? {
+                kind: "stdio",
+                command: mcpCommand.trim(),
+                args: mcpArgs.split("\n").map((argument) => argument.trim()).filter(Boolean)
+              }
+            : { kind: "streamable_http", url: mcpUrl.trim() },
+          auth_mode: stdio ? "none" : advanced ? mcpAuth : "none",
           protocol_mode: advanced ? mcpProtocol : "auto",
           enabled: true
         },
-        advanced && mcpAuth === "bearer_token" ? mcpCredential : undefined
+        !stdio && advanced && mcpAuth === "bearer_token" ? mcpCredential : undefined
       );
       setMcpConnections((connections) => [
         ...connections.filter((item) => item.connection.id !== mutation.connection.id),
@@ -153,6 +164,8 @@ export function App() {
       setMcpName("");
       setMcpId("");
       setMcpUrl("");
+      setMcpCommand("");
+      setMcpArgs("");
       setMcpCredential("");
     } catch (error) {
       setMcpError(errorMessage(error));
@@ -330,17 +343,49 @@ export function App() {
                   placeholder="My tools"
                 />
               </label>
-              <label>
-                Server URL
-                <input
-                  value={mcpUrl}
-                  onChange={(event) => setMcpUrl(event.target.value)}
-                  placeholder="https://tools.example.com/mcp"
-                  inputMode="url"
-                />
-              </label>
+              {(!advanced || mcpTransport === "streamable_http") && (
+                <label>
+                  Server URL
+                  <input
+                    value={mcpUrl}
+                    onChange={(event) => setMcpUrl(event.target.value)}
+                    placeholder="https://tools.example.com/mcp"
+                    inputMode="url"
+                  />
+                </label>
+              )}
               {advanced && (
                 <div className="advanced-fields">
+                  <label>
+                    Transport
+                    <select
+                      value={mcpTransport}
+                      onChange={(event) => setMcpTransport(event.target.value as McpTransportKind)}
+                    >
+                      <option value="streamable_http">HTTP</option>
+                      <option value="stdio">Local executable (stdio)</option>
+                    </select>
+                  </label>
+                  {mcpTransport === "stdio" && (
+                    <>
+                      <label>
+                        Executable
+                        <input
+                          value={mcpCommand}
+                          onChange={(event) => setMcpCommand(event.target.value)}
+                          placeholder="npx"
+                        />
+                      </label>
+                      <label>
+                        Arguments (one per line)
+                        <textarea
+                          value={mcpArgs}
+                          onChange={(event) => setMcpArgs(event.target.value)}
+                          placeholder={"-y\n@modelcontextprotocol/server-filesystem\nC:\\Projects"}
+                        />
+                      </label>
+                    </>
+                  )}
                   <label>
                     Connection id
                     <input
@@ -360,7 +405,7 @@ export function App() {
                       <option value="legacy">Legacy only</option>
                     </select>
                   </label>
-                  <label>
+                  {mcpTransport === "streamable_http" && <label>
                     Authentication
                     <select
                       value={mcpAuth}
@@ -369,8 +414,8 @@ export function App() {
                       <option value="none">None</option>
                       <option value="bearer_token">Bearer token</option>
                     </select>
-                  </label>
-                  {mcpAuth === "bearer_token" && (
+                  </label>}
+                  {mcpTransport === "streamable_http" && mcpAuth === "bearer_token" && (
                     <label>
                       Bearer token
                       <input
