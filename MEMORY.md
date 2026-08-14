@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; organization contracts plus deterministic minimal-role selection and dependency-aware planning pass workspace tests on Windows.
-- Last meaningful change: Added the consumer-default core organization and a structured-intent planner that avoids keyword authorization, directly dispatches atomic work, coordinates compound work, rejects dependency cycles/overhead excess, adds requested independent evaluation, and keeps child budgets within parent limits.
-- Next step: Persist organization revisions, runs, plans, agent instances/leases, evaluations, usage, and replay evidence; then wire real provider/tool-backed website work.
+- Current task: M5 organization and useful work is in progress; contracts, minimal planning, SQLite run evidence, and evented daemon-restart recovery pass workspace tests on Windows.
+- Last meaningful change: SQLite migration 5 now persists immutable organization revisions/plans/usage/evaluations plus current run/instance/lease projections. Runtime startup moves interrupted runs to recovering and expires active instances/leases with authoritative events.
+- Next step: Wire provider routing, scoped project context, and typed tool execution into agent-run orchestration, then expose it through authenticated API/CLI and exercise real website work.
 - Blockers: None documented.
 
 ## Current State
@@ -102,6 +102,7 @@ When sources conflict, use this order:
 - M3 implements typed filesystem, process/shell, HTTP/download, system, Git/worktree/patch, and memory primitives behind one policy broker. SQLite durably stores approval state, execution leases, immutable tool audit, artifact registrations, and associated task events.
 - M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
 - M5 uses a separate `mcg-agents` boundary for versioned organization genomes, roles/instances, work plans, agent leases, success conditions, evaluation evidence, confidence/calibration, and organizational-cost metrics.
+- M5 SQLite migration 5 makes organization revisions, plans, usage, and evaluations immutable evidence while runs, instances, and leases are event-backed current projections. Startup never resumes stale authority: interrupted runs become `recovering` and active instances/leases expire before reassignment.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
 - M3 policy evaluates canonical resources, not prompt claims. Invalid or weakened owner constitutions fail closed on every broker request; audit and secret-isolation requirements cannot be disabled. Denied or approval-pending requests are audited before return and never reach a host executor.
@@ -142,6 +143,7 @@ When sources conflict, use this order:
 - 2026-08-14: M4 commit `41abefc` passed `scripts/verify.sh` on the owner-controlled Ubuntu VM, including native Tauri and Playwright. A real Linux daemon/CLI smoke then discovered the mirrored repository, corrected `npm` to `pnpm`, retrieved the correction in context, killed/restarted the daemon, and recovered both provenance-bearing versions.
 - 2026-08-14: M5 contract foundation added 2 focused tests for organization graph validation/round-trip, lease budget exhaustion, and objective overhead. `cargo test --workspace`, focused clippy with warnings denied, and `git diff --check` passed on Windows.
 - 2026-08-14: M5 minimal-organization planning added 4 focused tests. The consumer default has the five required core roles; atomic rename work selects only Coder with zero coordination overhead; compound site work selects only Executive/Coder/Tool Worker/Evaluator, injects independent evaluation, tracks dependencies, and preserves aggregate budgets; dependency cycles fail closed. Complete Rust workspace tests, focused strict clippy, formatting, and `git diff --check` passed on Windows.
+- 2026-08-14: M5 migration 5 file-backed qualification persisted an organization, planned/run state, instance, active lease, attributed provider usage, and objective evaluation; after close/reopen it recovered the run/instance/lease to explicit safe states and retained ordered event evidence. Complete workspace tests and strict workspace clippy passed on Windows.
 
 ## Decisions
 
@@ -264,6 +266,15 @@ When sources conflict, use this order:
 - Commands/tests: `cargo fmt --all -- --check`; `cargo clippy -p mcg-agents --all-targets -- -D warnings`; `cargo test --workspace`; `git diff --check`.
 - Result: Atomic and compound fixture plans produce the smallest sufficient organizations with explicit dependency, readiness, budget, evaluation, and overhead evidence.
 - Follow-up: Persist the complete organization/run/lease/evaluation lifecycle and its replay evidence.
+
+### 2026-08-14 - M5 Durable Run Evidence
+
+- Context: Orchestration cannot safely attach real providers or tools until run authority, cost attribution, evaluation, and interruption behavior survive crashes.
+- Decision: Use SQLite migration 5 for current run/instance/lease projections and immutable organization revisions, work plans, usage, and evaluation evidence; commit each lifecycle mutation with a versioned task event; attribute provider/model and tool usage without credentials; expire stale instance/lease authority and mark interrupted runs recovering during runtime startup.
+- Files: `crates/mcg-{domain,events,agents,storage,runtime}/`, `docs/architecture/agent-organization.md`, `README.md`.
+- Commands/tests: `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `git diff --check`.
+- Result: A real file-backed close/reopen fixture retains all immutable evidence and emits ordered recovery events for every interrupted projection.
+- Follow-up: Build provider/context/tool-backed agent-run orchestration and authenticated control surfaces.
 
 ## Known Issues
 

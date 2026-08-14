@@ -1,0 +1,1229 @@
+use chrono::{DateTime, Utc};
+use mcg_agents::{
+    AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState,
+    AgentState, AgentUsageRecord, ConfidenceEstimate, EvaluationReport, OrganizationGenome,
+    OrganizationalMetrics, UsageKind, WorkPlan,
+};
+use mcg_domain::{AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, RunId};
+use mcg_events::{EventEnvelope, EventKind};
+use rusqlite::{OptionalExtension, params};
+
+use crate::{SqliteEventStore, StorageError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AgentRecoveryReport {
+    pub runs_marked_recovering: u64,
+    pub instances_expired: u64,
+    pub leases_expired: u64,
+}
+
+impl SqliteEventStore {
+    /// Atomically stores an immutable organization revision, updates its current
+    /// projection, and appends replay evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, stale, skipped, or conflicting revisions.
+    pub fn record_organization_revision(
+        &mut self,
+        genome: &OrganizationGenome,
+    ) -> Result<EventEnvelope, StorageError> {
+        genome
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let current = self.organization(genome.organization_id)?;
+        match current {
+            None if genome.revision != 1 || genome.parent_revision_id.is_some() => {
+                return Err(StorageError::Conflict(
+                    "first organization revision must be revision 1 without a parent".into(),
+                ));
+            }
+            Some(ref current)
+                if genome.revision != current.revision.saturating_add(1)
+                    || genome.parent_revision_id != Some(current.revision_id) =>
+            {
+                return Err(StorageError::Conflict(
+                    "organization revision does not extend the current head".into(),
+                ));
+            }
+            _ => {}
+        }
+        let event = EventEnvelope::new(
+            EventKind::OrganizationRevisionRecorded,
+            None,
+            serde_json::to_value(genome)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO organization_revisions(
+                revision_id, organization_id, revision, parent_revision_id,
+                organization_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                genome.revision_id.to_string(),
+                genome.organization_id.to_string(),
+                i64::try_from(genome.revision).map_err(|_| StorageError::InvalidData(
+                    "organization revision exceeds SQLite range".into()
+                ))?,
+                genome.parent_revision_id.map(|id| id.to_string()),
+                serde_json::to_string(genome)?,
+                genome.created_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO organizations(
+                organization_id, current_revision_id, organization_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(organization_id) DO UPDATE SET
+                current_revision_id = excluded.current_revision_id,
+                organization_json = excluded.organization_json,
+                updated_at = excluded.updated_at",
+            params![
+                genome.organization_id.to_string(),
+                genome.revision_id.to_string(),
+                serde_json::to_string(genome)?,
+                genome.created_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads the current organization projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when its persisted JSON is invalid.
+    pub fn organization(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Option<OrganizationGenome>, StorageError> {
+        self.read_optional_json(
+            "SELECT organization_json FROM organizations WHERE organization_id = ?1",
+            &organization_id.to_string(),
+        )
+    }
+
+    /// Loads one immutable organization revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when its persisted JSON is invalid.
+    pub fn organization_revision(
+        &self,
+        revision_id: OrganizationRevisionId,
+    ) -> Result<Option<OrganizationGenome>, StorageError> {
+        self.read_optional_json(
+            "SELECT organization_json FROM organization_revisions WHERE revision_id = ?1",
+            &revision_id.to_string(),
+        )
+    }
+
+    /// Loads organization revisions in numeric order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row cannot be read or decoded.
+    pub fn organization_history(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Vec<OrganizationGenome>, StorageError> {
+        self.read_json_rows(
+            "SELECT organization_json FROM organization_revisions
+             WHERE organization_id = ?1 ORDER BY revision",
+            &organization_id.to_string(),
+        )
+    }
+
+    /// Atomically persists a planned run, its immutable work plan, and event.
+    ///
+    /// # Errors
+    ///
+    /// The task and organization revision must exist and all identities and plan
+    /// invariants must agree.
+    pub fn create_agent_run(
+        &mut self,
+        run: &AgentRun,
+        plan: &WorkPlan,
+    ) -> Result<EventEnvelope, StorageError> {
+        if run.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || run.state != AgentRunState::Planned
+            || run.completed_at.is_some()
+            || run.id != plan.run_id
+            || run.task_id != plan.task_id
+            || run.organization_revision_id != plan.organization_revision_id
+        {
+            return Err(StorageError::InvalidData(
+                "new agent run and work plan identities or initial state are inconsistent".into(),
+            ));
+        }
+        let task = self
+            .load_task(run.task_id)?
+            .ok_or(StorageError::TaskNotFound(run.task_id))?;
+        let genome = self
+            .organization_revision(run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                run.organization_revision_id,
+            ))?;
+        plan.validate(&genome)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !budgets_within_parent(plan, &task.budget) || !metrics_valid(&run.metrics) {
+            return Err(StorageError::InvalidData(
+                "agent run metrics or aggregate work budgets are invalid".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::AgentRunPlanned,
+            Some(run.task_id),
+            serde_json::json!({"run": run, "plan": plan}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_runs(
+                run_id, task_id, organization_revision_id, state, run_json,
+                created_at, updated_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![
+                run.id.to_string(),
+                run.task_id.to_string(),
+                run.organization_revision_id.to_string(),
+                run_state_name(run.state),
+                serde_json::to_string(run)?,
+                run.created_at.to_rfc3339(),
+                run.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO work_plans(run_id, task_id, plan_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                run.id.to_string(),
+                run.task_id.to_string(),
+                serde_json::to_string(plan)?,
+                plan.created_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads a current run projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid persisted JSON.
+    pub fn agent_run(&self, run_id: RunId) -> Result<Option<AgentRun>, StorageError> {
+        self.read_optional_json(
+            "SELECT run_json FROM agent_runs WHERE run_id = ?1",
+            &run_id.to_string(),
+        )
+    }
+
+    /// Loads the immutable work plan for a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid persisted JSON.
+    pub fn work_plan(&self, run_id: RunId) -> Result<Option<WorkPlan>, StorageError> {
+        self.read_optional_json(
+            "SELECT plan_json FROM work_plans WHERE run_id = ?1",
+            &run_id.to_string(),
+        )
+    }
+
+    /// Transitions the run projection and appends its authoritative event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown runs, illegal transitions, or stale writes.
+    pub fn transition_agent_run(
+        &mut self,
+        run_id: RunId,
+        next: AgentRunState,
+        metrics: OrganizationalMetrics,
+        at: DateTime<Utc>,
+    ) -> Result<(AgentRun, EventEnvelope), StorageError> {
+        let mut run = self
+            .agent_run(run_id)?
+            .ok_or(StorageError::AgentRunNotFound(run_id))?;
+        let previous = run.state;
+        if !previous.can_transition_to(next) {
+            return Err(StorageError::Conflict(format!(
+                "illegal agent run transition from {previous:?} to {next:?}"
+            )));
+        }
+        if !metrics_valid(&metrics) {
+            return Err(StorageError::InvalidData(
+                "agent run metrics must be finite and non-negative".into(),
+            ));
+        }
+        run.state = next;
+        run.metrics = metrics;
+        run.updated_at = at;
+        run.completed_at = next.is_terminal().then_some(at);
+        let event = EventEnvelope::new(
+            EventKind::AgentRunStateChanged,
+            Some(run.task_id),
+            serde_json::json!({"from": previous, "to": next, "run": run}),
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = ?1, run_json = ?2, updated_at = ?3,
+                completed_at = ?4 WHERE run_id = ?5 AND state = ?6",
+            params![
+                run_state_name(next),
+                serde_json::to_string(&run)?,
+                at.to_rfc3339(),
+                run.completed_at.map(|value| value.to_rfc3339()),
+                run_id.to_string(),
+                run_state_name(previous),
+            ],
+        )?;
+        ensure_single_change(changed, "agent run changed concurrently")?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((run, event))
+    }
+
+    /// Persists a newly created ephemeral agent instance and event.
+    ///
+    /// # Errors
+    ///
+    /// The run, selected role, task, schema, and initial state must agree.
+    pub fn record_agent_instance(
+        &mut self,
+        instance: &AgentInstance,
+    ) -> Result<EventEnvelope, StorageError> {
+        let run = self
+            .agent_run(instance.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(instance.run_id))?;
+        let plan = self
+            .work_plan(instance.run_id)?
+            .ok_or(StorageError::InvalidData(
+                "agent run has no work plan".into(),
+            ))?;
+        if instance.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || instance.state != AgentState::Created
+            || instance.task_id != run.task_id
+            || !plan.selected_roles.contains(&instance.role_id)
+            || instance.context_fingerprint.trim().is_empty()
+            || instance.confidence.basis_points > 10_000
+        {
+            return Err(StorageError::InvalidData(
+                "agent instance is inconsistent with its selected run role".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::AgentInstanceRecorded,
+            Some(instance.task_id),
+            serde_json::to_value(instance)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_instances(
+                instance_id, run_id, task_id, role_id, state, instance_json,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                instance.id.to_string(),
+                instance.run_id.to_string(),
+                instance.task_id.to_string(),
+                instance.role_id.to_string(),
+                instance_state_name(instance.state),
+                serde_json::to_string(instance)?,
+                instance.created_at.to_rfc3339(),
+                instance.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads a current agent instance projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid persisted JSON.
+    pub fn agent_instance(
+        &self,
+        instance_id: AgentInstanceId,
+    ) -> Result<Option<AgentInstance>, StorageError> {
+        self.read_optional_json(
+            "SELECT instance_json FROM agent_instances WHERE instance_id = ?1",
+            &instance_id.to_string(),
+        )
+    }
+
+    /// Transitions an agent instance and records confidence at that boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown instance or illegal/stale transition.
+    pub fn transition_agent_instance(
+        &mut self,
+        instance_id: AgentInstanceId,
+        next: AgentState,
+        confidence: ConfidenceEstimate,
+        at: DateTime<Utc>,
+    ) -> Result<(AgentInstance, EventEnvelope), StorageError> {
+        let mut instance = self
+            .agent_instance(instance_id)?
+            .ok_or(StorageError::AgentInstanceNotFound(instance_id))?;
+        let previous = instance.state;
+        if !instance_transition_allowed(previous, next) {
+            return Err(StorageError::Conflict(format!(
+                "illegal agent instance transition from {previous:?} to {next:?}"
+            )));
+        }
+        if confidence.basis_points > 10_000 {
+            return Err(StorageError::InvalidData(
+                "agent confidence exceeds 10000 basis points".into(),
+            ));
+        }
+        instance.state = next;
+        instance.confidence = confidence;
+        instance.updated_at = at;
+        let event = EventEnvelope::new(
+            EventKind::AgentInstanceStateChanged,
+            Some(instance.task_id),
+            serde_json::json!({"from": previous, "to": next, "instance": instance}),
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agent_instances SET state = ?1, instance_json = ?2, updated_at = ?3
+             WHERE instance_id = ?4 AND state = ?5",
+            params![
+                instance_state_name(next),
+                serde_json::to_string(&instance)?,
+                at.to_rfc3339(),
+                instance_id.to_string(),
+                instance_state_name(previous),
+            ],
+        )?;
+        ensure_single_change(changed, "agent instance changed concurrently")?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((instance, event))
+    }
+
+    /// Persists an active bounded lease for selected work.
+    ///
+    /// # Errors
+    ///
+    /// The instance and assigned work item must exist and agree on role.
+    pub fn record_agent_lease(
+        &mut self,
+        lease: &AgentLease,
+    ) -> Result<EventEnvelope, StorageError> {
+        let instance = self
+            .agent_instance(lease.instance_id)?
+            .ok_or(StorageError::AgentInstanceNotFound(lease.instance_id))?;
+        let plan = self
+            .work_plan(instance.run_id)?
+            .ok_or(StorageError::InvalidData(
+                "agent run has no work plan".into(),
+            ))?;
+        let item = plan
+            .items
+            .iter()
+            .find(|item| item.id == lease.work_item_id)
+            .ok_or_else(|| {
+                StorageError::InvalidData("lease references unknown work item".into())
+            })?;
+        if lease.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || lease.state != AgentLeaseState::Active
+            || item.assigned_role != instance.role_id
+            || lease.expires_at <= lease.acquired_at
+            || lease.heartbeat_at < lease.acquired_at
+            || lease.reporting_interval_seconds == 0
+            || instance.state != AgentState::Running
+            || !budget_values_valid(&lease.budget.limit)
+            || !lease.budget.consumed_cost_usd.is_finite()
+            || lease.budget.consumed_cost_usd < 0.0
+            || lease.budget.is_exhausted()
+        {
+            return Err(StorageError::InvalidData(
+                "agent lease is inconsistent with its instance, work, or bounds".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::AgentLeaseRecorded,
+            Some(instance.task_id),
+            serde_json::to_value(lease)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_leases(
+                lease_id, instance_id, work_item_id, state, lease_json,
+                acquired_at, expires_at, heartbeat_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                lease.id.to_string(),
+                lease.instance_id.to_string(),
+                lease.work_item_id.to_string(),
+                lease_state_name(lease.state),
+                serde_json::to_string(lease)?,
+                lease.acquired_at.to_rfc3339(),
+                lease.expires_at.to_rfc3339(),
+                lease.heartbeat_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads a current agent lease projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid persisted JSON.
+    pub fn agent_lease(&self, lease_id: AgentLeaseId) -> Result<Option<AgentLease>, StorageError> {
+        self.read_optional_json(
+            "SELECT lease_json FROM agent_leases WHERE lease_id = ?1",
+            &lease_id.to_string(),
+        )
+    }
+
+    /// Finishes an active lease with its final measured budget consumption.
+    ///
+    /// # Errors
+    ///
+    /// Only an active lease may transition and consumed values must be finite.
+    pub fn finish_agent_lease(
+        &mut self,
+        lease_id: AgentLeaseId,
+        next: AgentLeaseState,
+        consumed_tokens: u64,
+        consumed_cost_usd: f64,
+        elapsed_seconds: u64,
+        at: DateTime<Utc>,
+    ) -> Result<(AgentLease, EventEnvelope), StorageError> {
+        let mut lease = self
+            .agent_lease(lease_id)?
+            .ok_or(StorageError::AgentLeaseNotFound(lease_id))?;
+        if lease.state != AgentLeaseState::Active
+            || next == AgentLeaseState::Active
+            || !consumed_cost_usd.is_finite()
+            || consumed_cost_usd < 0.0
+            || at < lease.acquired_at
+        {
+            return Err(StorageError::Conflict(
+                "agent lease cannot make the requested terminal transition".into(),
+            ));
+        }
+        let instance = self
+            .agent_instance(lease.instance_id)?
+            .ok_or(StorageError::AgentInstanceNotFound(lease.instance_id))?;
+        lease.state = next;
+        lease.budget.consumed_tokens = consumed_tokens;
+        lease.budget.consumed_cost_usd = consumed_cost_usd;
+        lease.budget.elapsed_seconds = elapsed_seconds;
+        lease.heartbeat_at = at;
+        let event = EventEnvelope::new(
+            EventKind::AgentLeaseStateChanged,
+            Some(instance.task_id),
+            serde_json::to_value(&lease)?,
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agent_leases SET state = ?1, lease_json = ?2, heartbeat_at = ?3
+             WHERE lease_id = ?4 AND state = 'active'",
+            params![
+                lease_state_name(next),
+                serde_json::to_string(&lease)?,
+                at.to_rfc3339(),
+                lease_id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "agent lease changed concurrently")?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((lease, event))
+    }
+
+    /// Records immutable provider, tool, or coordination usage evidence.
+    ///
+    /// # Errors
+    ///
+    /// Usage identity, kind-specific attribution, and numeric values are validated.
+    pub fn record_agent_usage(
+        &mut self,
+        usage: &AgentUsageRecord,
+    ) -> Result<EventEnvelope, StorageError> {
+        let run = self
+            .agent_run(usage.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(usage.run_id))?;
+        let attribution_valid = match usage.kind {
+            UsageKind::ProviderModel => {
+                usage.provider_connection_id.is_some()
+                    && usage.model_id.is_some()
+                    && usage.tool_execution_id.is_none()
+            }
+            UsageKind::Tool => {
+                usage.tool_execution_id.is_some()
+                    && usage.provider_connection_id.is_none()
+                    && usage.model_id.is_none()
+            }
+            UsageKind::Coordination => {
+                usage.provider_connection_id.is_none()
+                    && usage.model_id.is_none()
+                    && usage.tool_execution_id.is_none()
+            }
+        };
+        if usage.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || usage.task_id != run.task_id
+            || !attribution_valid
+            || usage.cached_input_tokens > usage.input_tokens
+            || usage
+                .cost_usd
+                .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        {
+            return Err(StorageError::InvalidData(
+                "agent usage attribution or numeric values are invalid".into(),
+            ));
+        }
+        if let Some(instance_id) = usage.instance_id {
+            let instance = self
+                .agent_instance(instance_id)?
+                .ok_or(StorageError::AgentInstanceNotFound(instance_id))?;
+            if instance.run_id != usage.run_id {
+                return Err(StorageError::InvalidData(
+                    "agent usage instance belongs to a different run".into(),
+                ));
+            }
+        }
+        let event = EventEnvelope::new(
+            EventKind::AgentUsageRecorded,
+            Some(usage.task_id),
+            serde_json::to_value(usage)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_usage(usage_id, run_id, task_id, usage_json, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                usage.id.to_string(),
+                usage.run_id.to_string(),
+                usage.task_id.to_string(),
+                serde_json::to_string(usage)?,
+                usage.occurred_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Lists immutable usage evidence for a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row cannot be decoded.
+    pub fn agent_usage(&self, run_id: RunId) -> Result<Vec<AgentUsageRecord>, StorageError> {
+        self.read_json_rows(
+            "SELECT usage_json FROM agent_usage WHERE run_id = ?1
+             ORDER BY occurred_at, usage_id",
+            &run_id.to_string(),
+        )
+    }
+
+    /// Records an immutable evidence-backed evaluation report.
+    ///
+    /// # Errors
+    ///
+    /// The report must identify its run/task and satisfy the genome evidence policy.
+    pub fn record_evaluation(
+        &mut self,
+        report: &EvaluationReport,
+    ) -> Result<EventEnvelope, StorageError> {
+        let run = self
+            .agent_run(report.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(report.run_id))?;
+        let genome = self
+            .organization_revision(run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                run.organization_revision_id,
+            ))?;
+        let plan = self
+            .work_plan(report.run_id)?
+            .ok_or(StorageError::InvalidData(
+                "evaluated agent run has no work plan".into(),
+            ))?;
+        let covers_plan = plan.items.iter().all(|item| {
+            item.success_conditions.iter().all(|required| {
+                report
+                    .conditions
+                    .iter()
+                    .any(|result| result.condition == *required)
+            })
+        });
+        let outcome_consistent = match report.outcome {
+            mcg_agents::EvaluationOutcome::Passed => {
+                report.conditions.iter().all(|condition| condition.passed)
+            }
+            mcg_agents::EvaluationOutcome::Failed => {
+                report.conditions.iter().any(|condition| !condition.passed)
+            }
+            mcg_agents::EvaluationOutcome::Inconclusive => true,
+        };
+        if report.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || report.task_id != run.task_id
+            || report.conditions.is_empty()
+            || (genome.evaluation.require_objective_evidence && report.evidence.is_empty())
+            || report.confidence.basis_points > 10_000
+            || !covers_plan
+            || !outcome_consistent
+        {
+            return Err(StorageError::InvalidData(
+                "evaluation does not satisfy its run or objective evidence policy".into(),
+            ));
+        }
+        if let Some(instance_id) = report.evaluator_instance_id {
+            let instance = self
+                .agent_instance(instance_id)?
+                .ok_or(StorageError::AgentInstanceNotFound(instance_id))?;
+            if instance.run_id != report.run_id {
+                return Err(StorageError::InvalidData(
+                    "evaluation instance belongs to a different run".into(),
+                ));
+            }
+            let evaluator = genome.roles.iter().any(|role| {
+                role.id == instance.role_id && role.kind == mcg_agents::RoleKind::Evaluator
+            });
+            if !evaluator {
+                return Err(StorageError::InvalidData(
+                    "evaluation instance does not have the Evaluator role".into(),
+                ));
+            }
+        }
+        let event = EventEnvelope::new(
+            EventKind::EvaluationRecorded,
+            Some(report.task_id),
+            serde_json::to_value(report)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO evaluations(
+                evaluation_id, run_id, task_id, evaluation_json, evaluated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                report.id.to_string(),
+                report.run_id.to_string(),
+                report.task_id.to_string(),
+                serde_json::to_string(report)?,
+                report.evaluated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Lists immutable evaluation reports for a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row cannot be decoded.
+    pub fn evaluations(&self, run_id: RunId) -> Result<Vec<EvaluationReport>, StorageError> {
+        self.read_json_rows(
+            "SELECT evaluation_json FROM evaluations WHERE run_id = ?1
+             ORDER BY evaluated_at, evaluation_id",
+            &run_id.to_string(),
+        )
+    }
+
+    /// Converts interrupted run work into explicit recovering/expired states and
+    /// appends an event for every recovered projection update.
+    ///
+    /// # Errors
+    ///
+    /// Recovery is atomic and fails without partial state changes.
+    pub fn recover_agent_work(
+        &mut self,
+        at: DateTime<Utc>,
+    ) -> Result<AgentRecoveryReport, StorageError> {
+        let mut runs = self.read_all_json::<AgentRun>(
+            "SELECT run_json FROM agent_runs WHERE state IN ('running', 'waiting') ORDER BY run_id",
+        )?;
+        let mut instances = self.read_all_json::<AgentInstance>(
+            "SELECT instance_json FROM agent_instances
+             WHERE state IN ('running', 'waiting', 'blocked') ORDER BY instance_id",
+        )?;
+        let mut leases = self.read_all_json::<AgentLease>(
+            "SELECT lease_json FROM agent_leases WHERE state = 'active' ORDER BY lease_id",
+        )?;
+        let lease_instance_tasks = self
+            .read_all_json::<AgentInstance>(
+                "SELECT DISTINCT agent_instances.instance_json FROM agent_instances
+                 INNER JOIN agent_leases ON agent_leases.instance_id = agent_instances.instance_id
+                 WHERE agent_leases.state = 'active' ORDER BY agent_instances.instance_id",
+            )?
+            .into_iter()
+            .map(|instance| (instance.id, instance.task_id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let transaction = self.connection.transaction()?;
+        for run in &mut runs {
+            let previous = run.state;
+            run.state = AgentRunState::Recovering;
+            run.updated_at = at;
+            transaction.execute(
+                "UPDATE agent_runs SET state = 'recovering', run_json = ?1, updated_at = ?2
+                 WHERE run_id = ?3 AND state = ?4",
+                params![
+                    serde_json::to_string(run)?,
+                    at.to_rfc3339(),
+                    run.id.to_string(),
+                    run_state_name(previous),
+                ],
+            )?;
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(run.task_id),
+                    serde_json::json!({"from": previous, "to": AgentRunState::Recovering, "run": run, "reason": "daemon_restart"}),
+                ),
+            )?;
+        }
+        for instance in &mut instances {
+            let previous = instance.state;
+            instance.state = AgentState::Expired;
+            instance.updated_at = at;
+            transaction.execute(
+                "UPDATE agent_instances SET state = 'expired', instance_json = ?1, updated_at = ?2
+                 WHERE instance_id = ?3 AND state = ?4",
+                params![
+                    serde_json::to_string(instance)?,
+                    at.to_rfc3339(),
+                    instance.id.to_string(),
+                    instance_state_name(previous),
+                ],
+            )?;
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentInstanceStateChanged,
+                    Some(instance.task_id),
+                    serde_json::json!({"from": previous, "to": AgentState::Expired, "instance": instance, "reason": "daemon_restart"}),
+                ),
+            )?;
+        }
+        for lease in &mut leases {
+            lease.state = AgentLeaseState::Expired;
+            lease.heartbeat_at = at;
+            transaction.execute(
+                "UPDATE agent_leases SET state = 'expired', lease_json = ?1, heartbeat_at = ?2
+                 WHERE lease_id = ?3 AND state = 'active'",
+                params![
+                    serde_json::to_string(lease)?,
+                    at.to_rfc3339(),
+                    lease.id.to_string(),
+                ],
+            )?;
+            let task_id = lease_instance_tasks.get(&lease.instance_id).copied();
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentLeaseStateChanged,
+                    task_id,
+                    serde_json::json!({"lease": lease, "reason": "daemon_restart"}),
+                ),
+            )?;
+        }
+        transaction.commit()?;
+        Ok(AgentRecoveryReport {
+            runs_marked_recovering: runs.len() as u64,
+            instances_expired: instances.len() as u64,
+            leases_expired: leases.len() as u64,
+        })
+    }
+
+    fn read_optional_json<T: serde::de::DeserializeOwned>(
+        &self,
+        sql: &str,
+        parameter: &str,
+    ) -> Result<Option<T>, StorageError> {
+        let json = self
+            .connection
+            .query_row(sql, [parameter], |row| row.get::<_, String>(0))
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    fn read_json_rows<T: serde::de::DeserializeOwned>(
+        &self,
+        sql: &str,
+        parameter: &str,
+    ) -> Result<Vec<T>, StorageError> {
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = statement
+            .query_map([parameter], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
+    }
+
+    fn read_all_json<T: serde::de::DeserializeOwned>(
+        &self,
+        sql: &str,
+    ) -> Result<Vec<T>, StorageError> {
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
+    }
+}
+
+fn budgets_within_parent(plan: &WorkPlan, parent: &mcg_domain::TaskBudget) -> bool {
+    if !budget_values_valid(parent)
+        || plan
+            .items
+            .iter()
+            .any(|item| !budget_values_valid(&item.budget))
+    {
+        return false;
+    }
+    let tokens = parent.max_tokens.is_none_or(|limit| {
+        plan.items
+            .iter()
+            .try_fold(0_u64, |sum, item| sum.checked_add(item.budget.max_tokens?))
+            .is_some_and(|sum| sum <= limit)
+    });
+    let duration = parent.max_duration_seconds.is_none_or(|limit| {
+        plan.items
+            .iter()
+            .try_fold(0_u64, |sum, item| {
+                sum.checked_add(item.budget.max_duration_seconds?)
+            })
+            .is_some_and(|sum| sum <= limit)
+    });
+    let cost = parent.max_cost_usd.is_none_or(|limit| {
+        let values = plan
+            .items
+            .iter()
+            .map(|item| item.budget.max_cost_usd)
+            .collect::<Option<Vec<_>>>();
+        values.is_some_and(|values| values.into_iter().sum::<f64>() <= limit + f64::EPSILON)
+    });
+    tokens && duration && cost
+}
+
+fn budget_values_valid(budget: &mcg_domain::TaskBudget) -> bool {
+    budget
+        .max_cost_usd
+        .is_none_or(|cost| cost.is_finite() && cost >= 0.0)
+}
+
+fn metrics_valid(metrics: &OrganizationalMetrics) -> bool {
+    metrics.cost_usd.is_finite() && metrics.cost_usd >= 0.0
+}
+
+fn ensure_single_change(changed: usize, detail: &str) -> Result<(), StorageError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::Conflict(detail.into()))
+    }
+}
+
+const fn run_state_name(state: AgentRunState) -> &'static str {
+    match state {
+        AgentRunState::Planned => "planned",
+        AgentRunState::Running => "running",
+        AgentRunState::Waiting => "waiting",
+        AgentRunState::Recovering => "recovering",
+        AgentRunState::Completed => "completed",
+        AgentRunState::Failed => "failed",
+        AgentRunState::Cancelled => "cancelled",
+    }
+}
+
+const fn instance_state_name(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Created => "created",
+        AgentState::Running => "running",
+        AgentState::Waiting => "waiting",
+        AgentState::Blocked => "blocked",
+        AgentState::Completed => "completed",
+        AgentState::Failed => "failed",
+        AgentState::Cancelled => "cancelled",
+        AgentState::Expired => "expired",
+    }
+}
+
+const fn lease_state_name(state: AgentLeaseState) -> &'static str {
+    match state {
+        AgentLeaseState::Active => "active",
+        AgentLeaseState::Completed => "completed",
+        AgentLeaseState::Failed => "failed",
+        AgentLeaseState::Expired => "expired",
+        AgentLeaseState::Reassigned => "reassigned",
+        AgentLeaseState::Terminated => "terminated",
+    }
+}
+
+const fn instance_transition_allowed(from: AgentState, to: AgentState) -> bool {
+    matches!(
+        (from, to),
+        (
+            AgentState::Created,
+            AgentState::Running | AgentState::Cancelled
+        ) | (
+            AgentState::Running,
+            AgentState::Waiting
+                | AgentState::Blocked
+                | AgentState::Completed
+                | AgentState::Failed
+                | AgentState::Cancelled
+                | AgentState::Expired
+        ) | (
+            AgentState::Waiting | AgentState::Blocked,
+            AgentState::Running | AgentState::Failed | AgentState::Cancelled | AgentState::Expired
+        )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use mcg_agents::{
+        AGENT_RUN_SCHEMA_VERSION, AgentLease, AgentRun, AgentUsageRecord, ConditionResult,
+        EvaluationEvidence, EvaluationOutcome, ExecutivePlanner, LeaseBudget, PlannedWork,
+        PlanningRequest, RoleKind, SuccessCondition, TaskComplexity, UsageKind,
+    };
+    use mcg_domain::{
+        AgentInstanceId, AgentLeaseId, EvaluationId, RunId, TaskBudget, UsageRecordId,
+    };
+    use tempfile::tempdir;
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One contiguous crash/reopen scenario is intentional evidence.
+    fn organization_run_evidence_and_crash_recovery_survive_reopen() {
+        let directory = tempdir().expect("temp directory");
+        let database = directory.path().join("mcg.sqlite3");
+        let now = Utc::now();
+        let mut store = SqliteEventStore::open(&database).expect("open store");
+        let mut task = mcg_domain::TaskEnvelope::new("Build and evaluate the fixture site");
+        task.budget = TaskBudget {
+            max_tokens: Some(12_000),
+            max_cost_usd: Some(5.0),
+            max_duration_seconds: Some(900),
+        };
+        store.create_task(&task).expect("create task");
+
+        let genome = OrganizationGenome::consumer_default(now);
+        store
+            .record_organization_revision(&genome)
+            .expect("record organization");
+        let planned = PlannedWork::atomic(
+            "Implement the fixture site",
+            RoleKind::Coder,
+            vec![SuccessCondition::Test {
+                command: "npm test".into(),
+            }],
+        );
+        let request = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![planned],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &request, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: request.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        store.create_agent_run(&run, &plan).expect("create run");
+        store
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                now + Duration::seconds(1),
+            )
+            .expect("start run");
+
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: plan.items[0].assigned_role,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:fixture-context".into(),
+            confidence: ConfidenceEstimate::new(7_500, 0).expect("confidence"),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .record_agent_instance(&instance)
+            .expect("record instance");
+        store
+            .transition_agent_instance(
+                instance.id,
+                AgentState::Running,
+                instance.confidence,
+                now + Duration::seconds(2),
+            )
+            .expect("start instance");
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: vec!["filesystem.project".into()],
+            reporting_interval_seconds: 30,
+            max_retries: 2,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: now + Duration::seconds(2),
+            expires_at: now + Duration::minutes(15),
+            heartbeat_at: now + Duration::seconds(2),
+        };
+        store.record_agent_lease(&lease).expect("record lease");
+
+        let usage = AgentUsageRecord {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: UsageRecordId::new(),
+            run_id: run.id,
+            task_id: task.id,
+            instance_id: Some(instance.id),
+            kind: UsageKind::ProviderModel,
+            provider_connection_id: Some("fixture-provider".into()),
+            model_id: Some("fixture-model".into()),
+            tool_execution_id: None,
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            output_tokens: 40,
+            cost_usd: Some(0.01),
+            duration_ms: 250,
+            occurred_at: now + Duration::seconds(3),
+        };
+        store.record_agent_usage(&usage).expect("record usage");
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: EvaluationId::new(),
+            run_id: run.id,
+            task_id: task.id,
+            evaluator_instance_id: None,
+            conditions: vec![ConditionResult {
+                condition: SuccessCondition::Test {
+                    command: "npm test".into(),
+                },
+                passed: true,
+                detail: "fixture suite passed".into(),
+            }],
+            outcome: EvaluationOutcome::Passed,
+            confidence: ConfidenceEstimate::new(9_000, 1).expect("confidence"),
+            regressions: Vec::new(),
+            evidence: vec![EvaluationEvidence {
+                method: "process_exit".into(),
+                artifact_sha256: Some("fixture-sha256".into()),
+                event_sequence: None,
+                detail: "exit code 0".into(),
+            }],
+            evaluated_at: now + Duration::seconds(4),
+        };
+        store.record_evaluation(&report).expect("record evaluation");
+        drop(store);
+
+        let mut reopened = SqliteEventStore::open(&database).expect("reopen store");
+        assert_eq!(
+            reopened
+                .organization_history(genome.organization_id)
+                .expect("history"),
+            vec![genome]
+        );
+        assert_eq!(reopened.work_plan(run.id).expect("plan"), Some(plan));
+        assert_eq!(reopened.agent_usage(run.id).expect("usage"), vec![usage]);
+        assert_eq!(
+            reopened.evaluations(run.id).expect("evaluations"),
+            vec![report]
+        );
+
+        let recovery = reopened
+            .recover_agent_work(now + Duration::seconds(30))
+            .expect("recover work");
+        assert_eq!(
+            recovery,
+            AgentRecoveryReport {
+                runs_marked_recovering: 1,
+                instances_expired: 1,
+                leases_expired: 1,
+            }
+        );
+        assert_eq!(
+            reopened
+                .agent_run(run.id)
+                .expect("run")
+                .expect("present")
+                .state,
+            AgentRunState::Recovering
+        );
+        assert_eq!(
+            reopened
+                .agent_instance(instance.id)
+                .expect("instance")
+                .expect("present")
+                .state,
+            AgentState::Expired
+        );
+        assert_eq!(
+            reopened
+                .agent_lease(lease.id)
+                .expect("lease")
+                .expect("present")
+                .state,
+            AgentLeaseState::Expired
+        );
+        let events = reopened.events_for_task(task.id).expect("task events");
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == EventKind::AgentUsageRecorded)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == EventKind::EvaluationRecorded)
+        );
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::AgentRunStateChanged
+                && event.payload.get("reason").and_then(|value| value.as_str())
+                    == Some("daemon_restart")
+        }));
+    }
+}

@@ -266,12 +266,17 @@ impl WorkPlan {
         }
         if !self.estimated_organizational_overhead.is_finite()
             || !(0.0..=1.0).contains(&self.estimated_organizational_overhead)
+            || self.estimated_organizational_overhead
+                > genome.policy.max_organizational_overhead_ratio
         {
             return Err(PlanningError::InvalidEstimate);
         }
         let selected = self.selected_roles.iter().copied().collect::<BTreeSet<_>>();
         if selected.len() != self.selected_roles.len() {
             return Err(PlanningError::DuplicateSelectedRole);
+        }
+        if selected.len() > usize::from(genome.policy.max_total_agents) {
+            return Err(PlanningError::AgentLimitExceeded);
         }
         let known_roles = genome
             .roles
@@ -307,6 +312,40 @@ impl WorkPlan {
         if has_work_cycle(&self.items) {
             return Err(PlanningError::DependencyCycle);
         }
+        let used = self
+            .items
+            .iter()
+            .map(|item| item.assigned_role)
+            .collect::<BTreeSet<_>>();
+        let executive = genome
+            .roles
+            .iter()
+            .find(|role| role.kind == RoleKind::Executive)
+            .map(|role| role.id);
+        let needs_executive =
+            self.items.len() > 1 || self.items.iter().any(|item| !item.dependencies.is_empty());
+        if genome.policy.prefer_minimal_organization
+            && selected
+                .iter()
+                .any(|role| !(used.contains(role) || needs_executive && Some(*role) == executive))
+        {
+            return Err(PlanningError::UnnecessarySelectedRole);
+        }
+        if genome.evaluation.require_independent_evaluation {
+            let evaluators = genome
+                .roles
+                .iter()
+                .filter(|role| role.kind == RoleKind::Evaluator)
+                .map(|role| role.id)
+                .collect::<BTreeSet<_>>();
+            if !self
+                .items
+                .iter()
+                .any(|item| evaluators.contains(&item.assigned_role))
+            {
+                return Err(PlanningError::RequiredEvaluationMissing);
+            }
+        }
         Ok(())
     }
 }
@@ -339,6 +378,10 @@ pub enum PlanningError {
     IncompleteWorkItem,
     #[error("work item is assigned to a role outside the selected organization")]
     UnselectedAssignedRole,
+    #[error("minimal organization plan selected a role with no required work")]
+    UnnecessarySelectedRole,
+    #[error("organization policy requires an independent evaluation work item")]
+    RequiredEvaluationMissing,
     #[error("work item has an unknown or self dependency")]
     InvalidDependency,
     #[error("work plan dependency graph contains a cycle")]
@@ -635,6 +678,55 @@ mod tests {
         assert_eq!(
             ExecutivePlanner::default().plan(&genome, &request, Utc::now()),
             Err(PlanningError::DependencyCycle)
+        );
+    }
+
+    #[test]
+    fn imported_plan_cannot_smuggle_unused_roles_or_skip_required_evaluation() {
+        let mut genome = OrganizationGenome::consumer_default(Utc::now());
+        let request = PlanningRequest {
+            run_id: RunId::new(),
+            task: task("Update one file"),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "Update the file",
+                RoleKind::Coder,
+                vec![SuccessCondition::Test {
+                    command: "cargo test".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let mut plan = ExecutivePlanner::default()
+            .plan(&genome, &request, Utc::now())
+            .expect("valid atomic plan");
+        let unused = crate::RoleDefinition {
+            id: RoleId::new(),
+            kind: RoleKind::Researcher,
+            name: "Researcher".into(),
+            purpose: "Research".into(),
+            prompt_policy: "bounded".into(),
+            model_policy: crate::ModelPolicy {
+                capability_class: "research".into(),
+                preferred_models: Vec::new(),
+                allow_fallback: true,
+                max_escalation_tier: 1,
+            },
+            tool_capabilities: Vec::new(),
+            memory_namespace: "role/researcher".into(),
+        };
+        plan.selected_roles.push(unused.id);
+        genome.roles.push(unused);
+        assert_eq!(
+            plan.validate(&genome),
+            Err(PlanningError::UnnecessarySelectedRole)
+        );
+
+        plan.selected_roles.pop();
+        genome.evaluation.require_independent_evaluation = true;
+        assert_eq!(
+            plan.validate(&genome),
+            Err(PlanningError::RequiredEvaluationMissing)
         );
     }
 }

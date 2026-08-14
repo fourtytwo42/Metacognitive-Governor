@@ -26,6 +26,15 @@ pub enum EventKind {
     MemoryClaimRecorded,
     MemoryClaimCorrected,
     MemoryClaimStateChanged,
+    OrganizationRevisionRecorded,
+    AgentRunPlanned,
+    AgentRunStateChanged,
+    AgentInstanceRecorded,
+    AgentInstanceStateChanged,
+    AgentLeaseRecorded,
+    AgentLeaseStateChanged,
+    AgentUsageRecorded,
+    EvaluationRecorded,
     McgIntervention,
 }
 
@@ -48,6 +57,15 @@ impl EventKind {
             Self::MemoryClaimRecorded => "memory_claim_recorded",
             Self::MemoryClaimCorrected => "memory_claim_corrected",
             Self::MemoryClaimStateChanged => "memory_claim_state_changed",
+            Self::OrganizationRevisionRecorded => "organization_revision_recorded",
+            Self::AgentRunPlanned => "agent_run_planned",
+            Self::AgentRunStateChanged => "agent_run_state_changed",
+            Self::AgentInstanceRecorded => "agent_instance_recorded",
+            Self::AgentInstanceStateChanged => "agent_instance_state_changed",
+            Self::AgentLeaseRecorded => "agent_lease_recorded",
+            Self::AgentLeaseStateChanged => "agent_lease_state_changed",
+            Self::AgentUsageRecorded => "agent_usage_recorded",
+            Self::EvaluationRecorded => "evaluation_recorded",
             Self::McgIntervention => "mcg_intervention",
         }
     }
@@ -76,6 +94,21 @@ impl EventKind {
             "memory_claim_state_changed" | "MemoryClaimStateChanged" => {
                 Ok(Self::MemoryClaimStateChanged)
             }
+            "organization_revision_recorded" | "OrganizationRevisionRecorded" => {
+                Ok(Self::OrganizationRevisionRecorded)
+            }
+            "agent_run_planned" | "AgentRunPlanned" => Ok(Self::AgentRunPlanned),
+            "agent_run_state_changed" | "AgentRunStateChanged" => Ok(Self::AgentRunStateChanged),
+            "agent_instance_recorded" | "AgentInstanceRecorded" => Ok(Self::AgentInstanceRecorded),
+            "agent_instance_state_changed" | "AgentInstanceStateChanged" => {
+                Ok(Self::AgentInstanceStateChanged)
+            }
+            "agent_lease_recorded" | "AgentLeaseRecorded" => Ok(Self::AgentLeaseRecorded),
+            "agent_lease_state_changed" | "AgentLeaseStateChanged" => {
+                Ok(Self::AgentLeaseStateChanged)
+            }
+            "agent_usage_recorded" | "AgentUsageRecorded" => Ok(Self::AgentUsageRecorded),
+            "evaluation_recorded" | "EvaluationRecorded" => Ok(Self::EvaluationRecorded),
             "mcg_intervention" | "McgIntervention" => Ok(Self::McgIntervention),
             other => Err(other.to_owned()),
         }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, EvaluationId, OrganizationId, OrganizationRevisionId, RoleId,
-    RunId, TaskBudget, TaskId, WorkItemId,
+    RunId, TaskBudget, TaskId, ToolExecutionId, UsageRecordId, WorkItemId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -253,6 +253,89 @@ pub struct WorkPlan {
     pub selection_reason: String,
     pub estimated_organizational_overhead: f64,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRun {
+    pub schema_version: u16,
+    pub id: RunId,
+    pub task_id: TaskId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub state: AgentRunState,
+    pub metrics: OrganizationalMetrics,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunState {
+    Planned,
+    Running,
+    Waiting,
+    Recovering,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl AgentRunState {
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Planned, Self::Running | Self::Cancelled)
+                | (
+                    Self::Running,
+                    Self::Waiting
+                        | Self::Recovering
+                        | Self::Completed
+                        | Self::Failed
+                        | Self::Cancelled
+                )
+                | (
+                    Self::Waiting,
+                    Self::Running | Self::Recovering | Self::Failed | Self::Cancelled
+                )
+                | (
+                    Self::Recovering,
+                    Self::Running | Self::Failed | Self::Cancelled
+                )
+        )
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentUsageRecord {
+    pub schema_version: u16,
+    pub id: UsageRecordId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub instance_id: Option<AgentInstanceId>,
+    pub kind: UsageKind,
+    pub provider_connection_id: Option<String>,
+    pub model_id: Option<String>,
+    pub tool_execution_id: Option<ToolExecutionId>,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: u64,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageKind {
+    ProviderModel,
+    Tool,
+    Coordination,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

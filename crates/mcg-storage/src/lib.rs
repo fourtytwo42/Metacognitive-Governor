@@ -16,6 +16,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod agents;
+
+pub use agents::AgentRecoveryReport;
+
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
 const MIGRATION_1: &str = r"
@@ -153,6 +157,117 @@ BEFORE DELETE ON memory_claims BEGIN
 END;
 ";
 
+const MIGRATION_5: &str = r"
+CREATE TABLE IF NOT EXISTS organizations (
+    organization_id TEXT PRIMARY KEY,
+    current_revision_id TEXT NOT NULL,
+    organization_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS organization_revisions (
+    revision_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    parent_revision_id TEXT,
+    organization_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(organization_id, revision)
+);
+CREATE INDEX IF NOT EXISTS organization_revision_history
+    ON organization_revisions(organization_id, revision);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    organization_revision_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    run_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+    FOREIGN KEY(organization_revision_id) REFERENCES organization_revisions(revision_id)
+);
+CREATE INDEX IF NOT EXISTS agent_runs_task_created ON agent_runs(task_id, created_at, run_id);
+CREATE TABLE IF NOT EXISTS work_plans (
+    run_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_instances (
+    instance_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    instance_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS agent_instances_run_state ON agent_instances(run_id, state);
+CREATE TABLE IF NOT EXISTS agent_leases (
+    lease_id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    work_item_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    lease_json TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    FOREIGN KEY(instance_id) REFERENCES agent_instances(instance_id)
+);
+CREATE INDEX IF NOT EXISTS agent_leases_instance_state ON agent_leases(instance_id, state);
+
+CREATE TABLE IF NOT EXISTS agent_usage (
+    usage_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    usage_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS agent_usage_run_time ON agent_usage(run_id, occurred_at, usage_id);
+CREATE TABLE IF NOT EXISTS evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    evaluation_json TEXT NOT NULL,
+    evaluated_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS evaluations_run_time
+    ON evaluations(run_id, evaluated_at, evaluation_id);
+
+CREATE TRIGGER IF NOT EXISTS organization_revisions_no_update
+BEFORE UPDATE ON organization_revisions BEGIN
+    SELECT RAISE(FAIL, 'organization revisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS organization_revisions_no_delete
+BEFORE DELETE ON organization_revisions BEGIN
+    SELECT RAISE(FAIL, 'organization revisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS work_plans_no_update
+BEFORE UPDATE ON work_plans BEGIN SELECT RAISE(FAIL, 'work plans are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS work_plans_no_delete
+BEFORE DELETE ON work_plans BEGIN SELECT RAISE(FAIL, 'work plans are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS agent_usage_no_update
+BEFORE UPDATE ON agent_usage BEGIN SELECT RAISE(FAIL, 'agent usage is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS agent_usage_no_delete
+BEFORE DELETE ON agent_usage BEGIN SELECT RAISE(FAIL, 'agent usage is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS evaluations_no_update
+BEFORE UPDATE ON evaluations BEGIN SELECT RAISE(FAIL, 'evaluations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS evaluations_no_delete
+BEFORE DELETE ON evaluations BEGIN SELECT RAISE(FAIL, 'evaluations are immutable'); END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -167,6 +282,14 @@ pub enum StorageError {
     ProjectNotFound(ProjectId),
     #[error("memory claim {0} was not found")]
     MemoryClaimNotFound(MemoryClaimId),
+    #[error("organization revision {0} was not found")]
+    OrganizationRevisionNotFound(mcg_domain::OrganizationRevisionId),
+    #[error("agent run {0} was not found")]
+    AgentRunNotFound(mcg_domain::RunId),
+    #[error("agent instance {0} was not found")]
+    AgentInstanceNotFound(mcg_domain::AgentInstanceId),
+    #[error("agent lease {0} was not found")]
+    AgentLeaseNotFound(mcg_domain::AgentLeaseId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -231,6 +354,7 @@ impl SqliteEventStore {
             (2_i64, MIGRATION_2),
             (3_i64, MIGRATION_3),
             (4_i64, MIGRATION_4),
+            (5_i64, MIGRATION_5),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

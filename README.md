@@ -31,6 +31,7 @@ Implementation planning:
 - [M2 provider fabric](docs/architecture/provider-fabric.md)
 - [M3 tool and policy plane](docs/architecture/tool-policy-plane.md)
 - [M4 project intelligence and memory](docs/architecture/project-intelligence-memory.md)
+- [M5 agent organization and run evidence](docs/architecture/agent-organization.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 

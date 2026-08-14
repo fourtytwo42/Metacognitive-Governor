@@ -63,6 +63,7 @@ domain_id!(AgentInstanceId);
 domain_id!(AgentLeaseId);
 domain_id!(WorkItemId);
 domain_id!(EvaluationId);
+domain_id!(UsageRecordId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

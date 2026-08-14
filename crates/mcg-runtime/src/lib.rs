@@ -20,7 +20,7 @@ use mcg_projects::{
     MemoryError, MemoryLifecycle, MemoryLifecycleAction, ProjectDiscoverer, ProjectDiscoveryError,
     ProjectModel, SnapshotInvalidation, render_managed_memory,
 };
-use mcg_storage::{RecoveryReport, SqliteEventStore, StorageError};
+use mcg_storage::{AgentRecoveryReport, RecoveryReport, SqliteEventStore, StorageError};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease,
     ExecutionLeaseRepository, LeaseState, ToolAuditRecord, ToolAuditSink, ToolError,
@@ -40,6 +40,9 @@ pub struct RuntimeStatus {
     pub recovered_events: u64,
     pub recovered_tasks: u64,
     pub recovered_tool_leases: u64,
+    pub recovered_agent_runs: u64,
+    pub recovered_agent_instances: u64,
+    pub recovered_agent_leases: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +215,7 @@ pub struct AppRuntime {
     auth: LocalAuth,
     recovery: RecoveryReport,
     recovered_tool_leases: u64,
+    agent_recovery: AgentRecoveryReport,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -222,6 +226,7 @@ impl std::fmt::Debug for AppRuntime {
             .field("auth", &self.auth)
             .field("recovery", &self.recovery)
             .field("recovered_tool_leases", &self.recovered_tool_leases)
+            .field("agent_recovery", &self.agent_recovery)
             .finish_non_exhaustive()
     }
 }
@@ -241,12 +246,14 @@ impl AppRuntime {
         restrict_to_owner(&config.database_path(), 0o600)?;
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
+        let agent_recovery = store.recover_agent_work(Utc::now())?;
         Ok(Self::assemble(
             config,
             store,
             auth,
             recovery,
             recovered_tool_leases,
+            agent_recovery,
         ))
     }
 
@@ -259,6 +266,7 @@ impl AppRuntime {
         let mut store = SqliteEventStore::open_in_memory()?;
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
+        let agent_recovery = store.recover_agent_work(Utc::now())?;
         let auth = LocalAuth::from_token(token)?;
         Ok(Self::assemble(
             config,
@@ -266,6 +274,7 @@ impl AppRuntime {
             auth,
             recovery,
             recovered_tool_leases,
+            agent_recovery,
         ))
     }
 
@@ -275,6 +284,7 @@ impl AppRuntime {
         auth: LocalAuth,
         recovery: RecoveryReport,
         recovered_tool_leases: u64,
+        agent_recovery: AgentRecoveryReport,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(256);
         Self {
@@ -284,6 +294,7 @@ impl AppRuntime {
             auth,
             recovery,
             recovered_tool_leases,
+            agent_recovery,
         }
     }
 
@@ -311,6 +322,9 @@ impl AppRuntime {
             recovered_events: self.recovery.events_replayed,
             recovered_tasks: self.recovery.tasks_rebuilt,
             recovered_tool_leases: self.recovered_tool_leases,
+            recovered_agent_runs: self.agent_recovery.runs_marked_recovering,
+            recovered_agent_instances: self.agent_recovery.instances_expired,
+            recovered_agent_leases: self.agent_recovery.leases_expired,
         }
     }
 
