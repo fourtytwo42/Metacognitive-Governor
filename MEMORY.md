@@ -134,6 +134,7 @@ When sources conflict, use this order:
 - 2026-08-14: Installed Rust 1.93, Node 24.14, npm, Tauri/WebKit native libraries, and Playwright Chromium on owner-controlled Ubuntu 24.04 VM `192.168.50.109`; no VM password was stored in repository files or memory.
 - 2026-08-14: Windows and Ubuntu local verification scripts passed Rust fmt/clippy/tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E.
 - 2026-08-14: Exact governed MCP mutation commit `c14fef2` passed `./scripts/verify.sh` from fresh archive `/home/hendo420/mcg-worktree-c14fef2` on the owner-controlled Ubuntu VM; a `set -e` confirmation emitted `__VERIFY_PASSED__` after all Rust, docs, frontend, native Tauri, and Playwright gates.
+- 2026-08-14: Exact bounded-stdio commit `fdeb60f` passed `./scripts/verify.sh` from fresh archive `/home/hendo420/mcg-worktree-fdeb60f` on the owner-controlled Ubuntu VM. All Rust workspace tests (including modern and same-process legacy stdio fixtures), live GPU45, docs, frontend checks/build, native Tauri debug build, and Playwright passed with `__VERIFY_PASSED__`. The first attempt exposed a full VM filesystem; verified superseded generated worktrees `mcg-worktree-63d3dd4` and `mcg-worktree-c14fef2` were removed, recovering about 19 GB. Their source revisions remain in Git.
 - 2026-08-14: Windows and Ubuntu live daemon/CLI smoke tests created and transitioned a task, terminated the daemon, restarted it, and recovered the same projection with two ordered events; Ubuntu token mode verified as `0600`.
 - 2026-08-14: M2 provider fixture tests passed for model discovery, canonical response/stream normalization, bounded transient retry, credential redaction, and OAuth/API billing-boundary enforcement; opt-in live GPU45 discovery and Responses inference passed against the dynamically reported active model.
 - 2026-08-14: Complete Windows and Ubuntu local verification passed with M2: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. The common live GPU45 discovery/buffered/streaming probe also passed independently from both platforms.
@@ -426,8 +427,8 @@ When sources conflict, use this order:
 - Decision: Add one-child-per-operation stdio transport with a minimal environment, piped newline JSON-RPC, a 4 MiB line cap, request timeouts, kill-on-drop cleanup, five-second current discovery, and structured same-process legacy fallback. Route HTTP and stdio through one runtime client; expose stdio in CLI and advanced desktop only.
 - Files: `crates/mcg-mcp/src/{stdio,unified}.rs`, `crates/mcg-runtime/src/lib.rs`, `apps/mcg-cli/src/main.rs`, `apps/desktop/src/{App,App.test,desktop-client}.tsx`, `docs/architecture/mcp.md`, `README.md`.
 - Commands/tests: Modern and legacy spawned-process fixtures; focused Rust compile/tests; desktop Vitest and production build; CLI help smoke.
-- Result: Modern stdio discovery/call and same-process automatic legacy fallback pass on Windows; governed runtime configuration/execution now dispatches by durable transport, and all primary management interfaces accept stdio without persisting a credential.
-- Follow-up: Run strict complete local gates on Windows/Ubuntu and add third-party SDK interoperability plus native UAT.
+- Result: Modern stdio discovery/call and same-process automatic legacy fallback pass on Windows and in the complete Ubuntu gate; governed runtime configuration/execution now dispatches by durable transport, and all primary management interfaces accept stdio without persisting a credential.
+- Follow-up: Run the complete Windows gate after the live OAuth handoff is released; add third-party SDK interoperability plus native UAT.
 
 ## Known Issues
 
