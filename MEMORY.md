@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M5 organization and useful work is in progress; contracts, minimal planning, SQLite run evidence, and evented daemon-restart recovery pass workspace tests on Windows.
-- Last meaningful change: SQLite migration 5 now persists immutable organization revisions/plans/usage/evaluations plus current run/instance/lease projections. Runtime startup moves interrupted runs to recovering and expires active instances/leases with authoritative events.
-- Next step: Wire provider routing, scoped project context, and typed tool execution into agent-run orchestration, then expose it through authenticated API/CLI and exercise real website work.
+- Last meaningful change: Added a bounded agent turn engine and canonical Responses function-call/result inputs. It enforces remaining lease budgets, model context, route pinning/auth isolation, exact exposed/leased tools, typed decoding, and broker-only execution.
+- Next step: Integrate turn execution with runtime persistence/state transitions and provider/broker registries, then expose it through authenticated API/CLI and exercise real website work.
 - Blockers: None documented.
 
 ## Current State
@@ -144,6 +144,7 @@ When sources conflict, use this order:
 - 2026-08-14: M5 contract foundation added 2 focused tests for organization graph validation/round-trip, lease budget exhaustion, and objective overhead. `cargo test --workspace`, focused clippy with warnings denied, and `git diff --check` passed on Windows.
 - 2026-08-14: M5 minimal-organization planning added 4 focused tests. The consumer default has the five required core roles; atomic rename work selects only Coder with zero coordination overhead; compound site work selects only Executive/Coder/Tool Worker/Evaluator, injects independent evaluation, tracks dependencies, and preserves aggregate budgets; dependency cycles fail closed. Complete Rust workspace tests, focused strict clippy, formatting, and `git diff --check` passed on Windows.
 - 2026-08-14: M5 migration 5 file-backed qualification persisted an organization, planned/run state, instance, active lease, attributed provider usage, and objective evaluation; after close/reopen it recovered the run/instance/lease to explicit safe states and retained ordered event evidence. Complete workspace tests and strict workspace clippy passed on Windows.
+- 2026-08-14: M5 bounded turn tests route a context-constrained Coder through a priced capable model, decode `fs.read` into the typed tool plane, feed its broker outcome back using exact Responses function-call items, and return a final response. Authentication failure makes one provider call with no fallback; an unleased `fs.write` produces zero tool calls. Complete workspace tests and strict workspace clippy passed on Windows.
 
 ## Decisions
 
@@ -275,6 +276,15 @@ When sources conflict, use this order:
 - Commands/tests: `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `git diff --check`.
 - Result: A real file-backed close/reopen fixture retains all immutable evidence and emits ordered recovery events for every interrupted projection.
 - Follow-up: Build provider/context/tool-backed agent-run orchestration and authenticated control surfaces.
+
+### 2026-08-14 - M5 Bounded Agent Turn Engine
+
+- Context: Real useful work requires a provider-neutral model/tool loop without letting model output become authority.
+- Decision: Add canonical Responses function-call/result input parts; route against discovered capabilities/cost/context windows and remaining lease budget; permit retriable fallback only before the first response and only when the role allows it; pin subsequent calls; expose exact lease tool names; decode arguments into `ToolRequestKind`; execute exclusively through an injected tool gateway/broker; cap model/tool iterations.
+- Files: `crates/mcg-agents/src/orchestration.rs`, `crates/mcg-providers/src/{contracts,compatible}.rs`, `docs/architecture/agent-organization.md`.
+- Commands/tests: `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `npm run check:docs`; `git diff --check`.
+- Result: Fake-provider/broker tests prove typed tool round-trip, cost evidence, authentication billing isolation, provider pinning, and zero side effects for unleased tool calls.
+- Follow-up: Add runtime registry/persistence coordination so completed and failed turns atomically update durable run evidence and states.
 
 ## Known Issues
 

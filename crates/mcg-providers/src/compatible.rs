@@ -349,6 +349,35 @@ fn validate_request(request: &ModelRequest) -> Result<(), ProviderError> {
             "at least one message is required".into(),
         ));
     }
+    for message in &request.messages {
+        for part in &message.content {
+            match part {
+                ContentPart::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                } if message.content.len() == 1
+                    && message.role == MessageRole::Assistant
+                    && !call_id.trim().is_empty()
+                    && !name.trim().is_empty()
+                    && !arguments.trim().is_empty() => {}
+                ContentPart::ToolResult { call_id, output }
+                    if message.content.len() == 1
+                        && message.role == MessageRole::Tool
+                        && !call_id.trim().is_empty()
+                        && !output.trim().is_empty() => {}
+                ContentPart::ToolCall { .. } | ContentPart::ToolResult { .. } => {
+                    return Err(ProviderError::Configuration(
+                        "tool calls/results must be non-empty standalone assistant/tool inputs"
+                            .into(),
+                    ));
+                }
+                ContentPart::Text { .. }
+                | ContentPart::ImageUrl { .. }
+                | ContentPart::File { .. } => {}
+            }
+        }
+    }
     Ok(())
 }
 
@@ -361,6 +390,28 @@ fn request_json(
         .messages
         .iter()
         .map(|message| {
+            if let [
+                ContentPart::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                },
+            ] = message.content.as_slice()
+            {
+                return json!({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                });
+            }
+            if let [ContentPart::ToolResult { call_id, output }] = message.content.as_slice() {
+                return json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                });
+            }
             let content: Vec<Value> = message
                 .content
                 .iter()
@@ -371,6 +422,9 @@ fn request_json(
                     }
                     ContentPart::File { file_id } => {
                         json!({"type": "input_file", "file_id": file_id})
+                    }
+                    ContentPart::ToolCall { .. } | ContentPart::ToolResult { .. } => {
+                        unreachable!("tool content was validated as standalone")
                     }
                 })
                 .collect();
@@ -891,6 +945,45 @@ mod tests {
             max_output_tokens: None,
             metadata: Value::Null,
         }
+    }
+
+    #[test]
+    fn tool_call_and_result_use_responses_wire_items() {
+        let mut request = request();
+        request.messages.extend([
+            Message {
+                role: MessageRole::Assistant,
+                content: vec![ContentPart::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "fs.read".into(),
+                    arguments: r#"{"path":"README.md"}"#.into(),
+                }],
+                name: None,
+            },
+            Message {
+                role: MessageRole::Tool,
+                content: vec![ContentPart::ToolResult {
+                    call_id: "call_1".into(),
+                    output: r#"{"status":"succeeded"}"#.into(),
+                }],
+                name: None,
+            },
+        ]);
+        validate_request(&request).expect("valid tool inputs");
+        let value = request_json(&request, false, None);
+        assert_eq!(
+            value.pointer("/input/1/type"),
+            Some(&json!("function_call"))
+        );
+        assert_eq!(
+            value.pointer("/input/2/type"),
+            Some(&json!("function_call_output"))
+        );
+        request.messages[1].role = MessageRole::User;
+        assert!(matches!(
+            validate_request(&request),
+            Err(ProviderError::Configuration(_))
+        ));
     }
 
     #[tokio::test]

@@ -182,9 +182,25 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    Text { text: String },
-    ImageUrl { url: String, detail: Option<String> },
-    File { file_id: String },
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        url: String,
+        detail: Option<String>,
+    },
+    File {
+        file_id: String,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

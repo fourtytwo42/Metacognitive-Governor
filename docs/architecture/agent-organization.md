@@ -44,3 +44,21 @@ recovery history through the existing event stream.
 
 Run resumption or reassignment must create fresh instances and leases. Old
 plans, usage, evaluations, and organization revisions remain immutable evidence.
+
+## Bounded Model And Tool Turns
+
+The agent turn engine consumes an already-running instance, active lease,
+bounded context assembly, discovered route candidates, and an exact set of tool
+definitions. It rechecks schema, identity, remaining token/cost/time budgets,
+model context windows, and lease permissions before calling a provider.
+
+The first provider call may use only deterministic retriable fallbacks allowed
+by the role. Authentication never falls back. Once any provider responds, all
+later calls in that tool loop stay pinned to the same provider and model.
+
+Model function calls are decoded into `ToolRequestKind`, receive the task
+identity and a timeout capped by the remaining agent lease, and execute only
+through the supplied policy broker. The model receives the broker's bounded,
+redacted `ToolOutcome` as a canonical Responses `function_call_output`. Unknown,
+unexposed, unleased, duplicate, or malformed tool calls fail before the executor
+is invoked. Model calls and total tool calls have hard iteration limits.
