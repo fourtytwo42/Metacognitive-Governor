@@ -46,6 +46,11 @@ domain_id!(ProjectId);
 domain_id!(ThreadId);
 domain_id!(TaskId);
 domain_id!(RunId);
+domain_id!(ToolRequestId);
+domain_id!(ToolExecutionId);
+domain_id!(ApprovalId);
+domain_id!(LeaseId);
+domain_id!(ArtifactId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -38,6 +38,7 @@ rust-version = "1.93"
 async-trait = "0.1.92"
 axum = "0.8.9"
 base64 = "0.22.1"
+cap-std = "4.0.2"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive"] }
 eventsource-stream = "0.2.3"
@@ -62,6 +63,7 @@ tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
+url = "2.5.8"
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [workspace.lints.rust]

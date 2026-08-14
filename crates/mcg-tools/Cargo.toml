@@ -7,10 +7,21 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+cap-std.workspace = true
+chrono.workspace = true
+mcg-config = { path = "../mcg-config" }
 mcg-domain = { path = "../mcg-domain" }
+mcg-policy = { path = "../mcg-policy" }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
-
