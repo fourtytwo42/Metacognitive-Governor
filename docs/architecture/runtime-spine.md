@@ -46,6 +46,7 @@ are explicit overrides for controlled tests and alternate local clients.
 | `GET` | `/api/v1/tasks/{id}` | Read the task projection |
 | `POST` | `/api/v1/tasks/{id}` | Apply a validated state transition |
 | `POST` | `/api/v1/tasks/{id}/launch` | Idempotently plan, start, and advance consumer work |
+| `POST` | `/api/v1/tasks/{id}/retry` | Explicitly retry bounded incomplete work for a blocked task |
 | `GET` | `/api/v1/tasks/{id}/events` | Read ordered durable task history |
 | `GET` | `/api/v1/events/stream` | Receive committed events over SSE |
 
@@ -69,6 +70,10 @@ and tool authority boundaries. A repeated launch observes durable progress and
 does not issue duplicate model work. Model output is never objective completion:
 the run remains visibly awaiting evaluation until evidence is recorded. The CLI
 mirrors the flow with `mcg task create --project-id ...` and `mcg task launch`.
+Provider/tool failures move the task to `blocked`; retry is an explicit owner
+action and each work item is capped at its durable lease retry limit. Cancelling
+a launched task atomically cancels its run and revokes active agent instances and
+leases, so the task projection cannot leave hidden execution authority behind.
 
 ## Verification evidence
 

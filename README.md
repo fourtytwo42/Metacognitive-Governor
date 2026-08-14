@@ -95,6 +95,9 @@ derives useful command-based evidence from project discovery, and advances work
 through configured providers and governed tools. Repeating Start never duplicates
 paid model work, and the UI reports approval, provider, and objective-evaluation
 waits without treating a model's completion message as proof.
+Blocked work exposes an explicit bounded Retry action in desktop and
+`mcg task retry`; ordinary Start replay remains observation-only. Cancelling a
+launched task atomically cancels the run and terminates active agent authority.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

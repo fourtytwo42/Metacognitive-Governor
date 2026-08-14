@@ -489,6 +489,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route("/api/v1/tasks/{task_id}/tool-audit", get(task_tool_audit))
         .route("/api/v1/tasks/{task_id}/runs", post(plan_agent_run))
         .route("/api/v1/tasks/{task_id}/launch", post(launch_task))
+        .route("/api/v1/tasks/{task_id}/retry", post(retry_task))
         .route(
             "/api/v1/organizations",
             get(list_organizations).post(create_default_organization),
@@ -992,7 +993,7 @@ async fn launch_task(
         .launch_task_agent_run(task_id, &organization, &run, &plan)
         .map_err(map_runtime_error)?;
     if launched.replayed {
-        let execution = observe_launched_run(&launched.view);
+        let execution = observe_launched_run(&launched.task, &launched.view);
         return Ok(Json(LaunchTaskResponse {
             task: launched.task,
             run: launched.view,
@@ -1001,10 +1002,86 @@ async fn launch_task(
         }));
     }
 
+    advance_consumer_run(
+        &state,
+        task_id,
+        project_id,
+        &organization,
+        &launched.view,
+        &request,
+    )
+    .await
+    .map(Json)
+}
+
+async fn retry_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<LaunchTaskRequest>,
+) -> Result<Json<LaunchTaskResponse>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    let task = state
+        .runtime
+        .task(task_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::not_found(format!("task {task_id} was not found")))?;
+    if task.state != TaskState::Blocked {
+        return Err(ApiError::conflict(
+            "only a blocked consumer task can be retried",
+        ));
+    }
+    let project_id = task
+        .project_id
+        .ok_or_else(|| ApiError::bad_request("consumer task retry requires a selected project"))?;
+    let run_id = state
+        .runtime
+        .task_launch_run_id(task_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::conflict("task has no consumer launch to retry"))?;
+    let view = state
+        .runtime
+        .agent_run_view(run_id)
+        .map_err(map_runtime_error)?;
+    if view.run.state != AgentRunState::Running {
+        return Err(ApiError::conflict(
+            "consumer retry requires a running durable run",
+        ));
+    }
+    let organization = state
+        .runtime
+        .organization_revision(view.run.organization_revision_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::internal("consumer run organization disappeared"))?;
+    state
+        .runtime
+        .transition_task(task_id, TaskState::Active)
+        .map_err(map_runtime_error)?;
+    advance_consumer_run(&state, task_id, project_id, &organization, &view, &request)
+        .await
+        .map(Json)
+}
+
+async fn advance_consumer_run(
+    state: &ApiState,
+    task_id: TaskId,
+    project_id: ProjectId,
+    organization: &OrganizationGenome,
+    view: &AgentRunView,
+    request: &LaunchTaskRequest,
+) -> Result<LaunchTaskResponse, ApiError> {
+    let completed = view
+        .leases
+        .iter()
+        .filter(|lease| lease.state == mcg_agents::AgentLeaseState::Completed)
+        .map(|lease| lease.work_item_id)
+        .collect::<BTreeSet<_>>();
     let mut execution = LaunchExecution::AwaitingEvaluation {
         detail: "All planned agent turns finished; objective evaluation is still required.".into(),
     };
-    for item in &launched.view.plan.items {
+    for item in &view.plan.items {
+        if completed.contains(&item.id) {
+            continue;
+        }
         let role = organization
             .roles
             .iter()
@@ -1019,7 +1096,7 @@ async fn launch_task(
         let result = state
             .runtime
             .execute_agent_work(&AgentDispatchSpec {
-                run_id: launched.view.run.id,
+                run_id: view.run.id,
                 work_item_id: item.id,
                 project_id,
                 target_path: request.target_path.clone(),
@@ -1030,20 +1107,33 @@ async fn launch_task(
             })
             .await;
         if let Err(error) = result {
-            execution = match &error {
-                RuntimeError::AgentTurn(AgentTurnError::Tool(
-                    mcg_tools::ToolError::ApprovalRequired { .. },
-                )) => LaunchExecution::AwaitingApproval {
+            execution = if let RuntimeError::AgentTurn(AgentTurnError::Tool(
+                mcg_tools::ToolError::ApprovalRequired { .. },
+            )) = &error
+            {
+                LaunchExecution::AwaitingApproval {
                     detail: "A governed tool action is waiting for owner approval.".into(),
-                },
-                _ => LaunchExecution::Blocked {
+                }
+            } else {
+                if state
+                    .runtime
+                    .task(task_id)
+                    .map_err(map_runtime_error)?
+                    .is_some_and(|task| task.state == TaskState::Active)
+                {
+                    state
+                        .runtime
+                        .transition_task(task_id, TaskState::Blocked)
+                        .map_err(map_runtime_error)?;
+                }
+                LaunchExecution::Blocked {
                     detail: error.to_string(),
-                },
+                }
             };
             break;
         }
     }
-    Ok(Json(LaunchTaskResponse {
+    Ok(LaunchTaskResponse {
         task: state
             .runtime
             .task(task_id)
@@ -1051,15 +1141,15 @@ async fn launch_task(
             .ok_or_else(|| ApiError::internal("launched task disappeared"))?,
         run: state
             .runtime
-            .agent_run_view(launched.view.run.id)
+            .agent_run_view(view.run.id)
             .map_err(map_runtime_error)?,
         replayed: false,
         execution,
-    }))
+    })
 }
 
-fn observe_launched_run(view: &AgentRunView) -> LaunchExecution {
-    if view.run.state == AgentRunState::Waiting {
+fn observe_launched_run(task: &TaskEnvelope, view: &AgentRunView) -> LaunchExecution {
+    if task.state == TaskState::WaitingForApproval || view.run.state == AgentRunState::Waiting {
         LaunchExecution::AwaitingApproval {
             detail: "This run is waiting for owner approval; no duplicate model work was issued."
                 .into(),
@@ -1070,10 +1160,11 @@ fn observe_launched_run(view: &AgentRunView) -> LaunchExecution {
                 "Agent turns are durable; objective evaluation is still required before completion."
                     .into(),
         }
-    } else if view
-        .leases
-        .iter()
-        .any(|lease| lease.state == mcg_agents::AgentLeaseState::Failed)
+    } else if task.state == TaskState::Blocked
+        || view
+            .leases
+            .iter()
+            .any(|lease| lease.state == mcg_agents::AgentLeaseState::Failed)
     {
         LaunchExecution::Blocked {
             detail: "The prior launch has failed work evidence; use run details to retry safely."
@@ -2989,6 +3080,7 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One public launch/replay/retry/cancel scenario is intentional evidence.
     async fn consumer_launch_is_durable_idempotent_and_reports_missing_provider() {
         let directory = tempfile::tempdir().expect("temporary runtime");
         let project_root = directory.path().join("project");
@@ -3040,7 +3132,7 @@ form.addEventListener('submit', (event) => {
         )
         .expect("launch response body");
         assert!(!launched.replayed);
-        assert_eq!(launched.task.state, TaskState::Active);
+        assert_eq!(launched.task.state, TaskState::Blocked);
         assert_eq!(launched.run.run.state, AgentRunState::Running);
         assert_eq!(launched.run.plan.items.len(), 2);
         assert!(matches!(
@@ -3069,9 +3161,57 @@ form.addEventListener('submit', (event) => {
         assert_eq!(replayed.run.run.id, launched.run.run.id);
         assert!(matches!(
             replayed.execution,
-            LaunchExecution::NotStarted { .. }
+            LaunchExecution::Blocked { .. }
         ));
         assert_eq!(runtime.organizations().expect("organizations").len(), 1);
+        let retried = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}/retry", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&LaunchTaskRequest {
+                            target_path: None,
+                            context_token_budget: 2_048,
+                            requested_tools: Vec::new(),
+                            estimated_output_tokens: 512,
+                            max_model_calls: 2,
+                        })
+                        .expect("retry body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("retry response");
+        let retried: LaunchTaskResponse = serde_json::from_slice(
+            &retried
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("retry response body");
+        assert_eq!(retried.run.run.id, launched.run.run.id);
+        assert_eq!(retried.task.state, TaskState::Blocked);
+        assert!(matches!(retried.execution, LaunchExecution::Blocked { .. }));
+        let cancelled = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"state":"cancelled"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("cancel response");
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(
+            runtime
+                .agent_run_view(launched.run.run.id)
+                .expect("cancelled run")
+                .run
+                .state,
+            AgentRunState::Cancelled
+        );
     }
 
     #[tokio::test]

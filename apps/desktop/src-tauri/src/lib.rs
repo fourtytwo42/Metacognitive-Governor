@@ -260,6 +260,27 @@ async fn launch_task(
 }
 
 #[tauri::command]
+async fn retry_task(
+    task_id: String,
+    request: LaunchTaskRequest,
+) -> Result<LaunchTaskResponse, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/retry"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Task could not be retried: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task retry").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task retry response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn task_events(task_id: String) -> Result<TaskEventsResponse, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/events"))
@@ -363,6 +384,7 @@ pub fn run() {
             list_tasks,
             create_task,
             launch_task,
+            retry_task,
             transition_task,
             task_events,
             pick_project_directory,

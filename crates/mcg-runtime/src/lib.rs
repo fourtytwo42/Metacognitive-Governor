@@ -639,6 +639,14 @@ impl AppRuntime {
         task_id: TaskId,
         state: TaskState,
     ) -> Result<TaskEnvelope, RuntimeError> {
+        if state == TaskState::Cancelled
+            && let Some((task, events)) = self.store()?.cancel_launched_task(task_id)?
+        {
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            return Ok(task);
+        }
         let (task, event) = self.store()?.transition_task(task_id, state)?;
         let _ = self.event_sender.send(event);
         Ok(task)
@@ -651,6 +659,15 @@ impl AppRuntime {
     /// Returns an error when storage cannot be read.
     pub fn task(&self, task_id: TaskId) -> Result<Option<TaskEnvelope>, RuntimeError> {
         Ok(self.store()?.load_task(task_id)?)
+    }
+
+    /// Returns the durable consumer run associated with a task, when launched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when launch persistence cannot be read.
+    pub fn task_launch_run_id(&self, task_id: TaskId) -> Result<Option<RunId>, RuntimeError> {
+        Ok(self.store()?.task_launch_run_id(task_id)?)
     }
 
     /// Lists current durable task projections in deterministic display order.

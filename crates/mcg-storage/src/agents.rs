@@ -54,6 +54,174 @@ pub struct TaskLaunchReceipt {
 }
 
 impl SqliteEventStore {
+    /// Returns the one consumer run bound to a task, when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted launch identity is invalid.
+    pub fn task_launch_run_id(
+        &self,
+        task_id: mcg_domain::TaskId,
+    ) -> Result<Option<RunId>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT run_id FROM task_launches WHERE task_id = ?1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|run_id| {
+                run_id.parse().map_err(|_| {
+                    StorageError::InvalidData("stored task launch run id is invalid".into())
+                })
+            })
+            .transpose()
+    }
+
+    /// Atomically cancels a task-launched run and every still-active agent
+    /// authority before cancelling the task projection itself.
+    ///
+    /// Returns `None` when the task has no consumer launch record, allowing the
+    /// caller to use the ordinary task-only transition path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for illegal terminal transitions, corrupt launch
+    /// identity, concurrent state changes, or failed persistence.
+    #[allow(clippy::too_many_lines)]
+    pub fn cancel_launched_task(
+        &mut self,
+        task_id: mcg_domain::TaskId,
+    ) -> Result<Option<(TaskEnvelope, Vec<EventEnvelope>)>, StorageError> {
+        let Some(run_id) = self
+            .connection
+            .query_row(
+                "SELECT run_id FROM task_launches WHERE task_id = ?1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let run_id: RunId = run_id.parse().map_err(|_| {
+            StorageError::InvalidData("stored task launch run id is invalid".into())
+        })?;
+        let mut task = self
+            .load_task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let mut run = self
+            .agent_run(run_id)?
+            .ok_or(StorageError::AgentRunNotFound(run_id))?;
+        if run.task_id != task_id || !run.state.can_transition_to(AgentRunState::Cancelled) {
+            return Err(StorageError::Conflict(
+                "launched task run cannot be cancelled from its current state".into(),
+            ));
+        }
+        let previous_task = task.state;
+        task.transition_to(TaskState::Cancelled)?;
+        let previous_run = run.state;
+        run.state = AgentRunState::Cancelled;
+        run.updated_at = task.updated_at;
+        run.completed_at = Some(task.updated_at);
+        let mut instances: Vec<AgentInstance> = self.read_json_rows(
+            "SELECT instance_json FROM agent_instances
+             WHERE run_id = ?1 AND state IN ('created', 'running', 'waiting', 'blocked')
+             ORDER BY created_at, instance_id",
+            &run_id.to_string(),
+        )?;
+        let mut leases: Vec<AgentLease> = self.read_json_rows(
+            "SELECT agent_leases.lease_json FROM agent_leases
+             INNER JOIN agent_instances
+                ON agent_instances.instance_id = agent_leases.instance_id
+             WHERE agent_instances.run_id = ?1 AND agent_leases.state = 'active'
+             ORDER BY agent_leases.acquired_at, agent_leases.lease_id",
+            &run_id.to_string(),
+        )?;
+        let transaction = self.connection.transaction()?;
+        let mut events = Vec::new();
+        for instance in &mut instances {
+            let previous = instance.state;
+            instance.state = AgentState::Cancelled;
+            instance.updated_at = task.updated_at;
+            let changed = transaction.execute(
+                "UPDATE agent_instances SET state = 'cancelled', instance_json = ?1, updated_at = ?2
+                 WHERE instance_id = ?3 AND state = ?4",
+                params![
+                    serde_json::to_string(instance)?,
+                    task.updated_at.to_rfc3339(),
+                    instance.id.to_string(),
+                    instance_state_name(previous),
+                ],
+            )?;
+            ensure_single_change(changed, "agent instance changed while cancelling task")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentInstanceStateChanged,
+                    Some(task_id),
+                    serde_json::json!({"from": previous, "to": AgentState::Cancelled, "instance": instance, "reason": "task_cancelled"}),
+                ),
+            )?);
+        }
+        for lease in &mut leases {
+            lease.state = AgentLeaseState::Terminated;
+            lease.heartbeat_at = task.updated_at;
+            let changed = transaction.execute(
+                "UPDATE agent_leases SET state = 'terminated', lease_json = ?1, heartbeat_at = ?2
+                 WHERE lease_id = ?3 AND state = 'active'",
+                params![
+                    serde_json::to_string(lease)?,
+                    task.updated_at.to_rfc3339(),
+                    lease.id.to_string(),
+                ],
+            )?;
+            ensure_single_change(changed, "agent lease changed while cancelling task")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentLeaseStateChanged,
+                    Some(task_id),
+                    serde_json::json!({"lease": lease, "reason": "task_cancelled"}),
+                ),
+            )?);
+        }
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = 'cancelled', run_json = ?1, updated_at = ?2,
+                    completed_at = ?2 WHERE run_id = ?3 AND state = ?4",
+            params![
+                serde_json::to_string(&run)?,
+                task.updated_at.to_rfc3339(),
+                run.id.to_string(),
+                run_state_name(previous_run),
+            ],
+        )?;
+        ensure_single_change(changed, "agent run changed while cancelling task")?;
+        events.push(Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::AgentRunStateChanged,
+                Some(task_id),
+                serde_json::json!({"from": previous_run, "to": AgentRunState::Cancelled, "run": &run, "reason": "task_cancelled"}),
+            ),
+        )?);
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(task_id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: previous_task,
+                    to: TaskState::Cancelled,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok(Some((task, events)))
+    }
+
     /// Atomically binds an existing pending task to its one consumer run and
     /// starts both projections. Repeating the operation returns the original
     /// run and never creates duplicate authority.
@@ -1035,6 +1203,19 @@ impl SqliteEventStore {
                 "work item is already active or complete".into(),
             ));
         }
+        let prior_attempts: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM agent_leases
+             INNER JOIN agent_instances
+                ON agent_instances.instance_id = agent_leases.instance_id
+             WHERE agent_instances.run_id = ?1 AND agent_leases.work_item_id = ?2",
+            params![created.run_id.to_string(), lease.work_item_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if prior_attempts > i64::from(lease.max_retries) {
+            return Err(StorageError::Conflict(
+                "work item retry limit is exhausted".into(),
+            ));
+        }
         for dependency in &item.dependencies {
             let completed: bool = self.connection.query_row(
                 "SELECT EXISTS(
@@ -1548,6 +1729,18 @@ impl SqliteEventStore {
         lease.heartbeat_at = at;
         run.state = run_state;
         run.updated_at = at;
+        let mut task_transition = None;
+        if let Some(mut task) = self.load_task(run.task_id)?
+            && task.state == TaskState::Active
+        {
+            let next = match disposition {
+                AgentTurnDisposition::Waiting => TaskState::WaitingForApproval,
+                AgentTurnDisposition::Failed => TaskState::Blocked,
+            };
+            task.transition_to(next)?;
+            task.updated_at = at;
+            task_transition = Some((task, next));
+        }
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE agent_instances SET state = ?1, instance_json = ?2, updated_at = ?3
@@ -1623,6 +1816,21 @@ impl SqliteEventStore {
                 }),
             ),
         )?);
+        if let Some((task, next)) = task_transition {
+            let event = Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::TaskStateChanged,
+                    Some(run.task_id),
+                    serde_json::to_value(TaskStateChangedPayload {
+                        from: TaskState::Active,
+                        to: next,
+                    })?,
+                ),
+            )?;
+            Self::upsert_task(&transaction, &task, event.sequence)?;
+            events.push(event);
+        }
         transaction.commit()?;
         Ok(events)
     }
@@ -2155,6 +2363,12 @@ mod tests {
         assert!(replayed.replayed);
         assert_eq!(replayed.run.id, run.id);
         assert!(replayed.events.is_empty());
+        let (cancelled, events) = store
+            .cancel_launched_task(task.id)
+            .expect("cancel launch")
+            .expect("launch cancellation");
+        assert_eq!(cancelled.state, TaskState::Cancelled);
+        assert_eq!(events.len(), 2);
         drop(store);
 
         let reopened = SqliteEventStore::open(&database).expect("reopen store");
@@ -2164,7 +2378,7 @@ mod tests {
                 .expect("task")
                 .expect("task row")
                 .state,
-            TaskState::Active
+            TaskState::Cancelled
         );
         assert_eq!(
             reopened
@@ -2172,7 +2386,7 @@ mod tests {
                 .expect("run")
                 .expect("run row")
                 .state,
-            AgentRunState::Running
+            AgentRunState::Cancelled
         );
     }
 
@@ -2282,6 +2496,9 @@ mod tests {
             max_duration_seconds: Some(900),
         };
         store.create_task(&task).expect("create task");
+        store
+            .transition_task(task.id, TaskState::Active)
+            .expect("activate task");
 
         let genome = OrganizationGenome::consumer_default(now);
         store
@@ -2564,6 +2781,17 @@ mod tests {
                 .state,
             AgentLeaseState::Active
         );
+        assert_eq!(
+            reopened
+                .load_task(task.id)
+                .expect("task")
+                .expect("present")
+                .state,
+            TaskState::WaitingForApproval
+        );
+        reopened
+            .transition_task(task.id, TaskState::Active)
+            .expect("resume approved task");
         reopened
             .transition_agent_run(
                 run.id,
@@ -2609,6 +2837,14 @@ mod tests {
         assert_eq!(
             reopened.agent_turn_result(retry_lease.id).expect("result"),
             None
+        );
+        assert_eq!(
+            reopened
+                .load_task(task.id)
+                .expect("task")
+                .expect("present")
+                .state,
+            TaskState::Blocked
         );
     }
 }

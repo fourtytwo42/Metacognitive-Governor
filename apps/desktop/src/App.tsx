@@ -22,6 +22,7 @@ import {
   pickProjectDirectory,
   type ProjectModel,
   type RiskLevel,
+  retryTask,
   startOpenAiOAuth,
   type TaskEnvelope,
   type TaskEventsResponse,
@@ -287,6 +288,22 @@ export function App() {
     }
   }
 
+  async function retryBlockedTask(taskId: string) {
+    setTaskBusy(true);
+    setTaskError(null);
+    setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Retrying incomplete governed work..." }));
+    try {
+      const retried = await retryTask(taskId);
+      replaceTask(retried.task);
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: retried.execution.detail }));
+    } catch (error) {
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Retry failed." }));
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
   async function changeTaskState(taskId: string, state: "cancelled") {
     setTaskBusy(true);
     setTaskError(null);
@@ -463,6 +480,7 @@ export function App() {
                 </div>
                 <div className="task-actions">
                   {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy || !task.project_id} title={task.project_id ? undefined : "Select a project before starting"} onClick={() => startTask(task.id)}>Start task</button>}
+                  {task.state === "blocked" && <button className="primary" type="button" disabled={taskBusy} onClick={() => retryBlockedTask(task.id)}>Retry</button>}
                   {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
                   <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide history" : "History"}</button>
                 </div>

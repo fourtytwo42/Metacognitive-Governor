@@ -12,6 +12,7 @@ const client = vi.hoisted(() => ({
   listTasks: vi.fn(),
   createTask: vi.fn(),
   launchTask: vi.fn(),
+  retryTask: vi.fn(),
   transitionTask: vi.fn(),
   taskEvents: vi.fn(),
   pickProject: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("./desktop-client", () => ({
   listTasks: client.listTasks,
   createTask: client.createTask,
   launchTask: client.launchTask,
+  retryTask: client.retryTask,
   transitionTask: client.transitionTask,
   loadTaskEvents: client.taskEvents,
   pickProjectDirectory: client.pickProject,
@@ -50,6 +52,7 @@ beforeEach(() => {
   client.listTasks.mockReset();
   client.createTask.mockReset();
   client.launchTask.mockReset();
+  client.retryTask.mockReset();
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
   client.pickProject.mockReset();
@@ -250,6 +253,35 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   fireEvent.click(screen.getByRole("button", { name: "History" }));
   expect(await screen.findByText("task transitioned")).toBeInTheDocument();
   expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
+});
+
+test("blocked task retry is explicit and reports durable progress", async () => {
+  const blockedTask = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000030",
+    project_id: "00000000-0000-4000-8000-000000000031",
+    goal: "Retry the governed build",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "blocked",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.listTasks.mockResolvedValue({ tasks: [blockedTask] });
+  client.retryTask.mockResolvedValue({
+    task: { ...blockedTask, state: "active" },
+    replayed: false,
+    run: { run: { id: "00000000-0000-4000-8000-000000000032", state: "running" } },
+    execution: { state: "awaiting_evaluation", detail: "Objective checks are next." }
+  });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+  expect(client.retryTask).toHaveBeenCalledWith(blockedTask.id);
+  expect(await screen.findByText("Objective checks are next.")).toBeInTheDocument();
+  expect(screen.getByText("active")).toBeInTheDocument();
 });
 
 test("native project selection discovers the folder and associates the new task", async () => {

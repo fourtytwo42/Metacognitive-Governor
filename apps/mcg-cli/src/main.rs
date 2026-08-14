@@ -486,6 +486,12 @@ enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Explicitly retry incomplete work for a blocked consumer task.
+    Retry {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// List current durable task projections.
     List {
         #[arg(long)]
@@ -663,30 +669,10 @@ async fn run_task(
             }
         }
         TaskCommand::Launch { id, json } => {
-            let task_id = TaskId::from_str(&id)?;
-            let launched: LaunchTaskResponse = client
-                .post(format!("{host}/api/v1/tasks/{task_id}/launch"))
-                .bearer_auth(token)
-                .json(&LaunchTaskRequest {
-                    target_path: None,
-                    context_token_budget: 8_192,
-                    requested_tools: Vec::new(),
-                    estimated_output_tokens: 4_096,
-                    max_model_calls: 8,
-                })
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&launched)?);
-            } else {
-                println!(
-                    "{}: {:?} ({:?})",
-                    launched.run.run.id, launched.execution, launched.run.run.state
-                );
-            }
+            run_consumer_task(client, host, token, &id, "launch", json).await?;
+        }
+        TaskCommand::Retry { id, json } => {
+            run_consumer_task(client, host, token, &id, "retry", json).await?;
         }
         TaskCommand::List { json } => {
             list_tasks(client, host, token, json).await?;
@@ -746,6 +732,41 @@ async fn run_task(
                 .await?;
             println!("{}: {}", task.id, task.state);
         }
+    }
+    Ok(())
+}
+
+async fn run_consumer_task(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+    action: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let task_id = TaskId::from_str(id)?;
+    let result: LaunchTaskResponse = client
+        .post(format!("{host}/api/v1/tasks/{task_id}/{action}"))
+        .bearer_auth(token)
+        .json(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 8_192,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 4_096,
+            max_model_calls: 8,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "{}: {:?} ({:?})",
+            result.run.run.id, result.execution, result.run.run.state
+        );
     }
     Ok(())
 }

@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Consumer orchestration now has an idempotent real launch path; approval resume, safe retry, cancellation propagation, and objective evaluation/terminal settlement are the next dependency-ordered slice.
-- Last meaningful change: Replaced the desktop status-only Start action with atomic one-run reservation, consumer planning, bounded Coder/Evaluator advancement, durable replay observation, and matching API/CLI/Tauri contracts.
-- Next step: Add explicit approval-resume and retry authority, cascade cancellation through run/instance/lease state, then implement objective success-condition execution and terminal task/run settlement. Preserve the visible OAuth handoff.
+- Current task: Consumer launch/replay/retry/cancel is durable and bounded; approval continuation checkpoints and objective evaluation/terminal settlement are the next dependency-ordered slice.
+- Last meaningful change: Added explicit blocked-task retry with per-work lease limits, durable task waiting/blocked states, and atomic task/run/instance/lease cancellation propagation across API/CLI/Tauri/desktop.
+- Next step: Persist resumable turn checkpoints for approval continuation without duplicating side effects, then implement objective success-condition execution and terminal task/run settlement. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -459,6 +459,15 @@ When sources conflict, use this order:
 - Commands/tests: Strict focused Rust clippy; 43 targeted Rust tests; TypeScript; six Vitest flows; production Vite build; Playwright smoke; docs and diff checks.
 - Result: Atomic/restart-durable one-run reservation, missing-provider reporting, inferred command evidence, CLI/Tauri/desktop launch, and UI progress are green on Windows. Existing provider/tool/evaluator fixtures remain green. Objective evaluation and terminal settlement are intentionally still required.
 - Follow-up: Implement approval resume, bounded retry, cancellation propagation, objective condition execution, terminal settlement, and then the complete Ubuntu qualification.
+
+### 2026-08-14 - Linux Consumer Launch Qualification And Bounded Recovery
+
+- Context: Consumer launch needed exact cross-platform qualification plus owner-visible recovery/cancellation semantics.
+- Decision: Keep Start replay observation-only; add explicit Retry only for blocked tasks; cap attempts using each durable agent lease retry limit; project waiting/failure into task state; and atomically cancel task, run, active instances, and active leases together.
+- Files: `crates/mcg-{storage,runtime,api}/`, `apps/mcg-cli/`, `apps/desktop/`, runtime documentation.
+- Commands/tests: Exact commit `6c666f5` complete `./scripts/verify.sh` on owner-controlled Ubuntu; strict focused Windows Rust clippy/tests; seven Vitest flows.
+- Result: Exact consumer launch checkpoint passed Ubuntu native Tauri/GTK, Rust, frontend, live-provider, and Playwright gates. Superseded reproducible Linux snapshots `mcg-worktree-5b11909` and `mcg-worktree-352513c` were removed after exact realpath validation; source remains recoverable from Git. Retry/cancel changes are Windows-focused green and await their own exact Linux checkpoint.
+- Follow-up: Approval-resume checkpoints, objective evaluator, terminal settlement, then exact Linux qualification of the expanded recovery slice.
 
 ## Known Issues
 

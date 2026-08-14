@@ -205,6 +205,18 @@ export function launchTask(taskId: string): Promise<LaunchTaskResponse> {
   });
 }
 
+export function retryTask(taskId: string): Promise<LaunchTaskResponse> {
+  return invoke("retry_task", {
+    taskId,
+    request: {
+      context_token_budget: 8192,
+      requested_tools: [],
+      estimated_output_tokens: 4096,
+      max_model_calls: 8
+    }
+  });
+}
+
 export function loadTaskEvents(taskId: string): Promise<TaskEventsResponse> {
   return invoke("task_events", { taskId });
 }
