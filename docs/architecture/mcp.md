@@ -32,8 +32,10 @@ and [tools contract](https://modelcontextprotocol.io/specification/2026-07-28/se
   `-32020`.
 - Only `2026-07-28` is currently accepted. Unsupported versions receive HTTP 400,
   MCP error `-32022`, and the supported-version list.
-- The server never returns credential material. The initial tool family is
-  read-only and reaches project/memory data only through the runtime boundary.
+- The server never returns credential material. Read tools reach project/memory
+  data only through the runtime boundary. The one mutation creates bounded
+  authority transactionally and executes tools only through the existing policy
+  broker.
 
 ## Server methods
 
@@ -49,11 +51,41 @@ identity metadata on every successful tool result.
 | `mcg_query_project` | Lists current project models or reads one exact project UUID. |
 | `mcg_project_context` | Assembles current target-aware context within a caller-selected, server-bounded token budget. |
 | `mcg_memory_search` | Searches current provenance-bearing claims by project, optional namespace, freshness, and bounded result count. |
+| `mcg_query_run` | Reads a complete durable plan, authority, usage, evaluation, and turn-result view. |
+| `mcg_run_agent` | Idempotently creates an active task/running one-work-item run and executes one bounded provider/tool turn. |
 
-The tool annotations declare read-only, idempotent, non-destructive, closed-world
+The five query tools declare read-only, idempotent, non-destructive, closed-world
 behavior. Project context does not accept caller-supplied context items, so an MCP
 caller cannot inject material into MCG's canonical project or memory state through
-this read surface.
+the read surface. `mcg_run_agent` declares its mutating/open-world behavior and
+requires a caller request key. Coder and Tool Worker calls must explicitly list
+every requested tool; omitting the list does not grant the role's full tool set.
+
+## Governed run idempotency
+
+Migration 8 adds an immutable `(interface, request_key)` ledger with a canonical
+SHA-256 input hash and unique task/run identities. One SQLite transaction writes:
+
+1. the pending task and `task_created` event;
+2. the consumer organization revision;
+3. the immutable work plan and planned run;
+4. the active task and running run projections/events; and
+5. the interface request mapping.
+
+Any validation or SQLite failure rolls back all five. Repeating the exact input
+returns the same task/run. Reusing a key with different input fails. If the first
+HTTP response was lost after a successful turn, retry returns the existing single
+instance/result and never calls the provider again. If reservation succeeded but
+no authority was dispatched, retry may safely execute; a restart-recovered empty
+run first transitions from `recovering` back to `running` through the normal event
+boundary.
+
+`mcg_run_agent` deliberately creates one atomic work item. It does not claim that
+a model response proves the task complete: the task and run remain active with
+their turn evidence available through `mcg_query_run`. Broader decomposition,
+independent evaluation, completion settlement, cancellation, and approval-resume
+operations remain on the versioned REST/CLI surfaces until equivalent MCP
+contracts are implemented.
 
 ## Error behavior
 
@@ -68,15 +100,19 @@ Unexpected storage details are not reflected to the client.
 
 The API contract fixture proves authentication, pre-auth Origin rejection,
 mirrored-header failure, discovery, stable tool order, project lookup, bounded
-context assembly, memory search, and structured status results. Unit fixtures
-cover loopback-Origin classification and encoded `Mcp-Name` handling.
+context assembly, memory search, a real provider-backed governed turn, exact-key
+replay with one result/instance, conflicting-key rejection, run querying, and
+structured status results. A file-backed storage fixture proves atomic reservation,
+immutable request-key conflict handling, restart replay, and zero duplicate events.
+Unit fixtures cover loopback-Origin classification and encoded `Mcp-Name` handling.
 
 This is the MCP server foundation, not the completed MCP feature family. Remaining
 M6 work includes:
 
-- the governed mutating `mcg_run_agent` operation with durable task/run evidence;
 - MCP client configuration, protected credentials, modern/legacy negotiation,
   tool discovery, namespace isolation, and policy-broker execution by agents;
+- expanded MCP run decomposition, independent evaluation, approval-resume,
+  completion, and cancellation contracts;
 - request-scoped SSE progress and opt-in subscription streams where useful;
 - interoperability fixtures against representative third-party MCP SDKs and
   both-platform user-facing configuration/UAT.

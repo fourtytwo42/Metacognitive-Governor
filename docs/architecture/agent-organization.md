@@ -95,6 +95,14 @@ the plan calls for independent evaluation, the report must identify an actual
 Evaluator instance from the same run; a self-report or unrelated instance fails
 before any evaluation event is stored.
 
+SQLite migration 8 gives mutating stateless interfaces an immutable idempotency
+boundary. `mcg_run_agent` records its canonical request hash and creates the task,
+consumer organization revision, immutable plan, active task, and running run in
+one transaction. Exact retries resolve to the same task/run; key reuse with
+different input conflicts before any duplicate authority or event is created.
+Provider/tool execution remains outside that transaction and retains the normal
+dispatch, settlement, approval, and recovery rules.
+
 Dispatch resolves project, work item, assigned role, dependencies, context,
 server-owned tool schemas, provider routes, organization concurrency, lease
 duration, and remaining budget again at execution time. SQLite writes the fresh

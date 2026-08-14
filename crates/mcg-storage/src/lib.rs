@@ -19,7 +19,7 @@ use uuid::Uuid;
 mod agents;
 mod providers;
 
-pub use agents::{AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition};
+pub use agents::{AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, InterfaceRunReceipt};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
@@ -307,6 +307,28 @@ CREATE TABLE IF NOT EXISTS provider_catalogs (
 );
 ";
 
+const MIGRATION_8: &str = r"
+CREATE TABLE IF NOT EXISTS interface_run_requests (
+    interface TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    task_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(interface, request_key),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id)
+);
+CREATE TRIGGER IF NOT EXISTS interface_run_requests_no_update
+BEFORE UPDATE ON interface_run_requests BEGIN
+    SELECT RAISE(FAIL, 'interface run request records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS interface_run_requests_no_delete
+BEFORE DELETE ON interface_run_requests BEGIN
+    SELECT RAISE(FAIL, 'interface run request records are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -396,6 +418,7 @@ impl SqliteEventStore {
             (5_i64, MIGRATION_5),
             (6_i64, MIGRATION_6),
             (7_i64, MIGRATION_7),
+            (8_i64, MIGRATION_8),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

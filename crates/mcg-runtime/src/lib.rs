@@ -186,6 +186,13 @@ pub struct AgentRunView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InterfaceAgentRun {
+    pub task: TaskEnvelope,
+    pub view: AgentRunView,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderMutation {
     pub connection: ProviderConnection,
     pub catalog: ProviderModelCatalog,
@@ -1101,6 +1108,43 @@ impl AppRuntime {
         let event = self.store()?.create_agent_run(run, plan)?;
         let _ = self.event_sender.send(event.clone());
         Ok(event)
+    }
+
+    /// Atomically reserves and starts an idempotent task/run requested through
+    /// an external interface, then returns its complete durable view.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request key conflicts or any task,
+    /// organization, plan, project, budget, or persistence invariant fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_interface_agent_run(
+        &self,
+        interface: &str,
+        request_key: &str,
+        request_hash: &str,
+        task: &TaskEnvelope,
+        genome: &OrganizationGenome,
+        run: &AgentRun,
+        plan: &WorkPlan,
+    ) -> Result<InterfaceAgentRun, RuntimeError> {
+        let receipt = self.store()?.create_interface_agent_run(
+            interface,
+            request_key,
+            request_hash,
+            task,
+            genome,
+            run,
+            plan,
+        )?;
+        for event in &receipt.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(InterfaceAgentRun {
+            task: receipt.task,
+            view: self.agent_run_view(receipt.run.id)?,
+            replayed: receipt.replayed,
+        })
     }
 
     /// Transitions a durable agent run and publishes its event.

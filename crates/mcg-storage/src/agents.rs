@@ -4,8 +4,11 @@ use mcg_agents::{
     AgentState, AgentTurnResult, AgentUsageRecord, AssignedModel, ConfidenceEstimate,
     EvaluationReport, OrganizationGenome, OrganizationalMetrics, UsageKind, WorkPlan,
 };
-use mcg_domain::{AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, RunId};
-use mcg_events::{EventEnvelope, EventKind};
+use mcg_domain::{
+    AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, RunId, TaskEnvelope,
+    TaskState,
+};
+use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +37,250 @@ pub enum AgentTurnDisposition {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterfaceRunReceipt {
+    pub task: TaskEnvelope,
+    pub run: AgentRun,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
 impl SqliteEventStore {
+    /// Atomically creates an idempotent interface-owned task, organization,
+    /// immutable plan, active task projection, and running agent run.
+    ///
+    /// # Errors
+    ///
+    /// A request key may only be reused with the same canonical request hash.
+    /// All task, organization, run, plan, project, and budget invariants must
+    /// validate before any row or event is committed.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn create_interface_agent_run(
+        &mut self,
+        interface: &str,
+        request_key: &str,
+        request_hash: &str,
+        task: &TaskEnvelope,
+        genome: &OrganizationGenome,
+        run: &AgentRun,
+        plan: &WorkPlan,
+    ) -> Result<InterfaceRunReceipt, StorageError> {
+        if interface.is_empty()
+            || interface.len() > 32
+            || request_key.is_empty()
+            || request_key.len() > 128
+            || request_hash.len() != 64
+            || !request_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(StorageError::InvalidData(
+                "interface request identity is invalid".into(),
+            ));
+        }
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT request_hash, task_id, run_id FROM interface_run_requests
+                 WHERE interface = ?1 AND request_key = ?2",
+                params![interface, request_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((stored_hash, task_id, run_id)) = existing {
+            if stored_hash != request_hash {
+                return Err(StorageError::Conflict(
+                    "interface request key was already used with different input".into(),
+                ));
+            }
+            let task_id = task_id.parse().map_err(|_| {
+                StorageError::InvalidData("stored interface task id is invalid".into())
+            })?;
+            let run_id = run_id.parse().map_err(|_| {
+                StorageError::InvalidData("stored interface run id is invalid".into())
+            })?;
+            return Ok(InterfaceRunReceipt {
+                task: self
+                    .load_task(task_id)?
+                    .ok_or(StorageError::TaskNotFound(task_id))?,
+                run: self
+                    .agent_run(run_id)?
+                    .ok_or(StorageError::AgentRunNotFound(run_id))?,
+                replayed: true,
+                events: Vec::new(),
+            });
+        }
+
+        if task.state != TaskState::Pending
+            || run.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || run.state != AgentRunState::Planned
+            || run.completed_at.is_some()
+            || run.id != plan.run_id
+            || task.id != run.task_id
+            || task.id != plan.task_id
+            || run.organization_revision_id != genome.revision_id
+            || run.organization_revision_id != plan.organization_revision_id
+            || genome.revision != 1
+            || genome.parent_revision_id.is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "new interface task, organization, run, and plan identities are inconsistent"
+                    .into(),
+            ));
+        }
+        if let Some(project_id) = task.project_id
+            && self.project(project_id)?.is_none()
+        {
+            return Err(StorageError::ProjectNotFound(project_id));
+        }
+        genome
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        plan.validate(genome)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !budgets_within_parent(plan, &task.budget) || !metrics_valid(&run.metrics) {
+            return Err(StorageError::InvalidData(
+                "interface run metrics or aggregate work budgets are invalid".into(),
+            ));
+        }
+        if self.organization(genome.organization_id)?.is_some() {
+            return Err(StorageError::Conflict(
+                "interface organization identity already exists".into(),
+            ));
+        }
+
+        let mut active_task = task.clone();
+        active_task.transition_to(TaskState::Active)?;
+        let mut running_run = run.clone();
+        running_run.state = AgentRunState::Running;
+        running_run.updated_at = active_task.updated_at;
+        let created_event = EventEnvelope::new(
+            EventKind::TaskCreated,
+            Some(task.id),
+            serde_json::to_value(TaskCreatedPayload { task: task.clone() })?,
+        );
+        let organization_event = EventEnvelope::new(
+            EventKind::OrganizationRevisionRecorded,
+            None,
+            serde_json::to_value(genome)?,
+        );
+        let planned_event = EventEnvelope::new(
+            EventKind::AgentRunPlanned,
+            Some(task.id),
+            serde_json::json!({"run": run, "plan": plan}),
+        );
+        let active_event = EventEnvelope::new(
+            EventKind::TaskStateChanged,
+            Some(task.id),
+            serde_json::to_value(TaskStateChangedPayload {
+                from: TaskState::Pending,
+                to: TaskState::Active,
+            })?,
+        );
+        let running_event = EventEnvelope::new(
+            EventKind::AgentRunStateChanged,
+            Some(task.id),
+            serde_json::json!({
+                "from": AgentRunState::Planned,
+                "to": AgentRunState::Running,
+                "run": &running_run,
+            }),
+        );
+
+        let transaction = self.connection.transaction()?;
+        let mut events = Vec::new();
+        let event = Self::insert_event(&transaction, &created_event)?;
+        Self::upsert_task(&transaction, task, event.sequence)?;
+        events.push(event);
+        transaction.execute(
+            "INSERT INTO organization_revisions(
+                revision_id, organization_id, revision, parent_revision_id,
+                organization_json, created_at
+             ) VALUES (?1, ?2, 1, NULL, ?3, ?4)",
+            params![
+                genome.revision_id.to_string(),
+                genome.organization_id.to_string(),
+                serde_json::to_string(genome)?,
+                genome.created_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO organizations(
+                organization_id, current_revision_id, organization_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                genome.organization_id.to_string(),
+                genome.revision_id.to_string(),
+                serde_json::to_string(genome)?,
+                genome.created_at.to_rfc3339(),
+            ],
+        )?;
+        events.push(Self::insert_event(&transaction, &organization_event)?);
+        transaction.execute(
+            "INSERT INTO agent_runs(
+                run_id, task_id, organization_revision_id, state, run_json,
+                created_at, updated_at, completed_at
+             ) VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, NULL)",
+            params![
+                run.id.to_string(),
+                task.id.to_string(),
+                run.organization_revision_id.to_string(),
+                serde_json::to_string(run)?,
+                run.created_at.to_rfc3339(),
+                run.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO work_plans(run_id, task_id, plan_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                run.id.to_string(),
+                task.id.to_string(),
+                serde_json::to_string(plan)?,
+                plan.created_at.to_rfc3339(),
+            ],
+        )?;
+        events.push(Self::insert_event(&transaction, &planned_event)?);
+        let event = Self::insert_event(&transaction, &active_event)?;
+        Self::upsert_task(&transaction, &active_task, event.sequence)?;
+        events.push(event);
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND state = 'planned'",
+            params![
+                serde_json::to_string(&running_run)?,
+                running_run.updated_at.to_rfc3339(),
+                running_run.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "interface run could not start atomically")?;
+        events.push(Self::insert_event(&transaction, &running_event)?);
+        transaction.execute(
+            "INSERT INTO interface_run_requests(
+                interface, request_key, request_hash, task_id, run_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                interface,
+                request_key,
+                request_hash,
+                task.id.to_string(),
+                run.id.to_string(),
+                running_run.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(InterfaceRunReceipt {
+            task: active_task,
+            run: running_run,
+            replayed: false,
+            events,
+        })
+    }
+
     /// Atomically stores an immutable organization revision, updates its current
     /// projection, and appends replay evidence.
     ///
@@ -1656,6 +1902,98 @@ mod tests {
         AgentInstanceId, AgentLeaseId, EvaluationId, RunId, TaskBudget, UsageRecordId,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn interface_run_creation_is_atomic_idempotent_and_restart_durable() {
+        let directory = tempdir().expect("temp directory");
+        let database = directory.path().join("mcg.sqlite3");
+        let now = Utc::now();
+        let mut task = TaskEnvelope::new("Explain the fixture project");
+        task.budget = TaskBudget {
+            max_tokens: Some(4_000),
+            max_cost_usd: Some(1.0),
+            max_duration_seconds: Some(300),
+        };
+        let genome = OrganizationGenome::consumer_default(now);
+        let request = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "Explain the fixture project",
+                RoleKind::Conversation,
+                vec![SuccessCondition::Custom {
+                    description: "return a grounded explanation".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &request, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: request.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        let hash = "a".repeat(64);
+        let mut store = SqliteEventStore::open(&database).expect("open store");
+        let created = store
+            .create_interface_agent_run(
+                "mcp",
+                "fixture-request",
+                &hash,
+                &task,
+                &genome,
+                &run,
+                &plan,
+            )
+            .expect("create interface run");
+        assert!(!created.replayed);
+        assert_eq!(created.task.state, TaskState::Active);
+        assert_eq!(created.run.state, AgentRunState::Running);
+        assert_eq!(created.events.len(), 5);
+        let event_count = store.event_count().expect("event count");
+        drop(store);
+
+        let mut reopened = SqliteEventStore::open(&database).expect("reopen store");
+        let replayed = reopened
+            .create_interface_agent_run(
+                "mcp",
+                "fixture-request",
+                &hash,
+                &task,
+                &genome,
+                &run,
+                &plan,
+            )
+            .expect("replay interface run");
+        assert!(replayed.replayed);
+        assert_eq!(replayed.task.id, task.id);
+        assert_eq!(replayed.run.id, run.id);
+        assert!(replayed.events.is_empty());
+        assert_eq!(reopened.event_count().expect("event count"), event_count);
+        assert!(
+            reopened
+                .create_interface_agent_run(
+                    "mcp",
+                    "fixture-request",
+                    &"b".repeat(64),
+                    &task,
+                    &genome,
+                    &run,
+                    &plan,
+                )
+                .is_err()
+        );
+        assert_eq!(reopened.event_count().expect("event count"), event_count);
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One contiguous crash/reopen scenario is intentional evidence.

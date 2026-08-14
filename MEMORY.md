@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The modern MCP server foundation now exposes authenticated read-only status, project, bounded-context, and memory tools alongside the OpenAI-compatible proxy.
-- Last meaningful change: Added stateless MCP `2026-07-28` `POST /mcp` with `server/discover`, deterministic `tools/list`, `tools/call`, strict mirrored-header checks, pre-auth loopback-Origin validation, private cache hints, and structured tool results. MCP client and governed `mcg_run_agent` work remain.
-- Next step: Implement governed `mcg_run_agent` and the MCP client/configuration boundary while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
+- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The modern MCP server now includes read/query tools plus retry-safe governed single-turn agent execution.
+- Last meaningful change: Added `mcg_run_agent`, `mcg_query_run`, and SQLite migration 8. One transaction creates the idempotency record, task, consumer organization, immutable plan, active task, and running run; exact retries reuse durable evidence and conflicting input cannot duplicate authority.
+- Next step: Qualify the governed MCP mutation on Ubuntu, then implement the MCP client/configuration/discovery/namespace/policy boundary while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
 - Blockers: None documented.
 
 ## Current State
@@ -19,7 +19,7 @@ Durable project context lives here. Update this file whenever information should
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
-- M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server foundation. Its first four tools are deterministic and read-only; MCP client support and governed mutation remain in scope.
+- M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. MCP client support and expanded run-control/evaluation contracts remain in scope.
 
 ## User Preferences
 
@@ -104,7 +104,8 @@ When sources conflict, use this order:
 - M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
 - M5 uses a separate `mcg-agents` boundary for versioned organization genomes, roles/instances, work plans, agent leases, success conditions, evaluation evidence, confidence/calibration, and organizational-cost metrics.
 - The M6 provider proxy is authenticated by the installation bearer token and never executes externally supplied caller tools. `/v1/responses` and `/v1/chat/completions` share exact provider routing/fallback rules; authentication errors cannot cross provider or billing boundaries. `mcg:cheap` requires known cost and `mcg:local` accepts only loopback/private endpoints.
-- The M6 MCP server uses one stateless `POST /mcp`; it requires per-request protocol/capability metadata and matching `MCP-Protocol-Version`, `Mcp-Method`, and tool `Mcp-Name` headers. Present Origins must be literal loopback/localhost and are rejected before authentication otherwise. Initial server tools are read-only and return private-cache structured evidence.
+- The M6 MCP server uses one stateless `POST /mcp`; it requires per-request protocol/capability metadata and matching `MCP-Protocol-Version`, `Mcp-Method`, and tool `Mcp-Name` headers. Present Origins must be literal loopback/localhost and are rejected before authentication otherwise. Read/query tools return private-cache structured evidence; the agent-run mutation is explicitly marked destructive/open-world and remains policy-governed.
+- Migration 8 atomically reserves interface-owned runs under an immutable request key/SHA-256 input hash. `mcg_run_agent` requires explicit Coder/Tool Worker tool lists, executes through the existing provider/policy broker, never treats a model response as objective completion, and returns existing success/non-success evidence rather than duplicating work on retry.
 - M5 SQLite migration 5 makes organization revisions, plans, usage, and evaluations immutable evidence while runs, instances, and leases are event-backed current projections. Startup never resumes stale authority: interrupted runs become `recovering` and active instances/leases expire before reassignment.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
@@ -166,6 +167,7 @@ When sources conflict, use this order:
 - 2026-08-14: Exact provider-proxy commit `ba8580b` passed complete owner-controlled Ubuntu `scripts/verify.sh`: all strict Rust/workspace tests including 16 API/proxy tests and live GPU45, documentation, frontend checks/build, native Linux Tauri build, and Playwright passed. Windows full verification remains deferred only to preserve the still-visible owner OAuth handoff; its focused proxy checks are green.
 - 2026-08-14: Initial MCP server checkpoint passed Windows focused qualification: 19 `mcg-api` tests, strict full-workspace clippy with warnings denied, formatting, docs validation, and diff hygiene. Contract evidence covers pre-auth hostile-Origin rejection, auth, mirrored-header mismatch, modern discovery, stable tools, status, exact project query, bounded context, memory search, structured results, and encoded `Mcp-Name`. Full workspace tests reached only the expected Windows access-denied replacement of the live `mcg-daemon.exe`; PIDs 85024/74436 remained active and provider listing was still empty, so the visible uncompleted OAuth handoff was preserved. Ubuntu qualification is next.
 - 2026-08-14: Exact MCP server commit `63d3dd4` passed complete owner-controlled Ubuntu `scripts/verify.sh` from a fresh Git archive: strict full-workspace Rust checks/tests including 19 API/MCP tests and live GPU45, documentation, frontend type/unit/build, native Linux Tauri debug build, and Playwright all passed in 215 seconds. No GitHub-hosted automation ran. The fresh mirror is `/home/hendo420/mcg-worktree-63d3dd4`; the older canonical mirror was left untouched because destructive replacement was denied.
+- 2026-08-14: Governed MCP mutation checkpoint passed Windows focused qualification: full-workspace clippy, 19 API tests, 4 runtime tests, 12 storage tests, docs, formatting, and diff hygiene. A provider-backed MCP call creates and executes one durable run; exact retry returns the same one result/instance, a changed-input key conflicts, and `mcg_query_run` replays evidence. The file-backed migration-8 fixture proves atomic creation, restart replay, immutable key conflict, and zero duplicate events.
 
 ## Decisions
 
@@ -360,6 +362,15 @@ When sources conflict, use this order:
 - Commands/tests: `cargo test -p mcg-api`; `cargo clippy -p mcg-api --all-targets -- -D warnings`; `cargo fmt --all`; `npm run check:docs`; `git diff --check`.
 - Result: Nineteen API tests pass on Windows. Four deterministic tools return structured/private-cache results and hostile Origins, malformed/mismatched mirrored headers, unknown tools, invalid inputs, and internal read failures fail without side effects or credential exposure.
 - Follow-up: Add governed `mcg_run_agent`, MCP client configuration/discovery/namespace/policy execution, interoperability fixtures, and both-platform UAT.
+
+### 2026-08-14 - Idempotent Governed MCP Agent Run
+
+- Context: A stateless MCP mutation can be retried after a lost HTTP response; sequential REST-style creation would otherwise leave unknown partial state or duplicate costly/provider/tool work.
+- Decision: Require a safe caller request key, hash canonical tool arguments, and use migration 8 to atomically persist the key, pending task, consumer organization revision, immutable plan, active task, and running run. Execute only a single bounded work item through existing runtime authority and policy. Exact success retries return existing evidence; non-success authority is returned as an MCP tool error; changed input under the same key conflicts.
+- Files: `crates/mcg-{storage,runtime,api}/`, `docs/architecture/{agent-organization,mcp}.md`, `README.md`.
+- Commands/tests: `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test -p mcg-storage -p mcg-runtime -p mcg-api`; `npm run check:docs`; `git diff --check`.
+- Result: Focused Windows qualification is green. The mutation never grants an implicit Coder/Tool Worker tool set and does not mark the task/run complete from model self-report alone.
+- Follow-up: Complete Ubuntu qualification, then implement MCP client configuration, protected auth, modern/legacy negotiation, discovery/cache, tool namespaces, agent-policy execution, interoperability, and UI/CLI management.
 
 ## Known Issues
 

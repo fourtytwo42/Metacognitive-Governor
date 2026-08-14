@@ -100,11 +100,11 @@ bearer token. Initial aliases are `mcg:auto`, `mcg:coder`, `mcg:reasoner`,
 routing, streaming, cost, and caller-owned tool semantics.
 
 Modern MCP clients can use the authenticated stateless Streamable HTTP endpoint
-at `POST /mcp`. The first server checkpoint exposes deterministic read-only
-status, project, context, and memory tools under strict MCP 2026-07-28 metadata,
-header, and loopback-Origin validation. See
+at `POST /mcp`. The server exposes deterministic status, project, context,
+memory, run-query, and idempotent governed agent-run tools under strict MCP
+2026-07-28 metadata, header, and loopback-Origin validation. See
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
-the remaining MCP client and governed mutation work.
+the remaining MCP client, interoperability, and expanded run-control work.
 
 Start the browser-hosted desktop frontend during UI development:
 

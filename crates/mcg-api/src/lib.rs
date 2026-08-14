@@ -1892,6 +1892,23 @@ form.addEventListener('submit', (event) => {
                 None,
             )
             .expect("memory claim");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "mcp_execution_fixture".into(),
+                    display_name: "MCP Execution Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: model_discovery_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("MCP provider");
         let app = router(runtime);
 
         let valid_discover = mcp_request(
@@ -2009,6 +2026,8 @@ form.addEventListener('submit', (event) => {
                 "mcg_memory_search",
                 "mcg_project_context",
                 "mcg_query_project",
+                "mcg_query_run",
+                "mcg_run_agent",
                 "mcg_system_status"
             ]
         );
@@ -2106,9 +2125,125 @@ form.addEventListener('submit', (event) => {
             Some(&serde_json::json!("package_manager"))
         );
 
-        let wrong_name = app
+        let run_arguments = serde_json::json!({
+            "request_key": "mcp-agent-fixture-1",
+            "project_id": project.project_id,
+            "goal": "Explain the project in one grounded response",
+            "role": "conversation",
+            "success_conditions": ["return a terminal provider response"],
+            "context_token_budget": 512,
+            "estimated_output_tokens": 128,
+            "max_model_calls": 2
+        });
+        let run_agent = app
+            .clone()
             .oneshot(mcp_request(
                 &serde_json::json!(9),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_run_agent")),
+                    ("arguments".into(), run_arguments.clone()),
+                ]),
+                Some("mcg_run_agent"),
+            ))
+            .await
+            .expect("run agent response");
+        assert_eq!(run_agent.status(), StatusCode::OK);
+        let run_agent = response_json(run_agent).await;
+        assert_eq!(
+            run_agent.pointer("/result/isError"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            run_agent.pointer("/result/structuredContent/task/state"),
+            Some(&serde_json::json!("active"))
+        );
+        assert_eq!(
+            run_agent.pointer("/result/structuredContent/run/results/0/response/id"),
+            Some(&serde_json::json!("fixture-response"))
+        );
+        let run_id = run_agent["result"]["structuredContent"]["run"]["run"]["id"].clone();
+
+        let replay = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(10),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_run_agent")),
+                    ("arguments".into(), run_arguments.clone()),
+                ]),
+                Some("mcg_run_agent"),
+            ))
+            .await
+            .expect("replayed agent response");
+        let replay = response_json(replay).await;
+        assert_eq!(
+            replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            replay["result"]["structuredContent"]["run"]["results"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            replay["result"]["structuredContent"]["run"]["instances"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let queried_run = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(11),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_query_run")),
+                    ("arguments".into(), serde_json::json!({"run_id": run_id})),
+                ]),
+                Some("mcg_query_run"),
+            ))
+            .await
+            .expect("query run response");
+        let queried_run = response_json(queried_run).await;
+        assert_eq!(
+            queried_run["result"]["structuredContent"]["results"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let conflicting_key = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(12),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_run_agent")),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "request_key": "mcp-agent-fixture-1",
+                            "project_id": project.project_id,
+                            "goal": "A different goal"
+                        }),
+                    ),
+                ]),
+                Some("mcg_run_agent"),
+            ))
+            .await
+            .expect("conflicting key response");
+        assert_eq!(
+            response_json(conflicting_key).await.pointer("/error/code"),
+            Some(&serde_json::json!(-32_602))
+        );
+
+        let wrong_name = app
+            .oneshot(mcp_request(
+                &serde_json::json!(13),
                 "tools/call",
                 serde_json::Map::from_iter([
                     ("name".into(), serde_json::json!("mcg_system_status")),

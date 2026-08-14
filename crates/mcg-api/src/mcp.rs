@@ -9,8 +9,17 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use mcg_domain::ProjectId;
+use chrono::Utc;
+use mcg_agents::{
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, OrganizationGenome,
+    OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, SuccessCondition,
+    TaskComplexity,
+};
+use mcg_domain::{ProjectId, RiskLevel, RunId, TaskBudget, TaskEnvelope};
+use mcg_runtime::AgentDispatchSpec;
+use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use super::ApiState;
@@ -109,7 +118,7 @@ pub(super) async fn handle(
     let result = match request.method.as_str() {
         "server/discover" => Ok(discover_result()),
         "tools/list" => list_tools(&request.params),
-        "tools/call" => call_tool(&state, &request.params),
+        "tools/call" => call_tool(&state, &request.params).await,
         _ => Err(RpcFailure::new(
             StatusCode::NOT_FOUND,
             Some(id.clone()),
@@ -388,6 +397,7 @@ fn list_tools(params: &serde_json::Map<String, Value>) -> Result<Value, RpcFailu
     })))
 }
 
+#[allow(clippy::too_many_lines)] // One stable ordered registry keeps advertised schemas auditable.
 fn tool_definitions() -> Vec<Value> {
     let read_annotations = json!({
         "readOnlyHint": true,
@@ -444,6 +454,63 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_annotations,
         }),
         json!({
+            "name": "mcg_query_run",
+            "title": "Query MCG Agent Run",
+            "description": "Read the complete durable plan, authority, usage, evaluation, and turn-result view for one run UUID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["run_id"],
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_run_agent",
+            "title": "Run a Governed MCG Agent",
+            "description": "Idempotently create and start a durable task/run, then execute its one bounded agent turn through configured providers and MCG's policy broker. Coder and tool-worker tools must be explicitly listed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_key": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"},
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "goal": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "role": {"type": "string", "enum": ["conversation", "coder", "tool_worker"], "default": "conversation"},
+                    "success_conditions": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 2000}, "maxItems": 20},
+                    "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"], "default": "medium"},
+                    "budget": {
+                        "type": "object",
+                        "properties": {
+                            "max_tokens": {"type": "integer", "minimum": 1},
+                            "max_cost_usd": {"type": "number", "minimum": 0},
+                            "max_duration_seconds": {"type": "integer", "minimum": 1}
+                        },
+                        "additionalProperties": false
+                    },
+                    "target_path": {"type": "string"},
+                    "requested_tools": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["fs.read", "fs.list", "fs.write", "fs.patch", "fs.mkdir", "process.exec", "git.status", "git.diff", "git.apply_patch", "system.info"]},
+                        "uniqueItems": true,
+                        "maxItems": 16
+                    },
+                    "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                },
+                "required": ["request_key", "project_id", "goal"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
             "name": "mcg_system_status",
             "title": "Read MCG System Status",
             "description": "Return the daemon version, readiness, mode, and restart-recovery counts.",
@@ -457,7 +524,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn call_tool(
+async fn call_tool(
     state: &ApiState,
     params: &serde_json::Map<String, Value>,
 ) -> Result<Value, RpcFailure> {
@@ -485,8 +552,10 @@ fn call_tool(
             tool_success(serde_json::to_value(state.runtime.status()))
         }
         "mcg_query_project" => query_project(state, &arguments),
+        "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
         "mcg_memory_search" => memory_search(state, &arguments),
+        "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
             None,
@@ -494,6 +563,424 @@ fn call_tool(
             "Unknown tool name",
         )),
     }
+}
+
+fn query_run(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &["run_id"])?;
+    let run_id = required_string(arguments, "run_id")?
+        .parse::<RunId>()
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "run_id must be a UUID",
+            )
+        })?;
+    match state.runtime.agent_run_view(run_id) {
+        Ok(view) => tool_success(serde_json::to_value(view)),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "run_not_found",
+            "The requested agent run is not known to MCG",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not read the agent run",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunAgentArguments {
+    request_key: String,
+    project_id: ProjectId,
+    goal: String,
+    #[serde(default = "default_run_role")]
+    role: RoleKind,
+    #[serde(default)]
+    success_conditions: Vec<String>,
+    #[serde(default = "default_run_risk")]
+    risk: RiskLevel,
+    #[serde(default = "default_run_budget")]
+    budget: TaskBudget,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default)]
+    requested_tools: Vec<String>,
+    #[serde(default = "default_context_tokens")]
+    context_token_budget: u32,
+    #[serde(default = "default_output_tokens")]
+    estimated_output_tokens: u64,
+    #[serde(default = "default_model_calls")]
+    max_model_calls: u16,
+}
+
+const fn default_run_role() -> RoleKind {
+    RoleKind::Conversation
+}
+
+const fn default_run_risk() -> RiskLevel {
+    RiskLevel::Medium
+}
+
+fn default_run_budget() -> TaskBudget {
+    TaskBudget {
+        max_tokens: Some(20_000),
+        max_cost_usd: Some(5.0),
+        max_duration_seconds: Some(900),
+    }
+}
+
+const fn default_context_tokens() -> u32 {
+    DEFAULT_CONTEXT_TOKENS
+}
+
+const fn default_output_tokens() -> u64 {
+    4_096
+}
+
+const fn default_model_calls() -> u16 {
+    8
+}
+
+#[allow(clippy::too_many_lines)] // Keeps validation, durable reservation, and execution together.
+async fn run_agent(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request_hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(arguments).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG could not canonicalize the agent request",
+            )
+        })?)
+    );
+    let request: RunAgentArguments = serde_json::from_value(Value::Object(arguments.clone()))
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Agent request arguments do not match the advertised schema",
+            )
+        })?;
+    validate_run_agent_arguments(&request)?;
+    if state
+        .runtime
+        .project(request.project_id)
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG could not read the requested project",
+            )
+        })?
+        .is_none()
+    {
+        return Ok(tool_error(
+            "project_not_found",
+            "The requested project is not known to MCG",
+        ));
+    }
+
+    let mut task = TaskEnvelope::new(request.goal.trim());
+    task.project_id = Some(request.project_id);
+    task.risk = request.risk;
+    task.budget = request.budget.clone();
+    task.success_conditions = request
+        .success_conditions
+        .iter()
+        .map(|condition| condition.trim().to_owned())
+        .collect();
+    if task.success_conditions.is_empty() {
+        task.success_conditions.push(format!(
+            "Deliver a grounded terminal response for: {}",
+            task.goal
+        ));
+    }
+    let now = Utc::now();
+    let organization = OrganizationGenome::consumer_default(now);
+    let success_conditions = task
+        .success_conditions
+        .iter()
+        .map(|description| SuccessCondition::Custom {
+            description: description.clone(),
+        })
+        .collect();
+    let run_id = RunId::new();
+    let planning = PlanningRequest {
+        run_id,
+        task: task.clone(),
+        complexity: TaskComplexity::Atomic,
+        work: vec![PlannedWork::atomic(
+            task.goal.clone(),
+            request.role,
+            success_conditions,
+        )],
+        require_independent_evaluation: false,
+    };
+    let plan = ExecutivePlanner::default()
+        .plan(&organization, &planning, now)
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "The requested agent work cannot form a valid bounded plan",
+            )
+        })?;
+    let run = AgentRun {
+        schema_version: AGENT_RUN_SCHEMA_VERSION,
+        id: run_id,
+        task_id: task.id,
+        organization_revision_id: organization.revision_id,
+        state: AgentRunState::Planned,
+        metrics: OrganizationalMetrics::default(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    let mut reservation = state
+        .runtime
+        .create_interface_agent_run(
+            "mcp",
+            request.request_key.trim(),
+            &request_hash,
+            &task,
+            &organization,
+            &run,
+            &plan,
+        )
+        .map_err(|error| {
+            let message = if error.is_conflict() {
+                "request_key was already used with different agent input"
+            } else if error.is_invalid_request() {
+                "The agent request violates a durable runtime invariant"
+            } else {
+                "MCG could not reserve the durable agent run"
+            };
+            RpcFailure::new(StatusCode::OK, None, INVALID_PARAMS, message)
+        })?;
+
+    if reservation.replayed
+        && reservation.view.run.state == AgentRunState::Recovering
+        && reservation.view.results.is_empty()
+        && reservation.view.instances.is_empty()
+    {
+        state
+            .runtime
+            .transition_agent_run(
+                reservation.view.run.id,
+                AgentRunState::Running,
+                reservation.view.run.metrics.clone(),
+            )
+            .map_err(|_| {
+                RpcFailure::new(
+                    StatusCode::OK,
+                    None,
+                    INVALID_PARAMS,
+                    "The recovered agent run could not safely resume",
+                )
+            })?;
+        reservation.view = state
+            .runtime
+            .agent_run_view(reservation.view.run.id)
+            .map_err(|_| {
+                RpcFailure::new(
+                    StatusCode::OK,
+                    None,
+                    INTERNAL_ERROR,
+                    "MCG resumed the run but could not reload its durable view",
+                )
+            })?;
+    }
+    if reservation.replayed && !reservation.view.results.is_empty() {
+        return tool_success(Ok(json!({
+            "request_key": request.request_key,
+            "replayed": true,
+            "execution": "existing_evidence",
+            "task": reservation.task,
+            "run": reservation.view,
+        })));
+    }
+    if reservation.replayed && !reservation.view.instances.is_empty() {
+        return Ok(tool_error_with_data(
+            "existing_non_success_evidence",
+            "This idempotent run already has non-success authority evidence; inspect it and resume through the appropriate approval or run-control boundary",
+            json!({
+                "request_key": request.request_key,
+                "replayed": true,
+                "task": reservation.task,
+                "run": reservation.view,
+            }),
+        ));
+    }
+    let work_item_id = reservation.view.plan.items[0].id;
+    let execution = state
+        .runtime
+        .execute_agent_work(&AgentDispatchSpec {
+            run_id: reservation.view.run.id,
+            work_item_id,
+            project_id: request.project_id,
+            target_path: request.target_path,
+            context_token_budget: request.context_token_budget,
+            requested_tools: request.requested_tools,
+            estimated_output_tokens: request.estimated_output_tokens,
+            max_model_calls: request.max_model_calls,
+        })
+        .await;
+    match execution {
+        Ok(turn) => {
+            let view = state
+                .runtime
+                .agent_run_view(reservation.view.run.id)
+                .map_err(|_| {
+                    RpcFailure::new(
+                        StatusCode::OK,
+                        None,
+                        INTERNAL_ERROR,
+                        "MCG committed the turn but could not reload its durable view",
+                    )
+                })?;
+            tool_success(Ok(json!({
+                "request_key": request.request_key,
+                "replayed": reservation.replayed,
+                "execution": "turn_completed",
+                "task": reservation.task,
+                "turn": turn,
+                "run": view,
+            })))
+        }
+        Err(error) => {
+            let view = state
+                .runtime
+                .agent_run_view(reservation.view.run.id)
+                .unwrap_or(reservation.view);
+            let (code, message) = if matches!(
+                error,
+                mcg_runtime::RuntimeError::Provider(mcg_providers::ProviderError::Authentication(
+                    _
+                ))
+            ) {
+                (
+                    "provider_authentication",
+                    "The selected provider requires authentication; MCG did not fall back to another billing mode",
+                )
+            } else if matches!(error, mcg_runtime::RuntimeError::Provider(_)) {
+                (
+                    "provider_unavailable",
+                    "No eligible provider completed the bounded agent turn",
+                )
+            } else if error.is_conflict() {
+                (
+                    "run_conflict",
+                    "The durable run cannot dispatch work in its current state",
+                )
+            } else {
+                (
+                    "agent_execution_failed",
+                    "The bounded agent turn failed; inspect the durable run evidence before retrying with a new request key",
+                )
+            };
+            Ok(tool_error_with_data(
+                code,
+                message,
+                json!({
+                    "request_key": request.request_key,
+                    "replayed": reservation.replayed,
+                    "task": reservation.task,
+                    "run": view,
+                }),
+            ))
+        }
+    }
+}
+
+fn validate_run_agent_arguments(request: &RunAgentArguments) -> Result<(), RpcFailure> {
+    if request.request_key.trim() != request.request_key
+        || request.request_key.is_empty()
+        || request.request_key.len() > 128
+        || !request
+            .request_key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        || request.goal.trim().is_empty()
+        || request.goal.chars().count() > 20_000
+        || request.success_conditions.len() > 20
+        || request
+            .success_conditions
+            .iter()
+            .any(|condition| condition.trim().is_empty() || condition.chars().count() > 2_000)
+        || request.context_token_budget < 64
+        || request.context_token_budget > MAX_CONTEXT_TOKENS
+        || request.estimated_output_tokens == 0
+        || request.estimated_output_tokens > 100_000
+        || request.max_model_calls == 0
+        || request.max_model_calls > 32
+        || request
+            .budget
+            .max_cost_usd
+            .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+    {
+        return Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            "Agent request values are outside the advertised bounds",
+        ));
+    }
+    let allowed: &[&str] = match request.role {
+        RoleKind::Conversation => &[],
+        RoleKind::Coder => &[
+            "fs.read",
+            "fs.list",
+            "fs.write",
+            "fs.patch",
+            "fs.mkdir",
+            "process.exec",
+            "git.status",
+            "git.diff",
+            "git.apply_patch",
+        ],
+        RoleKind::ToolWorker => &["fs.read", "fs.list", "process.exec", "system.info"],
+        _ => {
+            return Err(RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "role must be conversation, coder, or tool_worker",
+            ));
+        }
+    };
+    if (request.role != RoleKind::Conversation && request.requested_tools.is_empty())
+        || request.requested_tools.len() > 16
+        || request
+            .requested_tools
+            .iter()
+            .any(|tool| !allowed.contains(&tool.as_str()))
+        || request
+            .requested_tools
+            .iter()
+            .enumerate()
+            .any(|(index, tool)| request.requested_tools[..index].contains(tool))
+    {
+        return Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            "requested_tools must be unique, explicit, and grantable to the selected role",
+        ));
+    }
+    Ok(())
 }
 
 fn query_project(
@@ -752,10 +1239,16 @@ fn tool_success(value: Result<Value, serde_json::Error>) -> Result<Value, RpcFai
 }
 
 fn tool_error(code: &str, message: &str) -> Value {
+    tool_error_with_data(code, message, json!({}))
+}
+
+fn tool_error_with_data(code: &str, message: &str, mut data: Value) -> Value {
+    data["error"] = json!(code);
+    data["message"] = json!(message);
     with_server_info(json!({
         "resultType": "complete",
         "content": [{"type": "text", "text": message}],
-        "structuredContent": {"error": code, "message": message},
+        "structuredContent": data,
         "isError": true,
     }))
 }
