@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use mcg_events::{EventEnvelope, EventKind};
-use mcg_providers::{ProviderConnection, ProviderModelCatalog};
+use mcg_providers::{ProviderAuthMode, ProviderConnection, ProviderModelCatalog};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{SqliteEventStore, StorageError};
@@ -163,6 +163,45 @@ impl SqliteEventStore {
             .optional()?;
         json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
             .transpose()
+    }
+
+    /// Appends secret-free evidence that an OAuth connection rotated credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for an unknown connection, rejects non-OAuth connections,
+    /// and returns persistence failures.
+    pub fn record_provider_credentials_refreshed(
+        &mut self,
+        connection_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<EventEnvelope, StorageError> {
+        let connection = self.provider_connection(connection_id)?.ok_or_else(|| {
+            StorageError::InvalidData(format!("provider connection {connection_id} was not found"))
+        })?;
+        if !matches!(
+            connection.auth_mode,
+            ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+        ) {
+            return Err(StorageError::InvalidData(
+                "provider credential refresh requires an OAuth connection".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::ProviderCredentialsRefreshed,
+                None,
+                serde_json::json!({
+                    "connection_id": connection_id,
+                    "auth_mode": connection.auth_mode,
+                    "refreshed_at": at,
+                }),
+            ),
+        )?;
+        transaction.commit()?;
+        Ok(event)
     }
 }
 

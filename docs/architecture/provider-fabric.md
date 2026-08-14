@@ -44,6 +44,16 @@ tokens, and the three OAuth token slots are isolated from SQLite, events, reques
 debug output, and CLI arguments. Tokens must not be written to provider
 configuration or logs.
 
+OAuth login is a dedicated authenticated daemon lifecycle: start creates a bounded,
+expiring in-memory session; complete consumes it exactly once and only then stores
+credentials plus a fixed subscription connection; cancel drops callback/device-code
+state. Pending sessions intentionally do not survive daemon restart. The CLI and
+native desktop call the same start/complete/cancel endpoints. Refresh replaces all
+token slots transactionally, restores the prior complete set on any partial store
+failure, leaves the provider on OAuth billing, and appends only secret-free rotation
+evidence to SQLite. OAuth login never performs an API model request as a fallback;
+model discovery is an explicit subsequent operation.
+
 OpenAI documents ChatGPT subscription and API-key sign-in as distinct login paths
 with different billing and administration behavior in its
 [Codex authentication guide](https://learn.chatgpt.com/docs/auth). The compatible

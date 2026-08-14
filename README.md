@@ -75,6 +75,10 @@ one ready work item through configured providers and project-confined governed
 tools; run, work-item, and project UUIDs are explicit positional arguments.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
+Connect an OpenAI subscription through the native Providers panel or with
+`mcg provider login openai-subscription "OpenAI Subscription"`. Use
+`--method device-code` on a headless machine. Subscription OAuth and API-key
+billing are separate connections; an OAuth failure never switches billing modes.
 For API-key or bearer authentication, select `--auth api-key` or
 `--auth bearer-token` and pipe the credential on standard input; credentials are
 never accepted as command-line arguments. Use `mcg provider list`, `models`, and

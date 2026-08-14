@@ -37,7 +37,8 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, MemoryClaimMutation,
-    ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus,
+    OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation, ProviderMutation, RuntimeError,
+    RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
@@ -263,6 +264,13 @@ pub struct ProviderListResponse {
     pub providers: Vec<ProviderListItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartOpenAiOAuthRequest {
+    pub connection_id: String,
+    pub display_name: String,
+    pub method: OpenAiOAuthMethod,
+}
+
 const fn default_budget_weight() -> u32 {
     1
 }
@@ -387,6 +395,7 @@ impl IntoResponse for ApiError {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the complete versioned route map visible in one place.
 pub fn router(runtime: Arc<AppRuntime>) -> Router {
     let state = ApiState { runtime };
     let protected = Router::new()
@@ -429,8 +438,21 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             post(discover_provider),
         )
         .route(
+            "/api/v1/providers/{connection_id}/oauth/refresh",
+            post(refresh_openai_oauth),
+        )
+        .route(
             "/api/v1/providers/{connection_id}/models/{model_id}/probe",
             post(probe_provider_model),
+        )
+        .route("/api/v1/oauth/openai/start", post(start_openai_oauth))
+        .route(
+            "/api/v1/oauth/openai/{session_id}/complete",
+            post(complete_openai_oauth),
+        )
+        .route(
+            "/api/v1/oauth/openai/{session_id}/cancel",
+            post(cancel_openai_oauth),
         )
         .route(
             "/api/v1/projects",
@@ -889,6 +911,44 @@ async fn configure_provider(
     Ok((StatusCode::CREATED, Json(mutation)))
 }
 
+async fn start_openai_oauth(
+    State(state): State<ApiState>,
+    Json(request): Json<StartOpenAiOAuthRequest>,
+) -> Result<(StatusCode, Json<OAuthLoginStart>), ApiError> {
+    let started = state
+        .runtime
+        .start_openai_oauth(request.connection_id, request.display_name, request.method)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(started)))
+}
+
+async fn complete_openai_oauth(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<(StatusCode, Json<ProviderMutation>), ApiError> {
+    let session_id = parse_oauth_session_id(&session_id)?;
+    let mutation = state
+        .runtime
+        .complete_openai_oauth(session_id)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(mutation)))
+}
+
+async fn cancel_openai_oauth(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let session_id = parse_oauth_session_id(&session_id)?;
+    state
+        .runtime
+        .cancel_openai_oauth(session_id)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_providers(
     State(state): State<ApiState>,
 ) -> Result<Json<ProviderListResponse>, ApiError> {
@@ -934,6 +994,18 @@ async fn discover_provider(
     state
         .runtime
         .discover_provider(&connection_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn refresh_openai_oauth(
+    State(state): State<ApiState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<EventEnvelope>, ApiError> {
+    state
+        .runtime
+        .refresh_openai_oauth(&connection_id)
         .await
         .map(Json)
         .map_err(map_runtime_error)
@@ -1289,6 +1361,12 @@ fn parse_memory_claim_id(value: &str) -> Result<MemoryClaimId, ApiError> {
         .map_err(|_| ApiError::bad_request("memory claim id must be a UUID"))
 }
 
+fn parse_oauth_session_id(value: &str) -> Result<uuid::Uuid, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("OAuth session id must be a UUID"))
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn map_runtime_error(error: RuntimeError) -> ApiError {
     let provider_error = match &error {
@@ -1324,7 +1402,10 @@ mod tests {
     use http_body_util::BodyExt;
     use mcg_config::AppConfig;
     use mcg_domain::{ArtifactId, ToolExecutionId, ToolRequestId};
-    use mcg_providers::{CONTRACT_VERSION, ProviderKind};
+    use mcg_providers::{
+        BrowserAuthorizationConfig, CHATGPT_CODEX_BASE_URL, CONTRACT_VERSION,
+        DeviceAuthorizationConfig, ProviderKind,
+    };
     use mcg_tools::{
         ApprovalRepository, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditSink, ToolOutcomeStatus,
     };
@@ -1383,6 +1464,50 @@ mod tests {
         format!("http://{address}/v1")
     }
 
+    async fn device_oauth_fixture() -> String {
+        let app = Router::new()
+            .route(
+                "/api/accounts/deviceauth/usercode",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "device_auth_id": "fixture-device-secret",
+                        "user_code": "ABCD-1234",
+                        "interval": 1
+                    }))
+                }),
+            )
+            .route(
+                "/api/accounts/deviceauth/token",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "authorization_code": "fixture-authorization-secret",
+                        "code_challenge": "fixture-challenge",
+                        "code_verifier": "fixture-verifier-secret"
+                    }))
+                }),
+            )
+            .route(
+                "/oauth/token",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "id_token": "fixture-id-secret",
+                        "access_token": "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.sig",
+                        "refresh_token": "fixture-refresh-secret"
+                    }))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("OAuth fixture listener");
+        let address = listener.local_addr().expect("OAuth fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("OAuth fixture server");
+        });
+        format!("http://{address}")
+    }
+
     fn authorized(request: axum::http::request::Builder) -> axum::http::request::Builder {
         request.header("authorization", format!("Bearer {TEST_TOKEN}"))
     }
@@ -1410,6 +1535,196 @@ mod tests {
 
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(status.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercises the complete secret-isolated OAuth lifecycle.
+    async fn device_oauth_login_is_authenticated_cancellable_and_billing_isolated() {
+        let issuer = device_oauth_fixture().await;
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory_with_oauth_configs(
+                AppConfig::default(),
+                TEST_TOKEN.to_owned(),
+                BrowserAuthorizationConfig::default(),
+                DeviceAuthorizationConfig {
+                    issuer,
+                    client_id: "fixture-client".into(),
+                    timeout: Duration::from_secs(2),
+                },
+            )
+            .expect("runtime should open"),
+        );
+        let app = router(runtime.clone());
+        let request = StartOpenAiOAuthRequest {
+            connection_id: "openai-subscription".into(),
+            display_name: "OpenAI Subscription".into(),
+            method: OpenAiOAuthMethod::DeviceCode,
+        };
+        let body = serde_json::to_vec(&request).expect("start request");
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/oauth/openai/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let started = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/oauth/openai/start"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("start response");
+        assert_eq!(started.status(), StatusCode::CREATED);
+        let started: OAuthLoginStart = serde_json::from_slice(
+            &started
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("OAuth start response");
+        assert_eq!(started.user_code.as_deref(), Some("ABCD-1234"));
+        assert_eq!(started.auth_mode, ProviderAuthMode::ChatGptDeviceCode);
+        assert!(!format!("{started:?}").contains("ABCD-1234"));
+        assert!(
+            runtime
+                .provider_connections()
+                .expect("providers")
+                .is_empty()
+        );
+
+        let complete_path = format!("/api/v1/oauth/openai/{}/complete", started.session_id);
+        let completed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&complete_path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("complete response");
+        assert_eq!(completed.status(), StatusCode::CREATED);
+        let completed_bytes = completed
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let mutation: ProviderMutation =
+            serde_json::from_slice(&completed_bytes).expect("provider mutation");
+        assert_eq!(mutation.connection.base_url, CHATGPT_CODEX_BASE_URL);
+        assert_eq!(
+            mutation.connection.auth_mode,
+            ProviderAuthMode::ChatGptDeviceCode
+        );
+        assert_eq!(mutation.connection.kind, ProviderKind::OpenAi);
+        assert!(mutation.catalog.models.is_empty());
+        let response_text = String::from_utf8(completed_bytes.to_vec()).expect("UTF-8 response");
+        assert!(!response_text.contains("fixture-refresh-secret"));
+        assert!(!response_text.contains("account-123"));
+        assert_eq!(runtime.provider_connections().expect("providers").len(), 1);
+        let consumed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&complete_path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("consumed response");
+        assert_eq!(consumed.status(), StatusCode::BAD_REQUEST);
+
+        let refreshed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(
+                    "/api/v1/providers/openai-subscription/oauth/refresh",
+                ))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("refresh response");
+        assert_eq!(refreshed.status(), StatusCode::OK);
+        let refreshed_bytes = refreshed
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let refreshed_event: EventEnvelope =
+            serde_json::from_slice(&refreshed_bytes).expect("refresh event");
+        assert_eq!(
+            refreshed_event.kind,
+            mcg_events::EventKind::ProviderCredentialsRefreshed
+        );
+        assert_eq!(
+            refreshed_event.payload["connection_id"],
+            "openai-subscription"
+        );
+        let refresh_text = String::from_utf8(refreshed_bytes.to_vec()).expect("UTF-8 response");
+        assert!(!refresh_text.contains("fixture-refresh-secret"));
+        assert!(!refresh_text.contains("account-123"));
+
+        let cancel_body = serde_json::to_vec(&StartOpenAiOAuthRequest {
+            connection_id: "cancelled-subscription".into(),
+            display_name: "Cancelled Subscription".into(),
+            method: OpenAiOAuthMethod::DeviceCode,
+        })
+        .expect("cancel start request");
+        let cancel_started = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/oauth/openai/start"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(cancel_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("cancel start response");
+        let cancel_started: OAuthLoginStart = serde_json::from_slice(
+            &cancel_started
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("cancel start");
+        let cancel_path = format!("/api/v1/oauth/openai/{}/cancel", cancel_started.session_id);
+        let cancelled = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(cancel_path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("cancel response");
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+        let cancelled_complete = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/oauth/openai/{}/complete",
+                    cancel_started.session_id
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("cancelled complete response");
+        assert_eq!(cancelled_complete.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(runtime.provider_connections().expect("providers").len(), 1);
     }
 
     #[tokio::test]

@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; safe provider/tool-backed work dispatch passes complete Windows and Ubuntu gates.
-- Last meaningful change: Ready work now receives atomic server-derived instance/lease authority, executes through project-confined governed tools and exact configured routes, and is exposed through authenticated API/CLI. Explicit capability probes persist honest observed model support.
-- Next step: Execute a real website fixture with a tool-capable provider, then wire standalone OpenAI OAuth into provider management.
+- Current task: M5 organization and useful work is in progress; standalone OpenAI subscription OAuth is wired and fully qualified on Windows/Ubuntu and awaits live-account UAT.
+- Last meaningful change: Expiring in-memory browser/device login sessions consume once into OS-store-only credentials and a fixed subscription-billed connection; cancellation, transactional refresh rollback, secret-free rotation events, and desktop/CLI flows have deterministic fixture coverage.
+- Next step: Perform real OpenAI OAuth UAT without exposing credentials, then execute a tool-capable real website fixture.
 - Blockers: None documented.
 
 ## Current State
@@ -130,6 +130,8 @@ When sources conflict, use this order:
 - 2026-08-14: Windows and Ubuntu live daemon/CLI smoke tests created and transitioned a task, terminated the daemon, restarted it, and recovered the same projection with two ordered events; Ubuntu token mode verified as `0600`.
 - 2026-08-14: M2 provider fixture tests passed for model discovery, canonical response/stream normalization, bounded transient retry, credential redaction, and OAuth/API billing-boundary enforcement; opt-in live GPU45 discovery and Responses inference passed against the dynamically reported active model.
 - 2026-08-14: Complete Windows and Ubuntu local verification passed with M2: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. The common live GPU45 discovery/buffered/streaming probe also passed independently from both platforms.
+- 2026-08-14: Standalone OpenAI subscription OAuth runtime/API/CLI/desktop fixture tests passed for authenticated device login, one-time session consumption, cancellation, strict subscription billing isolation, secret-free responses/events, access-token account routing, refresh rotation, and injected protected-store rollback. Full platform qualification and live-account UAT remain pending.
+- 2026-08-14: The complete standalone OAuth checkpoint passed `scripts/verify.ps1` on Windows and `scripts/verify.sh` on the owner-controlled Ubuntu VM, including strict Rust gates, restart tests, documentation, frontend tests/build, native Tauri builds, and Playwright. No GitHub-hosted automation ran.
 - 2026-08-14: M3 contract/policy/broker checkpoint passed 14 focused tests plus formatting, clippy with warnings denied, and `git diff --check`. Tests cover schema round-trip, immutable constitutional gates, secret/protected/path-scope bypasses, zero-side-effect denial/approval, content-addressed artifacts, secret redaction, and duplicate active leases.
 - 2026-08-14: M3 capability-safe filesystem checkpoint passed the complete Rust workspace test and clippy gates on Windows. Ten `mcg-tools` tests cover traversal/sibling denial, atomic write/patch/read, stale-hash conflict isolation, artifact hashes, approvals/audit, redaction, and leases. `cap-std` 4.0.2 confines file operations to pre-opened directory handles.
 - 2026-08-14: Committed and pushed the M3 control-plane/filesystem checkpoint as `96a378f`; `main` matched `origin/main` afterward and no GitHub-hosted automation was used.
@@ -329,6 +331,15 @@ When sources conflict, use this order:
 - Result: Authenticated provider-backed work execution reaches terminal durable evidence in the HTTP fixture and complete Windows/Ubuntu gates pass. GPU45 passed Responses and streaming, but its active model ignored a required function call, so MCG honestly retains unknown tool capability and will not route Coder tool work to it.
 - Follow-up: Use a probed tool-capable provider for the real website fixture.
 
+### 2026-08-14 - Standalone OAuth Provider Management
+
+- Context: OpenAI subscription access had standalone protocol fixtures but no consumer-facing runtime lifecycle.
+- Decision: Keep pending browser/device authorization bounded, expiring, in-memory, and consume-once; persist completed tokens only in the native credential store; persist a fixed ChatGPT Codex subscription connection with an initially empty catalog; keep model discovery explicit. Use the access-token account claim first with ID-token fallback. Rotate token sets transactionally with rollback and a secret-free event.
+- Files: `crates/mcg-{providers,runtime,api,events,storage}/`, `apps/mcg-cli/`, `apps/desktop/`, `docs/architecture/provider-fabric.md`.
+- Commands/tests: Focused strict Rust clippy/tests plus complete `scripts/verify.ps1` and owner-controlled Ubuntu `scripts/verify.sh`; frontend typecheck, two Vitest flows, production build, native Tauri builds, and Playwright smoke passed on both platforms.
+- Result: Authenticated API fixture proves device start/complete/cancel/refresh, exact billing isolation, and response secrecy. CLI opens/prints verification and cancels on Ctrl+C. Desktop exposes simple browser login and advanced device-code selection through native daemon commands. Full local cross-platform qualification is green.
+- Follow-up: Complete both-platform qualification and live OAuth UAT, then probe a subscription model for tool-capable real website work.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -353,7 +364,7 @@ When sources conflict, use this order:
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
 - Complete M5 durable run orchestration and useful end-to-end website/app work.
-- Wire the standalone OpenAI OAuth flow into provider management so a probed tool-capable subscription model can execute Coder work; do not fall back to API billing.
+- Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget
 

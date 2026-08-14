@@ -8,9 +8,9 @@ use mcg_api::{
     ExecuteAgentWorkRequest, ManagedMemoryResponse, MemoryClaimHistoryResponse,
     MemoryClaimListResponse, OrganizationListResponse, OrganizationMutationResponse,
     PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse, ProjectListResponse,
-    ProviderListResponse, ResolveApprovalRequest, TaskEventsResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest,
+    ProviderListResponse, ResolveApprovalRequest, StartOpenAiOAuthRequest, TaskEventsResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -23,8 +23,8 @@ use mcg_providers::{
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentRunView, AgentTurnCommit, MemoryClaimMutation, ProjectMutation, ProviderMutation,
-    RuntimeStatus,
+    AgentRunView, AgentTurnCommit, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod,
+    ProjectMutation, ProviderMutation, RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalState};
 use serde::Serialize;
@@ -98,6 +98,16 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ProviderCommand {
+    /// Sign in to an `OpenAI` subscription without using API billing.
+    Login {
+        id: String,
+        name: String,
+        #[arg(long, value_enum, default_value_t = OAuthMethodArg::Browser)]
+        method: OAuthMethodArg,
+        /// Print the verification link without opening the system browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Add a provider and immediately discover its models.
     Add {
         id: String,
@@ -119,8 +129,25 @@ enum ProviderCommand {
     Models { id: String },
     /// Refresh live model discovery.
     Discover { id: String },
+    /// Rotate the tokens for an `OpenAI` subscription connection.
+    Refresh { id: String },
     /// Probe one model's live Responses, streaming, and tool-call capabilities.
     Probe { id: String, model: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OAuthMethodArg {
+    Browser,
+    DeviceCode,
+}
+
+impl From<OAuthMethodArg> for OpenAiOAuthMethod {
+    fn from(value: OAuthMethodArg) -> Self {
+        match value {
+            OAuthMethodArg::Browser => Self::Browser,
+            OAuthMethodArg::DeviceCode => Self::DeviceCode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -746,6 +773,14 @@ async fn run_provider(
     command: ProviderCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        ProviderCommand::Login {
+            id,
+            name,
+            method,
+            no_open,
+        } => {
+            login_openai(client, host, token, id, name, method, no_open).await?;
+        }
         ProviderCommand::Add {
             id,
             name,
@@ -807,6 +842,20 @@ async fn run_provider(
                 catalog.models.len()
             );
         }
+        ProviderCommand::Refresh { id } => {
+            let event: mcg_events::EventEnvelope = client
+                .post(format!("{host}/api/v1/providers/{id}/oauth/refresh"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!(
+                "{id}: OAuth credentials refreshed (event {})",
+                event.sequence
+            );
+        }
         ProviderCommand::Probe { id, model } => {
             let report: ModelProbeReport = client
                 .post(format!("{host}/api/v1/providers/{id}/models/{model}/probe"))
@@ -819,6 +868,67 @@ async fn run_provider(
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors the explicit login command fields.
+async fn login_openai(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: String,
+    name: String,
+    method: OAuthMethodArg,
+    no_open: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .post(format!("{host}/api/v1/oauth/openai/start"))
+        .bearer_auth(token)
+        .json(&StartOpenAiOAuthRequest {
+            connection_id: id,
+            display_name: name,
+            method: method.into(),
+        })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await?;
+        return Err(format!("OpenAI login could not start ({status}): {detail}").into());
+    }
+    let started: OAuthLoginStart = response.json().await?;
+    println!("Open this verification page: {}", started.verification_url);
+    if let Some(code) = &started.user_code {
+        println!("Enter this one-time code: {code}");
+    }
+    if !no_open && webbrowser::open(&started.verification_url).is_err() {
+        eprintln!("The browser could not be opened automatically; use the link above.");
+    }
+    println!("Waiting for OpenAI authorization. Press Ctrl+C to cancel.");
+
+    let complete_url = format!("{host}/api/v1/oauth/openai/{}/complete", started.session_id);
+    let response = tokio::select! {
+        result = client.post(complete_url).bearer_auth(token).send() => result?,
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            let cancel_url = format!(
+                "{host}/api/v1/oauth/openai/{}/cancel",
+                started.session_id
+            );
+            let _ = client.post(cancel_url).bearer_auth(token).send().await;
+            return Err("OpenAI login cancelled".into());
+        }
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await?;
+        return Err(format!("OpenAI login failed ({status}): {detail}").into());
+    }
+    let mutation: ProviderMutation = response.json().await?;
+    println!(
+        "{} signed in with {:?}; API-key billing was not configured.",
+        mutation.connection.id, mutation.connection.auth_mode
+    );
     Ok(())
 }
 

@@ -77,28 +77,33 @@ pub struct OAuthTokenSet {
 }
 
 impl OAuthTokenSet {
-    /// Reads the account-routing claim from the issuer-provided ID token.
+    /// Reads the account-routing claim from issuer-provided OAuth tokens.
     /// This decodes claims only; authenticity is established by the direct TLS
     /// token exchange with the configured issuer.
     ///
     /// # Errors
-    /// Returns [`ProviderError::Authentication`] for a malformed JWT payload.
+    /// Returns [`ProviderError::Authentication`] when a JWT claim payload is present
+    /// but malformed. Access-token claims are preferred for Codex compatibility;
+    /// the ID token remains a fallback for issuer variants that place it there.
     pub fn account_id(&self) -> Result<Option<String>, ProviderError> {
-        let payload = self
-            .id_token
-            .expose()
-            .split('.')
-            .nth(1)
-            .ok_or_else(|| ProviderError::Authentication("ID token is not a JWT".into()))?;
-        let payload = URL_SAFE_NO_PAD
-            .decode(payload)
-            .map_err(|error| ProviderError::Authentication(error.to_string()))?;
-        let claims: serde_json::Value = serde_json::from_slice(&payload)
-            .map_err(|error| ProviderError::Authentication(error.to_string()))?;
-        Ok(claims
-            .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
-            .and_then(serde_json::Value::as_str)
-            .map(Into::into))
+        for token in [&self.access_token, &self.id_token] {
+            let parts = token.expose().split('.').collect::<Vec<_>>();
+            if parts.len() != 3 {
+                continue;
+            }
+            let payload = URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .map_err(|error| ProviderError::Authentication(error.to_string()))?;
+            let claims: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|error| ProviderError::Authentication(error.to_string()))?;
+            if let Some(account_id) = claims
+                .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                return Ok(Some(account_id.into()));
+            }
+        }
+        Ok(None)
     }
 
     /// Rotates OAuth tokens through the issuer while preserving any fields the
@@ -455,7 +460,8 @@ mod tests {
             .encode(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"account-123"}}"#);
         let tokens = OAuthTokenSet {
             id_token: ProviderCredential::new(format!("{header}.{payload}.sig")).expect("id"),
-            access_token: ProviderCredential::new("access").expect("access"),
+            access_token: ProviderCredential::new(format!("{header}.{payload}.sig"))
+                .expect("access"),
             refresh_token: ProviderCredential::new("refresh").expect("refresh"),
         };
         assert_eq!(

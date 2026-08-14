@@ -1,5 +1,9 @@
 //! Dependency wiring, durable task orchestration, and local authentication.
 
+mod oauth;
+
+pub use oauth::*;
+
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -28,10 +32,11 @@ use mcg_projects::{
     ProjectModel, SnapshotInvalidation, render_managed_memory,
 };
 use mcg_providers::{
-    MemoryProviderCredentialStore, ModelProbeReport, ModelRequest, ModelResponse, OAuthTokenSet,
-    OsProviderCredentialStore, ProviderConnection, ProviderCredential, ProviderCredentialStore,
-    ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, RouteCandidate,
-    RoutingPolicy, ToolDefinition, clear_provider_credentials, save_provider_credentials,
+    BrowserAuthorizationConfig, DeviceAuthorizationConfig, MemoryProviderCredentialStore,
+    ModelProbeReport, ModelRequest, ModelResponse, OAuthTokenSet, OsProviderCredentialStore,
+    ProviderConnection, ProviderCredential, ProviderCredentialStore, ProviderError,
+    ProviderModelCatalog, ProviderModelRef, ProviderRegistry, RouteCandidate, RoutingPolicy,
+    ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
 pub use mcg_storage::AgentTurnCommit;
 use mcg_storage::{
@@ -313,6 +318,7 @@ pub struct AppRuntime {
     agent_recovery: AgentRecoveryReport,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
+    oauth_state: OAuthRuntimeState,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -355,6 +361,8 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             provider_credentials,
+            BrowserAuthorizationConfig::default(),
+            DeviceAuthorizationConfig::default(),
         ))
     }
 
@@ -364,6 +372,26 @@ impl AppRuntime {
     ///
     /// Returns an error when storage or the supplied token is invalid.
     pub fn open_in_memory(config: AppConfig, token: String) -> Result<Self, RuntimeError> {
+        Self::open_in_memory_with_oauth_configs(
+            config,
+            token,
+            BrowserAuthorizationConfig::default(),
+            DeviceAuthorizationConfig::default(),
+        )
+    }
+
+    /// Creates an isolated runtime with explicit OAuth endpoints for deterministic
+    /// loopback integration tests. Production callers should use [`Self::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage or the supplied token is invalid.
+    pub fn open_in_memory_with_oauth_configs(
+        config: AppConfig,
+        token: String,
+        browser_config: BrowserAuthorizationConfig,
+        device_config: DeviceAuthorizationConfig,
+    ) -> Result<Self, RuntimeError> {
         let mut store = SqliteEventStore::open_in_memory()?;
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
@@ -379,9 +407,12 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             provider_credentials,
+            browser_config,
+            device_config,
         ))
     }
 
+    #[allow(clippy::too_many_arguments)] // Centralizes all recovered state and injected secure boundaries.
     fn assemble(
         config: AppConfig,
         store: SqliteEventStore,
@@ -390,6 +421,8 @@ impl AppRuntime {
         recovered_tool_leases: u64,
         agent_recovery: AgentRecoveryReport,
         provider_credentials: Arc<dyn ProviderCredentialStore>,
+        browser_config: BrowserAuthorizationConfig,
+        device_config: DeviceAuthorizationConfig,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(256);
         Self {
@@ -402,6 +435,7 @@ impl AppRuntime {
             agent_recovery,
             provider_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
+            oauth_state: OAuthRuntimeState::new(browser_config, device_config),
         }
     }
 

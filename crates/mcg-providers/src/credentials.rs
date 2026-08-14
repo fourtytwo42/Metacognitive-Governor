@@ -168,27 +168,78 @@ pub fn save_provider_credentials<S: ProviderCredentialStore + ?Sized>(
             ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode,
             None,
             Some(oauth),
-        ) => {
-            store.save(
-                connection_id,
-                ProviderSecretSlot::Primary,
-                &oauth.access_token,
-            )?;
-            store.save(
-                connection_id,
-                ProviderSecretSlot::OAuthIdToken,
-                &oauth.id_token,
-            )?;
-            store.save(
-                connection_id,
-                ProviderSecretSlot::OAuthRefreshToken,
-                &oauth.refresh_token,
-            )
-        }
+        ) => replace_oauth_credentials(store, connection_id, oauth),
         _ => Err(ProviderError::Configuration(
             "credential shape does not match the explicit provider auth mode".into(),
         )),
     }
+}
+
+/// Loads the complete token set for an explicitly OAuth-billed connection.
+///
+/// # Errors
+///
+/// Returns an error for a non-OAuth mode, unavailable store, or incomplete token set.
+pub fn load_oauth_credentials<S: ProviderCredentialStore + ?Sized>(
+    store: &S,
+    connection_id: &str,
+    auth_mode: ProviderAuthMode,
+) -> Result<OAuthTokenSet, ProviderError> {
+    if !matches!(
+        auth_mode,
+        ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+    ) {
+        return Err(ProviderError::Configuration(
+            "OAuth credentials require an explicit ChatGPT OAuth auth mode".into(),
+        ));
+    }
+    let required = |slot| {
+        store.load(connection_id, slot)?.ok_or_else(|| {
+            ProviderError::Authentication(format!(
+                "provider connection {connection_id} has incomplete OAuth credentials"
+            ))
+        })
+    };
+    Ok(OAuthTokenSet {
+        access_token: required(ProviderSecretSlot::Primary)?,
+        id_token: required(ProviderSecretSlot::OAuthIdToken)?,
+        refresh_token: required(ProviderSecretSlot::OAuthRefreshToken)?,
+    })
+}
+
+fn replace_oauth_credentials<S: ProviderCredentialStore + ?Sized>(
+    store: &S,
+    connection_id: &str,
+    oauth: &OAuthTokenSet,
+) -> Result<(), ProviderError> {
+    let replacements = [
+        (ProviderSecretSlot::Primary, &oauth.access_token),
+        (ProviderSecretSlot::OAuthIdToken, &oauth.id_token),
+        (ProviderSecretSlot::OAuthRefreshToken, &oauth.refresh_token),
+    ];
+    let previous = replacements
+        .iter()
+        .map(|(slot, _)| store.load(connection_id, *slot))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, (slot, credential)) in replacements.iter().enumerate() {
+        if let Err(error) = store.save(connection_id, *slot, credential) {
+            let rollback = replacements
+                .iter()
+                .zip(previous.iter())
+                .take(index)
+                .try_for_each(|((rollback_slot, _), old)| match old {
+                    Some(old) => store.save(connection_id, *rollback_slot, old),
+                    None => store.delete(connection_id, *rollback_slot),
+                });
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(_) => Err(ProviderError::Authentication(
+                    "OAuth credential rotation failed and protected-store rollback failed".into(),
+                )),
+            };
+        }
+    }
+    Ok(())
 }
 
 /// Removes every credential slot associated with one provider connection.
@@ -234,7 +285,59 @@ fn credential_store_error(error: impl std::fmt::Display) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    #[derive(Default)]
+    struct FailingRotationStore {
+        inner: MemoryProviderCredentialStore,
+        fail_id_token_write: AtomicBool,
+    }
+
+    impl ProviderCredentialStore for FailingRotationStore {
+        fn load(
+            &self,
+            connection_id: &str,
+            slot: ProviderSecretSlot,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.inner.load(connection_id, slot)
+        }
+
+        fn save(
+            &self,
+            connection_id: &str,
+            slot: ProviderSecretSlot,
+            credential: &ProviderCredential,
+        ) -> Result<(), ProviderError> {
+            if slot == ProviderSecretSlot::OAuthIdToken
+                && self.fail_id_token_write.load(Ordering::SeqCst)
+            {
+                return Err(ProviderError::Authentication(
+                    "injected protected-store failure".into(),
+                ));
+            }
+            self.inner.save(connection_id, slot, credential)
+        }
+
+        fn delete(
+            &self,
+            connection_id: &str,
+            slot: ProviderSecretSlot,
+        ) -> Result<(), ProviderError> {
+            self.inner.delete(connection_id, slot)
+        }
+    }
+
+    fn oauth_tokens(prefix: &str) -> OAuthTokenSet {
+        OAuthTokenSet {
+            id_token: ProviderCredential::new(format!("{prefix}-id")).expect("id token"),
+            access_token: ProviderCredential::new(format!("{prefix}-access"))
+                .expect("access token"),
+            refresh_token: ProviderCredential::new(format!("{prefix}-refresh"))
+                .expect("refresh token"),
+        }
+    }
 
     #[test]
     fn memory_store_round_trips_without_serializable_credential_values() {
@@ -277,6 +380,46 @@ mod tests {
         assert!(
             save_provider_credentials(&store, "openai-api", ProviderAuthMode::ApiKey, None, None,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_oauth_rotation_restores_the_complete_previous_token_set() {
+        let store = FailingRotationStore::default();
+        let original = oauth_tokens("original");
+        save_provider_credentials(
+            &store,
+            "openai-subscription",
+            ProviderAuthMode::ChatGptDeviceCode,
+            None,
+            Some(&original),
+        )
+        .expect("initial token set");
+        store.fail_id_token_write.store(true, Ordering::SeqCst);
+
+        let error = save_provider_credentials(
+            &store,
+            "openai-subscription",
+            ProviderAuthMode::ChatGptDeviceCode,
+            None,
+            Some(&oauth_tokens("replacement")),
+        )
+        .expect_err("rotation should fail");
+        assert!(error.to_string().contains("injected"));
+        let restored = load_oauth_credentials(
+            &store,
+            "openai-subscription",
+            ProviderAuthMode::ChatGptDeviceCode,
+        )
+        .expect("restored tokens");
+        assert_eq!(
+            restored.access_token.expose(),
+            original.access_token.expose()
+        );
+        assert_eq!(restored.id_token.expose(), original.id_token.expose());
+        assert_eq!(
+            restored.refresh_token.expose(),
+            original.refresh_token.expose()
         );
     }
 }

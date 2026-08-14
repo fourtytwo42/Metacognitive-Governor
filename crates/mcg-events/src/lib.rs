@@ -22,6 +22,7 @@ pub enum EventKind {
     ProviderCallCompleted,
     ProviderConnectionRecorded,
     ProviderCatalogDiscovered,
+    ProviderCredentialsRefreshed,
     ToolRequested,
     ToolCompleted,
     ProjectDiscovered,
@@ -59,6 +60,7 @@ impl EventKind {
             Self::ProviderCallCompleted => "provider_call_completed",
             Self::ProviderConnectionRecorded => "provider_connection_recorded",
             Self::ProviderCatalogDiscovered => "provider_catalog_discovered",
+            Self::ProviderCredentialsRefreshed => "provider_credentials_refreshed",
             Self::ToolRequested => "tool_requested",
             Self::ToolCompleted => "tool_completed",
             Self::ProjectDiscovered => "project_discovered",
@@ -103,6 +105,9 @@ impl EventKind {
             }
             "provider_catalog_discovered" | "ProviderCatalogDiscovered" => {
                 Ok(Self::ProviderCatalogDiscovered)
+            }
+            "provider_credentials_refreshed" | "ProviderCredentialsRefreshed" => {
+                Ok(Self::ProviderCredentialsRefreshed)
             }
             "tool_requested" | "ToolRequested" => Ok(Self::ToolRequested),
             "tool_completed" | "ToolCompleted" => Ok(Self::ToolCompleted),
