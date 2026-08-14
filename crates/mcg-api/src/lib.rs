@@ -45,11 +45,13 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, ConsumerEvaluationProgress,
-    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformSessionRequest,
-    ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
+    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
+    PlatformSessionRequest, ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus,
+    ScheduleWakeMutation,
 };
 use mcg_tools::{
-    ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ToolAuditRecord,
+    ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument,
+    PersistentBrowserMode, PersistentBrowserObservation, ToolAuditRecord, ToolError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -374,6 +376,16 @@ pub struct ClosePlatformSessionRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachBrowserSessionRequest {
+    pub mode: PersistentBrowserMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavigateBrowserSessionRequest {
+    pub url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LaunchExecution {
@@ -559,6 +571,30 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "tool_denied",
+            message: message.into(),
+        }
+    }
+
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "tool_unavailable",
+            message: message.into(),
+        }
+    }
+
+    fn gateway_timeout(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "tool_timeout",
+            message: message.into(),
+        }
+    }
+
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -612,6 +648,22 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/platform/sessions/{session_id}/close",
             post(close_platform_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/browser/attach",
+            post(attach_browser_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/browser/navigate",
+            post(navigate_browser_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/browser/handoff",
+            post(handoff_browser_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/browser/reclaim",
+            post(reclaim_browser_session),
         )
         .route(
             "/api/v1/schedules",
@@ -978,6 +1030,7 @@ async fn list_platform_sessions(
         sessions: state
             .runtime
             .platform_sessions()
+            .await
             .map_err(map_runtime_error)?,
     }))
 }
@@ -991,6 +1044,7 @@ async fn get_platform_session(
         state
             .runtime
             .platform_session(session_id)
+            .await
             .map_err(map_runtime_error)?,
     ))
 }
@@ -1004,6 +1058,7 @@ async fn platform_session_history(
         events: state
             .runtime
             .platform_session_history(session_id)
+            .await
             .map_err(map_runtime_error)?,
     }))
 }
@@ -1018,6 +1073,65 @@ async fn close_platform_session(
         state
             .runtime
             .close_platform_session(session_id, &request.reason, Utc::now())
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn attach_browser_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<AttachBrowserSessionRequest>,
+) -> Result<Json<PlatformBrowserMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .attach_browser_session(session_id, request.mode, Utc::now())
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn navigate_browser_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<NavigateBrowserSessionRequest>,
+) -> Result<Json<PersistentBrowserObservation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .navigate_browser_session(session_id, &request.url)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn handoff_browser_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformBrowserMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .handoff_browser_session(session_id, Utc::now())
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn reclaim_browser_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformBrowserMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .reclaim_browser_session(session_id, Utc::now())
+            .await
             .map_err(map_runtime_error)?,
     ))
 }
@@ -2846,6 +2960,18 @@ fn map_runtime_error(error: RuntimeError) -> ApiError {
             }
         };
     }
+    if let RuntimeError::Tool(tool) = &error {
+        return match tool {
+            ToolError::Invalid(_) => ApiError::bad_request(error.to_string()),
+            ToolError::Denied(_) => ApiError::forbidden(error.to_string()),
+            ToolError::ApprovalRequired { .. } | ToolError::Lease(_) => {
+                ApiError::conflict(error.to_string())
+            }
+            ToolError::TimedOut => ApiError::gateway_timeout(error.to_string()),
+            ToolError::Unavailable(_) => ApiError::service_unavailable(error.to_string()),
+            ToolError::Execution(_) => ApiError::internal(error.to_string()),
+        };
+    }
     if error.is_not_found() {
         ApiError::not_found(error.to_string())
     } else if error.is_invalid_request() {
@@ -4023,6 +4149,10 @@ form.addEventListener('submit', (event) => {
                 "mcg_platform_sessions",
                 "mcg_platform_request",
                 "mcg_platform_close",
+                "mcg_browser_attach",
+                "mcg_browser_navigate",
+                "mcg_browser_handoff",
+                "mcg_browser_reclaim",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
                 "mcg_run_agent",
@@ -4416,7 +4546,88 @@ form.addEventListener('submit', (event) => {
             conflict.pointer("/result/isError"),
             Some(&serde_json::json!(true))
         );
-        assert_eq!(runtime.platform_sessions().expect("sessions").len(), 1);
+        assert_eq!(
+            runtime.platform_sessions().await.expect("sessions").len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_rest_and_mcp_browser_controls_share_one_real_session() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("browser fixture listener");
+        let address = listener.local_addr().expect("browser fixture address");
+        let fixture = Router::new().route(
+            "/result",
+            get(|| async { Html("<title>Interface fixture</title>") }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, fixture)
+                .await
+                .expect("browser fixture server");
+        });
+        let app = router(test_runtime());
+        let session_id = PlatformSessionId::new();
+        let origin = format!("http://{address}");
+        let create = authorized(Request::post("/api/v1/platform/sessions"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&CreatePlatformSessionRequest {
+                    session_id,
+                    kind: PlatformSessionKind::Browser,
+                    project_id: None,
+                    task_id: None,
+                    display_name: "interface fixture".into(),
+                    allowed_origins: vec![origin.clone()],
+                    lifetime_seconds: 300,
+                })
+                .expect("create body"),
+            ))
+            .expect("create request");
+        assert_eq!(
+            app.clone().oneshot(create).await.expect("create").status(),
+            StatusCode::CREATED
+        );
+        let attach = authorized(Request::post(format!(
+            "/api/v1/platform/sessions/{session_id}/browser/attach"
+        )))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"mode":"headless"}"#))
+        .expect("attach request");
+        let attached = response_json(app.clone().oneshot(attach).await.expect("attach")).await;
+        assert_eq!(
+            attached.pointer("/session/state"),
+            Some(&serde_json::json!("active"))
+        );
+        let navigated = mcp_tool_response(
+            app.clone(),
+            206,
+            "mcg_browser_navigate",
+            serde_json::json!({
+                "session_id": session_id,
+                "url": format!("{origin}/result?token=secret")
+            }),
+        )
+        .await;
+        assert_eq!(
+            navigated.pointer("/result/structuredContent/title"),
+            Some(&serde_json::json!("Interface fixture"))
+        );
+        assert_eq!(
+            navigated.pointer("/result/structuredContent/safe_url"),
+            Some(&serde_json::json!(format!("{origin}/result")))
+        );
+        assert!(!navigated.to_string().contains("token=secret"));
+        let close = authorized(Request::post(format!(
+            "/api/v1/platform/sessions/{session_id}/close"
+        )))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"reason":"interface fixture complete"}"#))
+        .expect("close request");
+        let closed = response_json(app.oneshot(close).await.expect("close")).await;
+        assert_eq!(closed.pointer("/state"), Some(&serde_json::json!("closed")));
+        server.abort();
     }
 
     #[tokio::test]

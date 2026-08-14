@@ -1,6 +1,6 @@
 # Platform Capabilities And Sessions
 
-- Status: M8 foundation implemented; persistent executors pending.
+- Status: M8 durable authority and persistent browser executor implemented.
 - Contract version: `PLATFORM_SCHEMA_VERSION = 1`.
 - Date: 2026-08-14.
 
@@ -75,6 +75,27 @@ event. Already-expired live records close with an immutable expiration event
 before recovery, and reads settle any lifetime that elapsed while the daemon was
 running. Authority is never silently reconstructed from stale process state.
 
+## Persistent browser executor
+
+Attaching a browser launches one Chromium process and page in a session-specific
+ephemeral profile. Activation is committed only after Chromium, the page, request
+interception, and download denial are live. A failed attachment leaves the durable
+reservation `Requested` and removes the partial profile.
+
+Browser sessions require at least one immutable allowed origin. Every main-frame
+and subresource request is intercepted: only `GET` and `HEAD` requests inside the
+grant are continued; credential-bearing URLs, cross-origin traffic, mutations,
+and downloads fail closed. Navigation responses expose only a query- and
+fragment-free URL, title, mode, handoff state, and denied-request count. Cookies,
+page content, credentials, and profile paths never cross the API boundary.
+
+Headless sessions cannot be handed off. A visible session stops accepting MCG
+operations before durable custody moves to `local_owner`. Returning custody first
+navigates to `about:blank`, preventing MCG from reading content the owner entered
+while in control. Closing or expiring a session terminates Chromium and removes
+its isolated profile. On daemon startup, stale profile directories are removed
+after live durable records have been interrupted.
+
 ## Storage and interfaces
 
 SQLite migration 15 adds immutable capability snapshots, current session
@@ -84,19 +105,17 @@ restart recovery are atomic.
 The same contract is exposed through:
 
 - authenticated REST under `/api/v1/platform/*`;
-- `mcg platform capabilities/list/request-browser/request-computer/history/close`;
+- `mcg platform capabilities/list/request-browser/request-computer/attach/navigate/handoff/reclaim/history/close`;
 - native Tauri commands and the Computer & Browser desktop dashboard; and
 - MCP tools `mcg_platform_capabilities`, `mcg_platform_sessions`,
-  `mcg_platform_request`, and `mcg_platform_close`.
+  `mcg_platform_request`, `mcg_platform_close`, `mcg_browser_attach`,
+  `mcg_browser_navigate`, `mcg_browser_handoff`, and `mcg_browser_reclaim`.
 
 The OpenAI-compatible provider endpoints intentionally remain provider APIs and
 do not duplicate host-control management semantics.
 
 ## Next dependency
 
-The next M8 layer attaches a persistent browser executor to this authority model.
-It must preserve one browser profile/session across bounded operations, enforce
-the recorded origin grant, prove attachment before activation, implement a real
-local-owner handoff, and exercise restart/interruption behavior on Windows and
-Linux. Computer use, Sites, and SSH then reuse the same authority contract rather
-than inventing separate lifecycle rules.
+Computer use, Sites, and typed SSH reuse this authority contract rather than
+inventing separate lifecycle rules. Visible browser handoff and restart behavior
+must also pass native Windows and Linux UAT before M8 is complete.

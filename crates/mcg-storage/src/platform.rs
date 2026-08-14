@@ -254,6 +254,19 @@ impl SqliteEventStore {
     /// # Errors
     /// Returns an error when expired sessions cannot be decoded or atomically updated.
     pub fn expire_platform_sessions(&mut self, now: DateTime<Utc>) -> Result<u64, StorageError> {
+        let expired = self.expire_platform_session_ids(now)?;
+        u64::try_from(expired.len())
+            .map_err(|_| StorageError::InvalidData("platform expiration count overflow".into()))
+    }
+
+    /// Closes expired live reservations and returns their identities for executor cleanup.
+    ///
+    /// # Errors
+    /// Returns an error when expired sessions cannot be decoded or atomically updated.
+    pub fn expire_platform_session_ids(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PlatformSessionId>, StorageError> {
         let sessions: Vec<PlatformSession> = self
             .platform_sessions()?
             .into_iter()
@@ -281,8 +294,7 @@ impl SqliteEventStore {
             )?;
         }
         transaction.commit()?;
-        u64::try_from(sessions.len())
-            .map_err(|_| StorageError::InvalidData("platform expiration count overflow".into()))
+        Ok(sessions.into_iter().map(|session| session.id).collect())
     }
 }
 

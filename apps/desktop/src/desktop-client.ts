@@ -293,6 +293,19 @@ export interface CreatePlatformSessionRequest {
 
 export interface PlatformSessionListResponse { sessions: PlatformSession[]; }
 export interface PlatformSessionHistoryResponse { events: PlatformSessionEvent[]; }
+export type PersistentBrowserMode = "headless" | "visible";
+export interface PersistentBrowserObservation {
+  session_id: string;
+  mode: PersistentBrowserMode;
+  safe_url: string;
+  title?: string;
+  handed_off: boolean;
+  denied_requests: number;
+}
+export interface PlatformBrowserMutation {
+  session: PlatformSession;
+  browser: PersistentBrowserObservation;
+}
 
 export interface TaskEventsResponse {
   events: Array<{
@@ -446,6 +459,22 @@ export function loadPlatformSessionHistory(sessionId: string): Promise<PlatformS
 
 export function closePlatformSession(sessionId: string, reason: string): Promise<PlatformSession> {
   return invoke("close_platform_session", { sessionId, request: { reason } });
+}
+
+export function attachBrowserSession(sessionId: string, mode: PersistentBrowserMode): Promise<PlatformBrowserMutation> {
+  return invoke("attach_browser_session", { sessionId, request: { mode } });
+}
+
+export function navigateBrowserSession(sessionId: string, url: string): Promise<PersistentBrowserObservation> {
+  return invoke("navigate_browser_session", { sessionId, request: { url } });
+}
+
+export function handoffBrowserSession(sessionId: string): Promise<PlatformBrowserMutation> {
+  return invoke("handoff_browser_session", { sessionId });
+}
+
+export function reclaimBrowserSession(sessionId: string): Promise<PlatformBrowserMutation> {
+  return invoke("reclaim_browser_session", { sessionId });
 }
 
 export function createSchedule(request: CreateScheduleRequest): Promise<ScheduleDefinition> {

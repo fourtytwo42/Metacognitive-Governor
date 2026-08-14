@@ -3,18 +3,19 @@ use std::{io::Read, path::PathBuf, str::FromStr};
 use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
-    ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
-    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest, EvaluationMutationResponse,
-    ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse, OrganizationListResponse,
-    OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
-    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest, WakeScheduleRequest,
+    ApprovalListResponse, AssembleContextRequest, AttachBrowserSessionRequest,
+    CorrectMemoryClaimRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse,
+    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    NavigateBrowserSessionRequest, OrganizationListResponse, OrganizationMutationResponse,
+    PlanAgentRunRequest, PlanWorkRequest, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
+    ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -34,9 +35,11 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, ProjectMutation, ProviderMutation, RuntimeStatus,
+    OpenAiOAuthMethod, PlatformBrowserMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
 };
-use mcg_tools::{ApprovalRequest, ApprovalState};
+use mcg_tools::{
+    ApprovalRequest, ApprovalState, PersistentBrowserMode, PersistentBrowserObservation,
+};
 use serde::Serialize;
 use zeroize::Zeroize;
 
@@ -174,6 +177,34 @@ enum PlatformCommand {
         task_id: Option<String>,
         #[arg(long, default_value_t = 3_600)]
         lifetime_seconds: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start the reserved browser in an isolated profile.
+    Attach {
+        id: String,
+        /// Show a local window so control can later be handed to its owner.
+        #[arg(long)]
+        visible: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Navigate an active browser inside its immutable origin grant.
+    Navigate {
+        id: String,
+        url: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hand a visible browser window to the local owner.
+    Handoff {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Blank owner-visible content and return browser control to MCG.
+    Reclaim {
+        id: String,
         #[arg(long)]
         json: bool,
     },
@@ -905,6 +936,74 @@ async fn run_platform(
             )
             .await?;
         }
+        PlatformCommand::Attach { id, visible, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let mutation: PlatformBrowserMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/browser/attach"
+                ))
+                .bearer_auth(token)
+                .json(&AttachBrowserSessionRequest {
+                    mode: if visible {
+                        PersistentBrowserMode::Visible
+                    } else {
+                        PersistentBrowserMode::Headless
+                    },
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_browser_mutation(&mutation, json)?;
+        }
+        PlatformCommand::Navigate { id, url, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let observation: PersistentBrowserObservation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/browser/navigate"
+                ))
+                .bearer_auth(token)
+                .json(&NavigateBrowserSessionRequest { url })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&observation)?);
+            } else {
+                println!("{}: {}", observation.session_id, observation.safe_url);
+            }
+        }
+        PlatformCommand::Handoff { id, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let mutation: PlatformBrowserMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/browser/handoff"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_browser_mutation(&mutation, json)?;
+        }
+        PlatformCommand::Reclaim { id, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let mutation: PlatformBrowserMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/browser/reclaim"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_browser_mutation(&mutation, json)?;
+        }
         PlatformCommand::History { id } => {
             let id = PlatformSessionId::from_str(&id)?;
             let response: PlatformSessionHistoryResponse = client
@@ -930,6 +1029,21 @@ async fn run_platform(
                 .await?;
             println!("{}: {:?}", session.id, session.state);
         }
+    }
+    Ok(())
+}
+
+fn print_browser_mutation(
+    mutation: &PlatformBrowserMutation,
+    json: bool,
+) -> Result<(), serde_json::Error> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(mutation)?);
+    } else {
+        println!(
+            "{}: {:?} ({})",
+            mutation.session.id, mutation.session.state, mutation.browser.safe_url
+        );
     }
     Ok(())
 }
@@ -2696,6 +2810,29 @@ mod tests {
             capabilities.command,
             Command::Platform {
                 command: PlatformCommand::Capabilities { json: true }
+            }
+        ));
+        let attach = Cli::try_parse_from(["mcg", "platform", "attach", session_id, "--visible"])
+            .expect("attach");
+        assert!(matches!(
+            attach.command,
+            Command::Platform {
+                command: PlatformCommand::Attach { visible: true, .. }
+            }
+        ));
+        let navigate = Cli::try_parse_from([
+            "mcg",
+            "platform",
+            "navigate",
+            session_id,
+            "https://example.com/result",
+            "--json",
+        ])
+        .expect("navigate");
+        assert!(matches!(
+            navigate.command,
+            Command::Platform {
+                command: PlatformCommand::Navigate { json: true, .. }
             }
         ));
     }

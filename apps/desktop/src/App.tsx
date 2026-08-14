@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   approveRequest,
+  attachBrowserSession,
   cancelOpenAiOAuth,
   closePlatformSession,
   completeOpenAiOAuth,
@@ -13,6 +14,7 @@ import {
   discoverProject,
   discoverMcpConnection,
   discoverProvider,
+  handoffBrowserSession,
   listMcpConnections,
   listProviders,
   listApprovals,
@@ -27,6 +29,7 @@ import {
   loadScheduleHistory,
   loadPlatformCapabilities,
   loadPlatformSessionHistory,
+  navigateBrowserSession,
   type McpAuthMode,
   type McpListItem,
   type McpProtocolMode,
@@ -42,6 +45,7 @@ import {
   type PlatformSession,
   type PlatformSessionHistoryResponse,
   type PlatformSessionKind,
+  type PersistentBrowserObservation,
   pickProjectDirectory,
   type ProjectModel,
   type RiskLevel,
@@ -52,6 +56,7 @@ import {
   retryTask,
   resumeTask,
   requestPlatformSession,
+  reclaimBrowserSession,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
@@ -252,6 +257,8 @@ export function App() {
   const [platformName, setPlatformName] = useState("");
   const [platformKind, setPlatformKind] = useState<PlatformSessionKind>("browser");
   const [platformOrigins, setPlatformOrigins] = useState("");
+  const [platformBrowserUrls, setPlatformBrowserUrls] = useState<Record<string, string>>({});
+  const [platformBrowsers, setPlatformBrowsers] = useState<Record<string, PersistentBrowserObservation | undefined>>({});
   const [platformBusy, setPlatformBusy] = useState(false);
   const [platformError, setPlatformError] = useState<string | null>(null);
 
@@ -882,6 +889,66 @@ export function App() {
     }
   }
 
+  async function attachPlatformBrowser(sessionId: string, visible: boolean) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const result = await attachBrowserSession(sessionId, visible ? "visible" : "headless");
+      replacePlatformSession(result.session);
+      setPlatformBrowsers((current) => ({ ...current, [sessionId]: result.browser }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function navigatePlatformBrowser(sessionId: string) {
+    const url = platformBrowserUrls[sessionId]?.trim();
+    if (!url) {
+      setPlatformError("Enter a URL inside this session's allowed sites.");
+      return;
+    }
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const browser = await navigateBrowserSession(sessionId, url);
+      setPlatformBrowsers((current) => ({ ...current, [sessionId]: browser }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function handoffPlatformBrowser(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const result = await handoffBrowserSession(sessionId);
+      replacePlatformSession(result.session);
+      setPlatformBrowsers((current) => ({ ...current, [sessionId]: result.browser }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function reclaimPlatformBrowser(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const result = await reclaimBrowserSession(sessionId);
+      replacePlatformSession(result.session);
+      setPlatformBrowsers((current) => ({ ...current, [sessionId]: result.browser }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
   async function togglePlatformHistory(sessionId: string) {
     if (platformHistory[sessionId]) {
       setPlatformHistory((current) => ({ ...current, [sessionId]: undefined }));
@@ -1131,7 +1198,7 @@ export function App() {
                 <input value={platformName} onChange={(event) => setPlatformName(event.target.value)} placeholder="Research checkout options" />
               </label>
               {platformKind === "browser" && <label>
-                Allowed sites {advanced ? "(one origin per line)" : "(optional)"}
+                Allowed sites {advanced ? "(one origin per line)" : "(required before starting)"}
                 <textarea value={platformOrigins} onChange={(event) => setPlatformOrigins(event.target.value)} placeholder="https://example.com" />
               </label>}
               <p className="muted">Reservation is local and restart-safe. It will not be labeled active until MCG has attached a verified executor.</p>
@@ -1148,6 +1215,10 @@ export function App() {
                   <p>{session.kind === "browser" ? "Browser session" : "Computer-use session"}</p>
                   {session.state === "requested" && <small>Waiting for a verified executor</small>}
                   {session.state === "interrupted" && <small>Interrupted at restart; authority was not silently resumed</small>}
+                  {session.kind === "browser" && platformBrowsers[session.id] && <small>
+                    {platformBrowsers[session.id]!.title ? `${platformBrowsers[session.id]!.title} · ` : ""}
+                    {platformBrowsers[session.id]!.safe_url}
+                  </small>}
                   {advanced && <>
                     <code>{session.id}</code>
                     <small>Owner: {session.owner.replaceAll("_", " ")} · recovery count {session.recovery_count} · expires {new Date(session.expires_at).toLocaleString()}</small>
@@ -1162,6 +1233,24 @@ export function App() {
                   </ol>}
                 </div>
                 <div className="task-actions">
+                  {session.kind === "browser" && session.state === "requested" && <>
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => attachPlatformBrowser(session.id, false)}>Start private browser</button>
+                    {advanced && <button className="secondary" type="button" disabled={platformBusy} onClick={() => attachPlatformBrowser(session.id, true)}>Start visible browser</button>}
+                  </>}
+                  {session.kind === "browser" && session.state === "active" && <>
+                    <input
+                      aria-label={`URL for ${session.display_name}`}
+                      value={platformBrowserUrls[session.id] ?? ""}
+                      onChange={(event) => setPlatformBrowserUrls((current) => ({ ...current, [session.id]: event.target.value }))}
+                      placeholder={session.allowed_origins[0] ?? "https://example.com"}
+                    />
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => navigatePlatformBrowser(session.id)}>Go</button>
+                    {platformBrowsers[session.id]?.mode === "visible" && <button className="secondary" type="button" disabled={platformBusy} onClick={() => handoffPlatformBrowser(session.id)}>Hand to me</button>}
+                  </>}
+                  {session.kind === "browser" && session.state === "handed_off" && <>
+                    <small>Returning control blanks the current page before MCG can read it.</small>
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformBrowser(session.id)}>Return control to MCG</button>
+                  </>}
                   <button className="secondary" type="button" disabled={platformBusy} onClick={() => togglePlatformHistory(session.id)}>{platformHistory[session.id] ? "Hide history" : "History"}</button>
                   {!(["closed", "failed"] as string[]).includes(session.state) && <button className="link-button" type="button" disabled={platformBusy} onClick={() => closePlatform(session.id)}>Close</button>}
                 </div>

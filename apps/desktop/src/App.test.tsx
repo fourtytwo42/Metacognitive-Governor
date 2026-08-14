@@ -37,7 +37,11 @@ const client = vi.hoisted(() => ({
   listPlatformSessions: vi.fn(),
   requestPlatformSession: vi.fn(),
   loadPlatformSessionHistory: vi.fn(),
-  closePlatformSession: vi.fn()
+  closePlatformSession: vi.fn(),
+  attachBrowserSession: vi.fn(),
+  navigateBrowserSession: vi.fn(),
+  handoffBrowserSession: vi.fn(),
+  reclaimBrowserSession: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -76,7 +80,11 @@ vi.mock("./desktop-client", () => ({
   listPlatformSessions: client.listPlatformSessions,
   requestPlatformSession: client.requestPlatformSession,
   loadPlatformSessionHistory: client.loadPlatformSessionHistory,
-  closePlatformSession: client.closePlatformSession
+  closePlatformSession: client.closePlatformSession,
+  attachBrowserSession: client.attachBrowserSession,
+  navigateBrowserSession: client.navigateBrowserSession,
+  handoffBrowserSession: client.handoffBrowserSession,
+  reclaimBrowserSession: client.reclaimBrowserSession
 }));
 
 import { App } from "./App";
@@ -118,6 +126,10 @@ beforeEach(() => {
   client.requestPlatformSession.mockReset();
   client.loadPlatformSessionHistory.mockReset();
   client.closePlatformSession.mockReset();
+  client.attachBrowserSession.mockReset();
+  client.navigateBrowserSession.mockReset();
+  client.handoffBrowserSession.mockReset();
+  client.reclaimBrowserSession.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -217,7 +229,7 @@ test("platform reservation stays truthful and reuses identity after an uncertain
   const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
   await within(panel).findByText("browser automation");
   fireEvent.change(within(panel).getByLabelText("Name"), { target: { value: session.display_name } });
-  fireEvent.change(within(panel).getByLabelText("Allowed sites (optional)"), { target: { value: "https://example.com" } });
+  fireEvent.change(within(panel).getByLabelText("Allowed sites (required before starting)"), { target: { value: "https://example.com" } });
   fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
   expect(await within(panel).findByRole("alert")).toHaveTextContent("response lost");
   const firstId = client.requestPlatformSession.mock.calls[0][0].session_id;
@@ -229,6 +241,51 @@ test("platform reservation stays truthful and reuses identity after an uncertain
     kind: "browser",
     allowed_origins: ["https://example.com"]
   });
+});
+
+test("private browser starts, navigates, and displays only the safe URL", async () => {
+  const requested = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000072",
+    definition_hash: "b".repeat(64),
+    kind: "browser",
+    state: "requested",
+    owner: "mcg",
+    display_name: "Private research",
+    allowed_origins: ["https://example.com"],
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z",
+    expires_at: "2026-08-14T01:00:00Z",
+    recovery_count: 0
+  };
+  const active = { ...requested, state: "active" };
+  client.listPlatformSessions.mockResolvedValue({ sessions: [requested] });
+  client.attachBrowserSession.mockResolvedValue({
+    session: active,
+    browser: { session_id: requested.id, mode: "headless", safe_url: "about:blank", handed_off: false, denied_requests: 0 }
+  });
+  client.navigateBrowserSession.mockResolvedValue({
+    session_id: requested.id,
+    mode: "headless",
+    safe_url: "https://example.com/result",
+    title: "Safe result",
+    handed_off: false,
+    denied_requests: 0
+  });
+  render(<App />);
+  const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
+  await within(panel).findByRole("heading", { name: requested.display_name });
+  fireEvent.click(within(panel).getByRole("button", { name: "Start private browser" }));
+  const url = await within(panel).findByLabelText(`URL for ${requested.display_name}`);
+  fireEvent.change(url, { target: { value: "https://example.com/result?token=secret" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Go" }));
+  await within(panel).findByText("Safe result · https://example.com/result");
+  expect(client.attachBrowserSession).toHaveBeenCalledWith(requested.id, "headless");
+  expect(client.navigateBrowserSession).toHaveBeenCalledWith(
+    requested.id,
+    "https://example.com/result?token=secret"
+  );
+  expect(within(panel).queryByText(/token=secret/)).not.toBeInTheDocument();
 });
 
 test("scheduler retries reuse one identity and rotate it only after success", async () => {

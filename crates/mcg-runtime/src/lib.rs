@@ -61,11 +61,12 @@ use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
     BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ExecutionLease,
     ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor, HttpExecutor,
-    InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor, ProcessExecutor,
-    ProcessOptions, ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument,
-    ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink,
-    ToolBroker, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest,
-    ToolRequestKind, VerificationEvidence, browser_runtime_available,
+    InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor, PersistentBrowserManager,
+    PersistentBrowserMode, PersistentBrowserObservation, ProcessExecutor, ProcessOptions,
+    ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument, ResearchExecutor,
+    SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError,
+    ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
+    VerificationEvidence, browser_runtime_available,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -109,6 +110,12 @@ pub struct PlatformSessionCreateResult {
     pub created: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformBrowserMutation {
+    pub session: PlatformSession,
+    pub browser: PersistentBrowserObservation,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConsumerEvaluationProgress {
     AwaitingApproval { approval_id: ApprovalId },
@@ -140,6 +147,8 @@ pub enum RuntimeError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Mcp(#[from] McpError),
+    #[error(transparent)]
+    Tool(#[from] ToolError),
     #[error("runtime storage lock was poisoned")]
     StorageLock,
     #[error("local authentication token is invalid")]
@@ -177,6 +186,7 @@ impl RuntimeError {
                         | MemoryError::EmptyKey
                 )
                 | Self::AgentTurn(AgentTurnError::Invalid(_))
+                | Self::Tool(ToolError::Invalid(_))
         )
     }
 
@@ -501,6 +511,7 @@ pub struct AppRuntime {
     recovered_platform_sessions: u64,
     expired_platform_sessions: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
+    browser_sessions: Arc<PersistentBrowserManager>,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
@@ -544,6 +555,10 @@ impl AppRuntime {
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
+        let browser_sessions = Arc::new(PersistentBrowserManager::new(
+            config.browser_executable.clone(),
+            config.data_directory.join("browser-sessions"),
+        )?);
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(OsProviderCredentialStore);
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
@@ -558,6 +573,7 @@ impl AppRuntime {
             recovered_platform_sessions,
             expired_platform_sessions,
             platform_capabilities,
+            browser_sessions,
             provider_credentials,
             mcp_credentials,
             BrowserAuthorizationConfig::default(),
@@ -602,6 +618,10 @@ impl AppRuntime {
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
+        let browser_sessions = Arc::new(PersistentBrowserManager::new(
+            config.browser_executable.clone(),
+            std::env::temp_dir().join(format!("mcg-browser-sessions-{}", Uuid::new_v4())),
+        )?);
         let auth = LocalAuth::from_token(token)?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(MemoryProviderCredentialStore::default());
@@ -618,6 +638,7 @@ impl AppRuntime {
             recovered_platform_sessions,
             expired_platform_sessions,
             platform_capabilities,
+            browser_sessions,
             provider_credentials,
             mcp_credentials,
             browser_config,
@@ -637,6 +658,7 @@ impl AppRuntime {
         recovered_platform_sessions: u64,
         expired_platform_sessions: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
+        browser_sessions: Arc<PersistentBrowserManager>,
         provider_credentials: Arc<dyn ProviderCredentialStore>,
         mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
@@ -655,6 +677,7 @@ impl AppRuntime {
             recovered_platform_sessions,
             expired_platform_sessions,
             platform_capabilities,
+            browser_sessions,
             provider_credentials,
             mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
@@ -747,23 +770,21 @@ impl AppRuntime {
     ///
     /// # Errors
     /// Returns an error when runtime storage cannot be read.
-    pub fn platform_sessions(&self) -> Result<Vec<PlatformSession>, RuntimeError> {
-        let mut store = self.store()?;
-        store.expire_platform_sessions(Utc::now())?;
-        Ok(store.platform_sessions()?)
+    pub async fn platform_sessions(&self) -> Result<Vec<PlatformSession>, RuntimeError> {
+        self.settle_expired_platform_sessions(Utc::now()).await?;
+        Ok(self.store()?.platform_sessions()?)
     }
 
     /// Loads one durable platform session.
     ///
     /// # Errors
     /// Returns not-found for an unknown identity or an error when storage cannot be read.
-    pub fn platform_session(
+    pub async fn platform_session(
         &self,
         session_id: PlatformSessionId,
     ) -> Result<PlatformSession, RuntimeError> {
-        let mut store = self.store()?;
-        store.expire_platform_sessions(Utc::now())?;
-        store
+        self.settle_expired_platform_sessions(Utc::now()).await?;
+        self.store()?
             .platform_session(session_id)?
             .ok_or_else(|| StorageError::PlatformSessionNotFound(session_id).into())
     }
@@ -772,34 +793,181 @@ impl AppRuntime {
     ///
     /// # Errors
     /// Returns not-found for an unknown identity or an error when storage cannot be read.
-    pub fn platform_session_history(
+    pub async fn platform_session_history(
         &self,
         session_id: PlatformSessionId,
     ) -> Result<Vec<PlatformSessionEvent>, RuntimeError> {
-        let mut store = self.store()?;
-        store.expire_platform_sessions(Utc::now())?;
-        Ok(store.platform_session_history(session_id)?)
+        self.settle_expired_platform_sessions(Utc::now()).await?;
+        Ok(self.store()?.platform_session_history(session_id)?)
+    }
+
+    /// Launches an isolated persistent browser and then commits active authority.
+    ///
+    /// # Errors
+    /// Returns an error for the wrong session kind/state/owner, browser failure, or storage failure.
+    pub async fn attach_browser_session(
+        &self,
+        session_id: PlatformSessionId,
+        mode: PersistentBrowserMode,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformBrowserMutation, RuntimeError> {
+        self.settle_expired_platform_sessions(now).await?;
+        let requested = self.load_platform_session(session_id)?;
+        require_browser_authority(
+            &requested,
+            PlatformSessionState::Requested,
+            PlatformSessionOwner::Mcg,
+        )?;
+        let browser = self
+            .browser_sessions
+            .attach(session_id, &requested.allowed_origins, mode)
+            .await?;
+        let transition = {
+            self.store()?.transition_platform_session(
+                session_id,
+                PlatformSessionState::Active,
+                "isolated browser executor attached",
+                now,
+            )
+        };
+        match transition {
+            Ok((session, _)) => Ok(PlatformBrowserMutation { session, browser }),
+            Err(error) => {
+                let _ = self.browser_sessions.close_if_attached(session_id).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Navigates an active MCG-owned browser inside its immutable origin grant.
+    ///
+    /// # Errors
+    /// Returns an error for invalid authority, disallowed URLs, or browser failure.
+    pub async fn navigate_browser_session(
+        &self,
+        session_id: PlatformSessionId,
+        url: &str,
+    ) -> Result<PersistentBrowserObservation, RuntimeError> {
+        self.settle_expired_platform_sessions(Utc::now()).await?;
+        let session = self.load_platform_session(session_id)?;
+        require_browser_authority(
+            &session,
+            PlatformSessionState::Active,
+            PlatformSessionOwner::Mcg,
+        )?;
+        Ok(self.browser_sessions.navigate(session_id, url).await?)
+    }
+
+    /// Hands a visible browser window to the local owner and commits that authority change.
+    ///
+    /// # Errors
+    /// Returns an error for invalid authority, headless sessions, browser failure, or storage failure.
+    pub async fn handoff_browser_session(
+        &self,
+        session_id: PlatformSessionId,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformBrowserMutation, RuntimeError> {
+        self.settle_expired_platform_sessions(now).await?;
+        let session = self.load_platform_session(session_id)?;
+        require_browser_authority(
+            &session,
+            PlatformSessionState::Active,
+            PlatformSessionOwner::Mcg,
+        )?;
+        let browser = self.browser_sessions.handoff(session_id).await?;
+        let transition = {
+            self.store()?.transition_platform_session(
+                session_id,
+                PlatformSessionState::HandedOff,
+                "visible browser handed to local owner",
+                now,
+            )
+        };
+        match transition {
+            Ok((session, _)) => Ok(PlatformBrowserMutation { session, browser }),
+            Err(error) => {
+                let _ = self.browser_sessions.reclaim(session_id).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Blanks owner-visible content before returning browser authority to MCG.
+    ///
+    /// # Errors
+    /// Returns an error for invalid authority, browser failure, or storage failure.
+    pub async fn reclaim_browser_session(
+        &self,
+        session_id: PlatformSessionId,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformBrowserMutation, RuntimeError> {
+        self.settle_expired_platform_sessions(now).await?;
+        let session = self.load_platform_session(session_id)?;
+        require_browser_authority(
+            &session,
+            PlatformSessionState::HandedOff,
+            PlatformSessionOwner::LocalOwner,
+        )?;
+        let browser = self.browser_sessions.reclaim(session_id).await?;
+        let transition = {
+            self.store()?.transition_platform_session(
+                session_id,
+                PlatformSessionState::Active,
+                "local owner returned browser control after privacy blanking",
+                now,
+            )
+        };
+        match transition {
+            Ok((session, _)) => Ok(PlatformBrowserMutation { session, browser }),
+            Err(error) => {
+                let _ = self.browser_sessions.handoff(session_id).await;
+                Err(error.into())
+            }
+        }
     }
 
     /// Relinquishes a requested or attached session without inventing executor state.
     ///
     /// # Errors
     /// Returns an error for an unknown session, illegal transition, invalid reason, or storage failure.
-    pub fn close_platform_session(
+    pub async fn close_platform_session(
         &self,
         session_id: PlatformSessionId,
         reason: &str,
         now: DateTime<Utc>,
     ) -> Result<PlatformSession, RuntimeError> {
-        let mut store = self.store()?;
-        store.expire_platform_sessions(now)?;
-        let (session, _) = store.transition_platform_session(
+        self.settle_expired_platform_sessions(now).await?;
+        let current = self.load_platform_session(session_id)?;
+        let (session, _) = self.store()?.transition_platform_session(
             session_id,
             PlatformSessionState::Closed,
             reason,
             now,
         )?;
+        if current.kind == PlatformSessionKind::Browser {
+            self.browser_sessions.close_if_attached(session_id).await?;
+        }
         Ok(session)
+    }
+
+    async fn settle_expired_platform_sessions(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(), RuntimeError> {
+        let expired = self.store()?.expire_platform_session_ids(now)?;
+        for session_id in expired {
+            self.browser_sessions.close_if_attached(session_id).await?;
+        }
+        Ok(())
+    }
+
+    fn load_platform_session(
+        &self,
+        session_id: PlatformSessionId,
+    ) -> Result<PlatformSession, RuntimeError> {
+        self.store()?
+            .platform_session(session_id)?
+            .ok_or_else(|| StorageError::PlatformSessionNotFound(session_id).into())
     }
 
     /// Persists a task and publishes its committed event.
@@ -3432,6 +3600,24 @@ impl AppRuntime {
     }
 }
 
+fn require_browser_authority(
+    session: &PlatformSession,
+    expected_state: PlatformSessionState,
+    expected_owner: PlatformSessionOwner,
+) -> Result<(), RuntimeError> {
+    if session.kind != PlatformSessionKind::Browser {
+        return Err(ToolError::Invalid("platform session is not a browser session".into()).into());
+    }
+    if session.state != expected_state || session.owner != expected_owner {
+        return Err(ToolError::Invalid(format!(
+            "browser authority requires {expected_state:?}/{expected_owner:?}, found {:?}/{:?}",
+            session.state, session.owner
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct DurableToolControl {
     store: Arc<Mutex<SqliteEventStore>>,
@@ -4253,7 +4439,11 @@ mod tests {
     };
 
     use super::*;
-    use axum::{Json, Router, routing::post};
+    use axum::{
+        Json, Router,
+        response::Html,
+        routing::{get, post},
+    };
     use mcg_agents::{
         AGENT_RUN_SCHEMA_VERSION, AgentTurnRequest, ExecutivePlanner, LeaseBudget, PlannedWork,
         PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
@@ -4335,6 +4525,98 @@ mod tests {
         runtime.create_task(&task).expect("task should persist");
 
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
+    }
+
+    #[tokio::test]
+    async fn persistent_browser_authority_and_history_follow_real_executor_outcomes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new()
+            .route("/one", get(|| async { Html("<title>One</title>") }))
+            .route("/two", get(|| async { Html("<title>Two</title>") }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture server");
+        });
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        let now = Utc::now();
+        let session_id = PlatformSessionId::new();
+        let origin = format!("http://{address}");
+        runtime
+            .request_platform_session(
+                &PlatformSessionRequest {
+                    id: session_id,
+                    kind: PlatformSessionKind::Browser,
+                    project_id: None,
+                    task_id: None,
+                    display_name: "real browser fixture".into(),
+                    allowed_origins: vec![origin.clone()],
+                    lifetime_seconds: 300,
+                },
+                now,
+            )
+            .expect("request");
+        let attached = runtime
+            .attach_browser_session(session_id, PersistentBrowserMode::Headless, now)
+            .await
+            .expect("attach");
+        assert_eq!(attached.session.state, PlatformSessionState::Active);
+        assert_eq!(attached.browser.safe_url, "about:blank");
+        let one = runtime
+            .navigate_browser_session(session_id, &format!("{origin}/one?secret=hidden"))
+            .await
+            .expect("first navigation");
+        assert_eq!(one.title.as_deref(), Some("One"));
+        assert!(!one.safe_url.contains("secret"));
+        let two = runtime
+            .navigate_browser_session(session_id, &format!("{origin}/two"))
+            .await
+            .expect("second navigation");
+        assert_eq!(two.title.as_deref(), Some("Two"));
+        assert!(
+            runtime
+                .navigate_browser_session(session_id, "https://example.com/")
+                .await
+                .expect_err("cross-origin navigation must fail")
+                .is_invalid_request()
+        );
+        assert_eq!(
+            runtime
+                .platform_session(session_id)
+                .await
+                .expect("session")
+                .state,
+            PlatformSessionState::Active
+        );
+        assert!(
+            runtime
+                .handoff_browser_session(session_id, Utc::now())
+                .await
+                .expect_err("headless handoff must fail")
+                .is_invalid_request()
+        );
+        runtime
+            .settle_expired_platform_sessions(now + Duration::seconds(301))
+            .await
+            .expect("expire and clean executor");
+        assert_eq!(
+            runtime
+                .load_platform_session(session_id)
+                .expect("closed")
+                .state,
+            PlatformSessionState::Closed
+        );
+        let history = runtime
+            .platform_session_history(session_id)
+            .await
+            .expect("history");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].to_state, PlatformSessionState::Requested);
+        assert_eq!(history[1].to_state, PlatformSessionState::Active);
+        assert_eq!(history[2].to_state, PlatformSessionState::Closed);
+        server.abort();
     }
 
     #[tokio::test]

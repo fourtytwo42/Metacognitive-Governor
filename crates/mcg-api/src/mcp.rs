@@ -20,6 +20,7 @@ use mcg_domain::{
     ScheduleTrigger, TaskBudget, TaskEnvelope,
 };
 use mcg_runtime::{AgentDispatchSpec, PlatformSessionRequest};
+use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -549,6 +550,60 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mcg_browser_attach",
+            "title": "Attach an MCG Browser",
+            "description": "Launch the requested browser in a private ephemeral profile. Headless is the safe default; visible mode permits an explicit owner handoff.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "format": "uuid"},
+                    "mode": {"type": "string", "enum": ["headless", "visible"]}
+                },
+                "required": ["session_id", "mode"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_browser_navigate",
+            "title": "Navigate an MCG Browser",
+            "description": "Navigate an active MCG-owned browser within its immutable origin grant. Returned URLs never include query strings or fragments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "format": "uuid"},
+                    "url": {"type": "string", "format": "uri", "maxLength": 2048}
+                },
+                "required": ["session_id", "url"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true}
+        }),
+        json!({
+            "name": "mcg_browser_handoff",
+            "title": "Hand Browser to Local Owner",
+            "description": "Stop MCG browser operations and hand a visible browser window to its local owner.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string", "format": "uuid"}},
+                "required": ["session_id"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_browser_reclaim",
+            "title": "Return Browser Control to MCG",
+            "description": "Blank owner-visible content before returning a handed-off browser to MCG control.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string", "format": "uuid"}},
+                "required": ["session_id"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
             "name": "mcg_scheduler_create",
             "title": "Create an MCG Schedule",
             "description": "Idempotently create one bounded durable schedule. Reuse the same schedule_id only for an exact retry of the same definition.",
@@ -712,9 +767,13 @@ async fn call_tool(
         "mcg_scheduler_create" => scheduler_create(state, &arguments),
         "mcg_scheduler_remove" => scheduler_remove(state, &arguments),
         "mcg_platform_capabilities" => platform_capabilities(state, &arguments),
-        "mcg_platform_sessions" => platform_sessions(state, &arguments),
+        "mcg_platform_sessions" => platform_sessions(state, &arguments).await,
         "mcg_platform_request" => platform_request(state, &arguments),
-        "mcg_platform_close" => platform_close(state, &arguments),
+        "mcg_platform_close" => platform_close(state, &arguments).await,
+        "mcg_browser_attach" => browser_attach(state, &arguments).await,
+        "mcg_browser_navigate" => browser_navigate(state, &arguments).await,
+        "mcg_browser_handoff" => browser_handoff(state, &arguments).await,
+        "mcg_browser_reclaim" => browser_reclaim(state, &arguments).await,
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -735,12 +794,12 @@ fn platform_capabilities(
     })))
 }
 
-fn platform_sessions(
+async fn platform_sessions(
     state: &ApiState,
     arguments: &serde_json::Map<String, Value>,
 ) -> Result<Value, RpcFailure> {
     require_only_keys(arguments, &[])?;
-    match state.runtime.platform_sessions() {
+    match state.runtime.platform_sessions().await {
         Ok(sessions) => tool_success(Ok(json!({"sessions": sessions}))),
         Err(_) => Ok(tool_error(
             "runtime_error",
@@ -796,7 +855,7 @@ fn platform_request(
     }
 }
 
-fn platform_close(
+async fn platform_close(
     state: &ApiState,
     arguments: &serde_json::Map<String, Value>,
 ) -> Result<Value, RpcFailure> {
@@ -811,6 +870,7 @@ fn platform_close(
     match state
         .runtime
         .close_platform_session(request.session_id, &request.reason, Utc::now())
+        .await
     {
         Ok(session) => tool_success(Ok(json!({"session": session}))),
         Err(error) if error.is_not_found() => Ok(tool_error(
@@ -824,6 +884,111 @@ fn platform_close(
         Err(_) => Ok(tool_error(
             "runtime_error",
             "MCG could not close the platform session",
+        )),
+    }
+}
+
+async fn browser_attach(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<BrowserAttachArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Browser attach arguments do not match the advertised schema",
+        ));
+    };
+    browser_result(
+        state
+            .runtime
+            .attach_browser_session(request.session_id, request.mode, Utc::now())
+            .await,
+        "attach",
+    )
+}
+
+async fn browser_navigate(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<BrowserNavigateArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Browser navigation arguments do not match the advertised schema",
+        ));
+    };
+    browser_result(
+        state
+            .runtime
+            .navigate_browser_session(request.session_id, &request.url)
+            .await,
+        "navigate",
+    )
+}
+
+async fn browser_handoff(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<BrowserSessionArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Browser handoff arguments do not match the advertised schema",
+        ));
+    };
+    browser_result(
+        state
+            .runtime
+            .handoff_browser_session(request.session_id, Utc::now())
+            .await,
+        "hand off",
+    )
+}
+
+async fn browser_reclaim(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<BrowserSessionArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Browser reclaim arguments do not match the advertised schema",
+        ));
+    };
+    browser_result(
+        state
+            .runtime
+            .reclaim_browser_session(request.session_id, Utc::now())
+            .await,
+        "reclaim",
+    )
+}
+
+fn browser_result<T: serde::Serialize>(
+    result: Result<T, mcg_runtime::RuntimeError>,
+    operation: &str,
+) -> Result<Value, RpcFailure> {
+    match result {
+        Ok(value) => tool_success(serde_json::to_value(value)),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "session_not_found",
+            "The requested browser session is not known to MCG",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_state",
+            &format!("MCG could not {operation} the browser in its current authority state"),
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            &format!("MCG could not {operation} the browser"),
         )),
     }
 }
@@ -848,6 +1013,26 @@ struct PlatformRequestArguments {
 struct PlatformCloseArguments {
     session_id: PlatformSessionId,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserAttachArguments {
+    session_id: PlatformSessionId,
+    mode: PersistentBrowserMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserNavigateArguments {
+    session_id: PlatformSessionId,
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserSessionArguments {
+    session_id: PlatformSessionId,
 }
 
 fn query_run(

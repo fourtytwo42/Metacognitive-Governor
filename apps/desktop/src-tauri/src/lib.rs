@@ -1,11 +1,12 @@
 use mcg_api::{
-    ApprovalListResponse, ClosePlatformSessionRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest,
-    LaunchTaskResponse, McpListResponse, PlatformSessionHistoryResponse,
-    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
-    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
-    SetScheduleStateRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest, WakeScheduleRequest,
+    ApprovalListResponse, AttachBrowserSessionRequest, ClosePlatformSessionRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest,
+    LaunchTaskRequest, LaunchTaskResponse, McpListResponse, NavigateBrowserSessionRequest,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectListResponse,
+    ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionTaskRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -16,9 +17,10 @@ use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_providers::{ProviderConnection, ProviderModelCatalog};
 use mcg_runtime::{
-    McpMutation, OAuthLoginStart, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
+    McpMutation, OAuthLoginStart, PlatformBrowserMutation, ProjectMutation, ProviderMutation,
+    ScheduleWakeMutation,
 };
-use mcg_tools::ApprovalRequest;
+use mcg_tools::{ApprovalRequest, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -391,6 +393,88 @@ async fn close_platform_session(
         .json()
         .await
         .map_err(|error| format!("Platform session close response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn attach_browser_session(
+    session_id: String,
+    request: AttachBrowserSessionRequest,
+) -> Result<PlatformBrowserMutation, String> {
+    platform_browser_post(
+        &session_id,
+        "attach",
+        Some(&request),
+        "Browser session attach",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn navigate_browser_session(
+    session_id: String,
+    request: NavigateBrowserSessionRequest,
+) -> Result<PersistentBrowserObservation, String> {
+    platform_browser_post(
+        &session_id,
+        "navigate",
+        Some(&request),
+        "Browser session navigation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn handoff_browser_session(session_id: String) -> Result<PlatformBrowserMutation, String> {
+    platform_browser_post::<PlatformBrowserMutation, ()>(
+        &session_id,
+        "handoff",
+        None,
+        "Browser session handoff",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reclaim_browser_session(session_id: String) -> Result<PlatformBrowserMutation, String> {
+    platform_browser_post::<PlatformBrowserMutation, ()>(
+        &session_id,
+        "reclaim",
+        None,
+        "Browser session reclaim",
+    )
+    .await
+}
+
+async fn platform_browser_post<T, B>(
+    session_id: &str,
+    operation: &str,
+    body: Option<&B>,
+    label: &str,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let client = reqwest::Client::new();
+    let request = client
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/platform/sessions/{session_id}/browser/{operation}"
+        ))
+        .bearer_auth(daemon_token()?);
+    let response = match body {
+        Some(body) => request.json(body),
+        None => request,
+    }
+    .send()
+    .await
+    .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -781,6 +865,10 @@ pub fn run() {
             request_platform_session,
             platform_session_history,
             close_platform_session,
+            attach_browser_session,
+            navigate_browser_session,
+            handoff_browser_session,
+            reclaim_browser_session,
             create_schedule,
             set_schedule_state,
             schedule_history,
