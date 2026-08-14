@@ -20,7 +20,10 @@ mod agents;
 mod mcp;
 mod providers;
 
-pub use agents::{AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, InterfaceRunReceipt};
+pub use agents::{
+    AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
+    ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
+};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
@@ -363,6 +366,20 @@ BEFORE DELETE ON task_launches BEGIN
 END;
 ";
 
+const MIGRATION_11: &str = r"
+CREATE TABLE IF NOT EXISTS consumer_evaluation_checkpoints (
+    task_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS consumer_evaluation_checkpoints_state
+    ON consumer_evaluation_checkpoints(state, updated_at);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -455,6 +472,7 @@ impl SqliteEventStore {
             (8_i64, MIGRATION_8),
             (9_i64, MIGRATION_9),
             (10_i64, MIGRATION_10),
+            (11_i64, MIGRATION_11),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

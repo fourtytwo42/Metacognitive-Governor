@@ -46,7 +46,8 @@ use mcg_providers::{
 };
 pub use mcg_storage::AgentTurnCommit;
 use mcg_storage::{
-    AgentRecoveryReport, AgentTurnDisposition, RecoveryReport, SqliteEventStore, StorageError,
+    AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
+    ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
@@ -75,6 +76,12 @@ pub struct RuntimeStatus {
     pub recovered_agent_runs: u64,
     pub recovered_agent_instances: u64,
     pub recovered_agent_leases: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConsumerEvaluationProgress {
+    AwaitingApproval { approval_id: ApprovalId },
+    Settled(EvaluationReport),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1334,6 +1341,60 @@ impl AppRuntime {
         Ok(event)
     }
 
+    /// Loads a consumer evaluation checkpoint when objective execution has
+    /// started or is waiting for approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn consumer_evaluation_checkpoint(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Option<ConsumerEvaluationCheckpoint>, RuntimeError> {
+        Ok(self.store()?.consumer_evaluation_checkpoint(task_id)?)
+    }
+
+    /// Restores an owner-approved objective evaluation checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the matching stable request is approved.
+    pub fn resume_consumer_evaluation(
+        &self,
+        task_id: TaskId,
+    ) -> Result<ConsumerEvaluationCheckpoint, RuntimeError> {
+        let (checkpoint, events) = self
+            .store()?
+            .resume_consumer_evaluation(task_id, Utc::now())?;
+        for event in events {
+            let _ = self.event_sender.send(event);
+        }
+        Ok(checkpoint)
+    }
+
+    /// Starts a fresh objective request identity after denial/cancellation.
+    ///
+    /// Returns `None` when the task is blocked for ordinary agent work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale checkpoint/task/run state.
+    pub fn retry_consumer_evaluation(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Option<TaskEnvelope>, RuntimeError> {
+        let Some((task, events)) = self
+            .store()?
+            .retry_consumer_evaluation(task_id, Utc::now())?
+        else {
+            return Ok(None);
+        };
+        for event in events {
+            let _ = self.event_sender.send(event);
+        }
+        Ok(Some(task))
+    }
+
     /// Executes supported consumer success conditions through the governed
     /// tool broker, records objective evidence, and atomically settles the
     /// launched task/run from the resulting independent evaluation report.
@@ -1346,7 +1407,7 @@ impl AppRuntime {
     pub async fn evaluate_and_settle_consumer_run(
         &self,
         task_id: TaskId,
-    ) -> Result<EvaluationReport, RuntimeError> {
+    ) -> Result<ConsumerEvaluationProgress, RuntimeError> {
         let task = self
             .task(task_id)?
             .ok_or(StorageError::TaskNotFound(task_id))?;
@@ -1398,6 +1459,95 @@ impl AppRuntime {
             )
             .into());
         }
+        let existing_checkpoint = self.store()?.consumer_evaluation_checkpoint(task_id)?;
+        let mut checkpoint = existing_checkpoint
+            .clone()
+            .unwrap_or(ConsumerEvaluationCheckpoint {
+                schema_version: AGENT_RUN_SCHEMA_VERSION,
+                task_id,
+                run_id,
+                project_snapshot_id: project.id,
+                state: ConsumerEvaluationCheckpointState::Running,
+                next_condition_index: 0,
+                attempt: 0,
+                request_id: None,
+                batch_approved: false,
+                results: Vec::new(),
+                evidence: Vec::new(),
+                regressions: Vec::new(),
+                objective_failures: 0,
+                unsupported: 0,
+                executed: 0,
+                updated_at: Utc::now(),
+            });
+        if checkpoint.run_id != run_id
+            || checkpoint.project_snapshot_id != project.id
+            || checkpoint.state != ConsumerEvaluationCheckpointState::Running
+            || checkpoint.next_condition_index > conditions.len()
+        {
+            return Err(StorageError::Conflict(
+                "consumer evaluation checkpoint is stale or not resumable".into(),
+            )
+            .into());
+        }
+        if existing_checkpoint.is_none() {
+            let event = self
+                .store()?
+                .save_consumer_evaluation_checkpoint(&checkpoint)?;
+            let _ = self.event_sender.send(event);
+        }
+        if self.config.autonomy == AutonomyPreset::Guided && !checkpoint.batch_approved {
+            let request_id = objective_batch_request_id(run_id, checkpoint.attempt, &conditions)?;
+            let control = self.tool_control();
+            let approval = control
+                .find_for(request_id)
+                .await
+                .map_err(runtime_tool_error)?;
+            let approval_id = if let Some(approval) = approval {
+                if approval.state != ApprovalState::Pending {
+                    return Err(StorageError::Conflict(
+                        "guided evaluation batch approval is not pending".into(),
+                    )
+                    .into());
+                }
+                approval.id
+            } else {
+                let approval_id = ApprovalId::new();
+                let commands = conditions
+                    .iter()
+                    .filter_map(objective_command)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                control
+                    .create(ApprovalRequest {
+                        schema_version: TOOL_SCHEMA_VERSION,
+                        id: approval_id,
+                        tool_request_id: request_id,
+                        task_id,
+                        action: "evaluation.run_discovered_checks".into(),
+                        resource: project.root.clone(),
+                        reason: format!(
+                            "Guided mode requires approval to run these discovered project checks: {commands}"
+                        ),
+                        state: ApprovalState::Pending,
+                        requested_at: Utc::now(),
+                        expires_at: Utc::now() + Duration::hours(24),
+                    })
+                    .await
+                    .map_err(runtime_tool_error)?;
+                approval_id
+            };
+            checkpoint.state = ConsumerEvaluationCheckpointState::WaitingForApproval;
+            checkpoint.request_id = Some(request_id);
+            checkpoint.updated_at = Utc::now();
+            let (_task, events) = self
+                .store()?
+                .wait_consumer_evaluation_approval(&checkpoint)?;
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            return Ok(ConsumerEvaluationProgress::AwaitingApproval { approval_id });
+        }
         let root = std::path::PathBuf::from(&project.root);
         let process = ProcessExecutor::new([root.clone()], Arc::new(RejectingCredentialResolver))
             .map_err(runtime_tool_error)?;
@@ -1422,52 +1572,46 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: if self.config.autonomy == AutonomyPreset::Guided
+                    && checkpoint.batch_approved
+                {
+                    AutonomyPreset::Balanced
+                } else {
+                    self.config.autonomy
+                },
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),
                 redactor: OutputRedactor::default(),
             },
         );
-        let mut results = Vec::new();
-        let mut evidence = Vec::new();
-        let mut regressions = Vec::new();
-        let mut objective_failures = 0_u32;
-        let mut unsupported = 0_u32;
-        let mut executed = 0_u32;
-        for (index, condition) in conditions.iter().enumerate() {
+        for (index, condition) in conditions
+            .iter()
+            .enumerate()
+            .skip(checkpoint.next_condition_index)
+        {
             let Some(command) = objective_command(condition) else {
-                unsupported = unsupported.saturating_add(1);
+                checkpoint.unsupported = checkpoint.unsupported.saturating_add(1);
                 let detail = "No deterministic evaluator is implemented for this condition yet.";
-                results.push(ConditionResult {
+                checkpoint.results.push(ConditionResult {
                     condition: condition.clone(),
                     passed: false,
                     detail: detail.into(),
                 });
-                evidence.push(EvaluationEvidence {
+                checkpoint.evidence.push(EvaluationEvidence {
                     method: "unsupported_condition".into(),
                     artifact_sha256: None,
                     event_sequence: None,
                     detail: detail.into(),
                 });
+                checkpoint.next_condition_index = index.saturating_add(1);
+                checkpoint.updated_at = Utc::now();
+                let event = self
+                    .store()?
+                    .save_consumer_evaluation_checkpoint(&checkpoint)?;
+                let _ = self.event_sender.send(event);
                 continue;
             };
-            if self.config.autonomy == AutonomyPreset::Guided {
-                unsupported = unsupported.saturating_add(1);
-                let detail = "Guided mode does not run build/test checks without a dedicated evaluation approval.";
-                results.push(ConditionResult {
-                    condition: condition.clone(),
-                    passed: false,
-                    detail: detail.into(),
-                });
-                evidence.push(EvaluationEvidence {
-                    method: "guided_evaluation_deferred".into(),
-                    artifact_sha256: None,
-                    event_sequence: None,
-                    detail: detail.into(),
-                });
-                continue;
-            }
             if !project
                 .commands
                 .iter()
@@ -1484,37 +1628,60 @@ impl AppRuntime {
                 format!("Objectively evaluate: {command}"),
                 ToolRequestKind::ProcessExec { options },
             );
-            request.id = objective_request_id(run_id, index, condition)?;
+            request.id = objective_request_id(run_id, index, checkpoint.attempt, condition)?;
             request.timeout_seconds = task
                 .budget
                 .max_duration_seconds
                 .unwrap_or(1_800)
                 .clamp(1, 86_400);
-            let outcome = broker.execute(&request).await.map_err(runtime_tool_error)?;
-            executed = executed.saturating_add(1);
+            let outcome = match broker.execute(&request).await {
+                Ok(outcome) => outcome,
+                Err(ToolError::ApprovalRequired { approval_id, .. }) => {
+                    checkpoint.state = ConsumerEvaluationCheckpointState::WaitingForApproval;
+                    checkpoint.request_id = Some(request.id);
+                    checkpoint.updated_at = Utc::now();
+                    let (_task, events) = self
+                        .store()?
+                        .wait_consumer_evaluation_approval(&checkpoint)?;
+                    for event in events {
+                        let _ = self.event_sender.send(event);
+                    }
+                    return Ok(ConsumerEvaluationProgress::AwaitingApproval { approval_id });
+                }
+                Err(error) => return Err(runtime_tool_error(error)),
+            };
+            checkpoint.executed = checkpoint.executed.saturating_add(1);
             let passed = outcome.status == ToolOutcomeStatus::Succeeded;
             if !passed {
-                objective_failures = objective_failures.saturating_add(1);
+                checkpoint.objective_failures = checkpoint.objective_failures.saturating_add(1);
             }
             let detail = objective_outcome_detail(&outcome);
             if !passed {
-                regressions.push(format!("{command}: {detail}"));
+                checkpoint.regressions.push(format!("{command}: {detail}"));
             }
-            results.push(ConditionResult {
+            checkpoint.results.push(ConditionResult {
                 condition: condition.clone(),
                 passed,
                 detail: detail.clone(),
             });
-            evidence.push(EvaluationEvidence {
+            checkpoint.evidence.push(EvaluationEvidence {
                 method: "governed_process_exit".into(),
                 artifact_sha256: None,
                 event_sequence: None,
                 detail: format!("{command}: {detail}"),
             });
+            checkpoint.next_condition_index = index.saturating_add(1);
+            checkpoint.attempt = 0;
+            checkpoint.request_id = None;
+            checkpoint.updated_at = Utc::now();
+            let event = self
+                .store()?
+                .save_consumer_evaluation_checkpoint(&checkpoint)?;
+            let _ = self.event_sender.send(event);
         }
-        let outcome = if objective_failures > 0 {
+        let outcome = if checkpoint.objective_failures > 0 {
             EvaluationOutcome::Failed
-        } else if unsupported > 0 {
+        } else if checkpoint.unsupported > 0 {
             EvaluationOutcome::Inconclusive
         } else {
             EvaluationOutcome::Passed
@@ -1525,7 +1692,7 @@ impl AppRuntime {
             } else {
                 9_500
             },
-            executed,
+            checkpoint.executed,
         )
         .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let report = EvaluationReport {
@@ -1534,18 +1701,20 @@ impl AppRuntime {
             run_id,
             task_id,
             evaluator_instance_id: Some(evaluator_instance_id),
-            conditions: results,
+            conditions: checkpoint.results.clone(),
             outcome,
             confidence,
-            regressions,
-            evidence,
+            regressions: checkpoint.regressions.clone(),
+            evidence: checkpoint.evidence.clone(),
             evaluated_at: Utc::now(),
         };
-        let events = self.store()?.settle_consumer_evaluation(&report)?;
+        let events = self
+            .store()?
+            .settle_consumer_evaluation(&report, &checkpoint)?;
         for event in events {
             let _ = self.event_sender.send(event);
         }
-        Ok(report)
+        Ok(ConsumerEvaluationProgress::Settled(report))
     }
 
     /// Atomically records a planned run and immutable work plan.
@@ -2303,6 +2472,18 @@ impl AppRuntime {
         if matches!(
             resolution.state,
             ApprovalState::Denied | ApprovalState::Cancelled
+        ) && let Some((approval, events)) =
+            store.reject_consumer_evaluation_approval(resolution)?
+        {
+            drop(store);
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            return Ok(approval);
+        }
+        if matches!(
+            resolution.state,
+            ApprovalState::Denied | ApprovalState::Cancelled
         ) && let Some((approval, events)) = store.reject_waiting_agent_approval(resolution)?
         {
             drop(store);
@@ -2656,6 +2837,7 @@ fn platform_process_executable(executable: &str) -> String {
 fn objective_request_id(
     run_id: RunId,
     index: usize,
+    attempt: u16,
     condition: &SuccessCondition,
 ) -> Result<ToolRequestId, RuntimeError> {
     let mut hash = Sha256::new();
@@ -2663,8 +2845,30 @@ fn objective_request_id(
     hash.update([0]);
     hash.update(index.to_le_bytes());
     hash.update([0]);
+    hash.update(attempt.to_le_bytes());
+    hash.update([0]);
     hash.update(
         serde_json::to_vec(condition)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    );
+    let digest = hash.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ok(ToolRequestId::from_stable_bytes(bytes))
+}
+
+fn objective_batch_request_id(
+    run_id: RunId,
+    attempt: u16,
+    conditions: &[SuccessCondition],
+) -> Result<ToolRequestId, RuntimeError> {
+    let mut hash = Sha256::new();
+    hash.update(run_id.to_string().as_bytes());
+    hash.update(b"\0guided-evaluation-batch\0");
+    hash.update(attempt.to_le_bytes());
+    hash.update([0]);
+    hash.update(
+        serde_json::to_vec(conditions)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
     );
     let digest = hash.finalize();

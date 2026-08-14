@@ -39,6 +39,7 @@ pub enum EventKind {
     AgentLeaseRecorded,
     AgentLeaseStateChanged,
     AgentUsageRecorded,
+    EvaluationCheckpointed,
     EvaluationRecorded,
     AgentRunMetricsUpdated,
     AgentTurnCompleted,
@@ -79,6 +80,7 @@ impl EventKind {
             Self::AgentLeaseRecorded => "agent_lease_recorded",
             Self::AgentLeaseStateChanged => "agent_lease_state_changed",
             Self::AgentUsageRecorded => "agent_usage_recorded",
+            Self::EvaluationCheckpointed => "evaluation_checkpointed",
             Self::EvaluationRecorded => "evaluation_recorded",
             Self::AgentRunMetricsUpdated => "agent_run_metrics_updated",
             Self::AgentTurnCompleted => "agent_turn_completed",
@@ -137,6 +139,9 @@ impl EventKind {
                 Ok(Self::AgentLeaseStateChanged)
             }
             "agent_usage_recorded" | "AgentUsageRecorded" => Ok(Self::AgentUsageRecorded),
+            "evaluation_checkpointed" | "EvaluationCheckpointed" => {
+                Ok(Self::EvaluationCheckpointed)
+            }
             "evaluation_recorded" | "EvaluationRecorded" => Ok(Self::EvaluationRecorded),
             "agent_run_metrics_updated" | "AgentRunMetricsUpdated" => {
                 Ok(Self::AgentRunMetricsUpdated)

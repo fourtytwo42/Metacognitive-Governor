@@ -98,10 +98,13 @@ durable execution leases. A validated independent `EvaluationReport` carries the
 redacted exit evidence. SQLite records that report and changes the task/run to
 completed or failed in one transaction; an inconclusive report blocks the task
 while leaving the run retryable. Start replay observes terminal evidence and never
-reissues model or objective work. Guided mode currently defers these process checks
-as inconclusive until a dedicated evaluation-approval checkpoint is implemented.
-Non-command conditions remain visibly awaiting evaluation rather than accepting
-model self-report as objective proof.
+reissues model or objective work. Guided mode durably checkpoints evaluation and
+requests one approval for the exact discovered command batch against the immutable
+project snapshot. Denial blocks the task and bounded retry creates a fresh approval
+identity; approval delegates only that batch, and resume after daemon restart
+continues from the stored condition index without another provider turn or repeated
+completed check. Non-command conditions remain visibly awaiting evaluation rather
+than accepting model self-report as objective proof.
 
 ## Verification evidence
 
@@ -118,7 +121,10 @@ a later Start replay.
 The objective fixture uses real cross-platform Node/npm processes to prove passing
 build/test/check conditions atomically complete a task, a nonzero test exit
 atomically fails it, evidence is durable, and terminal replay adds neither model
-calls nor tool audit records.
+calls nor tool audit records. A file-backed guided fixture denies and retries the
+batch with distinct identities, approves it, restarts the daemon while waiting,
+then resumes exactly once and verifies the checkpoint is removed only by atomic
+terminal settlement.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

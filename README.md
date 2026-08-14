@@ -109,9 +109,13 @@ For projects with discovered build, test, or static-analysis commands, Start now
 runs those checks through the governed tool broker after the independent Evaluator
 turn. Passing evidence atomically completes the task/run; a nonzero exit atomically
 fails them. Task History exposes the durable objective result and check counts,
-with per-condition details in advanced mode. Natural-language, browser, HTTP, and
-other condition types remain nonterminal until their objective evaluators are
-implemented; model text alone is never promoted to proof.
+with per-condition details in advanced mode. Guided mode requests one explicit
+approval for the exact discovered command batch and immutable project snapshot.
+That checkpoint survives daemon restart; denial blocks for a bounded retry with a
+fresh request identity, while approval resumes the batch without repeating model
+turns or completed checks. Natural-language, browser, HTTP, and other condition
+types remain nonterminal until their objective evaluators are implemented; model
+text alone is never promoted to proof.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

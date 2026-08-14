@@ -88,7 +88,11 @@ conditions are rerun by the harness through governed typed processes. Only a
 report tied to the completed Evaluator instance and covering every planned
 condition may settle the task and run. Passed reports atomically complete both;
 failed reports atomically fail both; inconclusive reports block the task without
-inventing terminal success.
+inventing terminal success. In guided mode, the harness stores a condition-indexed
+evaluation checkpoint and asks once for the exact discovered command batch. The
+approval is bound to the run, attempt, conditions, and immutable project snapshot;
+restart and resume therefore preserve evidence without granting broader process
+authority or replaying completed checks.
 
 ## Authenticated Control Surface
 

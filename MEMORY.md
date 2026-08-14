@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Command-based objective evaluation and atomic terminal settlement are cross-platform qualified; guided approvals and additional objective condition types are next.
-- Last meaningful change: Added atomic denied/cancelled approval settlement plus governed build/test/static-analysis execution, independent evaluation reports, terminal task/run settlement, and durable desktop evidence rendering.
-- Next step: Add guided evaluation approval checkpoints and objective HTTP/browser/artifact/custom condition evaluators, starting with authenticated HTTP status and rendered-page evidence. Persist full mid-turn checkpoints before supporting external MCP approval resume or eliminating the repeated provider inference. Preserve the visible OAuth handoff.
+- Current task: Durable guided objective-batch approval is Windows-qualified and awaits exact-commit Ubuntu qualification; HTTP and rendered-page objective evidence are next.
+- Last meaningful change: Added a condition-indexed SQLite evaluation checkpoint, one exact-batch guided approval, denial/retry identity rotation, restart-safe resume, and atomic checkpoint deletion with terminal settlement.
+- Next step: Qualify this exact commit on Ubuntu, then add authenticated HTTP-status and rendered-page evaluators before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -23,6 +23,7 @@ Durable project context lives here. Update this file whenever information should
 - Consumer Start requires a selected durable project and uses migration 10 to bind each existing task to exactly one running consumer plan. API, CLI, Tauri, and desktop share the launch contract; retries never reissue model work, and model self-report remains insufficient for completion.
 - Guided local-tool approvals can be reviewed and resumed from the desktop task card. Resume revalidates durable authority and unchanged project context; stable request identity prevents duplicate tool side effects, though the bounded provider turn is currently replayed and may incur another inference call.
 - Consumer plans whose conditions are entirely discovered build/test/static-analysis commands now execute those checks through the governed broker after independent Evaluator completion. Validated reports and completed/failed task/run projections commit atomically; terminal Start replay is observation-only.
+- Guided command evaluation stores its run/project/condition progress in SQLite and requests one approval for the immutable discovered batch. Denial blocks for bounded retry with a new request identity; approved work resumes across daemon restart without another provider turn or repeated completed check.
 
 ## User Preferences
 
@@ -111,6 +112,7 @@ When sources conflict, use this order:
 - The `mcg-mcp` client boundary stores only secret-free connection metadata/catalogs in migration 9 and bearer secrets under a separate OS credential-store service. Current HTTP configuration performs `server/discover` and `tools/list` before committing; public plaintext endpoints and URL-embedded credentials are rejected. Explicit remote agent tools use canonical `mcp::connection::tool` requests, per-lease aliases, immutable internal bindings, conservative catalog annotations, and the existing policy/approval/audit/execution-lease broker; the executor revalidates enabled catalog identity/classification before every call.
 - Stdio MCP operations spawn a direct child with a minimal environment, bounded line/request sizes, deterministic termination, a five-second current discovery probe, and same-process `2025-11-25` initialize fallback. Stdio accepts no bearer credential; CLI arguments are a direct vector and advanced desktop arguments are one per line.
 - Migration 8 atomically reserves interface-owned runs under an immutable request key/SHA-256 input hash. `mcg_run_agent` requires explicit Coder/Tool Worker tool lists, executes through the existing provider/policy broker, never treats a model response as objective completion, and returns existing success/non-success evidence rather than duplicating work on retry.
+- Migration 11 stores one consumer evaluation checkpoint per task/run. Its state, next condition, attempt, exact approval request, batch delegation flag, evidence, failures, and unsupported conditions are transactionally coordinated with task/run/approval events and removed only by terminal evaluation settlement.
 - M5 SQLite migration 5 makes organization revisions, plans, usage, and evaluations immutable evidence while runs, instances, and leases are event-backed current projections. Startup never resumes stale authority: interrupted runs become `recovering` and active instances/leases expire before reassignment.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
@@ -492,6 +494,15 @@ When sources conflict, use this order:
 - Commands/tests: Strict focused Windows Rust clippy; 24 API tests; real npm/Node objective pass/fail/replay scenario; nine Vitest flows; frontend typecheck/build; docs/diff checks; exact commit `52da160` complete Ubuntu `./scripts/verify.sh`.
 - Result: Passing discovered commands complete the task/run, nonzero exit evidence fails both, and terminal Start replay adds no model call or tool audit record. Desktop History shows durable evaluation outcome/check counts and advanced details; Deny exposes the retryable blocked state. Exact Windows-focused and complete Ubuntu native qualification are green.
 - Follow-up: Add a dedicated guided-mode objective-check approval checkpoint and deterministic HTTP, browser, artifact/file, research, screenshot, and custom-condition evaluators; non-command conditions deliberately remain nonterminal.
+
+### 2026-08-14 - Durable Guided Objective Approval
+
+- Context: Guided mode could not run harness-owned build/test/static-analysis checks because approval state and partial evaluation evidence did not survive a daemon restart.
+- Decision: Persist one condition-indexed evaluation checkpoint per consumer run; request a single approval bound to the exact discovered command batch, attempt, and immutable project snapshot; rotate identity after denial/retry; and treat approval as delegation only for that batch. Resume restores a recovering run without replaying provider turns or completed checks, and terminal settlement deletes the checkpoint atomically with its report and projections.
+- Files: `crates/mcg-{events,storage,runtime,api}/`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`, `README.md`.
+- Commands/tests: Strict focused Windows Rust clippy; focused Rust suites including 25 API tests; nine Vitest flows; frontend typecheck/build; documentation and diff checks.
+- Result: A file-backed API fixture proves wait, denial, bounded retry with fresh identity, approval, daemon restart into recovery, exact resume, three real npm/Node checks, terminal completion, checkpoint cleanup, two total model calls, and no duplicate tool completion.
+- Follow-up: Complete exact-commit Ubuntu qualification, then implement HTTP-status and rendered-page objective evaluators.
 
 ## Known Issues
 

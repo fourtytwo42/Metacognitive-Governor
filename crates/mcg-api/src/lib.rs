@@ -40,9 +40,9 @@ use mcg_providers::{
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, McpMutation, MemoryClaimMutation,
-    OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation, ProviderMutation, RuntimeError,
-    RuntimeStatus,
+    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, ConsumerEvaluationProgress,
+    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation,
+    ProviderMutation, RuntimeError, RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
@@ -1041,6 +1041,11 @@ async fn retry_task(
         .task_launch_run_id(task_id)
         .map_err(map_runtime_error)?
         .ok_or_else(|| ApiError::conflict("task has no consumer launch to retry"))?;
+    let evaluation_retry = state
+        .runtime
+        .retry_consumer_evaluation(task_id)
+        .map_err(map_runtime_error)?
+        .is_some();
     let view = state
         .runtime
         .agent_run_view(run_id)
@@ -1055,10 +1060,12 @@ async fn retry_task(
         .organization_revision(view.run.organization_revision_id)
         .map_err(map_runtime_error)?
         .ok_or_else(|| ApiError::internal("consumer run organization disappeared"))?;
-    state
-        .runtime
-        .transition_task(task_id, TaskState::Active)
-        .map_err(map_runtime_error)?;
+    if !evaluation_retry {
+        state
+            .runtime
+            .transition_task(task_id, TaskState::Active)
+            .map_err(map_runtime_error)?;
+    }
     advance_consumer_run(&state, task_id, project_id, &organization, &view, &request)
         .await
         .map(Json)
@@ -1070,16 +1077,28 @@ async fn resume_task(
     Json(request): Json<LaunchTaskRequest>,
 ) -> Result<Json<LaunchTaskResponse>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
-    state
+    if state
         .runtime
-        .resume_approved_agent_work(
-            task_id,
-            request.context_token_budget,
-            request.estimated_output_tokens,
-            request.max_model_calls,
-        )
-        .await
-        .map_err(map_runtime_error)?;
+        .consumer_evaluation_checkpoint(task_id)
+        .map_err(map_runtime_error)?
+        .is_some()
+    {
+        state
+            .runtime
+            .resume_consumer_evaluation(task_id)
+            .map_err(map_runtime_error)?;
+    } else {
+        state
+            .runtime
+            .resume_approved_agent_work(
+                task_id,
+                request.context_token_budget,
+                request.estimated_output_tokens,
+                request.max_model_calls,
+            )
+            .await
+            .map_err(map_runtime_error)?;
+    }
     let task = state
         .runtime
         .task(task_id)
@@ -1203,20 +1222,28 @@ async fn advance_consumer_run(
             .map_err(map_runtime_error)?
             .is_some_and(|task| task.state == TaskState::Active)
     {
-        let report = state
+        let progress = state
             .runtime
             .evaluate_and_settle_consumer_run(task_id)
             .await
             .map_err(map_runtime_error)?;
-        execution = match report.outcome {
-            mcg_agents::EvaluationOutcome::Passed => LaunchExecution::Completed {
-                detail: "All planned work and objective checks passed.".into(),
-            },
-            mcg_agents::EvaluationOutcome::Failed => LaunchExecution::Failed {
-                detail: "One or more objective checks failed; inspect evaluation evidence.".into(),
-            },
-            mcg_agents::EvaluationOutcome::Inconclusive => LaunchExecution::Blocked {
-                detail: "Objective checks were inconclusive; configuration or additional evidence is required.".into(),
+        execution = match progress {
+            ConsumerEvaluationProgress::AwaitingApproval { .. } => {
+                LaunchExecution::AwaitingApproval {
+                    detail: "A guided objective check is waiting for owner approval.".into(),
+                }
+            }
+            ConsumerEvaluationProgress::Settled(report) => match report.outcome {
+                mcg_agents::EvaluationOutcome::Passed => LaunchExecution::Completed {
+                    detail: "All planned work and objective checks passed.".into(),
+                },
+                mcg_agents::EvaluationOutcome::Failed => LaunchExecution::Failed {
+                    detail:
+                        "One or more objective checks failed; inspect evaluation evidence.".into(),
+                },
+                mcg_agents::EvaluationOutcome::Inconclusive => LaunchExecution::Blocked {
+                    detail: "Objective checks were inconclusive; configuration or additional evidence is required.".into(),
+                },
             },
         };
     }
@@ -3923,6 +3950,244 @@ form.addEventListener('submit', (event) => {
                 .all(|evidence| evidence.method == "governed_process_exit")
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Deny/retry/restart/approve/resume is one durable public scenario.
+    async fn guided_objective_batch_approval_survives_restart_and_resumes_once() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("README.md"),
+            "# Guided objective fixture\n",
+        )
+        .expect("readme");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"build":"node build.mjs","test":"node test.mjs","check":"node check.mjs"}}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            project_root.join("build.mjs"),
+            "import { mkdirSync } from 'node:fs'; mkdirSync('dist', { recursive: true });\n",
+        )
+        .expect("build script");
+        std::fs::write(project_root.join("test.mjs"), "process.exit(0);\n").expect("test script");
+        std::fs::write(project_root.join("check.mjs"), "process.exit(0);\n").expect("check script");
+        let mut config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        config.autonomy = AutonomyPreset::Guided;
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("durable runtime"));
+        let token = std::fs::read_to_string(config.auth_token_path())
+            .expect("auth token")
+            .trim()
+            .to_owned();
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "guided_objective_fixture".into(),
+                    display_name: "Guided Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let mut task = TaskEnvelope::new("Run approved objective gates once");
+        task.project_id = Some(project.project_id);
+        runtime.create_task(&task).expect("task");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+        let task_path = format!("/api/v1/tasks/{}/launch", task.id);
+        let waiting = app
+            .clone()
+            .oneshot(
+                Request::post(&task_path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("guided launch");
+        assert_eq!(waiting.status(), StatusCode::OK);
+        let waiting: LaunchTaskResponse = serde_json::from_slice(
+            &waiting
+                .into_body()
+                .collect()
+                .await
+                .expect("waiting body")
+                .to_bytes(),
+        )
+        .expect("waiting response");
+        assert_eq!(waiting.task.state, TaskState::WaitingForApproval);
+        assert!(matches!(
+            waiting.execution,
+            LaunchExecution::AwaitingApproval { .. }
+        ));
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        let first_approval = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("first approval")
+            .pop()
+            .expect("pending batch approval");
+        assert_eq!(first_approval.action, "evaluation.run_discovered_checks");
+        let checkpoint = runtime
+            .consumer_evaluation_checkpoint(task.id)
+            .expect("checkpoint read")
+            .expect("waiting checkpoint");
+        assert_eq!(checkpoint.next_condition_index, 0);
+        assert_eq!(checkpoint.attempt, 0);
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/approvals/{}/resolve", first_approval.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"state":"denied","reason":"exercise fresh retry authority"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("deny response");
+        assert_eq!(denied.status(), StatusCode::OK);
+        assert_eq!(
+            runtime
+                .task(task.id)
+                .expect("task read")
+                .expect("task present")
+                .state,
+            TaskState::Blocked
+        );
+        let blocked_checkpoint = runtime
+            .consumer_evaluation_checkpoint(task.id)
+            .expect("blocked checkpoint")
+            .expect("checkpoint present");
+        assert_eq!(blocked_checkpoint.attempt, 1);
+
+        let retried = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{}/retry", task.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("retry response");
+        assert_eq!(retried.status(), StatusCode::OK);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        let second_approval = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("retry approval")
+            .pop()
+            .expect("fresh pending approval");
+        assert_ne!(second_approval.id, first_approval.id);
+        assert_ne!(
+            second_approval.tool_request_id,
+            first_approval.tool_request_id
+        );
+
+        let approved = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/approvals/{}/resolve", second_approval.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"state":"approved","reason":"approve exact discovered checks"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("approve response");
+        assert_eq!(approved.status(), StatusCode::OK);
+        let run_id = waiting.run.run.id;
+        drop(app);
+        drop(runtime);
+
+        let reopened = Arc::new(AppRuntime::open(config).expect("reopen durable runtime"));
+        assert_eq!(
+            reopened
+                .agent_run_view(run_id)
+                .expect("recovered run")
+                .run
+                .state,
+            AgentRunState::Recovering
+        );
+        assert_eq!(
+            reopened
+                .task(task.id)
+                .expect("recovered task")
+                .expect("task present")
+                .state,
+            TaskState::WaitingForApproval
+        );
+        let resumed = router(reopened.clone())
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{}/resume", task.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("resume response");
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let resumed: LaunchTaskResponse = serde_json::from_slice(
+            &resumed
+                .into_body()
+                .collect()
+                .await
+                .expect("resumed body")
+                .to_bytes(),
+        )
+        .expect("resumed response");
+        assert_eq!(resumed.task.state, TaskState::Completed);
+        assert_eq!(resumed.run.run.state, AgentRunState::Completed);
+        assert!(matches!(
+            resumed.execution,
+            LaunchExecution::Completed { .. }
+        ));
+        assert_eq!(resumed.run.evaluations.len(), 1);
+        assert_eq!(resumed.run.evaluations[0].conditions.len(), 3);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert!(
+            reopened
+                .consumer_evaluation_checkpoint(task.id)
+                .expect("terminal checkpoint read")
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .tool_audit(task.id)
+                .expect("objective audit")
+                .iter()
+                .filter(|record| record.phase == ToolAuditPhase::Completion)
+                .count(),
+            3
+        );
     }
 
     #[tokio::test]

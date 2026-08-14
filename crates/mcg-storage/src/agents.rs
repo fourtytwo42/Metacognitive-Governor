@@ -5,8 +5,8 @@ use mcg_agents::{
     EvaluationReport, OrganizationGenome, OrganizationalMetrics, UsageKind, WorkPlan,
 };
 use mcg_domain::{
-    AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, RunId, TaskEnvelope,
-    TaskState,
+    AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, ProjectSnapshotId,
+    RunId, TaskEnvelope, TaskState, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState};
@@ -63,7 +63,478 @@ pub struct AgentResumeReceipt {
     pub events: Vec<EventEnvelope>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerEvaluationCheckpointState {
+    Running,
+    WaitingForApproval,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsumerEvaluationCheckpoint {
+    pub schema_version: u16,
+    pub task_id: mcg_domain::TaskId,
+    pub run_id: RunId,
+    pub project_snapshot_id: ProjectSnapshotId,
+    pub state: ConsumerEvaluationCheckpointState,
+    pub next_condition_index: usize,
+    pub attempt: u16,
+    pub request_id: Option<ToolRequestId>,
+    #[serde(default)]
+    pub batch_approved: bool,
+    pub results: Vec<mcg_agents::ConditionResult>,
+    pub evidence: Vec<mcg_agents::EvaluationEvidence>,
+    pub regressions: Vec<String>,
+    pub objective_failures: u32,
+    #[serde(default)]
+    pub unsupported: u32,
+    pub executed: u32,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl SqliteEventStore {
+    /// Loads the durable objective-evaluation checkpoint for one consumer task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted checkpoint JSON is invalid.
+    pub fn consumer_evaluation_checkpoint(
+        &self,
+        task_id: mcg_domain::TaskId,
+    ) -> Result<Option<ConsumerEvaluationCheckpoint>, StorageError> {
+        self.read_optional_json(
+            "SELECT checkpoint_json FROM consumer_evaluation_checkpoints WHERE task_id = ?1",
+            &task_id.to_string(),
+        )
+    }
+
+    /// Persists a running evaluation checkpoint with a matching event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale task/run authority or invalid checkpoint state.
+    pub fn save_consumer_evaluation_checkpoint(
+        &mut self,
+        checkpoint: &ConsumerEvaluationCheckpoint,
+    ) -> Result<EventEnvelope, StorageError> {
+        if checkpoint.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || checkpoint.state != ConsumerEvaluationCheckpointState::Running
+            || self.task_launch_run_id(checkpoint.task_id)? != Some(checkpoint.run_id)
+        {
+            return Err(StorageError::InvalidData(
+                "consumer evaluation checkpoint identity or state is invalid".into(),
+            ));
+        }
+        let task = self
+            .load_task(checkpoint.task_id)?
+            .ok_or(StorageError::TaskNotFound(checkpoint.task_id))?;
+        let run = self
+            .agent_run(checkpoint.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(checkpoint.run_id))?;
+        if task.state != TaskState::Active || run.state != AgentRunState::Running {
+            return Err(StorageError::Conflict(
+                "running evaluation checkpoint has stale task/run authority".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        upsert_consumer_evaluation_checkpoint(&transaction, checkpoint)?;
+        let event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::EvaluationCheckpointed,
+                Some(checkpoint.task_id),
+                serde_json::to_value(checkpoint)?,
+            ),
+        )?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Atomically checkpoints an approval-required objective condition and
+    /// moves the task into its visible waiting state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the checkpoint identifies a pending approval
+    /// and the task/run still hold active evaluation authority.
+    pub fn wait_consumer_evaluation_approval(
+        &mut self,
+        checkpoint: &ConsumerEvaluationCheckpoint,
+    ) -> Result<(TaskEnvelope, Vec<EventEnvelope>), StorageError> {
+        let request_id = checkpoint.request_id.ok_or_else(|| {
+            StorageError::InvalidData("waiting evaluation checkpoint has no request id".into())
+        })?;
+        if checkpoint.state != ConsumerEvaluationCheckpointState::WaitingForApproval
+            || self.task_launch_run_id(checkpoint.task_id)? != Some(checkpoint.run_id)
+            || !self
+                .approval_for_request(request_id)?
+                .is_some_and(|approval| approval.state == ApprovalState::Pending)
+        {
+            return Err(StorageError::Conflict(
+                "evaluation checkpoint does not have one pending approval".into(),
+            ));
+        }
+        let mut task = self
+            .load_task(checkpoint.task_id)?
+            .ok_or(StorageError::TaskNotFound(checkpoint.task_id))?;
+        let run = self
+            .agent_run(checkpoint.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(checkpoint.run_id))?;
+        if task.state != TaskState::Active || run.state != AgentRunState::Running {
+            return Err(StorageError::Conflict(
+                "evaluation task/run changed before approval wait".into(),
+            ));
+        }
+        task.transition_to(TaskState::WaitingForApproval)?;
+        task.updated_at = checkpoint.updated_at;
+        let transaction = self.connection.transaction()?;
+        upsert_consumer_evaluation_checkpoint(&transaction, checkpoint)?;
+        let checkpoint_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::EvaluationCheckpointed,
+                Some(checkpoint.task_id),
+                serde_json::to_value(checkpoint)?,
+            ),
+        )?;
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(checkpoint.task_id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::Active,
+                    to: TaskState::WaitingForApproval,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        transaction.commit()?;
+        Ok((task, vec![checkpoint_event, task_event]))
+    }
+
+    /// Restores a waiting evaluation checkpoint after its request is approved.
+    /// Interrupted runs are restored from recovering because the checkpoint
+    /// itself carries no active process authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless checkpoint, approval, task, and run agree.
+    pub fn resume_consumer_evaluation(
+        &mut self,
+        task_id: mcg_domain::TaskId,
+        at: DateTime<Utc>,
+    ) -> Result<(ConsumerEvaluationCheckpoint, Vec<EventEnvelope>), StorageError> {
+        let mut checkpoint = self
+            .consumer_evaluation_checkpoint(task_id)?
+            .ok_or_else(|| StorageError::Conflict("task has no evaluation checkpoint".into()))?;
+        let request_id = checkpoint.request_id.ok_or_else(|| {
+            StorageError::InvalidData("waiting evaluation checkpoint has no request id".into())
+        })?;
+        if checkpoint.state != ConsumerEvaluationCheckpointState::WaitingForApproval
+            || !self
+                .approval_for_request(request_id)?
+                .is_some_and(|approval| approval.state == ApprovalState::Approved)
+        {
+            return Err(StorageError::Conflict(
+                "evaluation checkpoint approval has not been granted".into(),
+            ));
+        }
+        let mut task = self
+            .load_task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let mut run = self
+            .agent_run(checkpoint.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(checkpoint.run_id))?;
+        if task.state != TaskState::WaitingForApproval
+            || !matches!(
+                run.state,
+                AgentRunState::Running | AgentRunState::Recovering
+            )
+        {
+            return Err(StorageError::Conflict(
+                "evaluation task/run cannot resume from current state".into(),
+            ));
+        }
+        task.transition_to(TaskState::Active)?;
+        task.updated_at = at;
+        checkpoint.state = ConsumerEvaluationCheckpointState::Running;
+        checkpoint.request_id = None;
+        checkpoint.batch_approved = true;
+        checkpoint.updated_at = at;
+        let previous_run = run.state;
+        run.state = AgentRunState::Running;
+        run.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        upsert_consumer_evaluation_checkpoint(&transaction, &checkpoint)?;
+        let mut events = vec![Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::EvaluationCheckpointed,
+                Some(task_id),
+                serde_json::to_value(&checkpoint)?,
+            ),
+        )?];
+        if previous_run != run.state {
+            let changed = transaction.execute(
+                "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+                 WHERE run_id = ?3 AND state = 'recovering'",
+                params![
+                    serde_json::to_string(&run)?,
+                    at.to_rfc3339(),
+                    run.id.to_string(),
+                ],
+            )?;
+            ensure_single_change(changed, "recovering evaluation run changed before resume")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(task_id),
+                    serde_json::json!({"from": previous_run, "to": run.state, "run": &run, "reason": "evaluation_approval_resumed"}),
+                ),
+            )?);
+        }
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(task_id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::WaitingForApproval,
+                    to: TaskState::Active,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok((checkpoint, events))
+    }
+
+    /// Atomically starts a fresh attempt for a denied evaluation checkpoint.
+    ///
+    /// Returns `None` when the blocked task is not an evaluation retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale checkpoint/task/run state.
+    pub fn retry_consumer_evaluation(
+        &mut self,
+        task_id: mcg_domain::TaskId,
+        at: DateTime<Utc>,
+    ) -> Result<Option<(TaskEnvelope, Vec<EventEnvelope>)>, StorageError> {
+        let Some(mut checkpoint) = self.consumer_evaluation_checkpoint(task_id)? else {
+            return Ok(None);
+        };
+        if checkpoint.state != ConsumerEvaluationCheckpointState::Blocked {
+            return Ok(None);
+        }
+        let mut task = self
+            .load_task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let mut run = self
+            .agent_run(checkpoint.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(checkpoint.run_id))?;
+        if task.state != TaskState::Blocked
+            || !matches!(
+                run.state,
+                AgentRunState::Running | AgentRunState::Recovering
+            )
+        {
+            return Err(StorageError::Conflict(
+                "evaluation retry has stale task/run state".into(),
+            ));
+        }
+        task.transition_to(TaskState::Active)?;
+        task.updated_at = at;
+        checkpoint.state = ConsumerEvaluationCheckpointState::Running;
+        checkpoint.request_id = None;
+        checkpoint.batch_approved = false;
+        checkpoint.updated_at = at;
+        let previous_run = run.state;
+        run.state = AgentRunState::Running;
+        run.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        upsert_consumer_evaluation_checkpoint(&transaction, &checkpoint)?;
+        let mut events = vec![Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::EvaluationCheckpointed,
+                Some(task_id),
+                serde_json::to_value(&checkpoint)?,
+            ),
+        )?];
+        if previous_run != run.state {
+            let changed = transaction.execute(
+                "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+                 WHERE run_id = ?3 AND state = 'recovering'",
+                params![
+                    serde_json::to_string(&run)?,
+                    at.to_rfc3339(),
+                    run.id.to_string()
+                ],
+            )?;
+            ensure_single_change(changed, "evaluation retry run changed concurrently")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(task_id),
+                    serde_json::json!({"from": previous_run, "to": run.state, "run": &run, "reason": "evaluation_retry"}),
+                ),
+            )?);
+        }
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(task_id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::Blocked,
+                    to: TaskState::Active,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok(Some((task, events)))
+    }
+
+    /// Atomically denies/cancels a waiting objective-check approval and blocks
+    /// the task for a fresh evaluation attempt.
+    ///
+    /// Returns `None` when the approval belongs to a different workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale approval/checkpoint/task/run state.
+    #[allow(clippy::too_many_lines)] // Approval, checkpoint, and projections share one transaction.
+    pub fn reject_consumer_evaluation_approval(
+        &mut self,
+        resolution: &ApprovalResolution,
+    ) -> Result<Option<(ApprovalRequest, Vec<EventEnvelope>)>, StorageError> {
+        if !matches!(
+            resolution.state,
+            ApprovalState::Denied | ApprovalState::Cancelled
+        ) {
+            return Ok(None);
+        }
+        let mut approval = self
+            .approval(resolution.approval_id)?
+            .ok_or_else(|| StorageError::Conflict("approval was not found".into()))?;
+        let Some(mut checkpoint) = self.consumer_evaluation_checkpoint(approval.task_id)? else {
+            return Ok(None);
+        };
+        if checkpoint.state != ConsumerEvaluationCheckpointState::WaitingForApproval
+            || checkpoint.request_id != Some(approval.tool_request_id)
+        {
+            return Ok(None);
+        }
+        if approval.state != ApprovalState::Pending || approval.expires_at <= resolution.resolved_at
+        {
+            return Err(StorageError::Conflict(
+                "approval is no longer pending and unexpired".into(),
+            ));
+        }
+        let mut task = self
+            .load_task(approval.task_id)?
+            .ok_or(StorageError::TaskNotFound(approval.task_id))?;
+        let mut run = self
+            .agent_run(checkpoint.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(checkpoint.run_id))?;
+        if task.state != TaskState::WaitingForApproval
+            || !matches!(
+                run.state,
+                AgentRunState::Running | AgentRunState::Recovering
+            )
+        {
+            return Err(StorageError::Conflict(
+                "evaluation rejection has stale task/run state".into(),
+            ));
+        }
+        let at = resolution.resolved_at;
+        approval.state = resolution.state;
+        checkpoint.state = ConsumerEvaluationCheckpointState::Blocked;
+        checkpoint.request_id = None;
+        checkpoint.batch_approved = false;
+        checkpoint.attempt = checkpoint.attempt.saturating_add(1);
+        checkpoint.updated_at = at;
+        task.transition_to(TaskState::Blocked)?;
+        task.updated_at = at;
+        let previous_run = run.state;
+        run.state = AgentRunState::Running;
+        run.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE approvals SET state = ?1, approval_json = ?2, resolved_at = ?3
+             WHERE approval_id = ?4 AND state = 'pending'",
+            params![
+                crate::approval_state_name(approval.state),
+                serde_json::to_string(&approval)?,
+                at.to_rfc3339(),
+                approval.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "evaluation approval changed before rejection")?;
+        upsert_consumer_evaluation_checkpoint(&transaction, &checkpoint)?;
+        let mut events = vec![
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::ApprovalResolved,
+                    Some(task.id),
+                    serde_json::json!({"approval": approval, "resolution": resolution}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::EvaluationCheckpointed,
+                    Some(task.id),
+                    serde_json::to_value(&checkpoint)?,
+                ),
+            )?,
+        ];
+        if previous_run != run.state {
+            let changed = transaction.execute(
+                "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+                 WHERE run_id = ?3 AND state = 'recovering'",
+                params![
+                    serde_json::to_string(&run)?,
+                    at.to_rfc3339(),
+                    run.id.to_string()
+                ],
+            )?;
+            ensure_single_change(changed, "evaluation rejection run changed concurrently")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunStateChanged,
+                    Some(task.id),
+                    serde_json::json!({"from": previous_run, "to": run.state, "run": &run, "reason": "evaluation_approval_rejected"}),
+                ),
+            )?);
+        }
+        let task_event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::TaskStateChanged,
+                Some(task.id),
+                serde_json::to_value(TaskStateChangedPayload {
+                    from: TaskState::WaitingForApproval,
+                    to: TaskState::Blocked,
+                })?,
+            ),
+        )?;
+        Self::upsert_task(&transaction, &task, task_event.sequence)?;
+        events.push(task_event);
+        transaction.commit()?;
+        Ok(Some((approval, events)))
+    }
+
     /// Atomically resolves a denied/cancelled approval for a launched waiting
     /// turn and revokes all authority retained for that turn.
     ///
@@ -2294,8 +2765,17 @@ impl SqliteEventStore {
     pub fn settle_consumer_evaluation(
         &mut self,
         report: &EvaluationReport,
+        checkpoint: &ConsumerEvaluationCheckpoint,
     ) -> Result<Vec<EventEnvelope>, StorageError> {
         let (mut run, plan) = self.validate_evaluation_report(report)?;
+        if checkpoint.task_id != report.task_id
+            || checkpoint.run_id != report.run_id
+            || checkpoint.state != ConsumerEvaluationCheckpointState::Running
+        {
+            return Err(StorageError::Conflict(
+                "evaluation report does not match its running checkpoint".into(),
+            ));
+        }
         if self.task_launch_run_id(report.task_id)? != Some(run.id) {
             return Err(StorageError::Conflict(
                 "evaluation run is not the task's consumer launch".into(),
@@ -2361,14 +2841,36 @@ impl SqliteEventStore {
                 at.to_rfc3339(),
             ],
         )?;
-        let mut events = vec![Self::insert_event(
+        let mut events = Vec::new();
+        if report.outcome == mcg_agents::EvaluationOutcome::Inconclusive {
+            let mut blocked = checkpoint.clone();
+            blocked.state = ConsumerEvaluationCheckpointState::Blocked;
+            blocked.attempt = blocked.attempt.saturating_add(1);
+            blocked.request_id = None;
+            blocked.updated_at = at;
+            upsert_consumer_evaluation_checkpoint(&transaction, &blocked)?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::EvaluationCheckpointed,
+                    Some(report.task_id),
+                    serde_json::to_value(&blocked)?,
+                ),
+            )?);
+        } else {
+            transaction.execute(
+                "DELETE FROM consumer_evaluation_checkpoints WHERE task_id = ?1 AND run_id = ?2",
+                params![report.task_id.to_string(), report.run_id.to_string()],
+            )?;
+        }
+        events.push(Self::insert_event(
             &transaction,
             &EventEnvelope::new(
                 EventKind::EvaluationRecorded,
                 Some(report.task_id),
                 serde_json::to_value(report)?,
             ),
-        )?];
+        )?);
         if run.state != previous_run {
             let changed = transaction.execute(
                 "UPDATE agent_runs SET state = ?1, run_json = ?2, updated_at = ?3,
@@ -2660,6 +3162,40 @@ fn insert_agent_usage(
         ],
     )?;
     Ok(())
+}
+
+fn upsert_consumer_evaluation_checkpoint(
+    transaction: &Transaction<'_>,
+    checkpoint: &ConsumerEvaluationCheckpoint,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "INSERT INTO consumer_evaluation_checkpoints(
+            task_id, run_id, state, checkpoint_json, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(task_id) DO UPDATE SET
+            state = excluded.state,
+            checkpoint_json = excluded.checkpoint_json,
+            updated_at = excluded.updated_at
+         WHERE consumer_evaluation_checkpoints.run_id = excluded.run_id",
+        params![
+            checkpoint.task_id.to_string(),
+            checkpoint.run_id.to_string(),
+            consumer_evaluation_checkpoint_state_name(checkpoint.state),
+            serde_json::to_string(checkpoint)?,
+            checkpoint.updated_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+const fn consumer_evaluation_checkpoint_state_name(
+    state: ConsumerEvaluationCheckpointState,
+) -> &'static str {
+    match state {
+        ConsumerEvaluationCheckpointState::Running => "running",
+        ConsumerEvaluationCheckpointState::WaitingForApproval => "waiting_for_approval",
+        ConsumerEvaluationCheckpointState::Blocked => "blocked",
+    }
 }
 
 fn budgets_within_parent(plan: &WorkPlan, parent: &mcg_domain::TaskBudget) -> bool {

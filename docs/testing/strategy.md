@@ -59,6 +59,8 @@ The first real-project suite includes:
 - repair a seeded defect and prove regression tests fail before and pass after;
 - run concurrent research and coding only when the task benefits from decomposition;
 - restart the daemon during a long task and resume without duplicate modifications;
+- restart while a guided objective batch awaits approval and resume without a
+  repeated model call, completed check, or broadened command authority;
 - require approval for deployment while allowing autonomous local build/test work;
 - exercise a fake provider failure, model escalation, budget stop, and user steering;
 - compare active and shadow models while accepting output only from the active run.
