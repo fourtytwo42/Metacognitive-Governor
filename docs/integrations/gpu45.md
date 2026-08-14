@@ -1,7 +1,7 @@
 # GPU45 Development Provider
 
 - Status: Available on the owner's private LAN.
-- Last verified: 2026-08-13.
+- Last verified: 2026-08-14.
 - Purpose: Local model inference and optional media/tool capability testing during
   MCG development.
 
@@ -43,7 +43,10 @@ key. On `401`, request a key from the owner; do not guess, scrape, or create one
   metadata. Treat aliases and active models as dynamic and rediscover them rather
   than copying a model ID into source code.
 - The primary inference surface is the streaming OpenAI Responses API at
-  `POST /v1/responses`.
+  `POST /v1/responses`. As of the verification date it returns SSE even when a
+  request explicitly sends `stream: false`; MCG's compatible adapter therefore
+  accepts a terminal `response.completed` SSE event for buffered calls as a
+  documented conformance exception.
 - The console also advertises management APIs for model control, benchmarks,
   transcription, speech, image/video/music generation, research, telemetry, and
   backup operations. Those are separate tool integrations and often require a
@@ -59,3 +62,8 @@ key. On `401`, request a key from the owner; do not guess, scrape, or create one
 - Never include private prompts, access tokens, cookies, or generated private media
   in test logs or fixtures.
 
+Run the opt-in live discovery and inference conformance test locally with:
+
+```text
+MCG_LIVE_GPU45=1 cargo test -p mcg-providers --test gpu45_live
+```

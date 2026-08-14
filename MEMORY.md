@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M1 durable runtime spine is implemented and verified on owner-controlled Windows and Ubuntu machines; ready to begin M2 provider fabric.
-- Last meaningful change: Added versioned task/events, atomic SQLite event/projection writes, replay recovery, local bearer authentication, resumable SSE, expanded CLI, and cross-platform local verification scripts.
-- Next step: Implement M2 provider contracts, explicit authentication modes, discovery/probes, routing/cost metadata, OpenRouter/OpenAI-compatible adapters, GPU45 conformance, and standalone OpenAI OAuth research/adapter.
+- Current task: M2 provider fabric is implemented and verified on owner-controlled Windows and Ubuntu machines; ready to begin M3 typed tools, capabilities, and approvals.
+- Last meaningful change: Completed canonical provider contracts, compatible/OpenRouter adapters, standalone OpenAI browser/device OAuth and refresh, subscription transport, probes, routing/pinning/fallback, cost accounting, and dual-platform GPU45 conformance.
+- Next step: Begin M3 typed filesystem/process/shell/Git/HTTP/system/memory tools with capability policies, approvals, secret isolation, audit events, and adversarial tests.
 - Blockers: None documented.
 
 ## Current State
@@ -99,6 +99,8 @@ When sources conflict, use this order:
 - Provider auth modes are explicit and billing-aware: browser OAuth, device-code OAuth, API key, bearer token, or none. OAuth failure never mutates a connection into API-key billing.
 - The M1 event log is authoritative; task projections are written in the same SQLite transaction and rebuilt by validated replay at daemon startup.
 - The local API rejects non-loopback binds. All routes except health require a generated persistent bearer token; SSE reconnects can replay from `after` or `Last-Event-ID`.
+- Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
+- OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
 
 ## Verification Ledger
 
@@ -121,6 +123,8 @@ When sources conflict, use this order:
 - 2026-08-14: Installed Rust 1.93, Node 24.14, npm, Tauri/WebKit native libraries, and Playwright Chromium on owner-controlled Ubuntu 24.04 VM `192.168.50.109`; no VM password was stored in repository files or memory.
 - 2026-08-14: Windows and Ubuntu local verification scripts passed Rust fmt/clippy/tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E.
 - 2026-08-14: Windows and Ubuntu live daemon/CLI smoke tests created and transitioned a task, terminated the daemon, restarted it, and recovered the same projection with two ordered events; Ubuntu token mode verified as `0600`.
+- 2026-08-14: M2 provider fixture tests passed for model discovery, canonical response/stream normalization, bounded transient retry, credential redaction, and OAuth/API billing-boundary enforcement; opt-in live GPU45 discovery and Responses inference passed against the dynamically reported active model.
+- 2026-08-14: Complete Windows and Ubuntu local verification passed with M2: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. The common live GPU45 discovery/buffered/streaming probe also passed independently from both platforms.
 
 ## Decisions
 
@@ -172,10 +176,29 @@ When sources conflict, use this order:
 - Result: Passing builds or automated tests alone cannot complete the goal; material defects, missing interfaces, unverified release gates, or substantial remaining human regression work keep it active.
 - Follow-up: Continue with M2 provider fabric, then progress through the dependency-ordered roadmap and final cross-platform UAT.
 
+### 2026-08-14 - M2 Provider Contract Foundation
+
+- Context: M2 requires one canonical interface across OpenAI, OpenRouter, GPU45, and arbitrary OpenAI-compatible endpoints without obscuring authentication or cost provenance.
+- Decision: Version provider contracts independently; persist secret-free connection metadata; keep credentials redacted and runtime-only; normalize Responses JSON/SSE; retry only pre-stream transient failures; omit absent fields on the wire; represent unreported prices as unknown.
+- Files: `crates/mcg-providers/src/contracts.rs`, `crates/mcg-providers/src/compatible.rs`, `crates/mcg-providers/tests/gpu45_live.rs`, `docs/integrations/gpu45.md`.
+- Commands/tests: `cargo test -p mcg-providers`; `cargo clippy -p mcg-providers --all-targets -- -D warnings`; `MCG_LIVE_GPU45=1 cargo test -p mcg-providers --test gpu45_live`.
+- Result: Deterministic provider tests and live GPU45 discovery/inference pass. GPU45 currently returns SSE even for `stream: false`, which the adapter handles as an explicit conformance exception.
+- Follow-up: Complete the remaining M2 routing and authentication layers.
+
+### 2026-08-14 - M2 Provider Fabric Complete
+
+- Context: The full M2 exit gate requires common provider behavior, explicit billing, standalone OAuth, dynamic discovery/probes, routing/cost behavior, and opted-in live evidence.
+- Decision: Use separate browser/device OAuth and API-key connection modes; route OAuth only to the ChatGPT Codex subscription backend; never fall back on auth failure; pin each request to one deterministic route with bounded transient fallbacks; enable shadow policy by debug/test default and release opt-in.
+- Files: `crates/mcg-providers/`, `docs/architecture/provider-fabric.md`, `docs/integrations/gpu45.md`, `THIRD_PARTY_NOTICES.md`.
+- Commands/tests: `scripts/verify.ps1`; Ubuntu `scripts/verify.sh`; `MCG_LIVE_GPU45=1 cargo test -p mcg-providers --test gpu45_live` on both Windows and Ubuntu.
+- Result: Nineteen provider unit/fixture tests and the common fake/fixture/live conformance paths pass. Full local platform gates pass, including native desktop builds and E2E. No GitHub automation ran.
+- Follow-up: Begin M3. Add OS credential-store persistence when provider connection management is wired into runtime/UI, and include the full upstream Apache license text in distributable packaging.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
-- MCG must validate that reuse or adaptation of OpenAI's `codex-login` and/or OpenClaw OAuth code is license-compatible and remains functional without depending on the Codex agent runtime. OAuth failures must never silently switch users to API billing.
+- The standalone OAuth implementation is adapted from Apache-2.0 OpenAI Codex source, does not depend on the Codex runtime or credential files, and has fixture coverage for browser/device/refresh flows and billing isolation.
+- OpenAI Codex source is Apache-2.0 licensed and the adapted standalone OAuth code is recorded in `THIRD_PARTY_NOTICES.md`; distributable packages must include the full upstream license text. OAuth endpoint/client compatibility remains an externally drifting integration and needs live UAT before release.
 - macOS packages are intended to ship alongside Windows and Linux but initially will not receive equivalent owner-controlled qualification; document this clearly until a macOS build/test machine exists.
 
 ## Completed Work
@@ -184,14 +207,16 @@ When sources conflict, use this order:
 - 2026-08-13: Split and repaired the PRD, added the product/engineering baseline and repository hygiene files, initialized Git, and published the private GitHub repository.
 - 2026-08-14: Completed and verified M0 architecture, roadmap, test strategy, Rust/Tauri/React workspace, CI, daemon/CLI smoke path, and initial UI/invariant tests.
 - 2026-08-14: Completed and verified the requested M1 runtime spine on Windows and Ubuntu, then disabled and removed GitHub-hosted automation.
+- 2026-08-14: Completed and verified M2 provider fabric on Windows and Ubuntu, including standalone OAuth fixtures and live GPU45 conformance on both platforms.
 
 ## Open Follow-ups
 
 - Choose a public-source license only if/when public distribution is considered; repository remains private.
-- Research and document the exact license/security boundary for a standalone Rust ChatGPT/Codex OAuth adapter using browser callback and device-code flows.
+- Persist provider credentials through Windows Credential Manager/Linux Secret Service when runtime connection management is added; never fall back to plaintext configuration.
+- Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
-- Implement M2 provider fabric, starting with canonical provider contracts and deterministic OpenAI-compatible fixtures.
+- Implement M3 typed tools, capability policies, approvals, audit evidence, and adversarial bypass tests.
 
 ## Do Not Forget
 

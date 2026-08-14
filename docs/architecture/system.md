@@ -57,6 +57,9 @@ The Rust workspace uses small crates with one-way dependencies:
 | `apps/desktop` | React UI and Tauri host using the same application contracts. |
 
 Domain crates do not depend on transports, SQLite, Tauri, or provider SDKs.
+
+The implemented M2 contracts and invariants are detailed in
+[`provider-fabric.md`](provider-fabric.md).
 Provider, tool, and storage implementations depend on domain contracts; runtime
 orchestrates them through traits. API clients never reach storage directly.
 
