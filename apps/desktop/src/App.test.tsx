@@ -6,6 +6,9 @@ const client = vi.hoisted(() => ({
   complete: vi.fn(),
   cancel: vi.fn(),
   open: vi.fn(),
+  listProviders: vi.fn(),
+  configureProvider: vi.fn(),
+  discoverProvider: vi.fn(),
   listMcp: vi.fn(),
   configureMcp: vi.fn(),
   discoverMcp: vi.fn(),
@@ -19,6 +22,7 @@ const client = vi.hoisted(() => ({
   denyRequest: vi.fn(),
   transitionTask: vi.fn(),
   taskEvents: vi.fn(),
+  taskAudit: vi.fn(),
   pickProject: vi.fn(),
   discoverProject: vi.fn(),
   listProjects: vi.fn()
@@ -29,6 +33,9 @@ vi.mock("./desktop-client", () => ({
   completeOpenAiOAuth: client.complete,
   cancelOpenAiOAuth: client.cancel,
   openExternalUrl: client.open,
+  listProviders: client.listProviders,
+  configureProvider: client.configureProvider,
+  discoverProvider: client.discoverProvider,
   listMcpConnections: client.listMcp,
   configureMcpConnection: client.configureMcp,
   discoverMcpConnection: client.discoverMcp,
@@ -42,6 +49,7 @@ vi.mock("./desktop-client", () => ({
   denyRequest: client.denyRequest,
   transitionTask: client.transitionTask,
   loadTaskEvents: client.taskEvents,
+  loadTaskAudit: client.taskAudit,
   pickProjectDirectory: client.pickProject,
   discoverProject: client.discoverProject,
   listProjects: client.listProjects
@@ -54,6 +62,9 @@ beforeEach(() => {
   client.complete.mockReset();
   client.cancel.mockReset();
   client.open.mockReset();
+  client.listProviders.mockReset();
+  client.configureProvider.mockReset();
+  client.discoverProvider.mockReset();
   client.listMcp.mockReset();
   client.configureMcp.mockReset();
   client.discoverMcp.mockReset();
@@ -67,10 +78,12 @@ beforeEach(() => {
   client.denyRequest.mockReset();
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
+  client.taskAudit.mockReset();
   client.pickProject.mockReset();
   client.discoverProject.mockReset();
   client.listProjects.mockReset();
   client.open.mockResolvedValue(undefined);
+  client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
@@ -112,6 +125,44 @@ test("OpenAI subscription login exposes verification then confirms connection", 
   fireEvent.click(screen.getByRole("button", { name: "I’ve authorized MCG" }));
   expect(await screen.findByText("OpenAI Subscription connected")).toBeInTheDocument();
   expect(client.complete).toHaveBeenCalledWith("fixture-session");
+});
+
+test("consumer provider setup discovers a local endpoint and advanced mode shows honest model cost", async () => {
+  const connection = {
+    contract_version: 1,
+    id: "local_gpu",
+    display_name: "Local GPU",
+    kind: "open_ai_compatible",
+    base_url: "http://127.0.0.1:1234/v1",
+    auth_mode: "none"
+  };
+  const catalog = {
+    connection_id: connection.id,
+    models: [{
+      id: "local-model",
+      display_name: "Local Model",
+      capabilities: { responses: true, streaming: true },
+      metadata: {}
+    }],
+    discovered_at: "2026-08-14T00:00:00Z"
+  };
+  client.configureProvider.mockResolvedValue({ connection, catalog });
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Add API or local provider" }));
+  fireEvent.change(screen.getByLabelText("Provider name"), { target: { value: connection.display_name } });
+  fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: connection.base_url } });
+  fireEvent.change(screen.getByLabelText("Authentication"), { target: { value: "none" } });
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Connect provider" }));
+
+  expect(await screen.findByRole("heading", { name: connection.display_name })).toBeInTheDocument();
+  expect(screen.getByText("Endpoint-reported billing · 1 models")).toBeInTheDocument();
+  expect(client.configureProvider).toHaveBeenCalledWith(expect.objectContaining(connection), undefined);
+
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  expect(screen.getByText("Local Model")).toBeInTheDocument();
+  expect(screen.getByText("Cost unknown")).toBeInTheDocument();
 });
 
 test("simple MCP setup discovers a server without exposing advanced credentials", async () => {
@@ -253,6 +304,29 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
       }
     ]
   });
+  client.taskAudit.mockResolvedValue({
+    records: [{
+      schema_version: 1,
+      execution_id: "00000000-0000-4000-8000-000000000060",
+      request_id: "00000000-0000-4000-8000-000000000061",
+      task_id: pendingTask.id,
+      tool: "browser.workflow",
+      resource: "http://127.0.0.1:3000",
+      request_fingerprint: "fixture",
+      phase: "completion",
+      decision: "allow",
+      result: "succeeded",
+      artifacts: [{
+        id: "00000000-0000-4000-8000-000000000062",
+        sha256: "a".repeat(64),
+        media_type: "image/png",
+        size_bytes: 2048,
+        relative_path: "aa/fixture"
+      }],
+      verification: [{ method: "browser.workflow_step", passed: true, detail: "step=1; matched" }],
+      recorded_at: pendingTask.created_at
+    }]
+  });
   render(<App />);
 
   await screen.findByRole("option", { name: "sample" });
@@ -276,11 +350,19 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   expect(client.launchTask).toHaveBeenCalledWith(pendingTask.id);
   expect(screen.getByText("Objective evaluation is still required.")).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "History" }));
-  expect(await screen.findByText("task transitioned")).toBeInTheDocument();
-  expect(screen.getByText("Objective result: passed")).toBeInTheDocument();
-  expect(screen.getByText("2 of 2 checks passed")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
+  expect(await screen.findByText("passed")).toBeInTheDocument();
+  expect(screen.getByText("2 / 2")).toBeInTheDocument();
+  expect(screen.getAllByText("1", { selector: ".evidence-overview strong" })).toHaveLength(2);
   expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
+  expect(client.taskAudit).toHaveBeenCalledWith(pendingTask.id);
+
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  expect(screen.getByText("task transitioned")).toBeInTheDocument();
+  expect(screen.getByText("Governed tool activity")).toBeInTheDocument();
+  expect(screen.getByText("browser.workflow")).toBeInTheDocument();
+  expect(screen.getByText("image/png · 2.0 KiB")).toBeInTheDocument();
+  expect(screen.getByTitle("a".repeat(64))).toBeInTheDocument();
 });
 
 test("blocked task retry is explicit and reports durable progress", async () => {

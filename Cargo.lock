@@ -2783,6 +2783,7 @@ dependencies = [
  "mcg-domain",
  "mcg-events",
  "mcg-mcp",
+ "mcg-providers",
  "mcg-runtime",
  "mcg-tools",
  "reqwest",

@@ -12,4 +12,20 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
   await expect(page.getByLabel("Connection id")).toBeVisible();
   await expect(page.getByLabel("Protocol")).toHaveValue("auto");
+
+  await page.getByRole("button", { name: "Add API or local provider" }).click();
+  await expect(page.getByLabel("Provider type")).toHaveValue("open_ai_compatible");
+  await expect(page.getByLabel("Connection id")).toHaveCount(2);
+});
+
+test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 720, height: 900 });
+  await page.goto("/");
+
+  const mode = page.getByRole("button", { name: "Advanced mode" });
+  await expect(mode).toBeVisible();
+  const box = await mode.boundingBox();
+  expect(box).not.toBeNull();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(720);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
 });

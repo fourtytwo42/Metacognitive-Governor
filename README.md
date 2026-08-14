@@ -83,11 +83,15 @@ the rest of the run evidence.
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can
 set constraints, success conditions, risk, and a cost ceiling. Task cards expose
-only legal start/cancel controls and load ordered event history from SQLite rather
-than reconstructing progress in browser state. “Open folder” uses a native
+only legal start/cancel controls and load ordered event history plus governed tool
+audit from SQLite rather than reconstructing progress in browser state. Simple mode
+summarizes objective outcome, checks, tool runs, and artifacts; advanced mode shows
+the full event timeline, verification methods, resources, and immutable hashes.
+“Open folder” uses a native
 Windows/Linux picker, discovers the repository through the daemon, and attaches
 the resulting durable project identity to the task; previously discovered folders
-remain selectable after restart.
+remain selectable after restart and appear with detected language/build/test/Git
+context in the Projects panel.
 
 `Start task` is a real orchestration boundary rather than a status-only button.
 It reserves one durable run, selects the consumer Coder and independent Evaluator,
@@ -108,8 +112,8 @@ task for an explicit bounded retry.
 For projects with discovered build, test, or static-analysis commands, Start now
 runs those checks through the governed tool broker after the independent Evaluator
 turn. Passing evidence atomically completes the task/run; a nonzero exit atomically
-fails them. Task History exposes the durable objective result and check counts,
-with per-condition details in advanced mode. Guided mode requests one explicit
+fails them. Task Evidence exposes the durable objective result and check counts,
+with per-condition and governed-tool details in advanced mode. Guided mode requests one explicit
 approval for the exact supported objective batch and immutable project snapshot.
 That checkpoint survives daemon restart; denial blocks for a bounded retry with a
 fresh request identity, while approval resumes the batch without repeating model
@@ -213,7 +217,10 @@ Evaluator still judges whether sources support the claims and whether meaningful
 conflicting evidence was surfaced.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
-Connect an OpenAI subscription through the native Providers panel or with
+The native Providers panel supports OpenAI subscription OAuth, OpenAI API keys,
+OpenRouter, and arbitrary local or remote OpenAI-compatible endpoints. It discovers
+the endpoint catalog before saving, labels subscription/usage/endpoint-reported
+billing explicitly, and shows known per-model prices or `Cost unknown`. Connect an OpenAI subscription through the panel or with
 `mcg provider login openai-subscription "OpenAI Subscription"`. Use
 `--method device-code` on a headless machine. Subscription OAuth and API-key
 billing are separate connections; an OAuth failure never switches billing modes.

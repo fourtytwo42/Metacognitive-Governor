@@ -206,6 +206,12 @@ cost, and results. Advanced mode adds organization, models, tools, memory,
 scheduler, experiments, raw events, and configuration revisions. The switch alters
 presentation density, not security policy or hidden behavior.
 
+Task evidence is progressively disclosed: simple mode shows outcome/check/tool/artifact
+counts and human-readable condition results; advanced mode adds the ordered event log,
+governed tool completions, verification records, scoped resources, and content hashes.
+Provider setup and project discovery follow the same split, retaining one underlying
+daemon contract and security policy across both modes.
+
 The CLI supports interactive, one-shot, piped, JSON, and streaming JSON modes.
 OpenAI-compatible and MCP adapters preserve caller-owned tools and maintain clear
 `caller`, `host`, and `mcg` namespaces.

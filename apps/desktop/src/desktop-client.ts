@@ -10,13 +10,53 @@ export interface OAuthLoginStart {
   user_code?: string;
 }
 
-export interface ProviderMutation {
-  connection: {
-    id: string;
-    display_name: string;
-    auth_mode: string;
+export type ProviderKind = "open_ai" | "open_router" | "open_ai_compatible";
+export type ProviderAuthMode = "chat_gpt_browser_oauth" | "chat_gpt_device_code" | "api_key" | "bearer_token" | "none";
+
+export interface ProviderConnection {
+  contract_version: number;
+  id: string;
+  display_name: string;
+  kind: ProviderKind;
+  base_url: string;
+  auth_mode: ProviderAuthMode;
+  organization?: string;
+  project?: string;
+}
+
+export interface ProviderModel {
+  id: string;
+  display_name: string;
+  owned_by?: string;
+  context_window?: number;
+  capabilities: Record<string, boolean | undefined>;
+  price?: {
+    input_per_million?: number;
+    cached_input_per_million?: number;
+    output_per_million?: number;
+    currency: string;
+    provenance: "provider_reported" | "unknown" | { mcg_catalog: { catalog_date: string } };
   };
-  catalog: { models: unknown[] };
+}
+
+export interface ProviderModelCatalog {
+  connection_id: string;
+  models: ProviderModel[];
+  discovered_at: string;
+}
+
+export interface ProviderListItem {
+  connection: ProviderConnection;
+  catalog?: ProviderModelCatalog;
+}
+
+export interface ProviderListResponse {
+  providers: ProviderListItem[];
+}
+
+export interface ProviderMutation {
+  connection: ProviderConnection;
+  catalog: ProviderModelCatalog;
 }
 
 export type McpAuthMode = "none" | "bearer_token";
@@ -141,6 +181,40 @@ export interface TaskEventsResponse {
   }>;
 }
 
+export interface ArtifactReference {
+  id: string;
+  sha256: string;
+  media_type: string;
+  size_bytes: number;
+  relative_path: string;
+}
+
+export interface VerificationEvidence {
+  method: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface ToolAuditRecord {
+  schema_version: number;
+  execution_id: string;
+  request_id: string;
+  task_id: string;
+  tool: string;
+  resource: string;
+  request_fingerprint: string;
+  phase: "decision" | "completion";
+  decision: string;
+  result?: "succeeded" | "failed" | "denied" | "approval_required" | "timed_out" | "cancelled";
+  artifacts: ArtifactReference[];
+  verification: VerificationEvidence[];
+  recorded_at: string;
+}
+
+export interface ToolAuditResponse {
+  records: ToolAuditRecord[];
+}
+
 export interface LaunchTaskResponse {
   task: TaskEnvelope;
   replayed: boolean;
@@ -184,6 +258,23 @@ export function cancelOpenAiOAuth(sessionId: string): Promise<void> {
 
 export function openExternalUrl(url: string): Promise<void> {
   return invoke("open_external_url", { url });
+}
+
+export function listProviders(): Promise<ProviderListResponse> {
+  return invoke("list_providers");
+}
+
+export function configureProvider(
+  connection: ProviderConnection,
+  credential?: string
+): Promise<ProviderMutation> {
+  return invoke("configure_provider", {
+    request: { connection, credential: credential || null }
+  });
+}
+
+export function discoverProvider(connectionId: string): Promise<ProviderModelCatalog> {
+  return invoke("discover_provider", { connectionId });
 }
 
 export function listMcpConnections(): Promise<McpListResponse> {
@@ -271,6 +362,10 @@ export function denyRequest(approvalId: string): Promise<ApprovalRequest> {
 
 export function loadTaskEvents(taskId: string): Promise<TaskEventsResponse> {
   return invoke("task_events", { taskId });
+}
+
+export function loadTaskAudit(taskId: string): Promise<ToolAuditResponse> {
+  return invoke("task_tool_audit", { taskId });
 }
 
 export function pickProjectDirectory(): Promise<string | null> {

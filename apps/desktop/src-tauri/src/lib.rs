@@ -1,13 +1,14 @@
 use mcg_api::{
     ApprovalListResponse, CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest,
-    LaunchTaskResponse, McpListResponse, ProjectListResponse, ResolveApprovalRequest,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    TransitionTaskRequest,
+    LaunchTaskResponse, McpListResponse, ProjectListResponse, ProviderListResponse,
+    ResolveApprovalRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::TaskEnvelope;
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
+use mcg_providers::{ProviderConnection, ProviderModelCatalog};
 use mcg_runtime::{McpMutation, OAuthLoginStart, ProjectMutation, ProviderMutation};
 use mcg_tools::ApprovalRequest;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,20 @@ const LOCAL_DAEMON: &str = "http://127.0.0.1:7777";
 struct ConfigureMcpCommand {
     connection: McpConnection,
     credential: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ConfigureProviderCommand {
+    connection: ProviderConnection,
+    credential: Option<String>,
+}
+
+impl Drop for ConfigureProviderCommand {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
 }
 
 impl Drop for ConfigureMcpCommand {
@@ -128,6 +143,60 @@ async fn refresh_openai_oauth(connection_id: String) -> Result<EventEnvelope, St
         .json()
         .await
         .map_err(|error| format!("OpenAI refresh response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_providers() -> Result<ProviderListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/providers"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Providers could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Provider listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Provider list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn configure_provider(request: ConfigureProviderCommand) -> Result<ProviderMutation, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/providers"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Provider could not be configured: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Provider setup").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Provider setup response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn discover_provider(connection_id: String) -> Result<ProviderModelCatalog, String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/providers/{connection_id}/discover"
+        ))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Provider discovery could not start: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Provider discovery").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Provider discovery response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -361,6 +430,23 @@ async fn task_events(task_id: String) -> Result<TaskEventsResponse, String> {
 }
 
 #[tauri::command]
+async fn task_tool_audit(task_id: String) -> Result<ToolAuditResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/tool-audit"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Task evidence could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task evidence").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task evidence response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
     app.dialog()
         .file()
@@ -441,6 +527,9 @@ pub fn run() {
             complete_openai_oauth,
             cancel_openai_oauth,
             refresh_openai_oauth,
+            list_providers,
+            configure_provider,
+            discover_provider,
             list_mcp_connections,
             configure_mcp_connection,
             discover_mcp_connection,
@@ -453,6 +542,7 @@ pub fn run() {
             resolve_approval,
             transition_task,
             task_events,
+            task_tool_audit,
             pick_project_directory,
             discover_project,
             list_projects,

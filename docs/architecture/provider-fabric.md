@@ -54,6 +54,14 @@ failure, leaves the provider on OAuth billing, and appends only secret-free rota
 evidence to SQLite. OAuth login never performs an API model request as a fallback;
 model discovery is an explicit subsequent operation.
 
+The native desktop uses the same authenticated configure/list/discover boundary for
+OpenAI API-key, OpenRouter, and arbitrary OpenAI-compatible endpoints. Credential
+fields are password controls, cross Tauri only in the explicit setup command, and
+are zeroized after the daemon stores them through the OS credential service. Simple
+mode shows connection, billing class, and catalog size. Advanced mode additionally
+shows endpoint/auth metadata, model identifiers, and known input/output price data;
+missing price metadata is rendered as unknown rather than estimated.
+
 OpenAI documents ChatGPT subscription and API-key sign-in as distinct login paths
 with different billing and administration behavior in its
 [Codex authentication guide](https://learn.chatgpt.com/docs/auth). The compatible

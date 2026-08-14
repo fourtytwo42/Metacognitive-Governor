@@ -118,6 +118,10 @@ Every major workflow is tested in simple and advanced mode. Accessibility checks
 cover keyboard navigation, focus, labels, contrast, reduced motion, and readable
 progress/errors. E2E tests preserve traces/screenshots only on failure and sanitize
 private paths and content.
+Desktop contract fixtures cover evidence/event co-loading, simple summaries,
+advanced tool verification and artifact provenance, every provider family, explicit
+billing/unknown-cost labels, and project discovery context. Responsive E2E asserts
+the mode switch remains visible and the page does not overflow at the narrow layout.
 
 ## Local verification lanes
 

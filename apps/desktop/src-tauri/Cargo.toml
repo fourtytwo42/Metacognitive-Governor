@@ -18,6 +18,7 @@ mcg-config = { path = "../../../crates/mcg-config" }
 mcg-domain = { path = "../../../crates/mcg-domain" }
 mcg-events = { path = "../../../crates/mcg-events" }
 mcg-mcp = { path = "../../../crates/mcg-mcp" }
+mcg-providers = { path = "../../../crates/mcg-providers" }
 mcg-runtime = { path = "../../../crates/mcg-runtime" }
 mcg-tools = { path = "../../../crates/mcg-tools" }
 reqwest.workspace = true

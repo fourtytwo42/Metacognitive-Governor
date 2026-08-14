@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Typed element and multi-step browser workflow evidence is cross-platform qualified; desktop task/evidence/provider/project UX is next.
-- Last meaningful change: Added `ELEMENT EXISTS` and immutable `BROWSER WORKFLOW` with a bounded non-script language, same-origin GET/HEAD confinement, unsafe-interaction rejection, and JSON/HTML/PNG evidence.
-- Next step: Deepen desktop task/evidence/provider/project UX around representative useful projects. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Current task: Desktop task evidence, provider setup/catalog, project workspace, and narrow-layout UX is Windows-qualified; exact Ubuntu qualification is next.
+- Last meaningful change: The native desktop now progressively discloses durable task/tool evidence, configures every required provider family without persisting frontend secrets, shows catalog price provenance, and exposes discovered project context.
+- Next step: Commit and push the desktop UX slice, qualify that exact commit through the owner-controlled Ubuntu verifier, then continue representative projects and remaining scheduler/MCP/proxy/diagnostics/privacy/packaging work. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -17,6 +17,9 @@ Durable project context lives here. Update this file whenever information should
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
+- The desktop task view loads authoritative event history and immutable governed-tool audit together. Simple mode summarizes outcomes, checks, tool runs, artifacts, and condition results; advanced mode adds ordered events, resources, verification records, and artifact hashes.
+- The desktop provider workspace supports OpenAI subscription OAuth, OpenAI API keys, OpenRouter, and arbitrary OpenAI-compatible/local endpoints. It discovers before saving, stores credentials through the existing OS credential service, labels billing explicitly, and displays known price metadata or `Cost unknown`.
+- The desktop Projects panel lists durable discovered workspaces with language/build/test/Git context and exposes paths, branches, and instruction-conflict counts only in advanced mode.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
 - M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. Its client supports current/legacy HTTP and stdio configuration/discovery/calls through API, CLI, and desktop; expanded run-control/evaluation contracts remain in scope.
@@ -127,6 +130,7 @@ When sources conflict, use this order:
 
 ## Verification Ledger
 
+- 2026-08-14: Desktop evidence/provider/project UX passed the Windows local gate: strict workspace clippy and formatting, broad Rust tests excluding the visible locked daemon/desktop binaries (39 tool and 31 API tests plus live GPU45 and real Chromium), frontend typecheck, 10 Vitest tests, production build, two Playwright tests, docs validation, and diff hygiene. Browser visual QA found and fixed a 720px sidebar overflow; the mode switch is now reachable and Playwright protects the narrow layout. Exact Ubuntu commit qualification remains next.
 - 2026-08-14: Exact provenance-backed research commit `7566cf4` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 291 seconds. The verified marker and `verify-final.exit=0` remain in `/home/hendo420/mcg-worktree-7566cf4`; all Rust gates (38 tool and 31 API tests plus live GPU45), docs, frontend, native Tauri/GTK, real Chromium, and Playwright passed. The superseded exact `4e5c432` snapshot was path/marker/exit verified and removed first to recover 13 GB; its source remains in Git. No GitHub-hosted automation ran.
 - 2026-07-12: Read `AGENTS.md` and `MEMORY.md`; identified stale project-specific memory and preserved the repository-local instruction logic.
 - 2026-07-12: Checked the workspace root; confirmed `AGENTS.md` and `MEMORY.md` are present and no `.git` directory is present at this level.
@@ -569,6 +573,15 @@ When sources conflict, use this order:
 - Result: Element checks objectively pass/fail after hydration. Browser workflows retain immutable JSON, final HTML/PNG, and ordered step evidence; intended multi-step interaction passes, false text fails, file mutation is rejected, unsafe interactions fail before action, and a missing workflow fails before model spend. Windows and Ubuntu qualification are green with no GitHub-hosted automation.
 - Follow-up: Build richer consumer task progress and evidence UX, provider/project setup flows, accessibility evidence, and representative end-to-end projects.
 
+### 2026-08-14 - Consumer Evidence And Provider Workspace UX
+
+- Context: The daemon already held durable task/tool evidence and all required provider contracts, but the consumer desktop exposed only event history and subscription login; project discovery also lacked a useful workspace view.
+- Decision: Load events and governed tool audit as one evidence experience with progressive disclosure. Reuse the authenticated provider configure/list/discover boundary for OpenAI API, OpenRouter, and compatible/local endpoints, keep credentials in an explicit password field that crosses only the Tauri command and is zeroized there, and render unknown costs honestly. Surface durable projects with simple context and advanced diagnostics.
+- Files: `apps/desktop/`, `tests/e2e/desktop-smoke.spec.ts`, `README.md`, `docs/architecture/{provider-fabric,system}.md`, `docs/testing/strategy.md`.
+- Commands/tests: Windows formatting and strict workspace clippy; broad Rust workspace tests excluding visible locked binaries; 39 tool and 31 API tests; live GPU45; real Chromium; frontend typecheck, 10 Vitest tests, production build, two Playwright tests, docs, and diff hygiene. In-app browser visual QA covered desktop and 720px layouts.
+- Result: Consumer task cards now expose objective evidence without reconstructing state in the frontend; every required non-OAuth provider family can be configured and refreshed natively; discovered projects are selectable and informative. A narrow-layout overflow found during visual QA was fixed and regression-tested. Windows qualification is green.
+- Follow-up: Qualify the exact commit on Ubuntu, then exercise these flows inside the native app with representative projects and continue the remaining product surfaces.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -590,7 +603,7 @@ When sources conflict, use this order:
 
 - Choose a public-source license only if/when public distribution is considered; repository remains private.
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
-- Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
+- Continue refining the established simple/advanced information architecture and visual system through representative project workflows and accessibility UAT.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
 - Continue M5 representative useful projects and broader end-to-end evidence while M6 interfaces are built; the durable provider/tool website and independent evaluator scenarios are complete checkpoints, not the full product.
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.

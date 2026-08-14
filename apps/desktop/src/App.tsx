@@ -5,15 +5,19 @@ import {
   cancelOpenAiOAuth,
   completeOpenAiOAuth,
   configureMcpConnection,
+  configureProvider,
   createTask,
   denyRequest,
   discoverProject,
   discoverMcpConnection,
+  discoverProvider,
   listMcpConnections,
+  listProviders,
   listApprovals,
   listProjects,
   listTasks,
   launchTask,
+  loadTaskAudit,
   loadTaskEvents,
   type McpAuthMode,
   type McpListItem,
@@ -22,6 +26,10 @@ import {
   openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
+  type ProviderAuthMode,
+  type ProviderKind,
+  type ProviderListItem,
+  type ProviderModel,
   pickProjectDirectory,
   type ProjectModel,
   type RiskLevel,
@@ -31,17 +39,102 @@ import {
   type TaskEnvelope,
   type ApprovalRequest,
   type TaskEventsResponse,
+  type ToolAuditResponse,
   transitionTask
 } from "./desktop-client";
 
-const progress = [
-  "Project instructions discovered",
-  "Provider fabric ready for connections",
-  "Policy boundary initialized"
-];
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function modelPrice(model: ProviderModel): string {
+  if (!model.price || (model.price.input_per_million === undefined && model.price.output_per_million === undefined)) {
+    return "Cost unknown";
+  }
+  const input = model.price.input_per_million === undefined ? "?" : `$${model.price.input_per_million.toFixed(2)}`;
+  const output = model.price.output_per_million === undefined ? "?" : `$${model.price.output_per_million.toFixed(2)}`;
+  return `${input} in · ${output} out / 1M`;
+}
+
+function TaskEvidence({
+  history,
+  audit,
+  advanced
+}: {
+  history: TaskEventsResponse;
+  audit: ToolAuditResponse;
+  advanced: boolean;
+}) {
+  const evaluation = history.events
+    .slice()
+    .reverse()
+    .find((event) => event.kind === "evaluation_recorded" && event.payload?.outcome);
+  const conditions = evaluation?.payload?.conditions ?? [];
+  const completions = audit.records.filter((record) => record.phase === "completion");
+  const artifacts = Array.from(
+    new Map(
+      completions.flatMap((record) => record.artifacts).map((artifact) => [artifact.sha256, artifact])
+    ).values()
+  );
+  const passingChecks = conditions.filter((condition) => condition.passed).length;
+
+  return (
+    <section className="task-evidence" aria-label="Task evidence">
+      <div className="evidence-overview">
+        <div><span>Outcome</span><strong>{evaluation?.payload?.outcome ?? "In progress"}</strong></div>
+        <div><span>Checks</span><strong>{passingChecks} / {conditions.length}</strong></div>
+        <div><span>Tool runs</span><strong>{completions.length}</strong></div>
+        <div><span>Artifacts</span><strong>{artifacts.length}</strong></div>
+      </div>
+      {conditions.length > 0 && <ul className="condition-results">
+        {conditions.map((condition, index) => (
+          <li className={condition.passed ? "condition-pass" : "condition-fail"} key={index}>
+            <strong>{condition.passed ? "Passed" : "Failed"}</strong>
+            <span>{condition.detail}</span>
+          </li>
+        ))}
+      </ul>}
+      {advanced && <div className="evidence-details">
+        <div>
+          <h4>Event timeline</h4>
+          <ol className="event-history">
+            {history.events.map((event) => (
+              <li key={event.sequence}>
+                <span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}
+              </li>
+            ))}
+          </ol>
+        </div>
+        <div>
+          <h4>Governed tool activity</h4>
+          {completions.length === 0 ? <p className="empty-inline">No completed tool runs.</p> : <ul className="tool-evidence-list">
+            {completions.map((record) => (
+              <li key={`${record.execution_id}-${record.recorded_at}`}>
+                <div><strong>{record.tool}</strong><span className={`tool-result result-${record.result ?? "unknown"}`}>{record.result ?? "unknown"}</span></div>
+                <code>{record.resource}</code>
+                {record.verification.map((item, index) => <small key={`${record.execution_id}-verification-${index}`}>{item.passed ? "Pass" : "Fail"} · {item.method}: {item.detail}</small>)}
+              </li>
+            ))}
+          </ul>}
+        </div>
+        {artifacts.length > 0 && <div className="artifact-evidence">
+          <h4>Immutable artifacts</h4>
+          <ul>
+            {artifacts.map((artifact) => <li key={artifact.sha256}>
+              <span>{artifact.media_type} · {formatBytes(artifact.size_bytes)}</span>
+              <code title={artifact.sha256}>{artifact.sha256}</code>
+            </li>)}
+          </ul>
+        </div>}
+      </div>}
+    </section>
+  );
 }
 
 export function App() {
@@ -51,6 +144,16 @@ export function App() {
   const [providerStatus, setProviderStatus] = useState("Not connected");
   const [busy, setBusy] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const [providers, setProviders] = useState<ProviderListItem[]>([]);
+  const [providerSetup, setProviderSetup] = useState(false);
+  const [providerName, setProviderName] = useState("");
+  const [providerId, setProviderId] = useState("");
+  const [providerKind, setProviderKind] = useState<ProviderKind>("open_ai_compatible");
+  const [providerUrl, setProviderUrl] = useState("");
+  const [providerAuth, setProviderAuth] = useState<ProviderAuthMode>("api_key");
+  const [providerCredential, setProviderCredential] = useState("");
+  const [providerOrganization, setProviderOrganization] = useState("");
+  const [providerProject, setProviderProject] = useState("");
   const [mcpConnections, setMcpConnections] = useState<McpListItem[]>([]);
   const [mcpName, setMcpName] = useState("");
   const [mcpId, setMcpId] = useState("");
@@ -73,6 +176,7 @@ export function App() {
   const [taskError, setTaskError] = useState<string | null>(null);
   const [taskLaunch, setTaskLaunch] = useState<Record<string, string>>({});
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
+  const [taskAudit, setTaskAudit] = useState<Record<string, ToolAuditResponse | undefined>>({});
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -85,6 +189,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setMcpError(errorMessage(error));
+      });
+    listProviders()
+      .then((response) => {
+        if (active) setProviders(response.providers);
+      })
+      .catch((error) => {
+        if (active) setProviderError(errorMessage(error));
       });
     listTasks()
       .then((response) => {
@@ -148,6 +259,10 @@ export function App() {
     try {
       const completed = await completeOpenAiOAuth(login.session_id);
       setProviderStatus(`${completed.connection.display_name} connected`);
+      setProviders((current) => [
+        { connection: completed.connection, catalog: completed.catalog },
+        ...current.filter((item) => item.connection.id !== completed.connection.id)
+      ]);
       setLogin(null);
     } catch (error) {
       setProviderError(errorMessage(error));
@@ -165,6 +280,71 @@ export function App() {
       setLogin(null);
       setProviderStatus("Not connected");
       setProviderError(null);
+    } catch (error) {
+      setProviderError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function generatedProviderId(): string {
+    const source = (providerId || providerName || "provider").toLowerCase();
+    const slug = source.replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+    return (slug || "provider").slice(0, 128);
+  }
+
+  async function addProvider() {
+    if (!providerName.trim() || !providerUrl.trim()) {
+      setProviderError("Provider name and base URL are required.");
+      return;
+    }
+    if (providerAuth !== "none" && !providerCredential) {
+      setProviderError("Enter the credential for this provider.");
+      return;
+    }
+    setBusy(true);
+    setProviderError(null);
+    try {
+      const mutation = await configureProvider(
+        {
+          contract_version: 1,
+          id: generatedProviderId(),
+          display_name: providerName.trim(),
+          kind: providerKind,
+          base_url: providerUrl.trim(),
+          auth_mode: providerAuth,
+          organization: advanced && providerOrganization.trim() ? providerOrganization.trim() : undefined,
+          project: advanced && providerProject.trim() ? providerProject.trim() : undefined
+        },
+        providerAuth === "none" ? undefined : providerCredential
+      );
+      setProviders((current) => [
+        { connection: mutation.connection, catalog: mutation.catalog },
+        ...current.filter((item) => item.connection.id !== mutation.connection.id)
+      ]);
+      setProviderStatus(`${mutation.connection.display_name} connected`);
+      setProviderName("");
+      setProviderId("");
+      setProviderUrl("");
+      setProviderCredential("");
+      setProviderOrganization("");
+      setProviderProject("");
+      setProviderSetup(false);
+    } catch (error) {
+      setProviderError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshProvider(connectionId: string) {
+    setBusy(true);
+    setProviderError(null);
+    try {
+      const catalog = await discoverProvider(connectionId);
+      setProviders((current) => current.map((item) =>
+        item.connection.id === connectionId ? { ...item, catalog } : item
+      ));
     } catch (error) {
       setProviderError(errorMessage(error));
     } finally {
@@ -370,18 +550,28 @@ export function App() {
   async function toggleTaskHistory(taskId: string) {
     if (taskHistory[taskId]) {
       setTaskHistory((history) => ({ ...history, [taskId]: undefined }));
+      setTaskAudit((audit) => ({ ...audit, [taskId]: undefined }));
       return;
     }
     setTaskBusy(true);
     setTaskError(null);
     try {
-      const events = await loadTaskEvents(taskId);
+      const [events, audit] = await Promise.all([loadTaskEvents(taskId), loadTaskAudit(taskId)]);
       setTaskHistory((history) => ({ ...history, [taskId]: events }));
+      setTaskAudit((current) => ({ ...current, [taskId]: audit }));
     } catch (error) {
       setTaskError(errorMessage(error));
     } finally {
       setTaskBusy(false);
     }
+  }
+
+  function taskEvidence(taskId: string) {
+    const history = taskHistory[taskId];
+    const audit = taskAudit[taskId];
+    return history && audit
+      ? <TaskEvidence history={history} audit={audit} advanced={advanced} />
+      : null;
   }
 
   async function chooseProject() {
@@ -528,18 +718,7 @@ export function App() {
                     <span>{approvals.find((approval) => approval.task_id === task.id)?.reason}</span>
                     {advanced && <code>{approvals.find((approval) => approval.task_id === task.id)?.resource}</code>}
                   </div>}
-                  {taskHistory[task.id] && <ol className="event-history">
-                    {taskHistory[task.id]?.events.map((event) => (
-                      <li key={event.sequence}>
-                        <span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}
-                        {event.kind === "evaluation_recorded" && event.payload?.outcome && <div className="evaluation-summary">
-                          <strong>Objective result: {event.payload.outcome}</strong>
-                          <span>{event.payload.conditions?.filter((condition) => condition.passed).length ?? 0} of {event.payload.conditions?.length ?? 0} checks passed</span>
-                          {advanced && event.payload.conditions?.map((condition, index) => <small key={`${event.sequence}-${index}`}>{condition.passed ? "Pass" : "Fail"}: {condition.detail}</small>)}
-                        </div>}
-                      </li>
-                    ))}
-                  </ol>}
+                  {taskEvidence(task.id)}
                 </div>
                 <div className="task-actions">
                   {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy || !task.project_id} title={task.project_id ? undefined : "Select a project before starting"} onClick={() => startTask(task.id)}>Start task</button>}
@@ -547,7 +726,7 @@ export function App() {
                   {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="primary" type="button" disabled={taskBusy} onClick={() => approveAndResume(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Approve and continue</button>}
                   {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => denyApprovalRequest(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Deny</button>}
                   {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
-                  <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide history" : "History"}</button>
+                  <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide evidence" : "Evidence"}</button>
                 </div>
               </article>
             ))}
@@ -555,12 +734,33 @@ export function App() {
         </section>
 
         <section className="grid" id="projects">
-          <article className="panel">
-            <p className="eyebrow">FOUNDATION STATUS</p>
-            <h2>Ready for implementation</h2>
-            <ul className="progress-list">
-              {progress.map((item) => <li key={item}><span>✓</span>{item}</li>)}
-            </ul>
+          <article className="panel project-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">PROJECTS</p>
+                <h2>Your workspaces</h2>
+              </div>
+              <button className="secondary" type="button" disabled={taskBusy} onClick={chooseProject}>Add project folder</button>
+            </div>
+            {projects.length === 0 ? <p className="empty-state">Open a folder to discover its language, build, tests, repository, and instructions.</p> : <div className="project-list">
+              {projects.map((project) => {
+                const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
+                const selected = selectedProject?.project_id === project.project_id;
+                return <article className={`project-card${selected ? " selected" : ""}`} key={project.project_id}>
+                  <div>
+                    <h3>{name}</h3>
+                    <p>{project.languages.length > 0 ? project.languages.join(", ") : "Language not detected"}</p>
+                    <div className="project-tags">
+                      {project.build_systems.map((system) => <span key={`build-${system}`}>{system}</span>)}
+                      {project.test_systems.map((system) => <span key={`test-${system}`}>{system}</span>)}
+                      {project.repository.is_git && <span>{project.repository.dirty ? "Git · changes" : "Git · clean"}</span>}
+                    </div>
+                    {advanced && <><code>{project.root}</code><small>{project.repository.branch ? `Branch ${project.repository.branch} · ` : ""}{project.instructions.conflicts.length} instruction conflicts</small></>}
+                  </div>
+                  <button className={selected ? "project-selected" : "secondary"} type="button" disabled={selected} onClick={() => setSelectedProject(project)}>{selected ? "Selected" : "Use project"}</button>
+                </article>;
+              })}
+            </div>}
           </article>
 
           <article className="panel runtime-panel">
@@ -628,6 +828,101 @@ export function App() {
             )}
             <p className="provider-state">{providerStatus}</p>
             {providerError && <p className="error-message" role="alert">{providerError}</p>}
+            <button className="secondary" type="button" onClick={() => {
+              if (providerSetup) setProviderCredential("");
+              setProviderSetup((value) => !value);
+            }}>
+              {providerSetup ? "Cancel provider setup" : "Add API or local provider"}
+            </button>
+          </div>
+          {providerSetup && <div className="provider-setup" aria-label="Add model provider">
+            <label>
+              Provider type
+              <select value={providerKind} onChange={(event) => {
+                const kind = event.target.value as ProviderKind;
+                const previousDefault = providerKind === "open_ai"
+                  ? "https://api.openai.com/v1"
+                  : providerKind === "open_router"
+                    ? "https://openrouter.ai/api/v1"
+                    : "";
+                const nextDefault = kind === "open_ai"
+                  ? "https://api.openai.com/v1"
+                  : kind === "open_router"
+                    ? "https://openrouter.ai/api/v1"
+                    : "";
+                setProviderKind(kind);
+                if (!providerUrl.trim() || providerUrl === previousDefault) {
+                  setProviderUrl(nextDefault);
+                }
+              }}>
+                <option value="open_ai_compatible">OpenAI-compatible or local</option>
+                <option value="open_ai">OpenAI API</option>
+                <option value="open_router">OpenRouter</option>
+              </select>
+            </label>
+            <label>
+              Provider name
+              <input value={providerName} onChange={(event) => setProviderName(event.target.value)} placeholder="Local GPU" />
+            </label>
+            <label>
+              Base URL
+              <input value={providerUrl} onChange={(event) => setProviderUrl(event.target.value)} placeholder="http://127.0.0.1:1234/v1" inputMode="url" />
+            </label>
+            <label>
+              Authentication
+              <select value={providerAuth} onChange={(event) => {
+                const auth = event.target.value as ProviderAuthMode;
+                setProviderAuth(auth);
+                if (auth === "none") setProviderCredential("");
+              }}>
+                <option value="api_key">API key</option>
+                <option value="bearer_token">Bearer token</option>
+                <option value="none">None (local/trusted endpoint)</option>
+              </select>
+            </label>
+            {providerAuth !== "none" && <label>
+              {providerAuth === "api_key" ? "API key" : "Bearer token"}
+              <input type="password" autoComplete="off" value={providerCredential} onChange={(event) => setProviderCredential(event.target.value)} />
+            </label>}
+            {advanced && <div className="advanced-fields provider-advanced">
+              <label>
+                Connection id
+                <input value={providerId} onChange={(event) => setProviderId(event.target.value)} placeholder="Generated from the name" />
+              </label>
+              <label>
+                OpenAI organization (optional)
+                <input value={providerOrganization} onChange={(event) => setProviderOrganization(event.target.value)} />
+              </label>
+              <label>
+                OpenAI project (optional)
+                <input value={providerProject} onChange={(event) => setProviderProject(event.target.value)} />
+              </label>
+            </div>}
+            <p className="form-note">MCG discovers models from the endpoint before saving. Credentials go directly to the operating-system credential store.</p>
+            <button className="primary" type="button" disabled={busy} onClick={addProvider}>{busy ? "Connecting…" : "Connect provider"}</button>
+          </div>}
+          <div className="provider-connections" aria-label="Configured model providers">
+            <div className="section-heading compact-heading">
+              <h3>Configured providers</h3>
+              <span className="count-badge">{providers.length} connected</span>
+            </div>
+            {providers.length === 0 ? <p className="empty-state">No model providers connected yet.</p> : providers.map((item) => (
+              <article className="provider-card" key={item.connection.id}>
+                <div>
+                  <h3>{item.connection.display_name}</h3>
+                  <p>{item.connection.auth_mode.startsWith("chat_gpt") ? "Subscription billing" : item.connection.auth_mode === "none" ? "Endpoint-reported billing" : "Usage-based billing"} · {item.catalog?.models.length ?? 0} models</p>
+                  {advanced && <><code>{item.connection.base_url}</code><small>{item.connection.kind.replaceAll("_", " ")} · {item.connection.auth_mode.replaceAll("_", " ")}</small></>}
+                </div>
+                <button className="secondary" type="button" disabled={busy} onClick={() => refreshProvider(item.connection.id)}>Refresh models</button>
+                {advanced && item.catalog && <ul className="model-list">
+                  {item.catalog.models.slice(0, 12).map((model) => <li key={model.id}>
+                    <span><strong>{model.display_name}</strong><code>{model.id}</code></span>
+                    <small>{modelPrice(model)}</small>
+                  </li>)}
+                  {item.catalog.models.length > 12 && <li className="model-overflow">+ {item.catalog.models.length - 12} more models</li>}
+                </ul>}
+              </article>
+            ))}
           </div>
         </section>
 
