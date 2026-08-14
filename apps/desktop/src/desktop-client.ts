@@ -180,6 +180,7 @@ export type ScheduleTrigger =
 export interface ScheduleDefinition {
   schema_version: number;
   id: string;
+  definition_hash: string;
   name: string;
   project_id: string;
   goal: string;
@@ -193,6 +194,7 @@ export interface ScheduleDefinition {
 }
 
 export interface CreateScheduleRequest {
+  schedule_id: string;
   name: string;
   project_id: string;
   goal: string;

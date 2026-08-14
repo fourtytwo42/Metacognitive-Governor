@@ -144,7 +144,11 @@ Approval/manual-evaluation waits and preflight budget exhaustion are safe-pause
 boundaries, while terminal task state is reconciled into occurrence history and
 notifications. Owner pauses are never overridden by subsystem wake requests.
 Authenticated REST, CLI, Tauri commands, and the simple/advanced native dashboard
-share these definitions and retained history.
+share these definitions and retained history. Creation is idempotent on a
+caller-owned schedule UUID plus the server-generated SHA-256 definition hash:
+an exact lost-response retry replays the stored definition, and different input
+using the same UUID conflicts. The authenticated MCP server exposes the same
+create/list/remove lifecycle without deleting occurrence history.
 
 ## Provider fabric
 

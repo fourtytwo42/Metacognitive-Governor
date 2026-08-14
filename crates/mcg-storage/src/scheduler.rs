@@ -366,8 +366,8 @@ impl SqliteEventStore {
     /// Returns an error for invalid definitions, duplicate identities, or database failures.
     pub fn create_schedule(&mut self, schedule: &ScheduleDefinition) -> Result<(), StorageError> {
         validate_schedule(schedule)?;
-        self.connection.execute(
-            "INSERT INTO schedules(schedule_id, state, next_run_at, schedule_json, created_at, updated_at)
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO schedules(schedule_id, state, next_run_at, schedule_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 schedule.id.to_string(),
@@ -378,6 +378,11 @@ impl SqliteEventStore {
                 schedule.updated_at.to_rfc3339(),
             ],
         )?;
+        if inserted != 1 {
+            return Err(StorageError::Conflict(
+                "schedule identity already exists".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -727,6 +732,12 @@ fn reclaim_expired(
 }
 
 fn validate_schedule(schedule: &ScheduleDefinition) -> Result<(), StorageError> {
+    let valid_definition_hash = schedule.definition_hash.is_empty()
+        || (schedule.definition_hash.len() == 64
+            && schedule
+                .definition_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     let valid_budget = schedule
         .budget
         .max_cost_usd
@@ -761,6 +772,7 @@ fn validate_schedule(schedule: &ScheduleDefinition) -> Result<(), StorageError> 
     if schedule.schema_version != SCHEDULE_SCHEMA_VERSION
         || schedule.name.trim().is_empty()
         || schedule.goal.trim().is_empty()
+        || !valid_definition_hash
         || !bounded_text
         || !bounded_trigger
         || schedule.context_token_budget == 0
@@ -1045,6 +1057,7 @@ mod tests {
         ScheduleDefinition {
             schema_version: SCHEDULE_SCHEMA_VERSION,
             id: ScheduleId::new(),
+            definition_hash: String::new(),
             name: "nightly verification".into(),
             project_id: ProjectId::new(),
             goal: "verify the project".into(),
@@ -1083,6 +1096,10 @@ mod tests {
         {
             let mut store = SqliteEventStore::open(&database).expect("open store");
             store.create_schedule(&schedule).expect("create schedule");
+            assert!(matches!(
+                store.create_schedule(&schedule),
+                Err(StorageError::Conflict(_))
+            ));
             let claim = store
                 .claim_due_schedule(now, "daemon-a", 30)
                 .expect("claim due work")
@@ -1251,6 +1268,9 @@ mod tests {
         };
         invalid_watch.next_run_at = None;
         assert!(store.create_schedule(&invalid_watch).is_err());
+        let mut invalid_hash = interval_schedule(now);
+        invalid_hash.definition_hash = "not-a-server-definition-hash".into();
+        assert!(store.create_schedule(&invalid_hash).is_err());
         assert!(
             store
                 .wake_schedule(

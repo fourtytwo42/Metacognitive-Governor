@@ -94,7 +94,12 @@ evidence instead of duplicating side effects. Approval waits and exhausted task
 budgets pause recurring admission until the owner explicitly resumes it. New
 unattended work defaults to bounded tokens, duration, and model-call count without
 inventing a dollar limit for providers whose cost is unknown; advanced desktop
-settings can add a cost ceiling and tune those limits.
+settings can add a cost ceiling and tune those limits. Schedule creation uses a
+caller-owned UUID across REST, CLI, desktop, and MCP: an exact retry returns the
+existing definition, while reuse for different input fails instead of admitting
+duplicate or ambiguous unattended work. CLI creation commands accept
+`--schedule-id UUID` when a script or operator needs retry continuity across
+separate command invocations.
 
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can

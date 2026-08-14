@@ -1,6 +1,6 @@
 //! Stateless MCP 2026-07-28 Streamable HTTP server boundary.
 
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use axum::{
     body::Bytes,
@@ -9,20 +9,23 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, OrganizationGenome,
     OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, SuccessCondition,
     TaskComplexity,
 };
-use mcg_domain::{ProjectId, RiskLevel, RunId, TaskBudget, TaskEnvelope};
+use mcg_domain::{
+    ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger, TaskBudget,
+    TaskEnvelope,
+};
 use mcg_runtime::AgentDispatchSpec;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use super::ApiState;
+use super::{ApiState, CreateScheduleRequest, create_schedule_record};
 
 const PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_NAME: &str = "metacognitive-governor";
@@ -468,6 +471,84 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_annotations,
         }),
         json!({
+            "name": "mcg_scheduler_list",
+            "title": "List MCG Schedules",
+            "description": "List durable unattended-work definitions with their current state and next wake.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_scheduler_create",
+            "title": "Create an MCG Schedule",
+            "description": "Idempotently create one bounded durable schedule. Reuse the same schedule_id only for an exact retry of the same definition.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {"type": "string", "format": "uuid"},
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "goal": {"type": "string", "minLength": 1, "maxLength": 32768},
+                    "constraints": {"type": "array", "items": {"type": "string", "maxLength": 8192}, "maxItems": 64},
+                    "success_conditions": {"type": "array", "items": {"type": "string", "maxLength": 8192}, "maxItems": 64},
+                    "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"], "default": "medium"},
+                    "budget": {
+                        "type": "object",
+                        "properties": {
+                            "max_tokens": {"type": "integer", "minimum": 1},
+                            "max_cost_usd": {"type": "number", "minimum": 0},
+                            "max_duration_seconds": {"type": "integer", "minimum": 1}
+                        },
+                        "additionalProperties": false
+                    },
+                    "trigger": {
+                        "oneOf": [
+                            {"type": "object", "properties": {"kind": {"const": "once"}, "at": {"type": "string", "format": "date-time"}}, "required": ["kind", "at"], "additionalProperties": false},
+                            {"type": "object", "properties": {"kind": {"const": "interval"}, "seconds": {"type": "integer", "minimum": 1}}, "required": ["kind", "seconds"], "additionalProperties": false},
+                            {"type": "object", "properties": {"kind": {"const": "cron"}, "expression": {"type": "string", "minLength": 1, "maxLength": 256}}, "required": ["kind", "expression"], "additionalProperties": false},
+                            {"type": "object", "properties": {"kind": {"const": "file_watch"}, "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096}, "poll_seconds": {"type": "integer", "minimum": 1}}, "required": ["kind", "relative_path", "poll_seconds"], "additionalProperties": false},
+                            {"type": "object", "properties": {"kind": {"const": "event"}, "event_kind": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["kind", "event_kind"], "additionalProperties": false},
+                            {"type": "object", "properties": {"kind": {"const": "heartbeat"}, "idle_seconds": {"type": "integer", "minimum": 1}, "busy_seconds": {"type": "integer", "minimum": 1}}, "required": ["kind", "idle_seconds", "busy_seconds"], "additionalProperties": false}
+                        ]
+                    },
+                    "first_run_at": {"type": "string", "format": "date-time"},
+                    "target_path": {"type": "string", "maxLength": 4096},
+                    "context_token_budget": {"type": "integer", "minimum": 1, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
+                    "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true, "maxItems": 128},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                },
+                "required": ["schedule_id", "project_id", "name", "goal", "trigger"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "mcg_scheduler_remove",
+            "title": "Remove an MCG Schedule",
+            "description": "Permanently stop future admission for one schedule while retaining its durable history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"schedule_id": {"type": "string", "format": "uuid"}},
+                "required": ["schedule_id"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
             "name": "mcg_run_agent",
             "title": "Run a Governed MCG Agent",
             "description": "Idempotently create and start a durable task/run, then execute its one bounded agent turn through configured providers and MCG's policy broker. Coder and tool-worker tools must be explicitly listed.",
@@ -560,6 +641,9 @@ async fn call_tool(
         "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
         "mcg_memory_search" => memory_search(state, &arguments),
+        "mcg_scheduler_list" => scheduler_list(state, &arguments),
+        "mcg_scheduler_create" => scheduler_create(state, &arguments),
+        "mcg_scheduler_remove" => scheduler_remove(state, &arguments),
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -596,6 +680,173 @@ fn query_run(
             "MCG could not read the agent run",
         )),
     }
+}
+
+fn scheduler_list(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &[])?;
+    match state.runtime.schedules() {
+        Ok(schedules) => tool_success(Ok(json!({"schedules": schedules}))),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not list durable schedules",
+        )),
+    }
+}
+
+fn scheduler_create(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request =
+        serde_json::from_value::<SchedulerCreateArguments>(Value::Object(arguments.clone()));
+    let Ok(request) = request else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Schedule arguments do not match the advertised schema",
+        ));
+    };
+    if request.context_token_budget == 0
+        || request.context_token_budget > MAX_CONTEXT_TOKENS
+        || request.estimated_output_tokens == 0
+        || request.estimated_output_tokens > 100_000
+        || request.max_model_calls == 0
+        || request.max_model_calls > 32
+        || request.budget.as_ref().is_some_and(|budget| {
+            budget.max_tokens == Some(0)
+                || budget
+                    .max_cost_usd
+                    .is_some_and(|value| !value.is_finite() || value < 0.0)
+                || budget.max_duration_seconds == Some(0)
+        })
+        || request.requested_tools.iter().collect::<HashSet<_>>().len()
+            != request.requested_tools.len()
+    {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Schedule execution bounds are outside the advertised limits",
+        ));
+    }
+    let request = CreateScheduleRequest {
+        schedule_id: request.schedule_id,
+        name: request.name,
+        project_id: request.project_id,
+        goal: request.goal,
+        constraints: request.constraints,
+        success_conditions: request.success_conditions,
+        risk: request.risk,
+        budget: request.budget.map(Into::into),
+        trigger: request.trigger,
+        first_run_at: request.first_run_at,
+        target_path: request.target_path,
+        context_token_budget: request.context_token_budget,
+        requested_tools: request.requested_tools,
+        estimated_output_tokens: request.estimated_output_tokens,
+        max_model_calls: request.max_model_calls,
+    };
+    match create_schedule_record(state, request) {
+        Ok((replayed, schedule)) => {
+            tool_success(Ok(json!({"replayed": replayed, "schedule": schedule})))
+        }
+        Err(error) => Ok(tool_error(error.code, &error.message)),
+    }
+}
+
+fn scheduler_remove(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &["schedule_id"])?;
+    let schedule_id = required_string(arguments, "schedule_id")?
+        .parse::<ScheduleId>()
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "schedule_id must be a UUID",
+            )
+        })?;
+    match state
+        .runtime
+        .set_schedule_state(schedule_id, ScheduleState::Completed, Utc::now())
+    {
+        Ok(schedule) => tool_success(Ok(json!({"schedule": schedule}))),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "schedule_not_found",
+            "The requested schedule is not known to MCG",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not stop the durable schedule",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchedulerCreateArguments {
+    schedule_id: ScheduleId,
+    project_id: ProjectId,
+    name: String,
+    goal: String,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(default)]
+    success_conditions: Vec<String>,
+    #[serde(default)]
+    risk: Option<RiskLevel>,
+    #[serde(default)]
+    budget: Option<SchedulerBudgetArguments>,
+    trigger: ScheduleTrigger,
+    #[serde(default)]
+    first_run_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default = "default_scheduler_context_tokens")]
+    context_token_budget: u32,
+    #[serde(default)]
+    requested_tools: Vec<String>,
+    #[serde(default = "default_scheduler_output_tokens")]
+    estimated_output_tokens: u64,
+    #[serde(default = "default_scheduler_model_calls")]
+    max_model_calls: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)] // Mirrors the public TaskBudget wire contract.
+struct SchedulerBudgetArguments {
+    #[serde(default)]
+    max_tokens: Option<u64>,
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+    #[serde(default)]
+    max_duration_seconds: Option<u64>,
+}
+
+impl From<SchedulerBudgetArguments> for TaskBudget {
+    fn from(value: SchedulerBudgetArguments) -> Self {
+        Self {
+            max_tokens: value.max_tokens,
+            max_cost_usd: value.max_cost_usd,
+            max_duration_seconds: value.max_duration_seconds,
+        }
+    }
+}
+
+const fn default_scheduler_context_tokens() -> u32 {
+    DEFAULT_CONTEXT_TOKENS
+}
+
+const fn default_scheduler_output_tokens() -> u64 {
+    4_096
+}
+
+const fn default_scheduler_model_calls() -> u16 {
+    8
 }
 
 #[derive(Debug, Deserialize)]

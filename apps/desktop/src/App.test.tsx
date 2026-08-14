@@ -128,6 +128,7 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
   const schedule = {
     schema_version: 1,
     id: "00000000-0000-4000-8000-000000000023",
+    definition_hash: "fixture-definition",
     name: "Hourly health check",
     project_id: project.project_id,
     goal: "Check project health",
@@ -154,6 +155,7 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
 
   expect(await within(scheduler).findByRole("heading", { name: schedule.name })).toBeInTheDocument();
   expect(client.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+    schedule_id: expect.any(String),
     project_id: project.project_id,
     trigger: { kind: "interval", seconds: 3600 },
     budget: {
@@ -163,6 +165,58 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
     },
     max_model_calls: 8
   }));
+});
+
+test("scheduler retries reuse one identity and rotate it only after success", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000031",
+    project_id: "00000000-0000-4000-8000-000000000032",
+    root: "C:\\Projects\\retry-scheduled",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  const completed = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000033",
+    definition_hash: "retry-definition",
+    name: "Retry-safe schedule",
+    project_id: project.project_id,
+    goal: "Survive a lost response",
+    trigger: { kind: "interval", seconds: 3600 },
+    state: "enabled",
+    next_run_at: "2026-08-14T01:00:00Z",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.createSchedule
+    .mockRejectedValueOnce(new Error("response lost"))
+    .mockResolvedValueOnce(completed)
+    .mockResolvedValueOnce({ ...completed, id: "00000000-0000-4000-8000-000000000034", name: "Next schedule" });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  const scheduler = screen.getByRole("region", { name: "Scheduler" });
+  fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: completed.name } });
+  fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: completed.goal } });
+  const create = within(scheduler).getByRole("button", { name: "Create schedule" });
+  fireEvent.click(create);
+  expect(await within(scheduler).findByRole("alert")).toHaveTextContent("response lost");
+  const firstIdentity = client.createSchedule.mock.calls[0][0].schedule_id;
+
+  fireEvent.click(create);
+  expect(await within(scheduler).findByRole("heading", { name: completed.name })).toBeInTheDocument();
+  expect(client.createSchedule.mock.calls[1][0].schedule_id).toBe(firstIdentity);
+
+  fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: "Next schedule" } });
+  fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: "Run next" } });
+  fireEvent.click(create);
+  await waitFor(() => expect(client.createSchedule).toHaveBeenCalledTimes(3));
+  expect(client.createSchedule.mock.calls[2][0].schedule_id).not.toBe(firstIdentity);
 });
 
 test("advanced mode reveals runtime details", () => {

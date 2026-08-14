@@ -346,6 +346,8 @@ fn parse_cron_number(value: &str, minimum: u32, maximum: u32) -> Result<u32, Str
 pub struct ScheduleDefinition {
     pub schema_version: u16,
     pub id: ScheduleId,
+    #[serde(default)]
+    pub definition_hash: String,
     pub name: String,
     pub project_id: ProjectId,
     pub goal: String,

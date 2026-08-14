@@ -27,6 +27,7 @@ fn restart_schedule(now: chrono::DateTime<Utc>) -> ScheduleDefinition {
     ScheduleDefinition {
         schema_version: SCHEDULE_SCHEMA_VERSION,
         id: ScheduleId::new(),
+        definition_hash: String::new(),
         name: "restart recovery".into(),
         project_id: ProjectId::new(),
         goal: "recover exactly once".into(),

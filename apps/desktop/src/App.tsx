@@ -79,6 +79,10 @@ const SCHEDULE_EVENT_KINDS = [
   "mcg_intervention"
 ] as const;
 
+function freshScheduleId(): string {
+  return crypto.randomUUID();
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -215,6 +219,7 @@ export function App() {
   const [schedules, setSchedules] = useState<ScheduleDefinition[]>([]);
   const [scheduleNotifications, setScheduleNotifications] = useState<SchedulerNotification[]>([]);
   const [scheduleHistory, setScheduleHistory] = useState<Record<string, ScheduleHistoryResponse | undefined>>({});
+  const [scheduleId, setScheduleId] = useState(freshScheduleId);
   const [scheduleName, setScheduleName] = useState("");
   const [scheduleGoal, setScheduleGoal] = useState("");
   const [scheduleKind, setScheduleKind] = useState<ScheduleTrigger["kind"]>("interval");
@@ -700,6 +705,7 @@ export function App() {
         throw new Error("Cost limit must be zero or a positive dollar amount.");
       }
       const schedule = await createSchedule({
+        schedule_id: scheduleId,
         name: scheduleName.trim(),
         project_id: selectedProject.project_id,
         goal: scheduleGoal.trim(),
@@ -718,6 +724,7 @@ export function App() {
         max_model_calls: positiveWholeNumber(scheduleModelCalls, "Model call limit")
       });
       replaceSchedule(schedule);
+      setScheduleId(freshScheduleId());
       setScheduleName("");
       setScheduleGoal("");
     } catch (error) {

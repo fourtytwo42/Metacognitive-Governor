@@ -136,6 +136,9 @@ enum ScheduleCommand {
         project_id: String,
         goal: String,
         at: String,
+        /// Stable UUID to reuse when retrying after an uncertain response.
+        #[arg(long)]
+        schedule_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -145,6 +148,9 @@ enum ScheduleCommand {
         project_id: String,
         goal: String,
         seconds: u64,
+        /// Stable UUID to reuse when retrying after an uncertain response.
+        #[arg(long)]
+        schedule_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -154,6 +160,9 @@ enum ScheduleCommand {
         project_id: String,
         goal: String,
         expression: String,
+        /// Stable UUID to reuse when retrying after an uncertain response.
+        #[arg(long)]
+        schedule_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -165,6 +174,9 @@ enum ScheduleCommand {
         relative_path: String,
         #[arg(long, default_value_t = 30)]
         poll_seconds: u64,
+        /// Stable UUID to reuse when retrying after an uncertain response.
+        #[arg(long)]
+        schedule_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -174,6 +186,9 @@ enum ScheduleCommand {
         project_id: String,
         goal: String,
         event_kind: String,
+        /// Stable UUID to reuse when retrying after an uncertain response.
+        #[arg(long)]
+        schedule_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -186,6 +201,9 @@ enum ScheduleCommand {
         idle_seconds: u64,
         #[arg(long, default_value_t = 30)]
         busy_seconds: u64,
+        /// Stable UUID to reuse when retrying after an uncertain response.
+        #[arg(long)]
+        schedule_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -834,7 +852,11 @@ async fn run_schedule_creation(
     token: &str,
     command: ScheduleCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (name, project_id, goal, trigger, json) = schedule_creation_parts(command)?;
+    let (name, project_id, goal, trigger, schedule_id, json) = schedule_creation_parts(command)?;
+    let schedule_id = match schedule_id {
+        Some(value) => ScheduleId::from_str(&value)?,
+        None => ScheduleId::new(),
+    };
     create_schedule_cli(
         client,
         host,
@@ -843,13 +865,22 @@ async fn run_schedule_creation(
         ProjectId::from_str(&project_id)?,
         goal,
         trigger,
+        schedule_id,
         json,
     )
     .await
 }
 
-type ScheduleCreationParts = (String, String, String, ScheduleTrigger, bool);
+type ScheduleCreationParts = (
+    String,
+    String,
+    String,
+    ScheduleTrigger,
+    Option<String>,
+    bool,
+);
 
+#[allow(clippy::too_many_lines)] // Keeps the six public trigger shapes visibly symmetric.
 fn schedule_creation_parts(
     command: ScheduleCommand,
 ) -> Result<ScheduleCreationParts, Box<dyn std::error::Error>> {
@@ -859,6 +890,7 @@ fn schedule_creation_parts(
             project_id,
             goal,
             at,
+            schedule_id,
             json,
         } => (
             name,
@@ -867,6 +899,7 @@ fn schedule_creation_parts(
             ScheduleTrigger::Once {
                 at: chrono::DateTime::parse_from_rfc3339(&at)?.with_timezone(&chrono::Utc),
             },
+            schedule_id,
             json,
         ),
         ScheduleCommand::CreateInterval {
@@ -874,12 +907,14 @@ fn schedule_creation_parts(
             project_id,
             goal,
             seconds,
+            schedule_id,
             json,
         } => (
             name,
             project_id,
             goal,
             ScheduleTrigger::Interval { seconds },
+            schedule_id,
             json,
         ),
         ScheduleCommand::CreateCron {
@@ -887,12 +922,14 @@ fn schedule_creation_parts(
             project_id,
             goal,
             expression,
+            schedule_id,
             json,
         } => (
             name,
             project_id,
             goal,
             ScheduleTrigger::Cron { expression },
+            schedule_id,
             json,
         ),
         ScheduleCommand::CreateWatch {
@@ -901,6 +938,7 @@ fn schedule_creation_parts(
             goal,
             relative_path,
             poll_seconds,
+            schedule_id,
             json,
         } => (
             name,
@@ -910,6 +948,7 @@ fn schedule_creation_parts(
                 relative_path,
                 poll_seconds,
             },
+            schedule_id,
             json,
         ),
         ScheduleCommand::CreateEvent {
@@ -917,12 +956,14 @@ fn schedule_creation_parts(
             project_id,
             goal,
             event_kind,
+            schedule_id,
             json,
         } => (
             name,
             project_id,
             goal,
             ScheduleTrigger::Event { event_kind },
+            schedule_id,
             json,
         ),
         ScheduleCommand::CreateHeartbeat {
@@ -931,6 +972,7 @@ fn schedule_creation_parts(
             goal,
             idle_seconds,
             busy_seconds,
+            schedule_id,
             json,
         } => (
             name,
@@ -940,6 +982,7 @@ fn schedule_creation_parts(
                 idle_seconds,
                 busy_seconds,
             },
+            schedule_id,
             json,
         ),
         _ => return Err("schedule command is not a creation command".into()),
@@ -980,12 +1023,14 @@ async fn create_schedule_cli(
     project_id: ProjectId,
     goal: String,
     trigger: ScheduleTrigger,
+    schedule_id: ScheduleId,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let schedule: mcg_domain::ScheduleDefinition = client
         .post(format!("{host}/api/v1/schedules"))
         .bearer_auth(token)
         .json(&CreateScheduleRequest {
+            schedule_id,
             name,
             project_id,
             goal,
@@ -2236,6 +2281,7 @@ mod tests {
 
     #[test]
     fn scheduler_commands_expose_simple_once_and_interval_triggers() {
+        let schedule_id = "00000000-0000-4000-8000-000000000099";
         let interval = Cli::try_parse_from([
             "mcg",
             "schedule",
@@ -2244,13 +2290,19 @@ mod tests {
             "00000000-0000-0000-0000-000000000001",
             "check site",
             "300",
+            "--schedule-id",
+            schedule_id,
         ])
         .expect("interval command");
         assert!(matches!(
             interval.command,
             Command::Schedule {
-                command: ScheduleCommand::CreateInterval { seconds: 300, .. }
-            }
+                command: ScheduleCommand::CreateInterval {
+                    seconds: 300,
+                    schedule_id: Some(id),
+                    ..
+                }
+            } if id == schedule_id
         ));
         let once = Cli::try_parse_from([
             "mcg",

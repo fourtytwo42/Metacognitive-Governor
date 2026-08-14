@@ -52,14 +52,21 @@ identity metadata on every successful tool result.
 | `mcg_project_context` | Assembles current target-aware context within a caller-selected, server-bounded token budget. |
 | `mcg_memory_search` | Searches current provenance-bearing claims by project, optional namespace, freshness, and bounded result count. |
 | `mcg_query_run` | Reads a complete durable plan, authority, usage, evaluation, and turn-result view. |
+| `mcg_scheduler_list` | Lists retained durable schedule definitions and current admission state. |
+| `mcg_scheduler_create` | Idempotently creates one bounded schedule from a caller-owned UUID and exact definition. |
+| `mcg_scheduler_remove` | Stops future admission for one schedule while retaining its definition and occurrence history. |
 | `mcg_run_agent` | Idempotently creates an active task/running one-work-item run and executes one bounded provider/tool turn. |
 
-The five query tools declare read-only, idempotent, non-destructive, closed-world
-behavior. Project context does not accept caller-supplied context items, so an MCP
+The query tools, including scheduler listing, declare read-only, idempotent,
+non-destructive, closed-world behavior. Project context does not accept
+caller-supplied context items, so an MCP
 caller cannot inject material into MCG's canonical project or memory state through
 the read surface. `mcg_run_agent` declares its mutating/open-world behavior and
 requires a caller request key. Coder and Tool Worker calls must explicitly list
 every requested tool; omitting the list does not grant the role's full tool set.
+Scheduler creation is mutating, idempotent, and open-world because admitted work
+can later reach configured providers and governed tools. Scheduler removal is an
+idempotent closed-world state transition and never erases evidence.
 
 ## Governed run idempotency
 

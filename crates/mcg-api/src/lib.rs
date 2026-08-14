@@ -291,6 +291,7 @@ pub struct LaunchTaskResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateScheduleRequest {
+    pub schedule_id: ScheduleId,
     pub name: String,
     pub project_id: ProjectId,
     pub goal: String,
@@ -480,6 +481,7 @@ struct ErrorResponse {
     message: String,
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -893,6 +895,28 @@ async fn create_schedule(
     State(state): State<ApiState>,
     Json(request): Json<CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<ScheduleDefinition>), ApiError> {
+    let (replayed, schedule) = create_schedule_record(&state, request)?;
+    Ok((
+        if replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(schedule),
+    ))
+}
+
+fn create_schedule_record(
+    state: &ApiState,
+    request: CreateScheduleRequest,
+) -> Result<(bool, ScheduleDefinition), ApiError> {
+    if request.first_run_at.is_some()
+        && !matches!(&request.trigger, ScheduleTrigger::Interval { .. })
+    {
+        return Err(ApiError::bad_request(
+            "first_run_at is valid only for fixed-interval schedules",
+        ));
+    }
     if state
         .runtime
         .project(request.project_id)
@@ -904,6 +928,13 @@ async fn create_schedule(
             request.project_id
         )));
     }
+    let definition_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&request)
+                .map_err(|_| ApiError::bad_request("schedule definition is not serializable"))?
+        )
+    );
     let now = Utc::now();
     let next_run_at = match &request.trigger {
         ScheduleTrigger::Once { at } => Some(*at),
@@ -924,7 +955,8 @@ async fn create_schedule(
     };
     let schedule = ScheduleDefinition {
         schema_version: SCHEDULE_SCHEMA_VERSION,
-        id: ScheduleId::new(),
+        id: request.schedule_id,
+        definition_hash,
         name: request.name,
         project_id: request.project_id,
         goal: request.goal,
@@ -946,11 +978,40 @@ async fn create_schedule(
         created_at: now,
         updated_at: now,
     };
-    state
+    if let Some(existing) = state
         .runtime
-        .create_schedule(&schedule)
-        .map_err(map_runtime_error)?;
-    Ok((StatusCode::CREATED, Json(schedule)))
+        .schedule(schedule.id)
+        .map_err(map_runtime_error)?
+    {
+        return replay_schedule_creation(existing, &schedule);
+    }
+    match state.runtime.create_schedule(&schedule) {
+        Ok(()) => Ok((false, schedule)),
+        Err(error) if error.is_conflict() => {
+            let existing = state
+                .runtime
+                .schedule(schedule.id)
+                .map_err(map_runtime_error)?
+                .ok_or_else(|| ApiError::conflict("schedule identity was reserved concurrently"))?;
+            replay_schedule_creation(existing, &schedule)
+        }
+        Err(error) => Err(map_runtime_error(error)),
+    }
+}
+
+fn replay_schedule_creation(
+    existing: ScheduleDefinition,
+    requested: &ScheduleDefinition,
+) -> Result<(bool, ScheduleDefinition), ApiError> {
+    if !requested.definition_hash.is_empty()
+        && existing.definition_hash == requested.definition_hash
+    {
+        Ok((true, existing))
+    } else {
+        Err(ApiError::conflict(
+            "schedule_id was already used with a different definition",
+        ))
+    }
 }
 
 async fn list_schedules(
@@ -3500,6 +3561,28 @@ form.addEventListener('submit', (event) => {
         .expect("JSON response")
     }
 
+    async fn mcp_tool_response(
+        app: Router,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = app
+            .oneshot(mcp_request(
+                &serde_json::json!(id),
+                "tools/call",
+                serde_json::json!({"name": name, "arguments": arguments})
+                    .as_object()
+                    .expect("tool params")
+                    .clone(),
+                Some(name),
+            ))
+            .await
+            .expect("MCP tool response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
     #[tokio::test]
     async fn health_is_public_but_status_requires_authentication() {
         let app = router(test_runtime());
@@ -3695,6 +3778,9 @@ form.addEventListener('submit', (event) => {
                 "mcg_project_context",
                 "mcg_query_project",
                 "mcg_query_run",
+                "mcg_scheduler_list",
+                "mcg_scheduler_create",
+                "mcg_scheduler_remove",
                 "mcg_run_agent",
                 "mcg_system_status"
             ]
@@ -3926,6 +4012,95 @@ form.addEventListener('submit', (event) => {
             response_json(wrong_name).await.pointer("/error/code"),
             Some(&serde_json::json!(-32_020))
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn mcp_scheduler_tools_create_replay_list_and_remove_one_definition() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(
+            project_root.path().join("README.md"),
+            "MCP scheduler fixture",
+        )
+        .expect("write fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let app = router(runtime.clone());
+        let schedule_id = ScheduleId::new();
+        let arguments = serde_json::json!({
+            "schedule_id": schedule_id,
+            "project_id": project_id,
+            "name": "MCP project heartbeat",
+            "goal": "inspect project health",
+            "trigger": {"kind": "heartbeat", "idle_seconds": 300, "busy_seconds": 30}
+        });
+
+        let created =
+            mcp_tool_response(app.clone(), 100, "mcg_scheduler_create", arguments.clone()).await;
+        assert_eq!(
+            created.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(false))
+        );
+        let replayed =
+            mcp_tool_response(app.clone(), 101, "mcg_scheduler_create", arguments.clone()).await;
+        assert_eq!(
+            replayed.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(runtime.schedules().expect("schedules").len(), 1);
+
+        let listed = mcp_tool_response(
+            app.clone(),
+            102,
+            "mcg_scheduler_list",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            listed["result"]["structuredContent"]["schedules"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        for id in [103, 104] {
+            let removed = mcp_tool_response(
+                app.clone(),
+                id,
+                "mcg_scheduler_remove",
+                serde_json::json!({"schedule_id": schedule_id}),
+            )
+            .await;
+            assert_eq!(
+                removed.pointer("/result/structuredContent/schedule/state"),
+                Some(&serde_json::json!("completed"))
+            );
+        }
+        let mut conflicting = arguments;
+        conflicting["goal"] = serde_json::json!("a different definition");
+        let mut invalid_budget = conflicting.clone();
+        invalid_budget["schedule_id"] = serde_json::json!(ScheduleId::new());
+        invalid_budget["budget"] = serde_json::json!({"max_tokens": 0});
+        let mut invalid_budget_shape = conflicting.clone();
+        invalid_budget_shape["schedule_id"] = serde_json::json!(ScheduleId::new());
+        invalid_budget_shape["budget"] = serde_json::json!({"max_tokens": 1, "unexpected": true});
+        let conflict =
+            mcp_tool_response(app.clone(), 105, "mcg_scheduler_create", conflicting).await;
+        assert_eq!(
+            conflict.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        for (id, invalid) in [(106, invalid_budget), (107, invalid_budget_shape)] {
+            let response =
+                mcp_tool_response(app.clone(), id, "mcg_scheduler_create", invalid).await;
+            assert_eq!(
+                response.pointer("/result/isError"),
+                Some(&serde_json::json!(true))
+            );
+        }
+        assert_eq!(runtime.schedules().expect("retained schedules").len(), 1);
     }
 
     #[tokio::test]
@@ -4172,6 +4347,49 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    async fn schedule_creation_is_idempotent_for_one_client_owned_identity() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("README.md"), "idempotent fixture")
+            .expect("write fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let state = ApiState { runtime };
+        let request = CreateScheduleRequest {
+            schedule_id: ScheduleId::new(),
+            name: "stable retry".into(),
+            project_id,
+            goal: "run exactly one recurring definition".into(),
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: None,
+            budget: None,
+            trigger: ScheduleTrigger::Interval { seconds: 300 },
+            first_run_at: None,
+            target_path: None,
+            context_token_budget: default_context_token_budget(),
+            requested_tools: Vec::new(),
+            estimated_output_tokens: default_estimated_output_tokens(),
+            max_model_calls: default_max_model_calls(),
+        };
+        let (first_replay, created) =
+            create_schedule_record(&state, request.clone()).expect("create schedule");
+        assert!(!first_replay);
+        let (second_replay, replayed) =
+            create_schedule_record(&state, request.clone()).expect("replay schedule");
+        assert!(second_replay);
+        assert_eq!(replayed, created);
+        let mut conflicting = request;
+        conflicting.goal = "different recurring definition".into();
+        let conflict = create_schedule_record(&state, conflicting).expect_err("reject conflict");
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(state.runtime.schedules().expect("list schedules").len(), 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn authenticated_scheduler_controls_and_budget_safe_pause_are_durable() {
         let runtime = test_runtime();
         let project_root = tempfile::tempdir().expect("project root");
@@ -4183,6 +4401,7 @@ form.addEventListener('submit', (event) => {
             .expect("discover project");
         let now = Utc::now();
         let body = serde_json::to_vec(&CreateScheduleRequest {
+            schedule_id: ScheduleId::new(),
             name: "bounded check".into(),
             project_id,
             goal: "perform a bounded unattended check".into(),
@@ -4204,6 +4423,25 @@ form.addEventListener('submit', (event) => {
         })
         .expect("serialize schedule");
         let app = router(runtime.clone());
+        let mut missing_identity: serde_json::Value =
+            serde_json::from_slice(&body).expect("schedule JSON");
+        missing_identity
+            .as_object_mut()
+            .expect("schedule object")
+            .remove("schedule_id");
+        let missing_identity = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/schedules"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&missing_identity).expect("missing-id JSON"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("missing identity response");
+        assert_eq!(missing_identity.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let unauthorized = app
             .clone()
             .oneshot(
@@ -4219,7 +4457,7 @@ form.addEventListener('submit', (event) => {
             .oneshot(
                 authorized(Request::post("/api/v1/schedules"))
                     .header("content-type", "application/json")
-                    .body(Body::from(body))
+                    .body(Body::from(body.clone()))
                     .expect("request"),
             )
             .await
@@ -4234,6 +4472,21 @@ form.addEventListener('submit', (event) => {
                 .to_bytes(),
         )
         .expect("created schedule");
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/schedules"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay response");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replayed: ScheduleDefinition =
+            serde_json::from_slice(&replay.into_body().collect().await.expect("body").to_bytes())
+                .expect("replayed schedule");
+        assert_eq!(replayed.id, created.id);
 
         assert!(
             run_scheduler_tick_at(runtime.clone(), now)
@@ -4362,6 +4615,7 @@ form.addEventListener('submit', (event) => {
         let schedule = ScheduleDefinition {
             schema_version: SCHEDULE_SCHEMA_VERSION,
             id: ScheduleId::new(),
+            definition_hash: String::new(),
             name: "dispatch check".into(),
             project_id,
             goal: "exercise the governed run path".into(),
@@ -4430,6 +4684,7 @@ form.addEventListener('submit', (event) => {
         let schedule = ScheduleDefinition {
             schema_version: SCHEDULE_SCHEMA_VERSION,
             id: ScheduleId::new(),
+            definition_hash: String::new(),
             name: "status watch".into(),
             project_id,
             goal: "inspect a changed status file".into(),
