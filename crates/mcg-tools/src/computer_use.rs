@@ -305,7 +305,12 @@ fn resolve_target(target: &ComputerUseTarget) -> Result<AttachedComputer, ToolEr
         ToolError::Unavailable(format!("computer display discovery failed: {error}"))
     })?;
     let screen = target.display_id.map_or_else(
-        || screens.iter().find(|screen| screen.display_info.is_primary),
+        || {
+            screens
+                .iter()
+                .find(|screen| screen.display_info.is_primary)
+                .or_else(|| screens.first())
+        },
         |id| screens.iter().find(|screen| screen.display_info.id == id),
     );
     let screen = screen.ok_or_else(|| {
