@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Command-based objective evaluation and atomic terminal settlement are focused-green on Windows and await exact Ubuntu qualification.
+- Current task: Command-based objective evaluation and atomic terminal settlement are cross-platform qualified; guided approvals and additional objective condition types are next.
 - Last meaningful change: Added atomic denied/cancelled approval settlement plus governed build/test/static-analysis execution, independent evaluation reports, terminal task/run settlement, and durable desktop evidence rendering.
-- Next step: Qualify the exact objective-settlement commit on Ubuntu, then add guided evaluation approval checkpoints and objective HTTP/browser/custom condition evaluators. Persist full mid-turn checkpoints before supporting external MCP approval resume or eliminating the repeated provider inference. Preserve the visible OAuth handoff.
+- Next step: Add guided evaluation approval checkpoints and objective HTTP/browser/artifact/custom condition evaluators, starting with authenticated HTTP status and rendered-page evidence. Persist full mid-turn checkpoints before supporting external MCP approval resume or eliminating the repeated provider inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -133,6 +133,7 @@ When sources conflict, use this order:
 - 2026-08-14: Exact commit `e706ba4` passed the complete owner-controlled Ubuntu `./scripts/verify.sh` gate, including native Tauri/GTK and Playwright qualification.
 - 2026-08-14: Exact approval-continuation commit `43c63f3` passed the complete owner-controlled Ubuntu `./scripts/verify.sh` gate, including strict workspace tests/clippy, live GPU45, frontend/docs, native Tauri/GTK, and Playwright.
 - 2026-08-14: Objective-settlement focused Windows gates passed 24 API tests, strict Rust clippy, nine desktop flows, frontend type/build, and docs. The public scenario uses real npm/Node build/test/check processes for atomic pass/fail settlement and terminal replay non-duplication.
+- 2026-08-14: Exact objective-settlement commit `52da160` passed complete owner-controlled Ubuntu `./scripts/verify.sh`, including the real npm/Node pass/fail scenario, strict workspace gates, live GPU45, frontend/docs, native Tauri/GTK, and Playwright.
 - 2026-08-14: Live daemon/CLI smoke test passed for health, human status, and JSON status; the exact temporary daemon process was stopped afterward.
 - 2026-08-14: The first GitHub Actions frontend run exposed non-deterministic workspace dependency placement: Vitest was hoisted while the explicit jsdom dependency was nested. Moved jsdom 29.1.1 to the root workspace, verified a clean `npm ci`, Vitest, and Playwright run, and updated checkout/setup-node to their current v7 major releases.
 - 2026-08-14: GitHub Actions run `31771954125` passed all documentation, frontend, Ubuntu Rust, and Windows Rust jobs for commit `b02d626`.
@@ -488,9 +489,9 @@ When sources conflict, use this order:
 - Context: Completed Coder/Evaluator model turns still left consumer tasks active because model self-report could not prove build, test, or static-analysis success; denying an approval also left retained waiting authority unresolved.
 - Decision: Resolve denied/cancelled launched approvals together with failed instance/lease, retryable run, blocked task, and ordered events in one SQLite transaction. After every planned turn completes, rerun only exact currently discovered Build/Test/StaticAnalysis commands through typed process requests, capability policy, tool audit, and execution leases. Bind the report to the completed independent Evaluator and atomically persist it with completed/failed task/run projections; inconclusive evidence blocks without inventing success.
 - Files: `crates/mcg-{domain,storage,runtime,api}/`, `apps/desktop/`, `docs/architecture/{runtime-spine,agent-organization}.md`, `README.md`.
-- Commands/tests: Strict focused Rust clippy; 24 API tests; real npm/Node objective pass/fail/replay scenario; nine Vitest flows; frontend typecheck/build; docs/diff checks.
-- Result: Passing discovered commands complete the task/run, nonzero exit evidence fails both, and terminal Start replay adds no model call or tool audit record. Desktop History shows durable evaluation outcome/check counts and advanced details; Deny exposes the retryable blocked state.
-- Follow-up: Run exact Ubuntu qualification. Add a dedicated guided-mode objective-check approval checkpoint and deterministic HTTP, browser, artifact/file, research, screenshot, and custom-condition evaluators; non-command conditions deliberately remain nonterminal.
+- Commands/tests: Strict focused Windows Rust clippy; 24 API tests; real npm/Node objective pass/fail/replay scenario; nine Vitest flows; frontend typecheck/build; docs/diff checks; exact commit `52da160` complete Ubuntu `./scripts/verify.sh`.
+- Result: Passing discovered commands complete the task/run, nonzero exit evidence fails both, and terminal Start replay adds no model call or tool audit record. Desktop History shows durable evaluation outcome/check counts and advanced details; Deny exposes the retryable blocked state. Exact Windows-focused and complete Ubuntu native qualification are green.
+- Follow-up: Add a dedicated guided-mode objective-check approval checkpoint and deterministic HTTP, browser, artifact/file, research, screenshot, and custom-condition evaluators; non-command conditions deliberately remain nonterminal.
 
 ## Known Issues
 
