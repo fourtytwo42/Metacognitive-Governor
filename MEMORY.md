@@ -6,7 +6,7 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M3 typed tools, capabilities, and approvals is in progress; its versioned contracts and policy/broker foundation compile and pass focused tests.
-- Last meaningful change: Integrated broker-issued execution leases and output redaction, then implemented all typed filesystem operations through fixed capability directory handles with atomic conflict-aware writes and observable verification.
+- Last meaningful change: Pushed M3 control-plane and capability-safe filesystem checkpoint `96a378f` (`Establish M3 tool policy boundary`) to private `origin/main`.
 - Next step: Implement structured process/shell, HTTP, system, Git, and memory executors, then add worktree isolation and durable SQLite/API wiring.
 - Blockers: None documented.
 
@@ -128,6 +128,7 @@ When sources conflict, use this order:
 - 2026-08-14: Complete Windows and Ubuntu local verification passed with M2: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. The common live GPU45 discovery/buffered/streaming probe also passed independently from both platforms.
 - 2026-08-14: M3 contract/policy/broker checkpoint passed 14 focused tests plus formatting, clippy with warnings denied, and `git diff --check`. Tests cover schema round-trip, immutable constitutional gates, secret/protected/path-scope bypasses, zero-side-effect denial/approval, content-addressed artifacts, secret redaction, and duplicate active leases.
 - 2026-08-14: M3 capability-safe filesystem checkpoint passed the complete Rust workspace test and clippy gates on Windows. Ten `mcg-tools` tests cover traversal/sibling denial, atomic write/patch/read, stale-hash conflict isolation, artifact hashes, approvals/audit, redaction, and leases. `cap-std` 4.0.2 confines file operations to pre-opened directory handles.
+- 2026-08-14: Committed and pushed the M3 control-plane/filesystem checkpoint as `96a378f`; `main` matched `origin/main` afterward and no GitHub-hosted automation was used.
 
 ## Decisions
 
