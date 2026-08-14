@@ -4,9 +4,9 @@ Durable project context lives here. Update this file whenever information should
 
 ## Active Handoff
 
-- Current task: Establish the MCG repository and durable product baseline, then publish it as a new GitHub repository.
-- Last meaningful change: Split the 60-section PRD into eight canonical specifications and recorded owner answers plus conservative defaults in ADR 0001.
-- Next step: Validate documentation, initialize Git, commit, create the private `fourtytwo42/Metacognitive-Governor` repository, and push `main`.
+- Current task: Product baseline and GitHub repository setup are complete; awaiting the owner's answers to the remaining high-impact questions.
+- Last meaningful change: Published the documentation baseline to the private GitHub repository `fourtytwo42/Metacognitive-Governor` on `main`.
+- Next step: Resolve the remaining owner choices, then produce the implementation architecture, milestone dependency map, test strategy, and Rust/Tauri workspace scaffold.
 - Blockers: None documented.
 
 ## Current State
@@ -14,7 +14,8 @@ Durable project context lives here. Update this file whenever information should
 - MCG is currently a documentation-only project describing a native, cross-platform metacognitive AI harness/runtime.
 - The complete vision remains in scope and will be delivered through integrated, end-to-end milestones rather than a throwaway narrow prototype.
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
-- There is no application scaffold yet. Git initialization and GitHub publication are the next actions.
+- The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
+- There is no application scaffold yet.
 
 ## User Preferences
 
@@ -75,6 +76,7 @@ When sources conflict, use this order:
 - 2026-08-13: Read all 60 sections of `MCG_PRD.md`; inspected the workspace with `rg --files` and `git status`; confirmed it contains only the three Markdown files and is not a Git repository.
 - 2026-08-13: Ran `scripts/split-prd.ps1`; verified eight canonical spec files contain all 60 numbered sections exactly once and no known mojibake signatures.
 - 2026-08-13: Verified GitHub CLI 2.86.0 is authenticated as `fourtytwo42` with repository permissions.
+- 2026-08-13: Initialized Git on `main`, created root commit `e5e053d` (`Establish MCG product baseline`), created private repository `fourtytwo42/Metacognitive-Governor`, and pushed `main`.
 
 ## Decisions
 
@@ -99,6 +101,7 @@ When sources conflict, use this order:
 ## Completed Work
 
 - 2026-07-12: Reset stale project-specific memory while retaining the durable memory-management logic.
+- 2026-08-13: Split and repaired the PRD, added the product/engineering baseline and repository hygiene files, initialized Git, and published the private GitHub repository.
 
 ## Open Follow-ups
 
