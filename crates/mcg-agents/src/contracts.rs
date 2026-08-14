@@ -394,6 +394,10 @@ pub enum SuccessCondition {
     },
     ScreenshotMatches {
         baseline: String,
+        expected_baseline_sha256: String,
+        url: String,
+        max_changed_basis_points: u16,
+        per_channel_threshold: u8,
     },
     ServiceHealthy {
         endpoint: String,

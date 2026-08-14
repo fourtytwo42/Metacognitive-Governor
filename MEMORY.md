@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Guided approval, HTTP status, real Chromium rendered-page, artifact/file, and exact-discovered custom command evidence are cross-platform qualified; research and screenshot-baseline evidence are next.
-- Last meaningful change: Added typed `FileExists`/`fs.verify`, bounded streaming artifact capture, safe package-script discovery, `FILE EXISTS`, and exact `COMMAND SUCCEEDS` evaluation.
-- Next step: Add research and screenshot-baseline evidence, then expand representative workflows and UI depth. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Current task: Screenshot-baseline evidence is Windows-qualified and awaiting an exact Ubuntu checkpoint; research provenance evidence follows.
+- Last meaningful change: Added immutable `SCREENSHOT MATCHES`, governed browser/file capability composition, bounded PNG decoding, decoded-pixel tolerances, and actual/baseline artifact provenance.
+- Next step: Commit and run the exact screenshot checkpoint through the complete owner-controlled Ubuntu gate, then implement provenance-backed research evidence. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -27,6 +27,7 @@ Durable project context lives here. Update this file whenever information should
 - Advanced consumer condition lines accept exact `HTTP STATUS URL` syntax. Runtime grants only the parsed credential-free origin, performs a body-bounded governed GET, captures response bytes as an artifact, and compares observed status exactly; status mismatch, timeout, and connection failure become failed evaluation evidence.
 - Advanced consumer condition lines accept exact `PAGE RENDERS URL` syntax. Runtime launches a fresh local Chromium CDP session, permits only exact-origin GET/HEAD plus in-page data/blob resources, checks DOM readiness/layout after JavaScript, and captures rendered HTML plus a PNG. Missing browser runtime blocks as inconclusive; render failure is objective failure.
 - Advanced consumer condition lines accept `FILE EXISTS project/relative/path` and exact `COMMAND SUCCEEDS discovered command`. File evidence is regular-file-only, capability-confined, streamed with a 1 GiB ceiling, and records artifact size/SHA-256 without stdout. Custom commands execute only when the complete command still matches safe current project discovery; arbitrary prose remains inconclusive.
+- Advanced consumer condition lines accept `SCREENSHOT MATCHES URL project/relative/baseline.png`. Launch hashes the regular baseline before model work; evaluation revalidates that digest, renders under exact-origin browser confinement, decodes bounded PNGs, and applies explicit channel/changed-area tolerances. Missing baselines fail before spend; dimension, visual, or post-binding baseline changes fail the objective.
 
 ## User Preferences
 
@@ -536,6 +537,15 @@ When sources conflict, use this order:
 - Result: Windows qualification is green. Exact commit `4238ec5` also passed an isolated complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`. Binary evidence is bounded, deduplicated, and hash/size checked; a missing file atomically fails task/run; exact discovered custom scripts pass through policy, leases, audit, and structured process execution.
 - Follow-up: Continue research and screenshot-baseline evaluators.
 
+### 2026-08-14 - Immutable Screenshot Baseline Evidence
+
+- Context: Rendered-page evidence captured a screenshot but could not compare it with an approved visual baseline; byte-hash equality would be too brittle, while a mutable path could redefine success after approval.
+- Decision: Add typed `BrowserScreenshotMatches` with URL, project-relative baseline, launch-bound baseline SHA-256, fixed viewport, per-channel threshold, and maximum changed-pixel basis points. Require both network-origin and file-read capabilities; decode only bounded PNGs; compare RGBA pixels; retain HTML, actual PNG, and baseline PNG as content-addressed evidence. Default consumer tolerance is channel delta 8 and 1% changed pixels.
+- Files: workspace/tool manifests and lock, `crates/mcg-{agents,tools,runtime,api}/`, `README.md`, and runtime/agent/testing documentation.
+- Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 33 tool and 30 API tests; real Chromium pass/mismatch/mutation scenario; nine Vitest flows; frontend typecheck/build; Playwright; docs/diff checks.
+- Result: Windows qualification is green. Missing baselines stop before model calls; identical real renders pass; a different page fails; dimension and area thresholds are exact; baseline mutation after launch is rejected. Exact Ubuntu qualification remains pending.
+- Follow-up: Commit and run complete `./scripts/verify.sh` on the owner-controlled Ubuntu VM, then implement research evidence.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -563,7 +573,7 @@ When sources conflict, use this order:
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
-- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser, file, and exact-discovered custom evaluators to research and screenshot conditions; unsupported conditions deliberately remain nonterminal.
+- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser, file, exact-discovered custom, and Windows-qualified screenshot evaluators to provenance-backed research conditions; unsupported conditions deliberately remain nonterminal.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

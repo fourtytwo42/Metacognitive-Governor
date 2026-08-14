@@ -104,6 +104,10 @@ project authority, captures a bounded regular-file artifact through `fs.verify`,
 and records its size and digest without placing file bytes in report text. Executable
 custom conditions are limited to the canonical `COMMAND SUCCEEDS ` prefix and an
 exact current discovery match; all other custom descriptions remain unsupported.
+Screenshot conditions durably bind URL, project-relative baseline, baseline digest,
+viewport, per-channel threshold, and maximum changed-area basis points. The evaluator
+must revalidate the baseline digest and attach decoded-pixel evidence; PNG-byte equality
+and model visual self-report are not accepted substitutes.
 
 ## Authenticated Control Surface
 

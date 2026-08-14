@@ -152,6 +152,15 @@ pub enum ToolRequestKind {
         viewport_width: u32,
         viewport_height: u32,
     },
+    BrowserScreenshotMatches {
+        url: String,
+        baseline_path: String,
+        expected_baseline_sha256: String,
+        viewport_width: u32,
+        viewport_height: u32,
+        max_changed_basis_points: u16,
+        per_channel_threshold: u8,
+    },
     SystemInfo,
     SystemEnv {
         names: Vec<String>,
@@ -234,6 +243,7 @@ impl ToolRequestKind {
             Self::HttpRequest { .. } => "http.request".into(),
             Self::HttpDownload { .. } => "http.download".into(),
             Self::BrowserRender { .. } => "browser.render".into(),
+            Self::BrowserScreenshotMatches { .. } => "browser.screenshot_matches".into(),
             Self::SystemInfo => "system.info".into(),
             Self::SystemEnv { .. } => "system.env".into(),
             Self::SystemProcesses => "system.processes".into(),

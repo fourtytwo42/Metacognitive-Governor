@@ -140,6 +140,15 @@ browser at a root-owned stable path and installs the repository's path-specific
 AppArmor profile granting `userns` to that executable. Development and release gates
 use the same layout. `--no-sandbox` and global AppArmor/sysctl weakening are forbidden.
 
+`SCREENSHOT MATCHES URL project/relative/baseline.png` becomes a typed visual
+regression condition. Launch streams and hashes the regular baseline before reserving
+model work, binding that digest into the durable plan. Evaluation revalidates the
+digest, renders at the fixed viewport under the same network confinement, decodes only
+bounded PNG dimensions/allocations, and compares RGBA pixels with explicit per-channel
+and changed-area thresholds. The default accepts channel deltas through 8 and no more
+than 100 basis points (1%) of changed pixels. Dimension changes fail. HTML, actual PNG,
+and baseline PNG are all content-addressed; the report points to the actual screenshot.
+
 ## Verification evidence
 
 Automated tests cover schema round trips, legal and illegal transitions, injected
@@ -169,6 +178,10 @@ The artifact fixture proves a binary file is streamed without stdout exposure,
 deduplicated by digest, bounded by the evidence limit, and combined with an exact
 discovered custom script. A missing file atomically fails the task/run with audited
 execution evidence.
+The screenshot fixture captures a real Chromium baseline before project discovery,
+rejects a missing baseline before any model call, proves an unchanged JavaScript page
+passes decoded-pixel comparison, proves a different page fails, and proves mutation
+after objective binding is rejected by digest revalidation.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

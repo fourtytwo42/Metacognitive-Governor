@@ -80,6 +80,10 @@ absolute-path rejection, regular-file-only enforcement, bounded streaming captur
 binary digest/size evidence, deduplication, missing files, and audit. Custom command
 fixtures require an exact safely discovered manifest command and verify that arbitrary
 prose or undiscovered commands cannot execute.
+Visual-baseline fixtures cover pre-model missing-file rejection, immutable baseline
+digest binding, post-binding mutation, bounded PNG decoding, dimension mismatch,
+per-channel noise, changed-pixel thresholds, actual/baseline artifact provenance,
+same-origin browser confinement, and terminal pass/fail settlement.
 
 ## API and compatibility testing
 

@@ -1569,12 +1569,16 @@ impl AppRuntime {
             filesystem: filesystem.clone(),
             process: process.clone(),
             http: Arc::new(
-                HttpExecutor::new(credentials, filesystem, &artifacts)
+                HttpExecutor::new(credentials, filesystem.clone(), &artifacts)
                     .map_err(runtime_tool_error)?,
             ),
             browser: Arc::new(
-                BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
-                    .map_err(runtime_tool_error)?,
+                BrowserExecutor::with_filesystem(
+                    self.config.browser_executable.clone(),
+                    &artifacts,
+                    filesystem,
+                )
+                .map_err(runtime_tool_error)?,
             ),
             system: Arc::new(SystemExecutor),
             git: Arc::new(
@@ -1604,7 +1608,8 @@ impl AppRuntime {
         }
         for condition in &conditions {
             if let SuccessCondition::HttpResponds { url, .. }
-            | SuccessCondition::PageRenders { url } = condition
+            | SuccessCondition::PageRenders { url }
+            | SuccessCondition::ScreenshotMatches { url, .. } = condition
             {
                 let origin = objective_network_origin(url)?;
                 if !capabilities
@@ -1667,6 +1672,23 @@ impl AppRuntime {
                     url: url.clone(),
                     viewport_width: 1_280,
                     viewport_height: 720,
+                }
+            } else if let SuccessCondition::ScreenshotMatches {
+                baseline,
+                expected_baseline_sha256,
+                url,
+                max_changed_basis_points,
+                per_channel_threshold,
+            } = condition
+            {
+                ToolRequestKind::BrowserScreenshotMatches {
+                    url: url.clone(),
+                    baseline_path: objective_project_file_path(&project.root, baseline)?,
+                    expected_baseline_sha256: expected_baseline_sha256.clone(),
+                    viewport_width: 1_280,
+                    viewport_height: 720,
+                    max_changed_basis_points: *max_changed_basis_points,
+                    per_channel_threshold: *per_channel_threshold,
                 }
             } else if let SuccessCondition::FileExists { path, .. } = condition {
                 ToolRequestKind::FsVerify {
@@ -1794,12 +1816,8 @@ impl AppRuntime {
                 });
                 checkpoint.evidence.push(EvaluationEvidence {
                     method: objective_evidence_method(condition).into(),
-                    artifact_sha256: if matches!(condition, SuccessCondition::PageRenders { .. }) {
-                        outcome.artifacts.last()
-                    } else {
-                        outcome.artifacts.first()
-                    }
-                    .map(|artifact| artifact.sha256.clone()),
+                    artifact_sha256: objective_evidence_artifact(condition, &outcome)
+                        .map(|artifact| artifact.sha256.clone()),
                     event_sequence: None,
                     detail: format!("{label}: {detail}"),
                 });
@@ -2962,6 +2980,8 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
             Some(format!("HTTP GET {url} returns {status}"))
         } else if let SuccessCondition::PageRenders { url } = condition {
             Some(format!("Page renders at {url}"))
+        } else if let SuccessCondition::ScreenshotMatches { baseline, url, .. } = condition {
+            Some(format!("Screenshot at {url} matches {baseline}"))
         } else if let SuccessCondition::FileExists { path, .. } = condition {
             Some(format!("File exists: {path}"))
         } else {
@@ -3014,6 +3034,7 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
     match condition {
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
+        SuccessCondition::ScreenshotMatches { .. } => "governed_screenshot_comparison",
         SuccessCondition::FileExists { .. } => "governed_file_artifact",
         _ => "governed_process_exit",
     }
@@ -3037,7 +3058,27 @@ fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome)
                         .is_none_or(|expected| artifact.sha256.eq_ignore_ascii_case(expected))
             });
     }
+    if matches!(condition, SuccessCondition::ScreenshotMatches { .. }) {
+        return outcome.status == ToolOutcomeStatus::Succeeded
+            && outcome.verification.iter().any(|evidence| {
+                evidence.method == "browser.screenshot_pixel_diff" && evidence.passed
+            });
+    }
     outcome.status == ToolOutcomeStatus::Succeeded
+}
+
+fn objective_evidence_artifact<'a>(
+    condition: &SuccessCondition,
+    outcome: &'a ToolOutcome,
+) -> Option<&'a mcg_tools::ArtifactReference> {
+    if matches!(
+        condition,
+        SuccessCondition::PageRenders { .. } | SuccessCondition::ScreenshotMatches { .. }
+    ) {
+        outcome.artifacts.get(1)
+    } else {
+        outcome.artifacts.first()
+    }
 }
 
 fn observed_http_status(outcome: &ToolOutcome) -> Option<u16> {
@@ -3060,7 +3101,10 @@ fn objective_condition_outcome_detail(
                 .map_or_else(|| "unknown".into(), |value| value.to_string())
         );
     }
-    if matches!(condition, SuccessCondition::PageRenders { .. }) {
+    if matches!(
+        condition,
+        SuccessCondition::PageRenders { .. } | SuccessCondition::ScreenshotMatches { .. }
+    ) {
         let verification = outcome
             .verification
             .iter()

@@ -46,6 +46,7 @@ use mcg_runtime::{
 };
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::trace::TraceLayer;
@@ -959,7 +960,7 @@ async fn launch_task(
         .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))?;
     let now = Utc::now();
     let organization = OrganizationGenome::consumer_default(now);
-    let conditions = consumer_success_conditions(&task, &project);
+    let conditions = consumer_success_conditions(&task, &project)?;
     let run_id = RunId::new();
     let planning = PlanningRequest {
         run_id,
@@ -1310,6 +1311,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::StaticAnalysis { .. }
             | SuccessCondition::HttpResponds { .. }
             | SuccessCondition::PageRenders { .. }
+            | SuccessCondition::ScreenshotMatches { .. }
             | SuccessCondition::FileExists { .. }
     ) || matches!(condition, SuccessCondition::Custom { description } if consumer_custom_command(description).is_some())
 }
@@ -1317,13 +1319,23 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
 fn consumer_success_conditions(
     task: &TaskEnvelope,
     project: &ProjectModel,
-) -> Vec<SuccessCondition> {
+) -> Result<Vec<SuccessCondition>, ApiError> {
     let mut conditions = task
         .success_conditions
         .iter()
         .filter(|description| !description.trim().is_empty())
         .map(|description| parse_consumer_success_condition(description))
         .collect::<Vec<_>>();
+    for condition in &mut conditions {
+        if let SuccessCondition::ScreenshotMatches {
+            baseline,
+            expected_baseline_sha256,
+            ..
+        } = condition
+        {
+            *expected_baseline_sha256 = consumer_baseline_sha256(&project.root, baseline)?;
+        }
+    }
     for command in &project.commands {
         let name = command.name.to_ascii_lowercase();
         let condition = if name.contains("test") {
@@ -1352,7 +1364,7 @@ fn consumer_success_conditions(
             description: format!("Verify the completed goal: {}", task.goal),
         });
     }
-    conditions
+    Ok(conditions)
 }
 
 fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
@@ -1369,6 +1381,17 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
     if let Some(command) = consumer_directive_value(trimmed, "COMMAND SUCCEEDS") {
         return SuccessCondition::Custom {
             description: format!("COMMAND SUCCEEDS {command}"),
+        };
+    }
+    if let Some(value) = consumer_directive_value(trimmed, "SCREENSHOT MATCHES")
+        && let Some((url, baseline)) = consumer_url_and_file_path(value)
+    {
+        return SuccessCondition::ScreenshotMatches {
+            baseline,
+            expected_baseline_sha256: String::new(),
+            url,
+            max_changed_basis_points: 100,
+            per_channel_threshold: 8,
         };
     }
     let mut parts = trimmed.split_ascii_whitespace();
@@ -1443,6 +1466,55 @@ fn consumer_custom_command(description: &str) -> Option<&str> {
         .strip_prefix("COMMAND SUCCEEDS ")
         .map(str::trim)
         .filter(|command| !command.is_empty())
+}
+
+fn consumer_url_and_file_path(value: &str) -> Option<(String, String)> {
+    let separator = value.find(char::is_whitespace)?;
+    let (url, path) = value.split_at(separator);
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    normalized_consumer_file_path(path.trim()).map(|path| (url.to_owned(), path))
+}
+
+fn consumer_baseline_sha256(project_root: &str, relative: &str) -> Result<String, ApiError> {
+    let path = std::path::Path::new(project_root).join(relative);
+    let mut file = std::fs::File::open(&path).map_err(|error| {
+        ApiError::bad_request(format!(
+            "open screenshot baseline {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        ApiError::bad_request(format!(
+            "inspect screenshot baseline {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() > 67_108_864 {
+        return Err(ApiError::bad_request(
+            "screenshot baseline must be a regular PNG no larger than 64 MiB",
+        ));
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|error| {
+            ApiError::bad_request(format!(
+                "read screenshot baseline {}: {error}",
+                path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 async fn get_agent_run(
@@ -2139,7 +2211,8 @@ mod tests {
         DeviceAuthorizationConfig, ProviderKind,
     };
     use mcg_tools::{
-        ApprovalRepository, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditSink, ToolOutcomeStatus,
+        ApprovalRepository, BrowserExecutor, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditSink,
+        ToolExecutor, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
     };
     use sha2::{Digest, Sha256};
     use tower::ServiceExt;
@@ -2147,6 +2220,7 @@ mod tests {
     use super::*;
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    static BROWSER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn test_runtime() -> Arc<AppRuntime> {
         Arc::new(
@@ -2184,6 +2258,18 @@ mod tests {
                 description: "COMMAND SUCCEEDS npm run verify-artifact".into(),
             }
         );
+        assert_eq!(
+            parse_consumer_success_condition(
+                "SCREENSHOT MATCHES https://example.test/app tests/baselines/home page.png"
+            ),
+            SuccessCondition::ScreenshotMatches {
+                baseline: "tests/baselines/home page.png".into(),
+                expected_baseline_sha256: String::new(),
+                url: "https://example.test/app".into(),
+                max_changed_basis_points: 100,
+                per_channel_threshold: 8,
+            }
+        );
         assert!(is_automatable_consumer_condition(
             &parse_consumer_success_condition("COMMAND SUCCEEDS npm run verify-artifact")
         ));
@@ -2202,6 +2288,11 @@ mod tests {
             "FILE EXISTS dist/./result.txt",
             "FILE EXISTS ",
             "COMMAND SUCCEEDS ",
+            "SCREENSHOT MATCHES https://user:secret@example.test baseline.png",
+            "SCREENSHOT MATCHES file:///tmp/page.html baseline.png",
+            "SCREENSHOT MATCHES https://example.test ../baseline.png",
+            "SCREENSHOT MATCHES https://example.test C:\\baseline.png",
+            "SCREENSHOT MATCHES https://example.test",
         ] {
             assert!(matches!(
                 parse_consumer_success_condition(unsafe_or_ambiguous),
@@ -4484,6 +4575,7 @@ form.addEventListener('submit', (event) => {
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // Public launch must compose provider, browser, evidence, and settlement.
     async fn consumer_page_render_uses_real_browser_and_screenshot_evidence() {
+        let _browser_guard = BROWSER_TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().expect("temporary runtime");
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -4585,6 +4677,205 @@ form.addEventListener('submit', (event) => {
                 && record.artifacts.len() == 2
         }));
         assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Baseline capture and pass/fail public launches are one scenario.
+    async fn consumer_screenshot_baseline_uses_decoded_pixel_evidence() {
+        let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        let baseline_directory = project_root.join("tests/baselines");
+        std::fs::create_dir_all(&baseline_directory).expect("baseline directory");
+        std::fs::write(
+            project_root.join("README.md"),
+            "# Screenshot objective fixture\n",
+        )
+        .expect("readme");
+        let fixture = objective_http_fixture().await;
+        let matching_url = format!("{fixture}/render");
+        let mismatch_url = format!("{fixture}/expected-missing");
+        let preflight_artifacts = directory.path().join("preflight-artifacts");
+        let renderer = BrowserExecutor::new(
+            std::env::var_os("MCG_BROWSER_EXECUTABLE").map(std::path::PathBuf::from),
+            &preflight_artifacts,
+        )
+        .expect("preflight renderer");
+        let baseline_request = ToolRequest::new(
+            TaskId::new(),
+            "capture trusted baseline fixture",
+            ToolRequestKind::BrowserRender {
+                url: matching_url.clone(),
+                viewport_width: 1_280,
+                viewport_height: 720,
+            },
+        );
+        let baseline_render = renderer
+            .execute(ToolExecutionId::new(), &baseline_request)
+            .await
+            .expect("baseline render");
+        assert_eq!(baseline_render.status, ToolOutcomeStatus::Succeeded);
+        let baseline_path = baseline_directory.join("home.png");
+        std::fs::copy(
+            preflight_artifacts.join(&baseline_render.artifacts[1].relative_path),
+            &baseline_path,
+        )
+        .expect("baseline file");
+
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "screenshot_objective_fixture".into(),
+                    display_name: "Screenshot Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+
+        let mut missing_baseline_task = TaskEnvelope::new("Reject a missing visual baseline");
+        missing_baseline_task.project_id = Some(project.project_id);
+        missing_baseline_task.success_conditions = vec![format!(
+            "SCREENSHOT MATCHES {matching_url} tests/baselines/missing.png"
+        )];
+        runtime
+            .create_task(&missing_baseline_task)
+            .expect("missing baseline task");
+        let missing_baseline = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    missing_baseline_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+            )
+            .await
+            .expect("missing baseline response");
+        assert_eq!(missing_baseline.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+
+        let mut passing_task = TaskEnvelope::new("Match the approved home-page baseline");
+        passing_task.project_id = Some(project.project_id);
+        passing_task.success_conditions = vec![format!(
+            "SCREENSHOT MATCHES {matching_url} tests/baselines/home.png"
+        )];
+        runtime.create_task(&passing_task).expect("passing task");
+        let passing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    passing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+            )
+            .await
+            .expect("passing response");
+        assert_eq!(passing.status(), StatusCode::OK);
+        let passing: LaunchTaskResponse = serde_json::from_slice(
+            &passing
+                .into_body()
+                .collect()
+                .await
+                .expect("passing body")
+                .to_bytes(),
+        )
+        .expect("passing response body");
+        assert_eq!(passing.task.state, TaskState::Completed);
+        let report = passing.run.evaluations.first().expect("passing report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert!(matches!(
+            &report.conditions[0].condition,
+            SuccessCondition::ScreenshotMatches {
+                expected_baseline_sha256,
+                ..
+            } if expected_baseline_sha256 == &baseline_render.artifacts[1].sha256
+        ));
+        assert_eq!(report.evidence[0].method, "governed_screenshot_comparison");
+        assert!(report.evidence[0].artifact_sha256.is_some());
+        assert!(report.evidence[0].detail.contains("dimensions_match=true"));
+        let audit = runtime
+            .tool_audit(passing_task.id)
+            .expect("screenshot audit");
+        assert!(audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "browser.screenshot_matches"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+                && record.artifacts.len() == 3
+        }));
+
+        let mut failing_task = TaskEnvelope::new("Reject a visually different page");
+        failing_task.project_id = Some(project.project_id);
+        failing_task.success_conditions = vec![format!(
+            "SCREENSHOT MATCHES {mismatch_url} tests/baselines/home.png"
+        )];
+        runtime.create_task(&failing_task).expect("failing task");
+        let failing = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    failing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("failing response");
+        assert_eq!(failing.status(), StatusCode::OK);
+        let failing: LaunchTaskResponse = serde_json::from_slice(
+            &failing
+                .into_body()
+                .collect()
+                .await
+                .expect("failing body")
+                .to_bytes(),
+        )
+        .expect("failing response body");
+        assert_eq!(failing.task.state, TaskState::Failed);
+        assert_eq!(
+            failing.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(
+            failing.run.evaluations[0].conditions[0]
+                .detail
+                .contains("changed_pixels=")
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]

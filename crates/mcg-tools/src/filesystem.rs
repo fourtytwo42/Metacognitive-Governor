@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
@@ -95,17 +96,9 @@ impl FilesystemExecutor {
     }
 
     fn read(&self, path: &str, max_bytes: u64) -> Result<ExecutionResult, ToolError> {
-        let (root, relative) = self.resolve(path)?;
-        let bytes = root
-            .read(&relative)
-            .map_err(|error| ToolError::Execution(format!("read file: {error}")))?;
+        let bytes = self.read_bounded_binary(path, max_bytes)?;
         let size = u64::try_from(bytes.len())
             .map_err(|_| ToolError::Execution("file is too large".into()))?;
-        if size > max_bytes {
-            return Err(ToolError::Execution(format!(
-                "file is {size} bytes, above the {max_bytes}-byte response limit"
-            )));
-        }
         let artifact = self.artifacts.capture(&bytes, "application/octet-stream")?;
         Ok(ExecutionResult {
             summary: format!("read {size} bytes"),
@@ -117,6 +110,43 @@ impl FilesystemExecutor {
                 detail: sha256(&bytes),
             }],
         })
+    }
+
+    pub(crate) fn read_bounded_binary(
+        &self,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, ToolError> {
+        let (root, relative) = self.resolve(path)?;
+        let file = root
+            .open(&relative)
+            .map_err(|error| ToolError::Execution(format!("open bounded file: {error}")))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| ToolError::Execution(format!("inspect bounded file: {error}")))?;
+        if !metadata.is_file() {
+            return Err(ToolError::Execution(
+                "bounded file path is not a regular file".into(),
+            ));
+        }
+        if metadata.len() > max_bytes {
+            return Err(ToolError::Unavailable(format!(
+                "file exceeds the {max_bytes}-byte read limit"
+            )));
+        }
+        let read_limit = max_bytes.saturating_add(1);
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len().min(max_bytes).min(1024 * 1024)).unwrap_or(0),
+        );
+        file.take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ToolError::Execution(format!("read bounded file: {error}")))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+            return Err(ToolError::Unavailable(format!(
+                "file exceeds the {max_bytes}-byte read limit"
+            )));
+        }
+        Ok(bytes)
     }
 
     fn verify(&self, path: &str, max_bytes: u64) -> Result<ExecutionResult, ToolError> {

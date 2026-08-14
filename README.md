@@ -133,6 +133,12 @@ installed Chrome/Chromium discovered locally; it never downloads a browser at ta
 execution time. Linux packages install the managed browser at
 `/opt/metacognitive-governor/browser/chrome` with a path-specific AppArmor profile;
 MCG never disables Chromium's sandbox or Ubuntu's global user-namespace restriction.
+Use `SCREENSHOT MATCHES URL project/relative/baseline.png` for visual regression
+evidence. MCG binds the baseline SHA-256 before model work, renders the URL at
+1280x720, decodes both PNGs with dimension/allocation limits, and compares pixels.
+The consumer default tolerates channel noise up to 8 and at most 1% changed pixels;
+structured plans retain explicit thresholds. Baseline, actual screenshot, and HTML
+remain content-addressed evidence. Missing or changed baselines fail closed.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

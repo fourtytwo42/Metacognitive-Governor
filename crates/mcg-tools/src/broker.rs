@@ -430,6 +430,17 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ResourceKind::NetworkOrigin,
             network_origin(url)?,
         )],
+        ToolRequestKind::BrowserScreenshotMatches {
+            url, baseline_path, ..
+        } => vec![
+            make(
+                ActionClass::ProjectRead,
+                CapabilityEffect::Read,
+                ResourceKind::NetworkOrigin,
+                network_origin(url)?,
+            ),
+            read_path(baseline_path),
+        ],
         ToolRequestKind::SystemInfo | ToolRequestKind::SystemProcesses => vec![make(
             ActionClass::ProjectRead,
             CapabilityEffect::Read,
@@ -602,6 +613,9 @@ fn primary_resource(request: &ToolRequest) -> String {
         ToolRequestKind::HttpRequest { url, .. }
         | ToolRequestKind::HttpDownload { url, .. }
         | ToolRequestKind::BrowserRender { url, .. } => sanitized_url_resource(url),
+        ToolRequestKind::BrowserScreenshotMatches {
+            url, baseline_path, ..
+        } => format!("{} against {baseline_path}", sanitized_url_resource(url)),
         ToolRequestKind::McpCall {
             connection_id,
             tool_name,

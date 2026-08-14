@@ -42,7 +42,8 @@ impl ToolExecutor for HostExecutor {
             ToolRequestKind::HttpRequest { .. } | ToolRequestKind::HttpDownload { .. } => {
                 &self.http
             }
-            ToolRequestKind::BrowserRender { .. } => &self.browser,
+            ToolRequestKind::BrowserRender { .. }
+            | ToolRequestKind::BrowserScreenshotMatches { .. } => &self.browser,
             ToolRequestKind::SystemInfo
             | ToolRequestKind::SystemEnv { .. }
             | ToolRequestKind::SystemProcesses => &self.system,
