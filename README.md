@@ -70,13 +70,17 @@ The authenticated organization and run-control surface is available through the
 same daemon. Create a consumer-default organization, list it, plan work for an
 existing task, and inspect or control the resulting run with `mcg organization`
 and `mcg run`. Run `mcg organization --help` or `mcg run --help` for the exact
-commands and JSON-file schema.
+commands and JSON-file schema. After starting a run, `mcg run execute` dispatches
+one ready work item through configured providers and project-confined governed
+tools; run, work-item, and project UUIDs are explicit positional arguments.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 For API-key or bearer authentication, select `--auth api-key` or
 `--auth bearer-token` and pipe the credential on standard input; credentials are
 never accepted as command-line arguments. Use `mcg provider list`, `models`, and
-`discover` to inspect the secret-free durable catalog.
+`discover` to inspect the secret-free durable catalog. Use `mcg provider probe
+PROVIDER MODEL` to explicitly test and persist live Responses, streaming, and
+required function-call behavior before assigning tool-using work.
 
 Start the browser-hosted desktop frontend during UI development:
 

@@ -19,9 +19,9 @@ use axum::{
 };
 use chrono::Utc;
 use mcg_agents::{
-    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, OrganizationGenome,
-    OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, SuccessCondition,
-    TaskComplexity,
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, ExecutivePlanner,
+    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
+    SuccessCondition, TaskComplexity,
 };
 use mcg_domain::{
     ApprovalId, MemoryClaimId, OrganizationId, OrganizationRevisionId, ProjectId, RiskLevel, RunId,
@@ -32,11 +32,12 @@ use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
 };
 use mcg_providers::{
-    ProviderAuthMode, ProviderConnection, ProviderCredential, ProviderModelCatalog,
+    ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderCredential,
+    ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentRunView, AppRuntime, MemoryClaimMutation, ProjectMutation, ProviderMutation, RuntimeError,
-    RuntimeStatus,
+    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, MemoryClaimMutation,
+    ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,21 @@ pub struct TransitionAgentRunRequest {
     pub state: AgentRunState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteAgentWorkRequest {
+    pub project_id: ProjectId,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default = "default_context_token_budget")]
+    pub context_token_budget: u32,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
+    #[serde(default = "default_estimated_output_tokens")]
+    pub estimated_output_tokens: u64,
+    #[serde(default = "default_max_model_calls")]
+    pub max_model_calls: u16,
+}
+
 #[derive(Deserialize)]
 pub struct ConfigureProviderRequest {
     pub connection: ProviderConnection,
@@ -253,6 +269,18 @@ const fn default_budget_weight() -> u32 {
 
 const fn default_estimated_useful_seconds() -> u64 {
     60
+}
+
+const fn default_context_token_budget() -> u32 {
+    16_384
+}
+
+const fn default_estimated_output_tokens() -> u64 {
+    4_096
+}
+
+const fn default_max_model_calls() -> u16 {
+    8
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -381,6 +409,10 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         )
         .route("/api/v1/runs/{run_id}", get(get_agent_run))
         .route(
+            "/api/v1/runs/{run_id}/work/{work_item_id}/execute",
+            post(execute_agent_work),
+        )
+        .route(
             "/api/v1/runs/{run_id}/transition",
             post(transition_agent_run),
         )
@@ -395,6 +427,10 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/providers/{connection_id}/discover",
             post(discover_provider),
+        )
+        .route(
+            "/api/v1/providers/{connection_id}/models/{model_id}/probe",
+            post(probe_provider_model),
         )
         .route(
             "/api/v1/projects",
@@ -801,6 +837,32 @@ async fn transition_agent_run(
         .map_err(map_runtime_error)
 }
 
+async fn execute_agent_work(
+    State(state): State<ApiState>,
+    Path((run_id, work_item_id)): Path<(String, String)>,
+    Json(request): Json<ExecuteAgentWorkRequest>,
+) -> Result<Json<AgentTurnCommit>, ApiError> {
+    let run_id = parse_run_id(&run_id)?;
+    let work_item_id = work_item_id
+        .parse::<WorkItemId>()
+        .map_err(|_| ApiError::bad_request("work item id must be a UUID"))?;
+    state
+        .runtime
+        .execute_agent_work(&AgentDispatchSpec {
+            run_id,
+            work_item_id,
+            project_id: request.project_id,
+            target_path: request.target_path,
+            context_token_budget: request.context_token_budget,
+            requested_tools: request.requested_tools,
+            estimated_output_tokens: request.estimated_output_tokens,
+            max_model_calls: request.max_model_calls,
+        })
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 async fn configure_provider(
     State(state): State<ApiState>,
     Json(mut request): Json<ConfigureProviderRequest>,
@@ -872,6 +934,23 @@ async fn discover_provider(
     state
         .runtime
         .discover_provider(&connection_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn probe_provider_model(
+    State(state): State<ApiState>,
+    Path((connection_id, model_id)): Path<(String, String)>,
+) -> Result<Json<ModelProbeReport>, ApiError> {
+    if connection_id.trim().is_empty() || model_id.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "provider connection and model ids are required",
+        ));
+    }
+    state
+        .runtime
+        .probe_provider_model(&connection_id, &model_id)
         .await
         .map(Json)
         .map_err(map_runtime_error)
@@ -1212,7 +1291,12 @@ fn parse_memory_claim_id(value: &str) -> Result<MemoryClaimId, ApiError> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn map_runtime_error(error: RuntimeError) -> ApiError {
-    if let RuntimeError::Provider(provider) = &error {
+    let provider_error = match &error {
+        RuntimeError::Provider(provider)
+        | RuntimeError::AgentTurn(AgentTurnError::Provider(provider)) => Some(provider),
+        _ => None,
+    };
+    if let Some(provider) = provider_error {
         return match provider {
             mcg_providers::ProviderError::Configuration(_) => {
                 ApiError::bad_request(error.to_string())
@@ -1258,19 +1342,37 @@ mod tests {
     }
 
     async fn model_discovery_fixture() -> String {
-        let app = Router::new().route(
-            "/v1/models",
-            get(|| async {
-                Json(serde_json::json!({
-                    "object": "list",
-                    "data": [{
-                        "id": "fixture-model",
-                        "object": "model",
-                        "owned_by": "fixture"
-                    }]
-                }))
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "fixture-model",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32768
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "id": "fixture-response",
+                        "model": "fixture-model",
+                        "status": "completed",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "fixture complete"}]
+                        }],
+                        "usage": {"input_tokens": 32, "output_tokens": 4, "total_tokens": 36}
+                    }))
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("fixture listener");
@@ -1858,6 +1960,140 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Complete authenticated dispatch/provider/settlement boundary.
+    async fn ready_work_executes_only_with_auth_and_commits_terminal_evidence() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# Fixture").expect("project fixture");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let mut task = TaskEnvelope::new("Complete a provider-backed fixture turn");
+        task.project_id = Some(project.project_id);
+        task.budget = TaskBudget {
+            max_tokens: Some(10_000),
+            max_cost_usd: Some(2.0),
+            max_duration_seconds: Some(300),
+        };
+        runtime.create_task(&task).expect("task");
+        let now = Utc::now();
+        let organization = OrganizationGenome::consumer_default(now);
+        runtime
+            .record_organization_revision(&organization)
+            .expect("organization");
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "Report fixture completion",
+                RoleKind::Conversation,
+                vec![SuccessCondition::Custom {
+                    description: "provider returns a terminal response".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&organization, &planning, now)
+            .expect("work plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: organization.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        runtime.create_agent_run(&run, &plan).expect("run");
+        runtime
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+            )
+            .expect("start run");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "execution_fixture".into(),
+                    display_name: "Execution Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: model_discovery_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let endpoint = format!("/api/v1/runs/{}/work/{}/execute", run.id, plan.items[0].id);
+        let body = serde_json::to_vec(&ExecuteAgentWorkRequest {
+            project_id: project.project_id,
+            target_path: None,
+            context_token_budget: 512,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 128,
+            max_model_calls: 2,
+        })
+        .expect("request body");
+        let app = router(runtime.clone());
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post(&endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(
+                authorized(Request::post(&endpoint))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("execution response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let commit: AgentTurnCommit = serde_json::from_slice(&bytes).expect("turn commit");
+        assert_eq!(commit.result.response.id, "fixture-response");
+        let durable = runtime.agent_run_view(run.id).expect("durable run");
+        assert_eq!(durable.instances.len(), 1);
+        assert_eq!(
+            durable.instances[0].state,
+            mcg_agents::AgentState::Completed
+        );
+        assert_eq!(
+            durable.leases[0].state,
+            mcg_agents::AgentLeaseState::Completed
+        );
+        assert_eq!(durable.results, vec![commit.result]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Covers atomic setup, explicit probe, rollback, and secret-free listing.
     async fn anonymous_provider_configuration_discovers_and_persists_secret_free_catalog() {
         let runtime = test_runtime();
         let app = router(runtime.clone());
@@ -1892,7 +2128,42 @@ mod tests {
             .to_bytes();
         let mutation: ProviderMutation = serde_json::from_slice(&body).expect("mutation");
         assert_eq!(mutation.catalog.models[0].id, "fixture-model");
+        assert_eq!(mutation.catalog.models[0].capabilities.tools, None);
         assert_eq!(runtime.provider_route_candidates().await.len(), 1);
+
+        let probed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(
+                    "/api/v1/providers/fixture_local/models/fixture-model/probe",
+                ))
+                .body(Body::empty())
+                .expect("probe request"),
+            )
+            .await
+            .expect("probe response");
+        assert_eq!(probed.status(), StatusCode::OK);
+        let report: ModelProbeReport = serde_json::from_slice(
+            &probed
+                .into_body()
+                .collect()
+                .await
+                .expect("probe body")
+                .to_bytes(),
+        )
+        .expect("probe report");
+        assert_eq!(report.observations.len(), 3);
+        assert_eq!(report.model.capabilities.responses, Some(true));
+        assert_eq!(
+            runtime
+                .provider_catalog("fixture_local")
+                .expect("catalog")
+                .expect("durable catalog")
+                .models[0]
+                .capabilities
+                .responses,
+            Some(true)
+        );
 
         let failed_request = serde_json::json!({
             "connection": {

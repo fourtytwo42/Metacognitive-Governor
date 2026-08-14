@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{
     CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelDescriptor, ModelProvider,
-    ModelRequest, ProviderError,
+    ModelRequest, OutputItem, ProviderError, ToolChoice, ToolDefinition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,12 +31,8 @@ pub struct ModelProbeReport {
     pub observations: Vec<ProbeObservation>,
 }
 
-/// Discovers a model, verifies a minimal buffered Responses call, and verifies
-/// that a streaming response yields at least one valid canonical event.
-///
-/// The probe does not infer tool or structured-output support from model quality;
-/// those capabilities remain provider-declared until dedicated evals can separate
-/// endpoint support from instruction-following quality.
+/// Discovers a model, verifies minimal buffered and streaming Responses calls,
+/// and checks required tool-call behavior using a harmless synthetic function.
 ///
 /// # Errors
 /// Returns an error when model discovery itself fails or the requested model is
@@ -78,6 +74,33 @@ pub async fn probe_model(
     };
     observations.push(observation("streaming", &streaming));
     model.capabilities.streaming = Some(streaming.is_ok());
+    let tool_call = provider
+        .create_response(tool_probe_request(model_id))
+        .await
+        .and_then(|response| {
+            response
+                .output
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item,
+                        OutputItem::ToolCall { name, .. } if name == "report_ok"
+                    )
+                })
+                .then_some(())
+                .ok_or_else(|| {
+                    ProviderError::Incompatible(
+                        "required tool probe returned no report_ok tool call".into(),
+                    )
+                })
+        });
+    let tool_observation = observation("tools", &tool_call);
+    model.capabilities.tools = match tool_observation.support {
+        ProbeSupport::Supported => Some(true),
+        ProbeSupport::Unsupported => Some(false),
+        ProbeSupport::Indeterminate => None,
+    };
+    observations.push(tool_observation);
     Ok(ModelProbeReport {
         provider_id: provider.connection().id.clone(),
         model,
@@ -133,6 +156,39 @@ fn probe_request(model: &str) -> ModelRequest {
     }
 }
 
+fn tool_probe_request(model: &str) -> ModelRequest {
+    ModelRequest {
+        contract_version: CONTRACT_VERSION,
+        model: model.into(),
+        instructions: Some("Call the provided report_ok tool exactly once.".into()),
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentPart::Text {
+                text: "Report that this tool-call capability probe is OK.".into(),
+            }],
+            name: None,
+        }],
+        tools: vec![ToolDefinition {
+            name: "report_ok".into(),
+            description: Some("Reports successful tool-call support".into()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": false
+            }),
+            strict: Some(true),
+        }],
+        tool_choice: Some(ToolChoice::Required),
+        structured_output: None,
+        reasoning: None,
+        temperature: Some(0.0),
+        top_p: None,
+        max_output_tokens: Some(64),
+        metadata: Value::Null,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -168,9 +224,17 @@ mod tests {
 
         async fn create_response(
             &self,
-            _request: ModelRequest,
+            request: ModelRequest,
         ) -> Result<ModelResponse, ProviderError> {
-            Ok(response())
+            let mut response = response();
+            if !request.tools.is_empty() {
+                response.output = vec![OutputItem::ToolCall {
+                    id: "probe-call".into(),
+                    name: "report_ok".into(),
+                    arguments: r#"{"ok":true}"#.into(),
+                }];
+            }
+            Ok(response)
         }
 
         async fn stream_response(
@@ -215,6 +279,7 @@ mod tests {
         let report = probe_model(&provider, "fixture").await.expect("probe");
         assert_eq!(report.model.capabilities.responses, Some(true));
         assert_eq!(report.model.capabilities.streaming, Some(true));
+        assert_eq!(report.model.capabilities.tools, Some(true));
         assert!(
             report
                 .observations

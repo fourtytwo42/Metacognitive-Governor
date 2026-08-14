@@ -88,6 +88,21 @@ The CLI exposes these operations through `mcg organization` and `mcg run`.
 Human output stays concise for creation and transitions, while inspection and
 plan-file operations return the complete JSON evidence needed by scripts.
 
+Dispatch resolves project, work item, assigned role, dependencies, context,
+server-owned tool schemas, provider routes, organization concurrency, lease
+duration, and remaining budget again at execution time. SQLite writes the fresh
+instance, its created-to-running transition, the active lease, and all three
+events atomically. Duplicate active/completed work, incomplete dependencies, and
+exhausted parallel/total-agent limits produce no new authority or event.
+
+The runtime constructs every filesystem, process, Git, HTTP, system, and memory
+executor before dispatch. Host capabilities are confined to the registered
+project root, process credentials reject by default, network origins are empty by
+default, and the secure owner constitution remains in force. The authenticated
+`POST /api/v1/runs/{run}/work/{item}/execute` route and `mcg run execute` command
+cannot supply role identities, lease limits, arbitrary tool schemas, or completion
+claims.
+
 Task replay upserts authoritative event-derived projections before removing
 unexpected orphan projections. It does not delete referenced task rows during
 normal replay, so organization/run evidence remains foreign-key valid while a

@@ -515,6 +515,197 @@ impl SqliteEventStore {
         Ok(event)
     }
 
+    /// Atomically creates fresh running instance authority and its active work lease.
+    /// Dependency completion and organization concurrency limits are checked before
+    /// any projection or event is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale run state, incomplete dependencies, duplicate
+    /// work, excessive concurrency, inconsistent authority, or failed persistence.
+    #[allow(clippy::too_many_lines)] // Keep all authority validation and atomic writes visible together.
+    pub fn dispatch_agent_work(
+        &mut self,
+        created: &AgentInstance,
+        lease: &AgentLease,
+        at: DateTime<Utc>,
+    ) -> Result<(AgentInstance, Vec<EventEnvelope>), StorageError> {
+        let run = self
+            .agent_run(created.run_id)?
+            .ok_or(StorageError::AgentRunNotFound(created.run_id))?;
+        if run.state != AgentRunState::Running {
+            return Err(StorageError::Conflict(
+                "agent work can only dispatch from a running run".into(),
+            ));
+        }
+        let plan = self
+            .work_plan(created.run_id)?
+            .ok_or_else(|| StorageError::InvalidData("agent run has no work plan".into()))?;
+        let organization = self
+            .organization_revision(run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                run.organization_revision_id,
+            ))?;
+        let item = plan
+            .items
+            .iter()
+            .find(|item| item.id == lease.work_item_id)
+            .ok_or_else(|| {
+                StorageError::InvalidData("lease references unknown work item".into())
+            })?;
+        let total_instances: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM agent_instances WHERE run_id = ?1",
+            [created.run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let active_instances: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM agent_instances
+             WHERE run_id = ?1 AND state IN ('created', 'running', 'waiting', 'blocked')",
+            [created.run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if total_instances >= i64::from(organization.policy.max_total_agents)
+            || active_instances >= i64::from(organization.policy.max_parallel_agents)
+        {
+            return Err(StorageError::Conflict(
+                "organization agent concurrency limit is exhausted".into(),
+            ));
+        }
+        let prior_authority: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM agent_leases
+                INNER JOIN agent_instances
+                    ON agent_instances.instance_id = agent_leases.instance_id
+                WHERE agent_instances.run_id = ?1 AND agent_leases.work_item_id = ?2
+                  AND agent_leases.state IN ('active', 'completed')
+             )",
+            params![created.run_id.to_string(), lease.work_item_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if prior_authority {
+            return Err(StorageError::Conflict(
+                "work item is already active or complete".into(),
+            ));
+        }
+        for dependency in &item.dependencies {
+            let completed: bool = self.connection.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM agent_leases
+                    INNER JOIN agent_instances
+                        ON agent_instances.instance_id = agent_leases.instance_id
+                    INNER JOIN agent_turn_results
+                        ON agent_turn_results.lease_id = agent_leases.lease_id
+                    WHERE agent_instances.run_id = ?1
+                      AND agent_leases.work_item_id = ?2
+                      AND agent_leases.state = 'completed'
+                      AND agent_instances.state = 'completed'
+                 )",
+                params![created.run_id.to_string(), dependency.to_string()],
+                |row| row.get(0),
+            )?;
+            if !completed {
+                return Err(StorageError::Conflict(format!(
+                    "work item dependency {dependency} is not complete"
+                )));
+            }
+        }
+        let lease_seconds = i64::try_from(organization.policy.default_lease_seconds)
+            .map_err(|_| StorageError::InvalidData("default agent lease is too long".into()))?;
+        let maximum_expiry = at
+            .checked_add_signed(chrono::Duration::seconds(lease_seconds))
+            .ok_or_else(|| {
+                StorageError::InvalidData("default agent lease overflows time".into())
+            })?;
+        if created.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || created.state != AgentState::Created
+            || created.task_id != run.task_id
+            || created.role_id != item.assigned_role
+            || created.context_fingerprint.trim().is_empty()
+            || created.confidence.basis_points > 10_000
+            || lease.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || lease.instance_id != created.id
+            || lease.state != AgentLeaseState::Active
+            || lease.goal != item.goal
+            || lease.budget.limit != item.budget
+            || lease.expires_at <= at
+            || lease.expires_at > maximum_expiry
+            || lease.acquired_at != at
+            || lease.heartbeat_at != at
+            || lease.reporting_interval_seconds == 0
+            || lease.max_retries > 10
+            || !budget_values_valid(&lease.budget.limit)
+            || lease.budget.consumed_tokens != 0
+            || lease.budget.consumed_cost_usd != 0.0
+            || lease.budget.elapsed_seconds != 0
+        {
+            return Err(StorageError::InvalidData(
+                "dispatched agent authority is inconsistent with its run and work item".into(),
+            ));
+        }
+        let mut running = created.clone();
+        running.state = AgentState::Running;
+        running.updated_at = at;
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_instances(
+                instance_id, run_id, task_id, role_id, state, instance_json,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7)",
+            params![
+                running.id.to_string(),
+                running.run_id.to_string(),
+                running.task_id.to_string(),
+                running.role_id.to_string(),
+                serde_json::to_string(&running)?,
+                running.created_at.to_rfc3339(),
+                running.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_leases(
+                lease_id, instance_id, work_item_id, state, lease_json,
+                acquired_at, expires_at, heartbeat_at
+             ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7)",
+            params![
+                lease.id.to_string(),
+                lease.instance_id.to_string(),
+                lease.work_item_id.to_string(),
+                serde_json::to_string(lease)?,
+                lease.acquired_at.to_rfc3339(),
+                lease.expires_at.to_rfc3339(),
+                lease.heartbeat_at.to_rfc3339(),
+            ],
+        )?;
+        let events = vec![
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentInstanceRecorded,
+                    Some(created.task_id),
+                    serde_json::to_value(created)?,
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentInstanceStateChanged,
+                    Some(created.task_id),
+                    serde_json::json!({"from": AgentState::Created, "to": AgentState::Running, "instance": &running}),
+                ),
+            )?,
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentLeaseRecorded,
+                    Some(created.task_id),
+                    serde_json::to_value(lease)?,
+                ),
+            )?,
+        ];
+        transaction.commit()?;
+        Ok((running, events))
+    }
+
     /// Loads a current agent lease projection.
     ///
     /// # Errors
@@ -1527,17 +1718,6 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        store
-            .record_agent_instance(&instance)
-            .expect("record instance");
-        store
-            .transition_agent_instance(
-                instance.id,
-                AgentState::Running,
-                instance.confidence,
-                now + Duration::seconds(2),
-            )
-            .expect("start instance");
         let lease = AgentLease {
             schema_version: AGENT_RUN_SCHEMA_VERSION,
             id: AgentLeaseId::new(),
@@ -1559,7 +1739,21 @@ mod tests {
             expires_at: now + Duration::minutes(15),
             heartbeat_at: now + Duration::seconds(2),
         };
-        store.record_agent_lease(&lease).expect("record lease");
+        let (running_instance, dispatch_events) = store
+            .dispatch_agent_work(&instance, &lease, now + Duration::seconds(2))
+            .expect("atomic dispatch");
+        assert_eq!(running_instance.state, AgentState::Running);
+        assert_eq!(dispatch_events.len(), 3);
+        let event_count_after_dispatch = store.event_count().expect("event count");
+        assert!(
+            store
+                .dispatch_agent_work(&instance, &lease, now + Duration::seconds(2))
+                .is_err()
+        );
+        assert_eq!(
+            store.event_count().expect("event count"),
+            event_count_after_dispatch
+        );
 
         let usage = AgentUsageRecord {
             schema_version: AGENT_RUN_SCHEMA_VERSION,

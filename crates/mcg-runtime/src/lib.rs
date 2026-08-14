@@ -10,37 +10,42 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use mcg_agents::{
-    AgentInstance, AgentLease, AgentModelGateway, AgentRun, AgentRunState, AgentState,
-    AgentToolGateway, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
-    AgentUsageRecord, ConfidenceEstimate, EvaluationReport, OrganizationGenome,
-    OrganizationalMetrics, WorkPlan,
+    AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
+    AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnEngine, AgentTurnError,
+    AgentTurnRequest, AgentTurnResult, AgentUsageRecord, ConfidenceEstimate, EvaluationReport,
+    LeaseBudget, OrganizationGenome, OrganizationalMetrics, RoleKind, WorkPlan,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
-    ApprovalId, LeaseId, MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState,
-    ToolExecutionId, ToolRequestId,
+    AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, ProjectId, RunId,
+    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
+use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
     ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
     MemoryError, MemoryLifecycle, MemoryLifecycleAction, ProjectDiscoverer, ProjectDiscoveryError,
     ProjectModel, SnapshotInvalidation, render_managed_memory,
 };
 use mcg_providers::{
-    MemoryProviderCredentialStore, ModelRequest, ModelResponse, OAuthTokenSet,
+    MemoryProviderCredentialStore, ModelProbeReport, ModelRequest, ModelResponse, OAuthTokenSet,
     OsProviderCredentialStore, ProviderConnection, ProviderCredential, ProviderCredentialStore,
     ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, RouteCandidate,
-    clear_provider_credentials, save_provider_credentials,
+    RoutingPolicy, ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
+pub use mcg_storage::AgentTurnCommit;
 use mcg_storage::{
-    AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, RecoveryReport, SqliteEventStore,
-    StorageError,
+    AgentRecoveryReport, AgentTurnDisposition, RecoveryReport, SqliteEventStore, StorageError,
 };
 use mcg_tools::{
-    ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease,
-    ExecutionLeaseRepository, LeaseState, ToolAuditRecord, ToolAuditSink, ToolError,
+    ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
+    ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor,
+    HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
+    ProcessExecutor, RejectingCredentialResolver, SystemExecutor, ToolAuditRecord, ToolAuditSink,
+    ToolBroker, ToolError,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -180,6 +185,26 @@ pub struct ProviderMutation {
     pub connection: ProviderConnection,
     pub catalog: ProviderModelCatalog,
     pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDispatchSpec {
+    pub run_id: RunId,
+    pub work_item_id: WorkItemId,
+    pub project_id: ProjectId,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    pub context_token_budget: u32,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
+    pub estimated_output_tokens: u64,
+    pub max_model_calls: u16,
+}
+
+pub struct PreparedAgentTurn {
+    pub request: AgentTurnRequest,
+    pub events: Vec<EventEnvelope>,
+    pub project_root: std::path::PathBuf,
 }
 
 #[derive(Clone)]
@@ -870,6 +895,49 @@ impl AppRuntime {
         Ok(catalog)
     }
 
+    /// Explicitly probes one model's live Responses, streaming, and tool-call
+    /// behavior and persists the observed capability descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, credential-store, provider, probe, or persistence errors.
+    pub async fn probe_provider_model(
+        &self,
+        connection_id: &str,
+        model_id: &str,
+    ) -> Result<ModelProbeReport, RuntimeError> {
+        let connection = self
+            .store()?
+            .provider_connection(connection_id)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(format!(
+                    "provider connection {connection_id} was not found"
+                ))
+            })?;
+        let (report, models) = {
+            let mut registry = self.provider_registry.write().await;
+            if !registry.provider_ids().iter().any(|id| id == connection_id) {
+                registry.register_connection(connection, self.provider_credentials.as_ref())?;
+            }
+            if registry.models(connection_id).is_none() {
+                registry.discover(connection_id).await?;
+            }
+            let report = registry.probe_model(connection_id, model_id).await?;
+            let models = registry.models(connection_id).ok_or_else(|| {
+                ProviderError::Configuration("provider probe produced no catalog".into())
+            })?;
+            (report, models)
+        };
+        let catalog = ProviderModelCatalog {
+            connection_id: connection_id.to_owned(),
+            models,
+            discovered_at: Utc::now(),
+        };
+        let event = self.store()?.record_provider_catalog(&catalog)?;
+        let _ = self.event_sender.send(event);
+        Ok(report)
+    }
+
     /// Records a validated immutable organization revision and publishes it.
     ///
     /// # Errors
@@ -983,6 +1051,221 @@ impl AppRuntime {
             .transition_agent_run(run_id, next, metrics, Utc::now())?;
         let _ = self.event_sender.send(event);
         Ok(run)
+    }
+
+    /// Resolves one immutable work item into fresh bounded runtime authority.
+    /// Project identity, role, dependencies, tool exposure, model routes, budgets,
+    /// and organization concurrency are all derived or revalidated server-side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale run state, project mismatch, unavailable routes,
+    /// ungrantable tools, incomplete dependencies, or failed atomic persistence.
+    #[allow(clippy::too_many_lines)] // Keep the complete server-side authority derivation visible together.
+    pub async fn prepare_agent_turn(
+        &self,
+        spec: &AgentDispatchSpec,
+    ) -> Result<PreparedAgentTurn, RuntimeError> {
+        if spec.context_token_budget < 64
+            || spec.estimated_output_tokens == 0
+            || spec.max_model_calls == 0
+            || spec.max_model_calls > 32
+        {
+            return Err(
+                StorageError::InvalidData("agent dispatch bounds are invalid".into()).into(),
+            );
+        }
+        let view = self.agent_run_view(spec.run_id)?;
+        if view.run.state != AgentRunState::Running {
+            return Err(StorageError::Conflict(
+                "agent work can only dispatch from a running run".into(),
+            )
+            .into());
+        }
+        let task = self
+            .task(view.run.task_id)?
+            .ok_or(StorageError::TaskNotFound(view.run.task_id))?;
+        if task.project_id != Some(spec.project_id) {
+            return Err(StorageError::InvalidData(
+                "agent dispatch project does not match the task envelope".into(),
+            )
+            .into());
+        }
+        let item = view
+            .plan
+            .items
+            .iter()
+            .find(|item| item.id == spec.work_item_id)
+            .cloned()
+            .ok_or_else(|| StorageError::InvalidData("work item was not found".into()))?;
+        let organization = self
+            .organization_revision(view.run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                view.run.organization_revision_id,
+            ))?;
+        let role = organization
+            .roles
+            .iter()
+            .find(|role| role.id == item.assigned_role)
+            .cloned()
+            .ok_or_else(|| StorageError::InvalidData("assigned role was not found".into()))?;
+        let project = self
+            .project(spec.project_id)?
+            .ok_or(StorageError::ProjectNotFound(spec.project_id))?;
+        let context = self.assemble_project_context(
+            spec.project_id,
+            Vec::new(),
+            spec.context_token_budget,
+            spec.target_path.as_deref(),
+        )?;
+        let context_json = serde_json::to_vec(&context)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let context_fingerprint = format!("sha256:{:x}", Sha256::digest(context_json));
+        let tools = resolve_role_tools(role.kind, &spec.requested_tools)?;
+        let routes = self.provider_route_candidates().await;
+        if routes.is_empty() {
+            return Err(ProviderError::Configuration(
+                "no discovered provider models are available".into(),
+            )
+            .into());
+        }
+        let now = Utc::now();
+        let lease_seconds = i64::try_from(organization.policy.default_lease_seconds)
+            .map_err(|_| StorageError::InvalidData("default agent lease is too long".into()))?;
+        let expires_at = now
+            .checked_add_signed(Duration::seconds(lease_seconds))
+            .ok_or_else(|| {
+                StorageError::InvalidData("default agent lease overflows time".into())
+            })?;
+        let confidence = ConfidenceEstimate::new(5_000, 0)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: role.id,
+            run_id: spec.run_id,
+            task_id: view.run.task_id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint,
+            confidence,
+            created_at: now,
+            updated_at: now,
+        };
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: item.id,
+            goal: item.goal,
+            budget: LeaseBudget {
+                limit: item.budget,
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: tools.iter().map(|tool| tool.name.clone()).collect(),
+            reporting_interval_seconds: 30,
+            max_retries: 2,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: now,
+            expires_at,
+            heartbeat_at: now,
+        };
+        let (running, events) = self.store()?.dispatch_agent_work(&instance, &lease, now)?;
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(PreparedAgentTurn {
+            request: AgentTurnRequest {
+                role,
+                instance: running,
+                lease,
+                context,
+                route_candidates: routes,
+                routing_policy: RoutingPolicy::default(),
+                tools,
+                estimated_output_tokens: spec.estimated_output_tokens,
+                max_model_calls: spec.max_model_calls,
+            },
+            events,
+            project_root: std::path::PathBuf::from(project.root),
+        })
+    }
+
+    /// Builds a project-confined host execution plane, atomically dispatches the
+    /// selected work, executes its bounded provider/tool loop, and durably settles it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when project capabilities cannot be opened, authority
+    /// cannot be dispatched, or provider/tool execution cannot be settled.
+    pub async fn execute_agent_work(
+        &self,
+        spec: &AgentDispatchSpec,
+    ) -> Result<AgentTurnCommit, RuntimeError> {
+        let task_id = self.agent_run_view(spec.run_id)?.run.task_id;
+        let task = self
+            .task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        if task.project_id != Some(spec.project_id) {
+            return Err(StorageError::InvalidData(
+                "agent dispatch project does not match the task envelope".into(),
+            )
+            .into());
+        }
+        let project = self
+            .project(spec.project_id)?
+            .ok_or(StorageError::ProjectNotFound(spec.project_id))?;
+        let root = std::path::PathBuf::from(project.root);
+        let artifacts = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts)?;
+        let credentials = Arc::new(RejectingCredentialResolver);
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([root.clone()], &artifacts).map_err(runtime_tool_error)?,
+        );
+        let process = Arc::new(
+            ProcessExecutor::new([root.clone()], credentials.clone())
+                .map_err(runtime_tool_error)?,
+        );
+        let host = HostExecutor {
+            filesystem: filesystem.clone(),
+            process: process.clone(),
+            http: Arc::new(
+                HttpExecutor::new(credentials, filesystem, &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            system: Arc::new(SystemExecutor),
+            git: Arc::new(
+                GitExecutor::new(process, [root.clone()], &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            memory: Arc::new(MemoryExecutor::new(InMemoryMemoryRepository::default())),
+        };
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            host,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities: CapabilityPolicy::project(&root),
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let prepared = self.prepare_agent_turn(spec).await?;
+        let confidence = ConfidenceEstimate::new(5_000, 0)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        self.execute_agent_turn(
+            prepared.request,
+            &self.provider_gateway(),
+            &broker,
+            confidence,
+        )
+        .await
     }
 
     /// Records a selected ephemeral agent instance and publishes its event.
@@ -1232,6 +1515,174 @@ impl ExecutionLeaseRepository for DurableToolControl {
             .finish_tool_lease(lease_id, state)
             .map_err(|error| ToolError::Lease(error.to_string()))
     }
+}
+
+fn resolve_role_tools(
+    role: RoleKind,
+    requested: &[String],
+) -> Result<Vec<ToolDefinition>, StorageError> {
+    let allowed: &[&str] = match role {
+        RoleKind::Coder => &[
+            "fs.read",
+            "fs.list",
+            "fs.write",
+            "fs.patch",
+            "fs.mkdir",
+            "process.exec",
+            "git.status",
+            "git.diff",
+            "git.apply_patch",
+        ],
+        RoleKind::Tester | RoleKind::Evaluator => &[
+            "fs.read",
+            "fs.list",
+            "process.exec",
+            "git.status",
+            "git.diff",
+        ],
+        RoleKind::Researcher => &["http.request"],
+        RoleKind::ToolWorker => &["fs.read", "fs.list", "process.exec", "system.info"],
+        RoleKind::TemporarySpecialist => &["fs.read", "fs.list"],
+        RoleKind::Executive | RoleKind::Conversation => &[],
+    };
+    let selected = if requested.is_empty() {
+        allowed.iter().map(|name| (*name).to_owned()).collect()
+    } else {
+        let mut selected = Vec::with_capacity(requested.len());
+        for name in requested {
+            if !allowed.contains(&name.as_str()) {
+                return Err(StorageError::InvalidData(format!(
+                    "tool {name} is not grantable to the selected role"
+                )));
+            }
+            if selected.contains(name) {
+                return Err(StorageError::InvalidData(format!(
+                    "tool {name} was requested more than once"
+                )));
+            }
+            selected.push(name.clone());
+        }
+        selected
+    };
+    selected.iter().map(|name| tool_definition(name)).collect()
+}
+
+#[allow(clippy::too_many_lines)] // One exhaustive schema registry is easier to audit than scattered schemas.
+fn tool_definition(name: &str) -> Result<ToolDefinition, StorageError> {
+    let properties = |fields: serde_json::Value, required: &[&str]| {
+        serde_json::json!({
+            "type": "object",
+            "properties": fields,
+            "required": required,
+            "additionalProperties": false
+        })
+    };
+    let parameters = match name {
+        "fs.read" => properties(
+            serde_json::json!({
+                "path": {"type": "string"},
+                "max_bytes": {"type": "integer", "minimum": 1}
+            }),
+            &["path", "max_bytes"],
+        ),
+        "fs.list" => properties(
+            serde_json::json!({
+                "path": {"type": "string"},
+                "recursive": {"type": "boolean"},
+                "max_entries": {"type": "integer", "minimum": 1}
+            }),
+            &["path", "recursive", "max_entries"],
+        ),
+        "fs.write" => properties(
+            serde_json::json!({
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "create_new": {"type": "boolean"}
+            }),
+            &["path", "content", "create_new"],
+        ),
+        "fs.patch" => properties(
+            serde_json::json!({
+                "path": {"type": "string"},
+                "expected_sha256": {"type": "string"},
+                "replacement": {"type": "string"}
+            }),
+            &["path", "expected_sha256", "replacement"],
+        ),
+        "fs.mkdir" => properties(
+            serde_json::json!({
+                "path": {"type": "string"},
+                "recursive": {"type": "boolean"}
+            }),
+            &["path", "recursive"],
+        ),
+        "process.exec" => properties(
+            serde_json::json!({
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "executable": {"type": "string"},
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "cwd": {"type": "string"},
+                        "env": {"type": "array", "maxItems": 0},
+                        "stdin": {"type": "string", "enum": ["null", "piped", "inherit"]},
+                        "stdin_data": {"type": ["string", "null"]},
+                        "stdout": {"type": "string", "enum": ["null", "piped", "inherit"]},
+                        "stderr": {"type": "string", "enum": ["null", "piped", "inherit"]}
+                    },
+                    "required": ["executable", "argv", "cwd", "env", "stdin", "stdin_data", "stdout", "stderr"],
+                    "additionalProperties": false
+                }
+            }),
+            &["options"],
+        ),
+        "git.status" => properties(
+            serde_json::json!({"repository": {"type": "string"}}),
+            &["repository"],
+        ),
+        "git.diff" => properties(
+            serde_json::json!({
+                "repository": {"type": "string"},
+                "staged": {"type": "boolean"}
+            }),
+            &["repository", "staged"],
+        ),
+        "git.apply_patch" => properties(
+            serde_json::json!({
+                "repository": {"type": "string"},
+                "patch": {"type": "string"},
+                "three_way": {"type": "boolean"},
+                "check_only": {"type": "boolean"}
+            }),
+            &["repository", "patch", "three_way", "check_only"],
+        ),
+        "http.request" => properties(
+            serde_json::json!({
+                "method": {"type": "string"},
+                "url": {"type": "string"},
+                "headers": {"type": "array", "maxItems": 0},
+                "body": {"type": ["string", "null"]},
+                "max_response_bytes": {"type": "integer", "minimum": 1}
+            }),
+            &["method", "url", "headers", "body", "max_response_bytes"],
+        ),
+        "system.info" => properties(serde_json::json!({}), &[]),
+        _ => {
+            return Err(StorageError::InvalidData(format!(
+                "tool {name} has no runtime schema"
+            )));
+        }
+    };
+    Ok(ToolDefinition {
+        name: name.to_owned(),
+        description: Some(format!("Governed {name} operation")),
+        parameters,
+        strict: Some(true),
+    })
+}
+
+fn runtime_tool_error(error: ToolError) -> RuntimeError {
+    AgentTurnError::Tool(error).into()
 }
 
 #[allow(clippy::needless_pass_by_value)] // `Result::map_err` adapter owns its source error.

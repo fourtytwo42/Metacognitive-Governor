@@ -48,10 +48,22 @@ async fn gpu45_discovers_active_model_and_completes_response() {
         .await
         .expect("GPU45 common provider conformance");
     assert_eq!(report.model.id, active_model);
+    for operation in ["responses", "streaming"] {
+        assert_eq!(
+            report
+                .observations
+                .iter()
+                .find(|observation| observation.operation == operation)
+                .map(|observation| observation.support),
+            Some(ProbeSupport::Supported),
+            "GPU45 probe observations: {:#?}",
+            report.observations
+        );
+    }
     assert!(
         report
             .observations
             .iter()
-            .all(|observation| observation.support == ProbeSupport::Supported)
+            .any(|observation| observation.operation == "tools")
     );
 }

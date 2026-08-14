@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; durable provider registry plus organization/run controls pass complete Windows and Ubuntu gates.
-- Last meaningful change: Provider credentials now use a native OS-store boundary; secret-free connections/catalogs are atomic SQLite migration 7 evidence; authenticated API/CLI configuration and restart rediscovery passed against real GPU45.
-- Next step: Add safe instance/lease dispatch through the configured registry and governed tool broker, then execute real provider-backed website work.
+- Current task: M5 organization and useful work is in progress; safe provider/tool-backed work dispatch passes the complete Windows gate.
+- Last meaningful change: Ready work now receives atomic server-derived instance/lease authority, executes through project-confined governed tools and exact configured routes, and is exposed through authenticated API/CLI. Explicit capability probes persist honest observed model support.
+- Next step: Qualify the same dispatch checkpoint on Ubuntu, then execute a real website fixture with a tool-capable provider.
 - Blockers: None documented.
 
 ## Current State
@@ -146,6 +146,8 @@ When sources conflict, use this order:
 - 2026-08-14: M5 migration 5 file-backed qualification persisted an organization, planned/run state, instance, active lease, attributed provider usage, and objective evaluation; after close/reopen it recovered the run/instance/lease to explicit safe states and retained ordered event evidence. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: M5 bounded turn tests route a context-constrained Coder through a priced capable model, decode `fs.read` into the typed tool plane, feed its broker outcome back using exact Responses function-call items, and return a final response. Authentication failure makes one provider call with no fallback; an unleased `fs.write` produces zero tool calls. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: M5 runtime turn commit test used the durable runtime, organization/run/instance/lease state, a two-call provider fixture, and the real policy broker to execute typed `fs.read`. Migration 6 atomically stored one immutable final result, three usage records, assigned model, run metrics, completed instance/lease, and ordered events. Restart evidence also verifies approval waiting retains authority for resume while later failure creates no usage/result. Complete workspace tests and strict workspace clippy passed on Windows.
+- 2026-08-14: Safe dispatch focused tests passed on Windows. SQLite rejects duplicate/incomplete/excess authority and atomically creates a running instance, active work lease, and three events. The authenticated execution API test rejects anonymous use, calls a configured compatible fixture, and durably completes instance, lease, usage, and result. Provider probes now include required function-call behavior and missing model metadata remains unknown. Live GPU45 passed buffered and streaming Responses; its active model ignored the required tool call, so tools remain unknown and it is not routed tool-using Coder work.
+- 2026-08-14: Complete Windows `scripts/verify.ps1` passed for safe dispatch: strict Rust format/clippy/workspace tests, docs validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. No GitHub-hosted automation ran.
 - 2026-08-14: Authenticated M5 API/CLI control surfaces created a consumer organization, planned atomic and dependency-ordered work, started a run, and returned its full durable evidence view. Real restart smoke found task replay's delete/reinsert strategy violated agent-run foreign keys; replay now upserts authoritative tasks and only removes unexpected orphans. The repaired database restarted into `recovering`, CLI inspection passed, and `scripts/verify.ps1` passed the full Windows Rust/frontend/docs/native/Playwright gate.
 - 2026-08-14: Configured provider registry added native OS credential-store isolation, exact registered/discovered target dispatch, SQLite migration 7 connection/catalog evidence, and authenticated `mcg provider` API/CLI operations. Failed initial discovery is atomic and leaves no connection, route, or credential slot. Full Windows verification passed. Real CLI GPU45 discovery found 10 models at `http://192-168-50-189.nip.io:30001/v1`, and restart rediscovery returned the same catalog; the temporary daemons were stopped.
 - 2026-08-14: Exact commit `8c93506` passed `scripts/verify.sh` on Ubuntu, including the Linux Secret Service/keyring dependency, all Rust gates, frontend/docs, native Tauri build, and Playwright. After explicitly building runnable binaries, a real Linux daemon/CLI configured GPU45, listed 10 models, stopped/restarted, lazily reconstructed the registry, rediscovered 10 models, and stopped cleanly.
@@ -317,6 +319,15 @@ When sources conflict, use this order:
 - Result: Full Windows qualification passes. GPU45 returned 10 dynamically discovered models before and after restart. A wrong console URL exposed failed-setup debris and opaque CLI errors; both were fixed with atomic setup rollback and surfaced API error bodies.
 - Follow-up: Create bounded instances/leases and dispatch work through the real registry and tool broker.
 
+### 2026-08-14 - Safe Provider And Tool Dispatch
+
+- Context: Configured providers could not perform planned work until every runtime authority and host capability was derived and committed safely.
+- Decision: Revalidate run/project/work/role/dependencies/budgets/concurrency server-side; atomically create running instance plus active lease and three events; expose fixed role tool schemas only; construct a project-confined secure broker before dispatch; settle every provider/tool outcome through the existing atomic turn boundary. Preserve absent model capabilities as unknown and grant tool routing only after an explicit required-call probe passes.
+- Files: `crates/mcg-{storage,runtime,api,providers}/`, `apps/mcg-cli/`, `docs/architecture/{agent-organization,provider-fabric}.md`, `README.md`.
+- Commands/tests: Focused provider/runtime/storage/API tests and strict clippy; live `MCG_LIVE_GPU45=1` probe; complete `scripts/verify.ps1` on Windows.
+- Result: Authenticated provider-backed work execution reaches terminal durable evidence in the HTTP fixture and the complete Windows gate passes. GPU45 passed Responses and streaming, but its active model ignored a required function call, so MCG honestly retains unknown tool capability and will not route Coder tool work to it.
+- Follow-up: Run complete Windows and Ubuntu gates, then use a probed tool-capable provider for the real website fixture.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -337,11 +348,11 @@ When sources conflict, use this order:
 ## Open Follow-ups
 
 - Choose a public-source license only if/when public distribution is considered; repository remains private.
-- Persist provider credentials through Windows Credential Manager/Linux Secret Service when runtime connection management is added; never fall back to plaintext configuration.
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
 - Complete M5 durable run orchestration and useful end-to-end website/app work.
+- Wire the standalone OpenAI OAuth flow into provider management so a probed tool-capable subscription model can execute Coder work; do not fall back to API billing.
 
 ## Do Not Forget
 

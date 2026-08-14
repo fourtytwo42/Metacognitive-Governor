@@ -5,22 +5,26 @@ use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
-    ManagedMemoryResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
-    ProjectHistoryResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
-    TaskEventsResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest,
+    ExecuteAgentWorkRequest, ManagedMemoryResponse, MemoryClaimHistoryResponse,
+    MemoryClaimListResponse, OrganizationListResponse, OrganizationMutationResponse,
+    PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse, ProjectListResponse,
+    ProviderListResponse, ResolveApprovalRequest, TaskEventsResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
+    TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
     MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, TaskEnvelope, TaskId, TaskState,
+    WorkItemId,
 };
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
-    CONTRACT_VERSION, ProviderAuthMode, ProviderConnection, ProviderKind, ProviderModelCatalog,
+    CONTRACT_VERSION, ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderKind,
+    ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentRunView, MemoryClaimMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
+    AgentRunView, AgentTurnCommit, MemoryClaimMutation, ProjectMutation, ProviderMutation,
+    RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalState};
 use serde::Serialize;
@@ -115,6 +119,8 @@ enum ProviderCommand {
     Models { id: String },
     /// Refresh live model discovery.
     Discover { id: String },
+    /// Probe one model's live Responses, streaming, and tool-call capabilities.
+    Probe { id: String, model: String },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -191,6 +197,22 @@ enum RunCommand {
     Get { id: String },
     /// Start or resume a planned/waiting/recovering run.
     Start { id: String },
+    /// Execute one ready work item through configured providers and governed tools.
+    Execute {
+        id: String,
+        work_item_id: String,
+        project_id: String,
+        #[arg(long)]
+        target_path: Option<String>,
+        #[arg(long, default_value_t = 16_384)]
+        context_token_budget: u32,
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+        #[arg(long, default_value_t = 4_096)]
+        estimated_output_tokens: u64,
+        #[arg(long, default_value_t = 8)]
+        max_model_calls: u16,
+    },
     /// Cancel a run.
     Cancel { id: String },
 }
@@ -677,6 +699,39 @@ async fn run_agent(
         RunCommand::Start { id } => {
             transition_run(client, host, token, &id, AgentRunState::Running).await?;
         }
+        RunCommand::Execute {
+            id,
+            work_item_id,
+            project_id,
+            target_path,
+            context_token_budget,
+            tools,
+            estimated_output_tokens,
+            max_model_calls,
+        } => {
+            let run_id = RunId::from_str(&id)?;
+            let work_item_id = WorkItemId::from_str(&work_item_id)?;
+            let project_id = ProjectId::from_str(&project_id)?;
+            let commit: AgentTurnCommit = client
+                .post(format!(
+                    "{host}/api/v1/runs/{run_id}/work/{work_item_id}/execute"
+                ))
+                .bearer_auth(token)
+                .json(&ExecuteAgentWorkRequest {
+                    project_id,
+                    target_path,
+                    context_token_budget,
+                    requested_tools: tools,
+                    estimated_output_tokens,
+                    max_model_calls,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&commit)?);
+        }
         RunCommand::Cancel { id } => {
             transition_run(client, host, token, &id, AgentRunState::Cancelled).await?;
         }
@@ -751,6 +806,17 @@ async fn run_provider(
                 catalog.connection_id,
                 catalog.models.len()
             );
+        }
+        ProviderCommand::Probe { id, model } => {
+            let report: ModelProbeReport = client
+                .post(format!("{host}/api/v1/providers/{id}/models/{model}/probe"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
     }
     Ok(())

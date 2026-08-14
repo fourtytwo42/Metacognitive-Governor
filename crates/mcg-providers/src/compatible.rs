@@ -517,13 +517,11 @@ fn parse_model(model: &Value, kind: ProviderKind) -> Result<ModelDescriptor, Pro
     let supported = model
         .get("supported_parameters")
         .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-        .unwrap_or_default();
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>());
     let modalities = model
         .pointer("/architecture/input_modalities")
         .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-        .unwrap_or_default();
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>());
     Ok(ModelDescriptor {
         id: id.into(),
         display_name: model
@@ -540,14 +538,16 @@ fn parse_model(model: &Value, kind: ProviderKind) -> Result<ModelDescriptor, Pro
             responses: None,
             chat_completions: None,
             streaming: None,
-            tools: Some(supported.contains(&"tools")),
-            structured_output: Some(
-                supported
+            tools: supported.as_ref().map(|values| values.contains(&"tools")),
+            structured_output: supported.as_ref().map(|values| {
+                values
                     .iter()
-                    .any(|value| matches!(*value, "response_format" | "structured_outputs")),
-            ),
-            vision: Some(modalities.contains(&"image")),
-            reasoning: Some(supported.iter().any(|value| value.starts_with("reasoning"))),
+                    .any(|value| matches!(*value, "response_format" | "structured_outputs"))
+            }),
+            vision: modalities.as_ref().map(|values| values.contains(&"image")),
+            reasoning: supported
+                .as_ref()
+                .map(|values| values.iter().any(|value| value.starts_with("reasoning"))),
         },
         price,
         metadata: model.clone(),

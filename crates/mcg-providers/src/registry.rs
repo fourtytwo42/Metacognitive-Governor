@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    CHATGPT_CODEX_BASE_URL, ModelDescriptor, ModelProvider, ModelRequest, ModelResponse,
-    OAuthTokenSet, OpenAiCompatibleProviderBuilder, ProviderAuthMode, ProviderConnection,
-    ProviderCredentialStore, ProviderError, ProviderKind, ProviderModelRef, ProviderSecretSlot,
-    RouteCandidate,
+    CHATGPT_CODEX_BASE_URL, ModelDescriptor, ModelProbeReport, ModelProvider, ModelRequest,
+    ModelResponse, OAuthTokenSet, OpenAiCompatibleProviderBuilder, ProviderAuthMode,
+    ProviderConnection, ProviderCredentialStore, ProviderError, ProviderKind, ProviderModelRef,
+    ProviderSecretSlot, RouteCandidate, probe_model,
 };
 
 #[derive(Default)]
@@ -136,6 +136,45 @@ impl ProviderRegistry {
         self.discovered
             .insert(provider_id.to_owned(), models.clone());
         Ok(models)
+    }
+
+    /// Runs explicit live capability probes for one discovered model and replaces
+    /// that model's in-memory descriptor with the observed result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown provider/model or failed discovery.
+    pub async fn probe_model(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<ModelProbeReport, ProviderError> {
+        let provider = self.provider(provider_id)?;
+        if !self
+            .discovered
+            .get(provider_id)
+            .is_some_and(|models| models.iter().any(|model| model.id == model_id))
+        {
+            return Err(ProviderError::Configuration(format!(
+                "model {model_id} has not been discovered for provider {provider_id}"
+            )));
+        }
+        let report = probe_model(provider.as_ref(), model_id).await?;
+        let models = self
+            .discovered
+            .get_mut(provider_id)
+            .ok_or_else(|| ProviderError::Configuration("provider has no model catalog".into()))?;
+        let model = models
+            .iter_mut()
+            .find(|model| model.id == model_id)
+            .ok_or_else(|| ProviderError::Configuration("probed model disappeared".into()))?;
+        model.clone_from(&report.model);
+        Ok(report)
+    }
+
+    #[must_use]
+    pub fn models(&self, provider_id: &str) -> Option<Vec<ModelDescriptor>> {
+        self.discovered.get(provider_id).cloned()
     }
 
     #[must_use]

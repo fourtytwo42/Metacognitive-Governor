@@ -57,10 +57,12 @@ adapted from OpenAI's Apache-2.0-licensed
 
 Discovery starts with the endpoint's model list. Provider-native metadata supplies
 context length, supported parameters, modalities, and provider-reported prices when
-available. The common conformance probe then runs one buffered and one streaming
-Responses request and records supported, unsupported, or indeterminate evidence.
-Tool and structured-output quality are not guessed from model prose; later evals
-separate protocol support from model reliability.
+available. Missing metadata remains unknown rather than becoming a false claim.
+The explicit conformance probe runs buffered and streaming Responses requests plus
+a harmless required function-call request, then records supported, unsupported,
+or indeterminate evidence. A successful response that ignores the required call
+remains indeterminate; tool authority is not granted from model prose or wishful
+inference. Structured-output reliability remains a separate later eval.
 
 SQLite migration 7 stores only validated connection metadata and the latest
 discovered model catalog. Initial discovery must succeed before the connection,
@@ -94,5 +96,7 @@ The common probe runs against:
   deliberately supplied on an owner-controlled machine.
 
 GPU45 currently returns a terminal SSE response even for `stream: false`; the
-adapter accepts this documented exception. Live aliases remain dynamically
-discovered and are never compiled into MCG.
+adapter accepts this documented exception. On 2026-08-14 its active model passed
+buffered and streaming Responses but ignored the required function-call probe, so
+tool support remained unknown and it was not eligible for tool-using Coder work.
+Live aliases remain dynamically discovered and are never compiled into MCG.
