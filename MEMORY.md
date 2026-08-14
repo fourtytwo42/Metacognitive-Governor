@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Screenshot-baseline evidence is cross-platform qualified; provenance-backed research evidence is next.
-- Last meaningful change: Added immutable `SCREENSHOT MATCHES`, governed browser/file capability composition, bounded PNG decoding, decoded-pixel tolerances, and actual/baseline artifact provenance.
-- Next step: Implement provenance-backed research evidence, then expand representative workflows and UI depth. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Current task: Provenance-backed research evidence is Windows-focused green and awaits exact Ubuntu qualification.
+- Last meaningful change: Added scope-bound `RESEARCH EVIDENCE`, two-stage governed file/network authorization, immutable JSON/source artifacts, bounded quote/freshness/conflict validation, and terminal replay coverage.
+- Next step: Commit and run exact Ubuntu qualification for research evidence, then expand representative workflows and UI depth. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -28,6 +28,7 @@ Durable project context lives here. Update this file whenever information should
 - Advanced consumer condition lines accept exact `PAGE RENDERS URL` syntax. Runtime launches a fresh local Chromium CDP session, permits only exact-origin GET/HEAD plus in-page data/blob resources, checks DOM readiness/layout after JavaScript, and captures rendered HTML plus a PNG. Missing browser runtime blocks as inconclusive; render failure is objective failure.
 - Advanced consumer condition lines accept `FILE EXISTS project/relative/path` and exact `COMMAND SUCCEEDS discovered command`. File evidence is regular-file-only, capability-confined, streamed with a 1 GiB ceiling, and records artifact size/SHA-256 without stdout. Custom commands execute only when the complete command still matches safe current project discovery; arbitrary prose remains inconclusive.
 - Advanced consumer condition lines accept `SCREENSHOT MATCHES URL project/relative/baseline.png`. Launch hashes the regular baseline before model work; evaluation revalidates that digest, renders under exact-origin browser confinement, decodes bounded PNGs, and applies explicit channel/changed-area tolerances. Missing baselines fail before spend; dimension, visual, or post-binding baseline changes fail the objective.
+- Advanced consumer condition lines accept `RESEARCH EVIDENCE project/relative/report.json`. Runtime captures and hashes bounded JSON under governed file authority, binds its scope to the exact task goal, derives and authorizes only declared credential-free source origins, then fetches at most 32 sources under one timeout with 1 MiB per-response limits. It structurally validates claims, grounded short quotes, optional freshness, and conflict references; the independent Evaluator retains semantic responsibility. JSON and fetched bodies are immutable artifacts, and terminal replay performs no model or network work.
 
 ## User Preferences
 
@@ -547,6 +548,15 @@ When sources conflict, use this order:
 - Result: Windows qualification is green. Exact commit `4e5c432` also passed complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`. Missing baselines stop before model calls; identical real renders pass; a full-viewport visual mismatch fails; dimension and area thresholds are exact; baseline mutation after launch is rejected. Initial exact commit `4ca6465` correctly showed that the former small 404 fixture changed fewer than the allowed 1% of pixels on Linux.
 - Follow-up: Implement provenance-backed research evidence.
 
+### 2026-08-14 - Provenance-Backed Research Evidence
+
+- Context: Research success conditions had no deterministic evidence path; accepting a model-authored answer or citation list would not prove scope, source reachability, quote grounding, freshness, or durable provenance.
+- Decision: Parse `RESEARCH EVIDENCE project/relative/report.json`; bind report scope to the exact task goal; capture its bounded UTF-8 bytes through governed filesystem read; derive exact credential-free network origins only after parsing; and execute typed `research.verify` through policy, leases, audit, and the hardened HTTP executor. Revalidate JSON SHA/artifact identity, cap claims/citations/sources, share one timeout, retain every fetched body, validate optional age and conflict references, and leave semantic truth/support to the independent Evaluator.
+- Files: `crates/mcg-{agents,tools,runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
+- Commands/tests: Strict full-workspace Windows clippy; 38 tool tests including real HTML/plain-text sources; 31 API tests including public pass/fabricated-quote-fail/replay; focused runtime/agent tests; docs and diff checks.
+- Result: Windows-focused gates are green. The report points to the immutable JSON SHA, audited `research.verify` retains JSON plus deterministically ordered source artifacts and URL/digest evidence, scope mismatch and post-binding mutation fail, optional freshness/conflict invariants are bounded, and terminal replay adds no model call, fetch, or audit record.
+- Follow-up: Commit the slice and run exact complete Ubuntu `./scripts/verify.sh`; then broaden workflows and remaining typed objective evaluators.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -574,7 +584,7 @@ When sources conflict, use this order:
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
-- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser, file, exact-discovered custom, and screenshot evaluators to provenance-backed research conditions; unsupported conditions deliberately remain nonterminal.
+- Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser render, file, exact-discovered custom, screenshot, and research evaluators to browser workflows, element/accessibility checks, service-health semantics, and other typed conditions; unsupported conditions deliberately remain nonterminal.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

@@ -149,6 +149,22 @@ and changed-area thresholds. The default accepts channel deltas through 8 and no
 than 100 basis points (1%) of changed pixels. Dimension changes fail. HTML, actual PNG,
 and baseline PNG are all content-addressed; the report points to the actual screenshot.
 
+`RESEARCH EVIDENCE project/relative/report.json` is evaluated in two governed
+stages. First, runtime reads and artifacts the bounded UTF-8 JSON file under project
+read authority. It parses the exact bytes, binds the declared scope to the immutable
+task goal, and derives the complete credential-free source set before granting any
+network authority. Second, typed `research.verify` requests exact read authority for
+the evidence path and each declared network origin, rechecks the JSON/artifact hash,
+and fetches every distinct URL through the hardened HTTP executor. The verifier
+accepts at most 128 claims, 256 citations, and 32 sources; each response is limited
+to 1 MiB and all fetches share the objective timeout. It validates unique claim IDs,
+at least one bounded quote per claim, the configured minimum distinct source count,
+optional publication-age limits, and conflict records that reference at least two
+known claims. The evidence JSON is the report's primary artifact and fetched source
+bodies are retained on the audited tool completion. Structural and quote-grounding
+evidence complements rather than replaces the independent Evaluator's semantic
+judgment. Terminal replay performs neither another model call nor another fetch.
+
 ## Verification evidence
 
 Automated tests cover schema round trips, legal and illegal transitions, injected
@@ -182,6 +198,10 @@ The screenshot fixture captures a real Chromium baseline before project discover
 rejects a missing baseline before any model call, proves an unchanged JavaScript page
 passes decoded-pixel comparison, proves a different page fails, and proves mutation
 after objective binding is rejected by digest revalidation.
+The research fixture binds its JSON scope to the exact task goal, fetches two real
+local HTTP sources, grounds quotations in HTML and plain text, retains all three
+artifacts, rejects a fabricated quotation, and proves terminal replay adds no model
+call, fetch, or tool audit record.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

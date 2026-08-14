@@ -8,6 +8,36 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub const TOOL_SCHEMA_VERSION: u16 = 1;
+pub const RESEARCH_EVIDENCE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchEvidenceDocument {
+    pub schema_version: u16,
+    pub scope: String,
+    pub claims: Vec<ResearchClaimEvidence>,
+    #[serde(default)]
+    pub conflicts: Vec<ResearchConflictEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchClaimEvidence {
+    pub id: String,
+    pub statement: String,
+    pub citations: Vec<ResearchCitationEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchCitationEvidence {
+    pub url: String,
+    pub quote: String,
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchConflictEvidence {
+    pub claim_ids: Vec<String>,
+    pub summary: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -161,6 +191,16 @@ pub enum ToolRequestKind {
         max_changed_basis_points: u16,
         per_channel_threshold: u8,
     },
+    ResearchVerify {
+        evidence_path: String,
+        evidence_artifact: ArtifactReference,
+        evidence_json: String,
+        document: ResearchEvidenceDocument,
+        required_scope: String,
+        minimum_sources: u16,
+        max_age_days: Option<u32>,
+        max_response_bytes: u64,
+    },
     SystemInfo,
     SystemEnv {
         names: Vec<String>,
@@ -244,6 +284,7 @@ impl ToolRequestKind {
             Self::HttpDownload { .. } => "http.download".into(),
             Self::BrowserRender { .. } => "browser.render".into(),
             Self::BrowserScreenshotMatches { .. } => "browser.screenshot_matches".into(),
+            Self::ResearchVerify { .. } => "research.verify".into(),
             Self::SystemInfo => "system.info".into(),
             Self::SystemEnv { .. } => "system.env".into(),
             Self::SystemProcesses => "system.processes".into(),

@@ -5,11 +5,13 @@ use mcg_domain::ToolExecutionId;
 
 use crate::{ToolError, ToolExecutor, ToolOutcome, ToolRequest, ToolRequestKind};
 
+#[derive(Clone)]
 pub struct HostExecutor {
     pub filesystem: Arc<dyn ToolExecutor>,
     pub process: Arc<dyn ToolExecutor>,
     pub http: Arc<dyn ToolExecutor>,
     pub browser: Arc<dyn ToolExecutor>,
+    pub research: Arc<dyn ToolExecutor>,
     pub system: Arc<dyn ToolExecutor>,
     pub git: Arc<dyn ToolExecutor>,
     pub memory: Arc<dyn ToolExecutor>,
@@ -44,6 +46,7 @@ impl ToolExecutor for HostExecutor {
             }
             ToolRequestKind::BrowserRender { .. }
             | ToolRequestKind::BrowserScreenshotMatches { .. } => &self.browser,
+            ToolRequestKind::ResearchVerify { .. } => &self.research,
             ToolRequestKind::SystemInfo
             | ToolRequestKind::SystemEnv { .. }
             | ToolRequestKind::SystemProcesses => &self.system,

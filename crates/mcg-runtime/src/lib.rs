@@ -5,6 +5,7 @@ mod oauth;
 pub use oauth::*;
 
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
@@ -54,9 +55,9 @@ use mcg_tools::{
     BrowserExecutor, ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor,
     HostExecutor, HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor,
     OutputRedactor, ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver,
-    SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError,
-    ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
-    VerificationEvidence,
+    ResearchEvidenceDocument, ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION,
+    ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
+    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1565,21 +1566,23 @@ impl AppRuntime {
             ProcessExecutor::new([root.clone()], credentials.clone())
                 .map_err(runtime_tool_error)?,
         );
+        let http = Arc::new(
+            HttpExecutor::new(credentials, filesystem.clone(), &artifacts)
+                .map_err(runtime_tool_error)?,
+        );
         let host = HostExecutor {
             filesystem: filesystem.clone(),
             process: process.clone(),
-            http: Arc::new(
-                HttpExecutor::new(credentials, filesystem.clone(), &artifacts)
-                    .map_err(runtime_tool_error)?,
-            ),
+            http: http.clone(),
             browser: Arc::new(
                 BrowserExecutor::with_filesystem(
                     self.config.browser_executable.clone(),
                     &artifacts,
-                    filesystem,
+                    filesystem.clone(),
                 )
                 .map_err(runtime_tool_error)?,
             ),
+            research: Arc::new(ResearchExecutor::new(http)),
             system: Arc::new(SystemExecutor),
             git: Arc::new(
                 GitExecutor::new(process, [root.clone()], &artifacts)
@@ -1622,21 +1625,21 @@ impl AppRuntime {
             }
         }
         let control = self.tool_control();
+        let broker_preset =
+            if self.config.autonomy == AutonomyPreset::Guided && checkpoint.batch_approved {
+                AutonomyPreset::Balanced
+            } else {
+                self.config.autonomy
+            };
         let broker = ToolBroker::new(
-            host,
+            host.clone(),
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: if self.config.autonomy == AutonomyPreset::Guided
-                    && checkpoint.batch_approved
-                {
-                    AutonomyPreset::Balanced
-                } else {
-                    self.config.autonomy
-                },
+                preset: broker_preset,
                 constitution: OwnerConstitution::secure_defaults(),
-                capabilities,
-                leases: Arc::new(control),
+                capabilities: capabilities.clone(),
+                leases: Arc::new(control.clone()),
                 redactor: OutputRedactor::default(),
             },
         );
@@ -1645,6 +1648,7 @@ impl AppRuntime {
             .enumerate()
             .skip(checkpoint.next_condition_index)
         {
+            let mut preparation_error = None;
             let request_kind = if let Some(command) = objective_command(condition) {
                 if !project
                     .commands
@@ -1695,6 +1699,96 @@ impl AppRuntime {
                     path: objective_project_file_path(&project.root, path)?,
                     max_bytes: 1_073_741_824,
                 }
+            } else if let SuccessCondition::ResearchSources {
+                evidence_path,
+                minimum,
+                max_age_days,
+                required_scope,
+            } = condition
+            {
+                let absolute_path = objective_project_file_path(&project.root, evidence_path)?;
+                let mut evidence_request = ToolRequest::new(
+                    task_id,
+                    format!("Read research evidence: {evidence_path}"),
+                    ToolRequestKind::FsRead {
+                        path: absolute_path.clone(),
+                        max_bytes: 1_048_576,
+                    },
+                );
+                evidence_request.id = objective_stage_request_id(
+                    run_id,
+                    index,
+                    checkpoint.attempt,
+                    condition,
+                    "research-evidence",
+                )?;
+                evidence_request.timeout_seconds = task
+                    .budget
+                    .max_duration_seconds
+                    .unwrap_or(1_800)
+                    .clamp(1, 86_400);
+                match broker.execute(&evidence_request).await {
+                    Ok(outcome) if outcome.status == ToolOutcomeStatus::Succeeded => {
+                        let evidence_json = outcome.stdout.clone().ok_or_else(|| {
+                            ToolError::Execution(
+                                "research evidence file did not contain UTF-8 JSON".into(),
+                            )
+                        });
+                        let parsed = evidence_json
+                            .as_ref()
+                            .map_err(|error| ToolError::Execution(error.to_string()))
+                            .and_then(|contents| {
+                                serde_json::from_str::<ResearchEvidenceDocument>(contents).map_err(
+                                    |error| {
+                                        ToolError::Execution(format!(
+                                            "research evidence is not valid JSON: {error}"
+                                        ))
+                                    },
+                                )
+                            });
+                        let artifact = outcome.artifacts.first().cloned().ok_or_else(|| {
+                            ToolError::Execution(
+                                "research evidence read did not produce an immutable artifact"
+                                    .into(),
+                            )
+                        });
+                        match (evidence_json, parsed, artifact) {
+                            (Ok(evidence_json), Ok(document), Ok(evidence_artifact)) => {
+                                ToolRequestKind::ResearchVerify {
+                                    evidence_path: absolute_path,
+                                    evidence_artifact,
+                                    evidence_json,
+                                    document,
+                                    required_scope: required_scope.clone(),
+                                    minimum_sources: *minimum,
+                                    max_age_days: *max_age_days,
+                                    max_response_bytes: 1_048_576,
+                                }
+                            }
+                            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                                preparation_error = Some(error);
+                                ToolRequestKind::FsRead {
+                                    path: absolute_path,
+                                    max_bytes: 1_048_576,
+                                }
+                            }
+                        }
+                    }
+                    Ok(outcome) => {
+                        preparation_error = Some(ToolError::Execution(outcome.summary));
+                        ToolRequestKind::FsRead {
+                            path: absolute_path,
+                            max_bytes: 1_048_576,
+                        }
+                    }
+                    Err(error) => {
+                        preparation_error = Some(error);
+                        ToolRequestKind::FsRead {
+                            path: absolute_path,
+                            max_bytes: 1_048_576,
+                        }
+                    }
+                }
             } else {
                 checkpoint.unsupported = checkpoint.unsupported.saturating_add(1);
                 let detail = "No deterministic evaluator is implemented for this condition yet.";
@@ -1730,7 +1824,63 @@ impl AppRuntime {
                 .max_duration_seconds
                 .unwrap_or(1_800)
                 .clamp(1, 86_400);
-            let outcome = match broker.execute(&request).await {
+            let execution = if let Some(error) = preparation_error {
+                Err(error)
+            } else if let ToolRequestKind::ResearchVerify { document, .. } = &request.kind {
+                let mut research_capabilities = capabilities.clone();
+                let mut origins = BTreeSet::new();
+                let mut source_urls = BTreeSet::new();
+                let mut capability_error = None;
+                for citation in document.claims.iter().flat_map(|claim| &claim.citations) {
+                    source_urls.insert(citation.url.clone());
+                    if source_urls.len() > 32 {
+                        capability_error = Some(ToolError::Execution(
+                            "research evidence exceeds 32 distinct source URLs".into(),
+                        ));
+                        break;
+                    }
+                    match objective_network_origin(&citation.url) {
+                        Ok(origin) => {
+                            origins.insert(origin);
+                        }
+                        Err(error) => {
+                            capability_error = Some(ToolError::Execution(format!(
+                                "research evidence contains an invalid source URL: {error}"
+                            )));
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = capability_error {
+                    Err(error)
+                } else {
+                    for origin in origins {
+                        if !research_capabilities
+                            .allowed_network_origins
+                            .contains(&origin)
+                        {
+                            research_capabilities.allowed_network_origins.push(origin);
+                        }
+                    }
+                    ToolBroker::new(
+                        host.clone(),
+                        control.clone(),
+                        control.clone(),
+                        BrokerControls {
+                            preset: broker_preset,
+                            constitution: OwnerConstitution::secure_defaults(),
+                            capabilities: research_capabilities,
+                            leases: Arc::new(control.clone()),
+                            redactor: OutputRedactor::default(),
+                        },
+                    )
+                    .execute(&request)
+                    .await
+                }
+            } else {
+                broker.execute(&request).await
+            };
+            let outcome = match execution {
                 Ok(outcome) => Some(outcome),
                 Err(ToolError::ApprovalRequired { approval_id, .. }) => {
                     checkpoint.state = ConsumerEvaluationCheckpointState::WaitingForApproval;
@@ -2238,17 +2388,19 @@ impl AppRuntime {
             ProcessExecutor::new([root.clone()], credentials.clone())
                 .map_err(runtime_tool_error)?,
         );
+        let http = Arc::new(
+            HttpExecutor::new(credentials, filesystem.clone(), &artifacts)
+                .map_err(runtime_tool_error)?,
+        );
         let host = HostExecutor {
             filesystem: filesystem.clone(),
             process: process.clone(),
-            http: Arc::new(
-                HttpExecutor::new(credentials, filesystem, &artifacts)
-                    .map_err(runtime_tool_error)?,
-            ),
+            http: http.clone(),
             browser: Arc::new(
                 BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
                     .map_err(runtime_tool_error)?,
             ),
+            research: Arc::new(ResearchExecutor::new(http)),
             system: Arc::new(SystemExecutor),
             git: Arc::new(
                 GitExecutor::new(process, [root.clone()], &artifacts)
@@ -2405,17 +2557,19 @@ impl AppRuntime {
             ProcessExecutor::new([root.clone()], credentials.clone())
                 .map_err(runtime_tool_error)?,
         );
+        let http = Arc::new(
+            HttpExecutor::new(credentials, filesystem.clone(), &artifacts)
+                .map_err(runtime_tool_error)?,
+        );
         let host = HostExecutor {
             filesystem: filesystem.clone(),
             process: process.clone(),
-            http: Arc::new(
-                HttpExecutor::new(credentials, filesystem, &artifacts)
-                    .map_err(runtime_tool_error)?,
-            ),
+            http: http.clone(),
             browser: Arc::new(
                 BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
                     .map_err(runtime_tool_error)?,
             ),
+            research: Arc::new(ResearchExecutor::new(http)),
             system: Arc::new(SystemExecutor),
             git: Arc::new(
                 GitExecutor::new(process, [root.clone()], &artifacts)
@@ -2984,6 +3138,15 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
             Some(format!("Screenshot at {url} matches {baseline}"))
         } else if let SuccessCondition::FileExists { path, .. } = condition {
             Some(format!("File exists: {path}"))
+        } else if let SuccessCondition::ResearchSources {
+            evidence_path,
+            minimum,
+            ..
+        } = condition
+        {
+            Some(format!(
+                "Research evidence in {evidence_path} uses at least {minimum} sources"
+            ))
         } else {
             None
         }
@@ -3036,6 +3199,7 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
         SuccessCondition::ScreenshotMatches { .. } => "governed_screenshot_comparison",
         SuccessCondition::FileExists { .. } => "governed_file_artifact",
+        SuccessCondition::ResearchSources { .. } => "governed_research_sources",
         _ => "governed_process_exit",
     }
 }
@@ -3103,7 +3267,9 @@ fn objective_condition_outcome_detail(
     }
     if matches!(
         condition,
-        SuccessCondition::PageRenders { .. } | SuccessCondition::ScreenshotMatches { .. }
+        SuccessCondition::PageRenders { .. }
+            | SuccessCondition::ScreenshotMatches { .. }
+            | SuccessCondition::ResearchSources { .. }
     ) {
         let verification = outcome
             .verification
@@ -3180,6 +3346,32 @@ fn objective_request_id(
     hash.update(index.to_le_bytes());
     hash.update([0]);
     hash.update(attempt.to_le_bytes());
+    hash.update([0]);
+    hash.update(
+        serde_json::to_vec(condition)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    );
+    let digest = hash.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ok(ToolRequestId::from_stable_bytes(bytes))
+}
+
+fn objective_stage_request_id(
+    run_id: RunId,
+    index: usize,
+    attempt: u16,
+    condition: &SuccessCondition,
+    stage: &str,
+) -> Result<ToolRequestId, RuntimeError> {
+    let mut hash = Sha256::new();
+    hash.update(run_id.to_string().as_bytes());
+    hash.update(b"\0objective-stage\0");
+    hash.update(index.to_le_bytes());
+    hash.update([0]);
+    hash.update(attempt.to_le_bytes());
+    hash.update([0]);
+    hash.update(stage.as_bytes());
     hash.update([0]);
     hash.update(
         serde_json::to_vec(condition)

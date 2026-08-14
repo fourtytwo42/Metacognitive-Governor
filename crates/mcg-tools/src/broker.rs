@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -441,6 +442,28 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ),
             read_path(baseline_path),
         ],
+        ToolRequestKind::ResearchVerify {
+            evidence_path,
+            document,
+            ..
+        } => {
+            let mut values = vec![read_path(evidence_path)];
+            let origins = document
+                .claims
+                .iter()
+                .flat_map(|claim| &claim.citations)
+                .map(|citation| network_origin(&citation.url))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            values.extend(origins.into_iter().map(|origin| {
+                make(
+                    ActionClass::ProjectRead,
+                    CapabilityEffect::Read,
+                    ResourceKind::NetworkOrigin,
+                    origin,
+                )
+            }));
+            values
+        }
         ToolRequestKind::SystemInfo | ToolRequestKind::SystemProcesses => vec![make(
             ActionClass::ProjectRead,
             CapabilityEffect::Read,
@@ -616,6 +639,14 @@ fn primary_resource(request: &ToolRequest) -> String {
         ToolRequestKind::BrowserScreenshotMatches {
             url, baseline_path, ..
         } => format!("{} against {baseline_path}", sanitized_url_resource(url)),
+        ToolRequestKind::ResearchVerify {
+            evidence_path,
+            document,
+            ..
+        } => format!(
+            "{evidence_path} with {} declared claims",
+            document.claims.len()
+        ),
         ToolRequestKind::McpCall {
             connection_id,
             tool_name,

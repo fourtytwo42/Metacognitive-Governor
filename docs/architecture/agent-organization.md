@@ -129,6 +129,14 @@ the plan calls for independent evaluation, the report must identify an actual
 Evaluator instance from the same run; a self-report or unrelated instance fails
 before any evaluation event is stored.
 
+Research conditions bind an evidence-file scope to the exact task goal. Objective
+verification proves that declared sources were freshly fetched under explicit
+origin capabilities, short citation quotations occur in the retained response
+bodies, configured age limits are met, and conflict records refer to known claims.
+Those checks establish provenance and grounding only; the separate Evaluator remains
+responsible for judging relevance, claim support, source quality, and whether real
+conflicting evidence was omitted.
+
 SQLite migration 8 gives mutating stateless interfaces an immutable idempotency
 boundary. `mcg_run_agent` records its canonical request hash and creates the task,
 consumer organization revision, immutable plan, active task, and running run in

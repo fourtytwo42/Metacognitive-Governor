@@ -1313,6 +1313,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::PageRenders { .. }
             | SuccessCondition::ScreenshotMatches { .. }
             | SuccessCondition::FileExists { .. }
+            | SuccessCondition::ResearchSources { .. }
     ) || matches!(condition, SuccessCondition::Custom { description } if consumer_custom_command(description).is_some())
 }
 
@@ -1334,6 +1335,9 @@ fn consumer_success_conditions(
         } = condition
         {
             *expected_baseline_sha256 = consumer_baseline_sha256(&project.root, baseline)?;
+        }
+        if let SuccessCondition::ResearchSources { required_scope, .. } = condition {
+            required_scope.clone_from(&task.goal);
         }
     }
     for command in &project.commands {
@@ -1376,6 +1380,16 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
             path,
             min_bytes: 0,
             expected_sha256: None,
+        };
+    }
+    if let Some(path) = consumer_directive_value(trimmed, "RESEARCH EVIDENCE")
+        && let Some(path) = normalized_consumer_file_path(path)
+    {
+        return SuccessCondition::ResearchSources {
+            evidence_path: path,
+            minimum: 2,
+            max_age_days: None,
+            required_scope: String::new(),
         };
     }
     if let Some(command) = consumer_directive_value(trimmed, "COMMAND SUCCEEDS") {
@@ -2259,6 +2273,15 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_consumer_success_condition(r"RESEARCH EVIDENCE reports\answer.json"),
+            SuccessCondition::ResearchSources {
+                evidence_path: "reports/answer.json".into(),
+                minimum: 2,
+                max_age_days: None,
+                required_scope: String::new(),
+            }
+        );
+        assert_eq!(
             parse_consumer_success_condition(
                 "SCREENSHOT MATCHES https://example.test/app tests/baselines/home page.png"
             ),
@@ -2288,6 +2311,11 @@ mod tests {
             "FILE EXISTS dist/./result.txt",
             "FILE EXISTS ",
             "COMMAND SUCCEEDS ",
+            "RESEARCH EVIDENCE ../escape.json",
+            "RESEARCH EVIDENCE /absolute/report.json",
+            "RESEARCH EVIDENCE C:\\absolute\\report.json",
+            "RESEARCH EVIDENCE reports/./answer.json",
+            "RESEARCH EVIDENCE ",
             "SCREENSHOT MATCHES https://user:secret@example.test baseline.png",
             "SCREENSHOT MATCHES file:///tmp/page.html baseline.png",
             "SCREENSHOT MATCHES https://example.test ../baseline.png",
@@ -4416,6 +4444,267 @@ form.addEventListener('submit', (event) => {
                 .is_none()
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Passing, replay, and quote-grounding failure share one public fixture.
+    async fn consumer_research_evidence_is_scope_bound_fetched_and_replay_safe() {
+        let source_app = axum::Router::new()
+            .route(
+                "/primary",
+                axum::routing::get(|| async {
+                    Html("<main>The governed research result is reproducible.</main>")
+                }),
+            )
+            .route(
+                "/independent",
+                axum::routing::get(|| async {
+                    "Independent evidence confirms the observed result."
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("source listener");
+        let source_base = format!("http://{}", listener.local_addr().expect("source address"));
+        let source_server = tokio::spawn(async move {
+            axum::serve(listener, source_app)
+                .await
+                .expect("source server");
+        });
+
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(project_root.join("reports")).expect("reports directory");
+        std::fs::write(
+            project_root.join("README.md"),
+            "# Research objective fixture\n",
+        )
+        .expect("readme");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "research_objective_fixture".into(),
+                    display_name: "Research Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let launch_body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+
+        let passing_goal = "Produce a source-backed reproducibility assessment";
+        let passing_json = serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "scope": passing_goal,
+            "claims": [
+                {
+                    "id": "primary",
+                    "statement": "The result is reproducible.",
+                    "citations": [{
+                        "url": format!("{source_base}/primary"),
+                        "quote": "The governed research result is reproducible.",
+                        "published_at": null
+                    }]
+                },
+                {
+                    "id": "independent",
+                    "statement": "An independent source confirms it.",
+                    "citations": [{
+                        "url": format!("{source_base}/independent"),
+                        "quote": "Independent evidence confirms the observed result.",
+                        "published_at": null
+                    }]
+                }
+            ],
+            "conflicts": [{
+                "claim_ids": ["primary", "independent"],
+                "summary": "The sources use different evidence collection methods."
+            }]
+        }))
+        .expect("research JSON");
+        std::fs::write(project_root.join("reports/assessment.json"), &passing_json)
+            .expect("research evidence");
+        let expected_evidence_sha = format!("{:x}", Sha256::digest(passing_json.as_bytes()));
+        let mut passing_task = TaskEnvelope::new(passing_goal);
+        passing_task.project_id = Some(project.project_id);
+        passing_task.success_conditions = vec!["RESEARCH EVIDENCE reports/assessment.json".into()];
+        runtime.create_task(&passing_task).expect("passing task");
+        let passing_path = format!("/api/v1/tasks/{}/launch", passing_task.id);
+        let passing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&passing_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(launch_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("passing response");
+        assert_eq!(passing.status(), StatusCode::OK);
+        let passing: LaunchTaskResponse = serde_json::from_slice(
+            &passing
+                .into_body()
+                .collect()
+                .await
+                .expect("passing body")
+                .to_bytes(),
+        )
+        .expect("passing response body");
+        assert_eq!(passing.task.state, TaskState::Completed);
+        let report = passing.run.evaluations.first().expect("passing report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert!(matches!(
+            &report.conditions[0].condition,
+            SuccessCondition::ResearchSources {
+                evidence_path,
+                minimum: 2,
+                required_scope,
+                ..
+            } if evidence_path == "reports/assessment.json" && required_scope == passing_goal
+        ));
+        assert_eq!(report.evidence[0].method, "governed_research_sources");
+        assert_eq!(
+            report.evidence[0].artifact_sha256.as_deref(),
+            Some(expected_evidence_sha.as_str())
+        );
+        assert!(
+            report.evidence[0]
+                .detail
+                .contains("2 distinct sources fetched")
+        );
+        let passing_audit = runtime.tool_audit(passing_task.id).expect("research audit");
+        assert!(passing_audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "fs.read"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+        }));
+        assert!(passing_audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "research.verify"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+                && record.artifacts.len() == 3
+        }));
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&passing_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(launch_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay response");
+        let replay: LaunchTaskResponse = serde_json::from_slice(
+            &replay
+                .into_body()
+                .collect()
+                .await
+                .expect("replay body")
+                .to_bytes(),
+        )
+        .expect("replay body JSON");
+        assert!(replay.replayed);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            runtime.tool_audit(passing_task.id).expect("replay audit"),
+            passing_audit
+        );
+
+        let failing_goal = "Reject research whose citation cannot be grounded";
+        let failing_json = serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "scope": failing_goal,
+            "claims": [
+                {
+                    "id": "primary",
+                    "statement": "The result is reproducible.",
+                    "citations": [{
+                        "url": format!("{source_base}/primary"),
+                        "quote": "The governed research result is reproducible.",
+                        "published_at": null
+                    }]
+                },
+                {
+                    "id": "fabricated",
+                    "statement": "A second source agrees.",
+                    "citations": [{
+                        "url": format!("{source_base}/independent"),
+                        "quote": "This quotation does not appear in the fetched source.",
+                        "published_at": null
+                    }]
+                }
+            ],
+            "conflicts": []
+        }))
+        .expect("failing research JSON");
+        std::fs::write(project_root.join("reports/assessment.json"), failing_json)
+            .expect("failing research evidence");
+        let mut failing_task = TaskEnvelope::new(failing_goal);
+        failing_task.project_id = Some(project.project_id);
+        failing_task.success_conditions = vec!["RESEARCH EVIDENCE reports/assessment.json".into()];
+        runtime.create_task(&failing_task).expect("failing task");
+        let failing = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    failing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(launch_body))
+                .expect("request"),
+            )
+            .await
+            .expect("failing response");
+        assert_eq!(failing.status(), StatusCode::OK);
+        let failing: LaunchTaskResponse = serde_json::from_slice(
+            &failing
+                .into_body()
+                .collect()
+                .await
+                .expect("failing body")
+                .to_bytes(),
+        )
+        .expect("failing response body");
+        assert_eq!(failing.task.state, TaskState::Failed);
+        assert_eq!(
+            failing.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(
+            failing.run.evaluations[0].conditions[0]
+                .detail
+                .contains("not found in its fetched source")
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 4);
+        source_server.abort();
     }
 
     #[tokio::test]

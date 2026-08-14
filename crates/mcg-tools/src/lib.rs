@@ -10,6 +10,7 @@ mod host;
 mod http;
 mod memory;
 mod process;
+mod research;
 mod secrets;
 mod system;
 
@@ -23,5 +24,6 @@ pub use host::*;
 pub use http::*;
 pub use memory::*;
 pub use process::*;
+pub use research::*;
 pub use secrets::*;
 pub use system::*;

@@ -140,6 +140,53 @@ The consumer default tolerates channel noise up to 8 and at most 1% changed pixe
 structured plans retain explicit thresholds. Baseline, actual screenshot, and HTML
 remain content-addressed evidence. Missing or changed baselines fail closed.
 
+Use `RESEARCH EVIDENCE project/relative/report.json` for source-backed research.
+The report scope must exactly equal the task goal and must contain at least two
+distinct credential-free HTTP(S) sources by default. Each claim names one or more
+source URLs and a short quotation that MCG can locate in the freshly fetched body;
+optional conflict records must reference at least two known claim IDs. For example:
+
+```json
+{
+  "schema_version": 1,
+  "scope": "Compare the documented deployment options",
+  "claims": [
+    {
+      "id": "option-a",
+      "statement": "Option A supports offline use.",
+      "citations": [{
+        "url": "https://docs.example.test/option-a",
+        "quote": "Option A can run without a network connection.",
+        "published_at": "2026-08-01T00:00:00Z"
+      }]
+    },
+    {
+      "id": "option-b",
+      "statement": "Option B requires a hosted control plane.",
+      "citations": [{
+        "url": "https://docs.example.test/option-b",
+        "quote": "The hosted control plane coordinates every deployment.",
+        "published_at": "2026-08-02T00:00:00Z"
+      }]
+    }
+  ],
+  "conflicts": [{
+    "claim_ids": ["option-a", "option-b"],
+    "summary": "The deployment models make different connectivity assumptions."
+  }]
+}
+```
+
+MCG first captures the JSON file through governed project read authority, binds its
+exact bytes to SHA-256, then authorizes only the declared source origins and fetches
+at most 32 sources with a shared timeout and a 1 MiB limit per response. The JSON
+and every fetched source remain content-addressed artifacts. Optional structured
+conditions can require `max_age_days`; when configured, every citation must provide
+an in-range `published_at`. These mechanical checks prove provenance, reachability,
+scope, freshness metadata, and quote grounding—not semantic truth. The independent
+Evaluator still judges whether sources support the claims and whether meaningful
+conflicting evidence was surfaced.
+
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with
 `mcg provider login openai-subscription "OpenAI Subscription"`. Use

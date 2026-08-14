@@ -84,6 +84,13 @@ Visual-baseline fixtures cover pre-model missing-file rejection, immutable basel
 digest binding, post-binding mutation, bounded PNG decoding, dimension mismatch,
 per-channel noise, changed-pixel thresholds, actual/baseline artifact provenance,
 same-origin browser confinement, and terminal pass/fail settlement.
+Research fixtures cover exact directive/path parsing, task-goal scope binding,
+immutable evidence-byte hashing, source-count and credential-free URL limits,
+optional freshness enforcement, conflict-reference integrity, real bounded HTTP
+fetches, HTML/plain-text quote grounding, retained JSON/source artifacts, fabricated
+quotation failure, durable task settlement, and terminal replay with no repeated
+model work, source fetch, or audit record. Semantic support remains the independent
+Evaluator's responsibility and is never inferred from a substring match alone.
 
 ## API and compatibility testing
 

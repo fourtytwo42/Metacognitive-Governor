@@ -403,7 +403,10 @@ pub enum SuccessCondition {
         endpoint: String,
     },
     ResearchSources {
+        evidence_path: String,
         minimum: u16,
+        max_age_days: Option<u32>,
+        required_scope: String,
     },
     Custom {
         description: String,
