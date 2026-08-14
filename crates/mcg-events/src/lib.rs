@@ -1,7 +1,7 @@
 //! Versioned events form MCG's audit and integration backbone.
 
 use chrono::{DateTime, Utc};
-use mcg_domain::TaskId;
+use mcg_domain::{TaskEnvelope, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -13,6 +13,7 @@ pub const EVENT_SCHEMA_VERSION: u16 = 1;
 pub enum EventKind {
     TaskCreated,
     TaskStarted,
+    TaskStateChanged,
     TaskCompleted,
     TaskFailed,
     ApprovalRequested,
@@ -22,6 +23,60 @@ pub enum EventKind {
     ToolRequested,
     ToolCompleted,
     McgIntervention,
+}
+
+impl EventKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskCreated => "task_created",
+            Self::TaskStarted => "task_started",
+            Self::TaskStateChanged => "task_state_changed",
+            Self::TaskCompleted => "task_completed",
+            Self::TaskFailed => "task_failed",
+            Self::ApprovalRequested => "approval_requested",
+            Self::ApprovalResolved => "approval_resolved",
+            Self::ProviderCallStarted => "provider_call_started",
+            Self::ProviderCallCompleted => "provider_call_completed",
+            Self::ToolRequested => "tool_requested",
+            Self::ToolCompleted => "tool_completed",
+            Self::McgIntervention => "mcg_intervention",
+        }
+    }
+
+    /// Parses the stable persisted representation of an event kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unknown value when no schema variant matches.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "task_created" | "TaskCreated" => Ok(Self::TaskCreated),
+            "task_started" | "TaskStarted" => Ok(Self::TaskStarted),
+            "task_state_changed" | "TaskStateChanged" => Ok(Self::TaskStateChanged),
+            "task_completed" | "TaskCompleted" => Ok(Self::TaskCompleted),
+            "task_failed" | "TaskFailed" => Ok(Self::TaskFailed),
+            "approval_requested" | "ApprovalRequested" => Ok(Self::ApprovalRequested),
+            "approval_resolved" | "ApprovalResolved" => Ok(Self::ApprovalResolved),
+            "provider_call_started" | "ProviderCallStarted" => Ok(Self::ProviderCallStarted),
+            "provider_call_completed" | "ProviderCallCompleted" => Ok(Self::ProviderCallCompleted),
+            "tool_requested" | "ToolRequested" => Ok(Self::ToolRequested),
+            "tool_completed" | "ToolCompleted" => Ok(Self::ToolCompleted),
+            "mcg_intervention" | "McgIntervention" => Ok(Self::McgIntervention),
+            other => Err(other.to_owned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskCreatedPayload {
+    pub task: TaskEnvelope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskStateChangedPayload {
+    pub from: TaskState,
+    pub to: TaskState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,5 +102,11 @@ impl EventEnvelope {
             kind,
             payload,
         }
+    }
+
+    #[must_use]
+    pub const fn with_sequence(mut self, sequence: u64) -> Self {
+        self.sequence = sequence;
+        self
     }
 }

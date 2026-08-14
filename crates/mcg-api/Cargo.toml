@@ -7,12 +7,20 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
+mcg-domain = { path = "../mcg-domain" }
+mcg-events = { path = "../mcg-events" }
 mcg-runtime = { path = "../mcg-runtime" }
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+http-body-util.workspace = true
+mcg-config = { path = "../mcg-config" }
+tower.workspace = true
+
 [lints]
 workspace = true
-

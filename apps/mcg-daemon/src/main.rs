@@ -15,9 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AppConfig::default();
     let address: SocketAddr = config.bind_address.parse()?;
-    let runtime = Arc::new(AppRuntime::new(config));
+    let runtime = Arc::new(AppRuntime::open(config)?);
 
     info!(%address, "starting MCG daemon");
     mcg_api::serve(address, runtime).await?;
+    info!("MCG daemon stopped cleanly");
     Ok(())
 }

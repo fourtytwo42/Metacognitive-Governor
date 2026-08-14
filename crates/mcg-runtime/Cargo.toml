@@ -14,7 +14,10 @@ mcg-providers = { path = "../mcg-providers" }
 mcg-storage = { path = "../mcg-storage" }
 mcg-tools = { path = "../mcg-tools" }
 serde.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
-

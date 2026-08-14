@@ -18,8 +18,9 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in product and architecture definition. The complete vision is in scope
-and will be delivered incrementally through tested, end-to-end milestones.
+MCG is in active implementation. M0 foundations and the M1 durable runtime spine
+are complete; the full vision remains in scope and is delivered through tested,
+end-to-end milestones.
 
 Start with the [product requirements](MCG_PRD.md) and the
 [product and engineering baseline](docs/decisions/0001-product-engineering-baseline.md).
@@ -27,6 +28,7 @@ Start with the [product requirements](MCG_PRD.md) and the
 Implementation planning:
 
 - [System architecture](docs/architecture/system.md)
+- [M1 runtime spine](docs/architecture/runtime-spine.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
@@ -65,4 +67,15 @@ Start the browser-hosted desktop frontend during UI development:
 
 ```powershell
 npm run dev
+```
+
+Run the complete owner-controlled local verification suite (GitHub-hosted builds
+are intentionally disabled):
+
+```powershell
+.\scripts\verify.ps1
+```
+
+```bash
+./scripts/verify.sh
 ```

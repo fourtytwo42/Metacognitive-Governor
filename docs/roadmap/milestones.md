@@ -33,11 +33,11 @@ Deliver:
 - Rust workspace and stable crate boundaries.
 - React/Tauri desktop shell and root build orchestration.
 - Formatting, linting, unit-test, contract-test, and E2E harnesses.
-- Windows/Linux CI and best-effort macOS packaging workflow design.
+- Local Windows/Linux verification scripts and best-effort macOS packaging workflow design.
 - Architecture, security, migration, and contribution conventions.
 
 Exit evidence: clean checkout can format, build, test, and start the daemon/CLI;
-desktop assets build; CI mirrors local commands.
+desktop assets build; documented local verification mirrors release commands.
 
 ## M1 — Runtime spine
 
@@ -197,4 +197,3 @@ Every milestone maintains:
 - deterministic fixtures plus opt-in live evaluations;
 - cost, latency, resource, attention, risk, and organizational-overhead metrics;
 - documentation and `MEMORY.md` updates at meaningful checkpoints.
-

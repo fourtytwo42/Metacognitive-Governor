@@ -4,9 +4,9 @@ Durable project context lives here. Update this file whenever information should
 
 ## Active Handoff
 
-- Current task: M0 repository and engineering foundations are implemented and verified; ready to begin M1 runtime spine.
-- Last meaningful change: Added the implementation architecture, complete dependency-ordered roadmap, testing strategy, Rust workspace, daemon/CLI, Tauri/React desktop shell, CI, and initial invariant/E2E tests.
-- Next step: Implement durable task creation, SQLite event/projection transactions, daemon restart recovery, local client authentication, and API event streaming from M1.
+- Current task: M1 durable runtime spine is implemented and verified on owner-controlled Windows and Ubuntu machines; ready to begin M2 provider fabric.
+- Last meaningful change: Added versioned task/events, atomic SQLite event/projection writes, replay recovery, local bearer authentication, resumable SSE, expanded CLI, and cross-platform local verification scripts.
+- Next step: Implement M2 provider contracts, explicit authentication modes, discovery/probes, routing/cost metadata, OpenRouter/OpenAI-compatible adapters, GPU45 conformance, and standalone OpenAI OAuth research/adapter.
 - Blockers: None documented.
 
 ## Current State
@@ -16,6 +16,8 @@ Durable project context lives here. Update this file whenever information should
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
+- GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
+- M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
 
 ## User Preferences
 
@@ -25,6 +27,8 @@ Durable project context lives here. Update this file whenever information should
 - Build MCG for general consumers with simple installation and minimal required human regression testing.
 - Keep every primary interface in the first complete release: native GUI, CLI, daemon/headless mode, OpenAI-compatible provider API, and MCP client/server.
 - Deeply integrate automated unit, integration, scenario, contract, and end-to-end testing.
+- Run builds and automated tests locally only. Do not use GitHub Actions or any GitHub-hosted automation that can incur usage charges.
+- Use the owner-controlled Ubuntu VM at `192.168.50.109` for Linux desktop, daemon, CLI, and test qualification; never persist its credentials in repository files or memory.
 - Keep the full PRD vision in scope; use multiple real projects, initially websites/apps, to refine the system.
 - Support OpenAI OAuth and API keys, OpenRouter, local OpenAI-compatible servers, and arbitrary OpenAI-compatible providers with user-supplied credentials.
 - Discover provider models/capabilities from endpoints and probes, display known costs, and represent unknown costs honestly.
@@ -58,7 +62,8 @@ When sources conflict, use this order:
 ## Setup And Commands
 
 - Prerequisites (last verified 2026-08-14): Rust 1.93+, Node.js 24+, and npm 10+.
-- Install frontend dependencies: `npm install` (use `npm ci` in CI).
+- Install frontend dependencies: `npm install`; use `npm ci` for clean local verification.
+- Complete Windows verification: `.\scripts\verify.ps1`; complete Linux verification: `./scripts/verify.sh`.
 - Rust checks: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
 - Frontend checks: `npm run check`, `npm run test`, `npm run build`, `npm run test:e2e`.
 - Documentation check: `npm run check:docs`.
@@ -90,6 +95,8 @@ When sources conflict, use this order:
 - Workspace dependency direction: stable domain/config/events at the center; policy/providers/tools/storage implement boundaries; runtime orchestrates; API and GUI/CLI are adapters.
 - Initial daemon API binds to `127.0.0.1:7777`; built-in remote harness access is out of initial scope.
 - Provider auth modes are explicit and billing-aware: browser OAuth, device-code OAuth, API key, bearer token, or none. OAuth failure never mutates a connection into API-key billing.
+- The M1 event log is authoritative; task projections are written in the same SQLite transaction and rebuilt by validated replay at daemon startup.
+- The local API rejects non-loopback binds. All routes except health require a generated persistent bearer token; SSE reconnects can replay from `after` or `Last-Event-ID`.
 
 ## Verification Ledger
 
@@ -108,6 +115,10 @@ When sources conflict, use this order:
 - 2026-08-14: Live daemon/CLI smoke test passed for health, human status, and JSON status; the exact temporary daemon process was stopped afterward.
 - 2026-08-14: The first GitHub Actions frontend run exposed non-deterministic workspace dependency placement: Vitest was hoisted while the explicit jsdom dependency was nested. Moved jsdom 29.1.1 to the root workspace, verified a clean `npm ci`, Vitest, and Playwright run, and updated checkout/setup-node to their current v7 major releases.
 - 2026-08-14: GitHub Actions run `31771954125` passed all documentation, frontend, Ubuntu Rust, and Windows Rust jobs for commit `b02d626`.
+- 2026-08-14: Disabled GitHub Actions at the repository setting and removed `.github/workflows/ci.yml` plus `.github/dependabot.yml`; all future builds/tests run only on owner-controlled machines.
+- 2026-08-14: Installed Rust 1.93, Node 24.14, npm, Tauri/WebKit native libraries, and Playwright Chromium on owner-controlled Ubuntu 24.04 VM `192.168.50.109`; no VM password was stored in repository files or memory.
+- 2026-08-14: Windows and Ubuntu local verification scripts passed Rust fmt/clippy/tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E.
+- 2026-08-14: Windows and Ubuntu live daemon/CLI smoke tests created and transitioned a task, terminated the daemon, restarted it, and recovered the same projection with two ordered events; Ubuntu token mode verified as `0600`.
 
 ## Decisions
 
@@ -142,25 +153,35 @@ When sources conflict, use this order:
 - Result: Frontend unit-test environment installation is deterministic across supported CI platforms.
 - Follow-up: Begin M1 durable runtime spine implementation.
 
+### 2026-08-14 - M1 Durable Runtime Spine
+
+- Context: The owner authorized the complete M1 task/event, SQLite, recovery, local authentication, streaming, and restart-test slice and prohibited GitHub-hosted builds or paid automation.
+- Decision: Use the append-only event log as authority, atomically maintain rebuildable task projections, require persistent local bearer authentication outside the public health route, and support durable SSE catch-up by sequence.
+- Files: `crates/mcg-domain`, `crates/mcg-events`, `crates/mcg-storage`, `crates/mcg-runtime`, `crates/mcg-api`, `apps/mcg-daemon`, `apps/mcg-cli`, `docs/architecture/runtime-spine.md`, `scripts/verify.ps1`, `scripts/verify.sh`.
+- Commands/tests: Both local platform scripts passed; native Windows and Linux desktop binaries built; real daemon/CLI forced-restart smoke tests passed on both platforms.
+- Result: The requested M1 runtime spine is complete and cross-platform qualified without GitHub automation.
+- Follow-up: Begin M2 provider fabric while retaining M1 invariants and local-only verification.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
 - MCG must validate that reuse or adaptation of OpenAI's `codex-login` and/or OpenClaw OAuth code is license-compatible and remains functional without depending on the Codex agent runtime. OAuth failures must never silently switch users to API billing.
-- macOS packages are intended to ship alongside Windows and Linux but initially will not receive equivalent automated or maintainer qualification; document this clearly until macOS CI/testing exists.
+- macOS packages are intended to ship alongside Windows and Linux but initially will not receive equivalent owner-controlled qualification; document this clearly until a macOS build/test machine exists.
 
 ## Completed Work
 
 - 2026-07-12: Reset stale project-specific memory while retaining the durable memory-management logic.
 - 2026-08-13: Split and repaired the PRD, added the product/engineering baseline and repository hygiene files, initialized Git, and published the private GitHub repository.
 - 2026-08-14: Completed and verified M0 architecture, roadmap, test strategy, Rust/Tauri/React workspace, CI, daemon/CLI smoke path, and initial UI/invariant tests.
+- 2026-08-14: Completed and verified the requested M1 runtime spine on Windows and Ubuntu, then disabled and removed GitHub-hosted automation.
 
 ## Open Follow-ups
 
 - Choose a public-source license only if/when public distribution is considered; repository remains private.
 - Research and document the exact license/security boundary for a standalone Rust ChatGPT/Codex OAuth adapter using browser callback and device-code flows.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
-- Add macOS CI and real-device qualification when capacity becomes available.
-- Implement M1 durable task/event/projection/recovery contracts, local client authentication, and streaming API.
+- Add owner-controlled macOS build and real-device qualification when capacity becomes available.
+- Implement M2 provider fabric, starting with canonical provider contracts and deterministic OpenAI-compatible fixtures.
 
 ## Do Not Forget
 

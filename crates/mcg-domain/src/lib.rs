@@ -1,7 +1,11 @@
-//! Stable domain types shared by every MCG interface and implementation layer.
+//! Stable, versioned domain types shared by every MCG interface.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
+
+pub const TASK_SCHEMA_VERSION: u16 = 1;
 
 macro_rules! domain_id {
     ($name:ident) => {
@@ -25,6 +29,14 @@ macro_rules! domain_id {
         impl std::fmt::Display for $name {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 self.0.fmt(formatter)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Uuid::parse_str(value).map(Self)
             }
         }
     };
@@ -56,6 +68,42 @@ pub enum TaskState {
     Cancelled,
 }
 
+impl TaskState {
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Pending, Self::Active | Self::Cancelled)
+                | (
+                    Self::Active,
+                    Self::WaitingForApproval
+                        | Self::Blocked
+                        | Self::Completed
+                        | Self::Failed
+                        | Self::Cancelled
+                )
+                | (
+                    Self::WaitingForApproval | Self::Blocked,
+                    Self::Active | Self::Failed | Self::Cancelled
+                )
+        )
+    }
+}
+
+impl std::fmt::Display for TaskState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+        formatter.write_str(value.as_str().ok_or(std::fmt::Error)?)
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid task transition from {from} to {to}")]
+pub struct InvalidTaskTransition {
+    pub from: TaskState,
+    pub to: TaskState,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TaskBudget {
     pub max_tokens: Option<u64>,
@@ -65,6 +113,7 @@ pub struct TaskBudget {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskEnvelope {
+    pub schema_version: u16,
     pub id: TaskId,
     pub project_id: Option<ProjectId>,
     pub thread_id: Option<ThreadId>,
@@ -74,12 +123,16 @@ pub struct TaskEnvelope {
     pub risk: RiskLevel,
     pub budget: TaskBudget,
     pub state: TaskState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl TaskEnvelope {
     #[must_use]
     pub fn new(goal: impl Into<String>) -> Self {
+        let now = Utc::now();
         Self {
+            schema_version: TASK_SCHEMA_VERSION,
             id: TaskId::new(),
             project_id: None,
             thread_id: None,
@@ -89,7 +142,26 @@ impl TaskEnvelope {
             risk: RiskLevel::Medium,
             budget: TaskBudget::default(),
             state: TaskState::Pending,
+            created_at: now,
+            updated_at: now,
         }
+    }
+
+    /// Applies a legal state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidTaskTransition`] when the state machine forbids the edge.
+    pub fn transition_to(&mut self, next: TaskState) -> Result<(), InvalidTaskTransition> {
+        if !self.state.can_transition_to(next) {
+            return Err(InvalidTaskTransition {
+                from: self.state,
+                to: next,
+            });
+        }
+        self.state = next;
+        self.updated_at = Utc::now();
+        Ok(())
     }
 }
 
@@ -104,5 +176,12 @@ mod tests {
         let decoded: TaskEnvelope = serde_json::from_str(&json).expect("task should deserialize");
 
         assert_eq!(decoded, task);
+        assert_eq!(decoded.schema_version, TASK_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn terminal_task_states_cannot_restart() {
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Active));
+        assert!(TaskState::Pending.can_transition_to(TaskState::Active));
     }
 }

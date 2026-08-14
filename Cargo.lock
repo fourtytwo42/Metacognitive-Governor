@@ -2093,6 +2093,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2150,9 +2156,16 @@ name = "mcg-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "http-body-util",
+ "mcg-config",
+ "mcg-domain",
+ "mcg-events",
  "mcg-runtime",
  "serde",
+ "serde_json",
  "tokio",
+ "tokio-stream",
+ "tower",
  "tower-http 0.7.0",
  "tracing",
 ]
@@ -2162,6 +2175,9 @@ name = "mcg-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "mcg-api",
+ "mcg-config",
+ "mcg-domain",
  "mcg-runtime",
  "reqwest",
  "serde_json",
@@ -2181,7 +2197,10 @@ version = "0.1.0"
 dependencies = [
  "mcg-api",
  "mcg-config",
+ "mcg-domain",
  "mcg-runtime",
+ "reqwest",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2199,8 +2218,10 @@ dependencies = [
 name = "mcg-domain"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "uuid",
 ]
 
@@ -2245,16 +2266,24 @@ dependencies = [
  "mcg-storage",
  "mcg-tools",
  "serde",
+ "subtle",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
 name = "mcg-storage"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "mcg-domain",
  "mcg-events",
  "rusqlite",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]
@@ -3161,6 +3190,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags 2.13.1",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4094,6 +4136,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "tendril"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4241,6 +4296,18 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

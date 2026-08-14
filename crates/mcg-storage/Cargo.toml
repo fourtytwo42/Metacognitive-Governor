@@ -6,11 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
+mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
 rusqlite.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
-

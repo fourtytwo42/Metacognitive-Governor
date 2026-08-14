@@ -89,9 +89,13 @@ cover keyboard navigation, focus, labels, contrast, reduced motion, and readable
 progress/errors. E2E tests preserve traces/screenshots only on failure and sanitize
 private paths and content.
 
-## CI lanes
+## Local verification lanes
 
-### Pull request
+MCG does not use GitHub Actions or other GitHub-hosted build automation. All build,
+test, packaging, scheduled, and release verification runs on owner-controlled local
+machines. GitHub is source hosting only.
+
+### Change verification
 
 - documentation/link validation;
 - Rust format, clippy with warnings denied, unit/integration/contract tests;
@@ -99,14 +103,14 @@ private paths and content.
 - deterministic browser E2E smoke suite;
 - secret and dependency-policy checks.
 
-### Main/nightly
+### Extended/local scheduled
 
 - full scenario/eval suite with fake providers;
 - opt-in GPU45 and configured live-provider conformance;
 - adversarial, fuzz, performance, and restart/recovery suites;
 - Windows and Linux packaged application smoke tests.
 
-### Release candidate
+### Local release candidate
 
 - signed installer, upgrade, rollback, backup/restore, and uninstall tests;
 - Windows/Linux clean-machine matrices and long-running soak;
@@ -139,6 +143,5 @@ npm run build
 npm run test:e2e
 ```
 
-Platform-specific setup belongs behind scripts or task-runner targets so CI and
-contributors execute the same logical commands.
-
+Platform-specific setup belongs behind scripts or task-runner targets so every
+developer and release machine executes the same logical commands.
