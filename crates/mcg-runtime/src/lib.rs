@@ -1496,7 +1496,12 @@ impl AppRuntime {
                 .save_consumer_evaluation_checkpoint(&checkpoint)?;
             let _ = self.event_sender.send(event);
         }
-        if self.config.autonomy == AutonomyPreset::Guided && !checkpoint.batch_approved {
+        if self.config.autonomy == AutonomyPreset::Guided
+            && !checkpoint.batch_approved
+            && conditions
+                .iter()
+                .any(|condition| objective_condition_label(condition).is_some())
+        {
             let request_id = objective_batch_request_id(run_id, checkpoint.attempt, &conditions)?;
             let control = self.tool_control();
             let approval = control
@@ -1513,9 +1518,9 @@ impl AppRuntime {
                 approval.id
             } else {
                 let approval_id = ApprovalId::new();
-                let commands = conditions
+                let checks = conditions
                     .iter()
-                    .filter_map(objective_command)
+                    .filter_map(objective_condition_label)
                     .collect::<Vec<_>>()
                     .join(", ");
                 control
@@ -1527,7 +1532,7 @@ impl AppRuntime {
                         action: "evaluation.run_discovered_checks".into(),
                         resource: project.root.clone(),
                         reason: format!(
-                            "Guided mode requires approval to run these discovered project checks: {commands}"
+                            "Guided mode requires approval to run these exact objective checks: {checks}"
                         ),
                         state: ApprovalState::Pending,
                         requested_at: Utc::now(),
@@ -1549,8 +1554,34 @@ impl AppRuntime {
             return Ok(ConsumerEvaluationProgress::AwaitingApproval { approval_id });
         }
         let root = std::path::PathBuf::from(&project.root);
-        let process = ProcessExecutor::new([root.clone()], Arc::new(RejectingCredentialResolver))
-            .map_err(runtime_tool_error)?;
+        let artifacts = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts)?;
+        let credentials = Arc::new(RejectingCredentialResolver);
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([root.clone()], &artifacts).map_err(runtime_tool_error)?,
+        );
+        let process = Arc::new(
+            ProcessExecutor::new([root.clone()], credentials.clone())
+                .map_err(runtime_tool_error)?,
+        );
+        let host = HostExecutor {
+            filesystem: filesystem.clone(),
+            process: process.clone(),
+            http: Arc::new(
+                HttpExecutor::new(credentials, filesystem, &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            system: Arc::new(SystemExecutor),
+            git: Arc::new(
+                GitExecutor::new(process, [root.clone()], &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            memory: Arc::new(MemoryExecutor::new(InMemoryMemoryRepository::default())),
+            external: Arc::new(RuntimeMcpExecutor {
+                store: self.store.clone(),
+                credentials: self.mcp_credentials.clone(),
+            }),
+        };
         let mut capabilities = CapabilityPolicy::project(&root);
         for command in &project.commands {
             if let Some(executable) = command
@@ -1566,9 +1597,21 @@ impl AppRuntime {
                 capabilities.allowed_executables.push(executable);
             }
         }
+        for condition in &conditions {
+            if let SuccessCondition::HttpResponds { url, .. } = condition {
+                let origin = objective_network_origin(url)?;
+                if !capabilities
+                    .allowed_network_origins
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&origin))
+                {
+                    capabilities.allowed_network_origins.push(origin);
+                }
+            }
+        }
         let control = self.tool_control();
         let broker = ToolBroker::new(
-            process,
+            host,
             control.clone(),
             control.clone(),
             BrokerControls {
@@ -1590,7 +1633,29 @@ impl AppRuntime {
             .enumerate()
             .skip(checkpoint.next_condition_index)
         {
-            let Some(command) = objective_command(condition) else {
+            let request_kind = if let Some(command) = objective_command(condition) {
+                if !project
+                    .commands
+                    .iter()
+                    .any(|discovered| discovered.command == command)
+                {
+                    return Err(StorageError::Conflict(
+                        "planned objective command no longer matches project discovery".into(),
+                    )
+                    .into());
+                }
+                ToolRequestKind::ProcessExec {
+                    options: objective_process_options(command, &project.root)?,
+                }
+            } else if let SuccessCondition::HttpResponds { url, .. } = condition {
+                ToolRequestKind::HttpRequest {
+                    method: "GET".into(),
+                    url: url.clone(),
+                    headers: Vec::new(),
+                    body: None,
+                    max_response_bytes: 1_048_576,
+                }
+            } else {
                 checkpoint.unsupported = checkpoint.unsupported.saturating_add(1);
                 let detail = "No deterministic evaluator is implemented for this condition yet.";
                 checkpoint.results.push(ConditionResult {
@@ -1612,21 +1677,12 @@ impl AppRuntime {
                 let _ = self.event_sender.send(event);
                 continue;
             };
-            if !project
-                .commands
-                .iter()
-                .any(|discovered| discovered.command == command)
-            {
-                return Err(StorageError::Conflict(
-                    "planned objective command no longer matches project discovery".into(),
-                )
-                .into());
-            }
-            let options = objective_process_options(command, &project.root)?;
+            let label = objective_condition_label(condition)
+                .unwrap_or_else(|| "unsupported objective condition".into());
             let mut request = ToolRequest::new(
                 task_id,
-                format!("Objectively evaluate: {command}"),
-                ToolRequestKind::ProcessExec { options },
+                format!("Objectively evaluate: {label}"),
+                request_kind,
             );
             request.id = objective_request_id(run_id, index, checkpoint.attempt, condition)?;
             request.timeout_seconds = task
@@ -1635,7 +1691,7 @@ impl AppRuntime {
                 .unwrap_or(1_800)
                 .clamp(1, 86_400);
             let outcome = match broker.execute(&request).await {
-                Ok(outcome) => outcome,
+                Ok(outcome) => Some(outcome),
                 Err(ToolError::ApprovalRequired { approval_id, .. }) => {
                     checkpoint.state = ConsumerEvaluationCheckpointState::WaitingForApproval;
                     checkpoint.request_id = Some(request.id);
@@ -1648,28 +1704,69 @@ impl AppRuntime {
                     }
                     return Ok(ConsumerEvaluationProgress::AwaitingApproval { approval_id });
                 }
+                Err(ToolError::Execution(detail)) => {
+                    checkpoint.executed = checkpoint.executed.saturating_add(1);
+                    checkpoint.objective_failures = checkpoint.objective_failures.saturating_add(1);
+                    let detail = format!("objective check could not execute: {detail}");
+                    checkpoint.regressions.push(format!("{label}: {detail}"));
+                    checkpoint.results.push(ConditionResult {
+                        condition: condition.clone(),
+                        passed: false,
+                        detail: detail.clone(),
+                    });
+                    checkpoint.evidence.push(EvaluationEvidence {
+                        method: objective_evidence_method(condition).into(),
+                        artifact_sha256: None,
+                        event_sequence: None,
+                        detail: format!("{label}: {detail}"),
+                    });
+                    None
+                }
+                Err(ToolError::TimedOut) => {
+                    checkpoint.executed = checkpoint.executed.saturating_add(1);
+                    checkpoint.objective_failures = checkpoint.objective_failures.saturating_add(1);
+                    let detail = "objective check timed out".to_owned();
+                    checkpoint.regressions.push(format!("{label}: {detail}"));
+                    checkpoint.results.push(ConditionResult {
+                        condition: condition.clone(),
+                        passed: false,
+                        detail: detail.clone(),
+                    });
+                    checkpoint.evidence.push(EvaluationEvidence {
+                        method: objective_evidence_method(condition).into(),
+                        artifact_sha256: None,
+                        event_sequence: None,
+                        detail: format!("{label}: {detail}"),
+                    });
+                    None
+                }
                 Err(error) => return Err(runtime_tool_error(error)),
             };
-            checkpoint.executed = checkpoint.executed.saturating_add(1);
-            let passed = outcome.status == ToolOutcomeStatus::Succeeded;
-            if !passed {
-                checkpoint.objective_failures = checkpoint.objective_failures.saturating_add(1);
+            if let Some(outcome) = outcome {
+                checkpoint.executed = checkpoint.executed.saturating_add(1);
+                let passed = objective_outcome_passed(condition, &outcome);
+                if !passed {
+                    checkpoint.objective_failures = checkpoint.objective_failures.saturating_add(1);
+                }
+                let detail = objective_condition_outcome_detail(condition, &outcome);
+                if !passed {
+                    checkpoint.regressions.push(format!("{label}: {detail}"));
+                }
+                checkpoint.results.push(ConditionResult {
+                    condition: condition.clone(),
+                    passed,
+                    detail: detail.clone(),
+                });
+                checkpoint.evidence.push(EvaluationEvidence {
+                    method: objective_evidence_method(condition).into(),
+                    artifact_sha256: outcome
+                        .artifacts
+                        .first()
+                        .map(|artifact| artifact.sha256.clone()),
+                    event_sequence: None,
+                    detail: format!("{label}: {detail}"),
+                });
             }
-            let detail = objective_outcome_detail(&outcome);
-            if !passed {
-                checkpoint.regressions.push(format!("{command}: {detail}"));
-            }
-            checkpoint.results.push(ConditionResult {
-                condition: condition.clone(),
-                passed,
-                detail: detail.clone(),
-            });
-            checkpoint.evidence.push(EvaluationEvidence {
-                method: "governed_process_exit".into(),
-                artifact_sha256: None,
-                event_sequence: None,
-                detail: format!("{command}: {detail}"),
-            });
             checkpoint.next_condition_index = index.saturating_add(1);
             checkpoint.attempt = 0;
             checkpoint.request_id = None;
@@ -2804,6 +2901,69 @@ fn objective_command(condition: &SuccessCondition) -> Option<&str> {
         | SuccessCondition::StaticAnalysis { command } => Some(command),
         _ => None,
     }
+}
+
+fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
+    objective_command(condition).map(str::to_owned).or_else(|| {
+        if let SuccessCondition::HttpResponds { url, status } = condition {
+            Some(format!("HTTP GET {url} returns {status}"))
+        } else {
+            None
+        }
+    })
+}
+
+fn objective_network_origin(value: &str) -> Result<String, RuntimeError> {
+    let url = url::Url::parse(value)
+        .map_err(|error| StorageError::InvalidData(format!("invalid objective URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(StorageError::InvalidData(
+            "objective HTTP checks require a credential-free HTTP(S) URL".into(),
+        )
+        .into());
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
+fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
+    if matches!(condition, SuccessCondition::HttpResponds { .. }) {
+        "governed_http_status"
+    } else {
+        "governed_process_exit"
+    }
+}
+
+fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome) -> bool {
+    if let SuccessCondition::HttpResponds { status, .. } = condition {
+        return observed_http_status(outcome) == Some(*status);
+    }
+    outcome.status == ToolOutcomeStatus::Succeeded
+}
+
+fn observed_http_status(outcome: &ToolOutcome) -> Option<u16> {
+    outcome
+        .verification
+        .iter()
+        .find(|evidence| evidence.method == "http.status")
+        .and_then(|evidence| evidence.detail.parse().ok())
+}
+
+fn objective_condition_outcome_detail(
+    condition: &SuccessCondition,
+    outcome: &ToolOutcome,
+) -> String {
+    if let SuccessCondition::HttpResponds { status, .. } = condition {
+        return format!(
+            "{}; expected_status={status}; observed_status={}",
+            outcome.summary,
+            observed_http_status(outcome)
+                .map_or_else(|| "unknown".into(), |value| value.to_string())
+        );
+    }
+    objective_outcome_detail(outcome)
 }
 
 fn objective_process_options(

@@ -68,6 +68,10 @@ The first real-project suite includes:
 Success evidence combines tests, build output, Git diff constraints, HTTP health,
 browser assertions, accessibility checks, and screenshots when visual comparison
 adds information. Model self-report is never sufficient.
+HTTP objective fixtures cover exact expected 2xx and non-2xx statuses, mismatches,
+unreachable origins, response artifact capture, capability confinement, and audit.
+Rendered-page success still requires a browser assertion; an HTTP body is not a
+render substitute.
 
 ## API and compatibility testing
 

@@ -113,9 +113,14 @@ with per-condition details in advanced mode. Guided mode requests one explicit
 approval for the exact discovered command batch and immutable project snapshot.
 That checkpoint survives daemon restart; denial blocks for a bounded retry with a
 fresh request identity, while approval resumes the batch without repeating model
-turns or completed checks. Natural-language, browser, HTTP, and other condition
+turns or completed checks. Natural-language, browser, and other condition
 types remain nonterminal until their objective evaluators are implemented; model
-text alone is never promoted to proof.
+text alone is never promoted to proof. Advanced success-condition lines can use
+`HTTP STATUS URL` (for example, `HTTP 200 http://127.0.0.1:3000/health`). MCG
+performs one governed, body-bounded GET to that exact credential-free URL, captures
+the response artifact, and compares the observed status exactly, including expected
+non-2xx responses. Browser rendering remains a distinct evaluator rather than being
+approximated by an HTTP fetch.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

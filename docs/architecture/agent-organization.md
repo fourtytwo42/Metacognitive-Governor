@@ -93,6 +93,11 @@ evaluation checkpoint and asks once for the exact discovered command batch. The
 approval is bound to the run, attempt, conditions, and immutable project snapshot;
 restart and resume therefore preserve evidence without granting broader process
 authority or replaying completed checks.
+Typed HTTP-status conditions use the same checkpoint and request identity. Their
+capability contains only the condition's credential-free origin, while the immutable
+request retains the exact URL and expected status. Response bytes are content-addressed;
+the report records the observed status and artifact hash without copying the body into
+evaluation history.
 
 ## Authenticated Control Surface
 

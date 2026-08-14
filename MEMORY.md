@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Durable guided objective-batch approval is cross-platform qualified; HTTP and rendered-page objective evidence are next.
-- Last meaningful change: Added a condition-indexed SQLite evaluation checkpoint, one exact-batch guided approval, denial/retry identity rotation, restart-safe resume, and atomic checkpoint deletion with terminal settlement.
-- Next step: Add authenticated HTTP-status and rendered-page evaluators before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Current task: Durable guided objective-batch approval is cross-platform qualified; governed HTTP-status evidence is Windows-focused green and rendered-page evidence is next.
+- Last meaningful change: Added exact `HTTP STATUS URL` consumer parsing and origin-confined, artifact-captured, restart-checkpointed HTTP evaluation with exact non-2xx comparison and failed transport settlement.
+- Next step: Exact-commit Ubuntu-qualify HTTP evaluation, then add an actual governed rendered-page evaluator before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -24,6 +24,7 @@ Durable project context lives here. Update this file whenever information should
 - Guided local-tool approvals can be reviewed and resumed from the desktop task card. Resume revalidates durable authority and unchanged project context; stable request identity prevents duplicate tool side effects, though the bounded provider turn is currently replayed and may incur another inference call.
 - Consumer plans whose conditions are entirely discovered build/test/static-analysis commands now execute those checks through the governed broker after independent Evaluator completion. Validated reports and completed/failed task/run projections commit atomically; terminal Start replay is observation-only.
 - Guided command evaluation stores its run/project/condition progress in SQLite and requests one approval for the immutable discovered batch. Denial blocks for bounded retry with a new request identity; approved work resumes across daemon restart without another provider turn or repeated completed check.
+- Advanced consumer condition lines accept exact `HTTP STATUS URL` syntax. Runtime grants only the parsed credential-free origin, performs a body-bounded governed GET, captures response bytes as an artifact, and compares observed status exactly; status mismatch, timeout, and connection failure become failed evaluation evidence.
 
 ## User Preferences
 
@@ -503,6 +504,15 @@ When sources conflict, use this order:
 - Commands/tests: Strict focused Windows Rust clippy; focused Rust suites including 25 API tests; nine Vitest flows; frontend typecheck/build; documentation and diff checks; exact commit `6e5f92e` complete Ubuntu `./scripts/verify.sh`.
 - Result: A file-backed API fixture proves wait, denial, bounded retry with fresh identity, approval, daemon restart into recovery, exact resume, three real npm/Node checks, terminal completion, checkpoint cleanup, two total model calls, and no duplicate tool completion. Exact Windows-focused and complete Ubuntu native/Tauri/Playwright qualification are green.
 - Follow-up: Implement HTTP-status and rendered-page objective evaluators.
+
+### 2026-08-14 - Governed HTTP Status Evidence
+
+- Context: Consumer plans treated HTTP health conditions as unsupported, and a plain fetch would have bypassed the harness policy/evidence plane or confused transport success with the expected status.
+- Decision: Parse only exact advanced lines of `HTTP STATUS URL`; accept credential-free HTTP(S) URLs and valid status codes; grant only the condition origin; issue a server-owned GET with a 1 MiB response limit; and reuse `HttpExecutor` through `HostExecutor`, broker policy, execution lease, immutable audit, redaction, same-origin redirect enforcement, and artifact storage. Compare the executor's `http.status` evidence exactly, including expected non-2xx responses, and convert execution/timeout failures into failed condition evidence.
+- Files: `crates/mcg-{runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
+- Commands/tests: Strict focused Rust clippy/tests including 27 API tests and all four consumer scenarios; HTTP parser safety cases; public HTTP pass/mismatch/unreachable fixture; nine Vitest flows; frontend typecheck/build; documentation and diff checks.
+- Result: Expected 404 evidence passes with a content-addressed response artifact, 404 when 200 is expected fails, and connection refusal produces an audited failed execution plus atomic failed task/run evaluation rather than an API error. Page rendering remains deliberately unsupported until backed by a real browser engine.
+- Follow-up: Exact-commit Ubuntu qualification, then governed rendered-page evidence.
 
 ## Known Issues
 

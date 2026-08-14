@@ -103,8 +103,18 @@ requests one approval for the exact discovered command batch against the immutab
 project snapshot. Denial blocks the task and bounded retry creates a fresh approval
 identity; approval delegates only that batch, and resume after daemon restart
 continues from the stored condition index without another provider turn or repeated
-completed check. Non-command conditions remain visibly awaiting evaluation rather
-than accepting model self-report as objective proof.
+completed check. Conditions without a deterministic evaluator remain visibly
+awaiting evaluation rather than accepting model self-report as objective proof.
+
+An advanced consumer success-condition line in the exact form `HTTP STATUS URL`
+becomes a typed `HttpResponds` condition. Runtime grants only that parsed origin,
+constructs a server-owned credential-free GET with a 1 MiB body limit, and sends it
+through the same policy, lease, audit, redaction, redirect, and artifact plane as
+agent HTTP tools. Same-origin redirects remain bounded and cross-origin redirects
+fail closed. Evaluation compares the `http.status` verification value rather than
+generic 2xx success, so an expected 404 can pass while a reachable status mismatch,
+timeout, or connection failure settles as failed objective evidence. `PageRenders`
+remains unsupported until an actual governed browser engine supplies render evidence.
 
 ## Verification evidence
 
@@ -125,6 +135,9 @@ calls nor tool audit records. A file-backed guided fixture denies and retries th
 batch with distinct identities, approves it, restarts the daemon while waiting,
 then resumes exactly once and verifies the checkpoint is removed only by atomic
 terminal settlement.
+The HTTP fixture proves an expected non-2xx response passes with a captured artifact,
+a status mismatch fails, and an unreachable origin records failed tool audit plus a
+terminal failed report instead of escaping as an API error.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

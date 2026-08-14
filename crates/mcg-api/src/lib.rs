@@ -1308,6 +1308,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
         SuccessCondition::Build { .. }
             | SuccessCondition::Test { .. }
             | SuccessCondition::StaticAnalysis { .. }
+            | SuccessCondition::HttpResponds { .. }
     )
 }
 
@@ -1319,9 +1320,7 @@ fn consumer_success_conditions(
         .success_conditions
         .iter()
         .filter(|description| !description.trim().is_empty())
-        .map(|description| SuccessCondition::Custom {
-            description: description.trim().to_owned(),
-        })
+        .map(|description| parse_consumer_success_condition(description))
         .collect::<Vec<_>>();
     for command in &project.commands {
         let name = command.name.to_ascii_lowercase();
@@ -1352,6 +1351,32 @@ fn consumer_success_conditions(
         });
     }
     conditions
+}
+
+fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
+    let trimmed = description.trim();
+    let mut parts = trimmed.split_ascii_whitespace();
+    let first = parts.next();
+    let status = parts.next();
+    let url = parts.next();
+    if first.is_some_and(|value| value.eq_ignore_ascii_case("http"))
+        && parts.next().is_none()
+        && let (Some(status), Some(url)) = (status.and_then(|value| value.parse::<u16>().ok()), url)
+        && (100..=599).contains(&status)
+        && url::Url::parse(url).is_ok_and(|value| {
+            matches!(value.scheme(), "http" | "https")
+                && value.username().is_empty()
+                && value.password().is_none()
+        })
+    {
+        return SuccessCondition::HttpResponds {
+            url: url.to_owned(),
+            status,
+        };
+    }
+    SuccessCondition::Custom {
+        description: trimmed.to_owned(),
+    }
 }
 
 async fn get_agent_run(
@@ -2063,6 +2088,29 @@ mod tests {
         )
     }
 
+    #[test]
+    fn consumer_http_condition_parser_requires_exact_safe_syntax() {
+        assert_eq!(
+            parse_consumer_success_condition("  HTTP 404 https://example.test/health?full=1  "),
+            SuccessCondition::HttpResponds {
+                url: "https://example.test/health?full=1".into(),
+                status: 404,
+            }
+        );
+        for unsafe_or_ambiguous in [
+            "HTTP 99 https://example.test",
+            "HTTP 200 https://user:secret@example.test",
+            "HTTP 200 file:///tmp/result",
+            "HTTP 200 https://example.test extra",
+            "Visit https://example.test and expect 200",
+        ] {
+            assert!(matches!(
+                parse_consumer_success_condition(unsafe_or_ambiguous),
+                SuccessCondition::Custom { .. }
+            ));
+        }
+    }
+
     async fn model_discovery_fixture() -> String {
         async fn response(Json(body): Json<serde_json::Value>) -> Response {
             if body.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -2589,6 +2637,25 @@ form.addEventListener('submit', (event) => {
                 .expect("objective fixture server");
         });
         format!("http://{address}/v1")
+    }
+
+    async fn objective_http_fixture() -> String {
+        let app = Router::new().route(
+            "/expected-missing",
+            get(|| async { (StatusCode::NOT_FOUND, "expected fixture status") }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("HTTP objective fixture listener");
+        let address = listener
+            .local_addr()
+            .expect("HTTP objective fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("HTTP objective fixture server");
+        });
+        format!("http://{address}")
     }
 
     async fn device_oauth_fixture() -> String {
@@ -3743,7 +3810,7 @@ form.addEventListener('submit', (event) => {
                     denied_task.id
                 )))
                 .header("content-type", "application/json")
-                .body(Body::from(body))
+                .body(Body::from(body.clone()))
                 .expect("request"),
             )
             .await
@@ -3908,6 +3975,7 @@ form.addEventListener('submit', (event) => {
         failing_task.project_id = Some(project.project_id);
         runtime.create_task(&failing_task).expect("failing task");
         let failing = app
+            .clone()
             .oneshot(
                 authorized(Request::post(format!(
                     "/api/v1/tasks/{}/launch",
@@ -3950,6 +4018,197 @@ form.addEventListener('submit', (event) => {
                 .all(|evidence| evidence.method == "governed_process_exit")
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exact status success and mismatch share the public launch fixture.
+    async fn consumer_http_status_is_governed_captured_and_exact() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# HTTP objective fixture\n")
+            .expect("readme");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "http_objective_fixture".into(),
+                    display_name: "HTTP Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let target = format!("{}/expected-missing", objective_http_fixture().await);
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+
+        let mut passing_task = TaskEnvelope::new("Verify the service health endpoint");
+        passing_task.project_id = Some(project.project_id);
+        passing_task.success_conditions = vec![format!("HTTP 404 {target}")];
+        runtime.create_task(&passing_task).expect("passing task");
+        let passing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    passing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+            )
+            .await
+            .expect("passing response");
+        assert_eq!(passing.status(), StatusCode::OK);
+        let passing: LaunchTaskResponse = serde_json::from_slice(
+            &passing
+                .into_body()
+                .collect()
+                .await
+                .expect("passing body")
+                .to_bytes(),
+        )
+        .expect("passing response body");
+        assert_eq!(passing.task.state, TaskState::Completed);
+        let report = passing.run.evaluations.first().expect("passing report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert_eq!(
+            report.conditions[0].condition,
+            SuccessCondition::HttpResponds {
+                url: target.clone(),
+                status: 404,
+            }
+        );
+        assert!(report.conditions[0].passed);
+        assert_eq!(report.evidence[0].method, "governed_http_status");
+        assert!(report.evidence[0].artifact_sha256.is_some());
+        assert!(report.evidence[0].detail.contains("observed_status=404"));
+        let audit = runtime.tool_audit(passing_task.id).expect("HTTP audit");
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|record| record.phase == ToolAuditPhase::Completion)
+                .count(),
+            1
+        );
+
+        let mut failing_task = TaskEnvelope::new("Reject the wrong service status");
+        failing_task.project_id = Some(project.project_id);
+        failing_task.success_conditions = vec![format!("HTTP 200 {target}")];
+        runtime.create_task(&failing_task).expect("failing task");
+        let failing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    failing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+            )
+            .await
+            .expect("failing response");
+        assert_eq!(failing.status(), StatusCode::OK);
+        let failing: LaunchTaskResponse = serde_json::from_slice(
+            &failing
+                .into_body()
+                .collect()
+                .await
+                .expect("failing body")
+                .to_bytes(),
+        )
+        .expect("failing response body");
+        assert_eq!(failing.task.state, TaskState::Failed);
+        assert_eq!(
+            failing.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(!failing.run.evaluations[0].conditions[0].passed);
+        assert!(
+            failing.run.evaluations[0].conditions[0]
+                .detail
+                .contains("expected_status=200; observed_status=404")
+        );
+
+        let unused = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unused endpoint reservation");
+        let unavailable = format!(
+            "http://{}/health",
+            unused.local_addr().expect("unused endpoint address")
+        );
+        drop(unused);
+        let mut unavailable_task = TaskEnvelope::new("Fail safely when the service is unreachable");
+        unavailable_task.project_id = Some(project.project_id);
+        unavailable_task.success_conditions = vec![format!("HTTP 200 {unavailable}")];
+        runtime
+            .create_task(&unavailable_task)
+            .expect("unavailable task");
+        let unavailable = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    unavailable_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("unavailable response");
+        assert_eq!(unavailable.status(), StatusCode::OK);
+        let unavailable: LaunchTaskResponse = serde_json::from_slice(
+            &unavailable
+                .into_body()
+                .collect()
+                .await
+                .expect("unavailable body")
+                .to_bytes(),
+        )
+        .expect("unavailable response body");
+        assert_eq!(unavailable.task.state, TaskState::Failed);
+        assert_eq!(
+            unavailable.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(
+            unavailable.run.evaluations[0].conditions[0]
+                .detail
+                .contains("objective check could not execute")
+        );
+        assert!(
+            unavailable.run.evaluations[0].evidence[0]
+                .artifact_sha256
+                .is_none()
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 6);
     }
 
     #[tokio::test]
