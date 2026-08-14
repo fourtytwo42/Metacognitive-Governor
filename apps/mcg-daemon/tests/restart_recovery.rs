@@ -46,6 +46,9 @@ fn restart_schedule(now: chrono::DateTime<Utc>) -> ScheduleDefinition {
         requested_tools: Vec::new(),
         estimated_output_tokens: 1_024,
         max_model_calls: 2,
+        watch_fingerprint: None,
+        last_watch_at: None,
+        last_event_sequence: 0,
         created_at: now,
         updated_at: now,
     }

@@ -10,14 +10,16 @@ use mcg_api::{
     MemoryClaimListResponse, OrganizationListResponse, OrganizationMutationResponse,
     PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse, ProjectListResponse,
     ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SetScheduleStateRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
-    MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    MemoryClaimId, NotificationSeverity, OrganizationRevisionId, ProjectId, RunId, ScheduleId,
+    ScheduleState, ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope,
+    TaskId, TaskState, WorkItemId,
 };
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
@@ -146,6 +148,47 @@ enum ScheduleCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Run on a five-field UTC cron expression.
+    CreateCron {
+        name: String,
+        project_id: String,
+        goal: String,
+        expression: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run when a project-relative file's content changes.
+    CreateWatch {
+        name: String,
+        project_id: String,
+        goal: String,
+        relative_path: String,
+        #[arg(long, default_value_t = 30)]
+        poll_seconds: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run when a new durable event kind is observed.
+    CreateEvent {
+        name: String,
+        project_id: String,
+        goal: String,
+        event_kind: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run an adaptive system heartbeat.
+    CreateHeartbeat {
+        name: String,
+        project_id: String,
+        goal: String,
+        #[arg(long, default_value_t = 300)]
+        idle_seconds: u64,
+        #[arg(long, default_value_t = 30)]
+        busy_seconds: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// List durable schedules.
     List {
         #[arg(long)]
@@ -159,6 +202,37 @@ enum ScheduleCommand {
     Pause { id: String },
     /// Permanently stop a schedule while retaining its history.
     Remove { id: String },
+    /// Request immediate attention without overriding an owner pause.
+    Wake {
+        id: String,
+        reason: String,
+        #[arg(long, value_enum, default_value_t = NotificationSeverityArg::Warning)]
+        severity: NotificationSeverityArg,
+    },
+    /// List scheduler notifications.
+    Notifications {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Mark one scheduler notification as read.
+    Acknowledge { id: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum NotificationSeverityArg {
+    Info,
+    Warning,
+    High,
+}
+
+impl From<NotificationSeverityArg> for NotificationSeverity {
+    fn from(value: NotificationSeverityArg) -> Self {
+        match value {
+            NotificationSeverityArg::Info => Self::Info,
+            NotificationSeverityArg::Warning => Self::Warning,
+            NotificationSeverityArg::High => Self::High,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -666,61 +740,16 @@ async fn run_schedule(
     command: ScheduleCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        ScheduleCommand::CreateOnce {
-            name,
-            project_id,
-            goal,
-            at,
-            json,
-        } => {
-            let at = chrono::DateTime::parse_from_rfc3339(&at)?.with_timezone(&chrono::Utc);
-            create_schedule_cli(
-                client,
-                host,
-                token,
-                name,
-                ProjectId::from_str(&project_id)?,
-                goal,
-                ScheduleTrigger::Once { at },
-                json,
-            )
-            .await?;
-        }
-        ScheduleCommand::CreateInterval {
-            name,
-            project_id,
-            goal,
-            seconds,
-            json,
-        } => {
-            create_schedule_cli(
-                client,
-                host,
-                token,
-                name,
-                ProjectId::from_str(&project_id)?,
-                goal,
-                ScheduleTrigger::Interval { seconds },
-                json,
-            )
-            .await?;
+        creation @ (ScheduleCommand::CreateOnce { .. }
+        | ScheduleCommand::CreateInterval { .. }
+        | ScheduleCommand::CreateCron { .. }
+        | ScheduleCommand::CreateWatch { .. }
+        | ScheduleCommand::CreateEvent { .. }
+        | ScheduleCommand::CreateHeartbeat { .. }) => {
+            run_schedule_creation(client, host, token, creation).await?;
         }
         ScheduleCommand::List { json } => {
-            let response: ScheduleListResponse = client
-                .get(format!("{host}/api/v1/schedules"))
-                .bearer_auth(token)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&response)?);
-            } else {
-                for schedule in response.schedules {
-                    println!("{}: {} ({:?})", schedule.id, schedule.name, schedule.state);
-                }
-            }
+            list_schedules_cli(client, host, token, json).await?;
         }
         ScheduleCommand::History { id } => {
             let id = ScheduleId::from_str(&id)?;
@@ -742,6 +771,201 @@ async fn run_schedule(
         }
         ScheduleCommand::Remove { id } => {
             set_schedule_state_cli(client, host, token, &id, ScheduleState::Completed).await?;
+        }
+        ScheduleCommand::Wake {
+            id,
+            reason,
+            severity,
+        } => {
+            let id = ScheduleId::from_str(&id)?;
+            let mutation: mcg_runtime::ScheduleWakeMutation = client
+                .post(format!("{host}/api/v1/schedules/{id}/wake"))
+                .bearer_auth(token)
+                .json(&WakeScheduleRequest {
+                    severity: severity.into(),
+                    reason,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}: {}", mutation.wake.id, mutation.wake.reason);
+        }
+        ScheduleCommand::Notifications { all } => {
+            let response: SchedulerNotificationListResponse = client
+                .get(format!(
+                    "{host}/api/v1/scheduler/notifications?include_read={all}"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            for notification in response.notifications {
+                println!(
+                    "{}: {:?} — {}",
+                    notification.id, notification.severity, notification.title
+                );
+            }
+        }
+        ScheduleCommand::Acknowledge { id } => {
+            let id = SchedulerNotificationId::from_str(&id)?;
+            let notification: SchedulerNotification = client
+                .post(format!(
+                    "{host}/api/v1/scheduler/notifications/{id}/acknowledge"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}: read={}", notification.id, notification.read);
+        }
+    }
+    Ok(())
+}
+
+async fn run_schedule_creation(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ScheduleCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (name, project_id, goal, trigger, json) = schedule_creation_parts(command)?;
+    create_schedule_cli(
+        client,
+        host,
+        token,
+        name,
+        ProjectId::from_str(&project_id)?,
+        goal,
+        trigger,
+        json,
+    )
+    .await
+}
+
+type ScheduleCreationParts = (String, String, String, ScheduleTrigger, bool);
+
+fn schedule_creation_parts(
+    command: ScheduleCommand,
+) -> Result<ScheduleCreationParts, Box<dyn std::error::Error>> {
+    let parts = match command {
+        ScheduleCommand::CreateOnce {
+            name,
+            project_id,
+            goal,
+            at,
+            json,
+        } => (
+            name,
+            project_id,
+            goal,
+            ScheduleTrigger::Once {
+                at: chrono::DateTime::parse_from_rfc3339(&at)?.with_timezone(&chrono::Utc),
+            },
+            json,
+        ),
+        ScheduleCommand::CreateInterval {
+            name,
+            project_id,
+            goal,
+            seconds,
+            json,
+        } => (
+            name,
+            project_id,
+            goal,
+            ScheduleTrigger::Interval { seconds },
+            json,
+        ),
+        ScheduleCommand::CreateCron {
+            name,
+            project_id,
+            goal,
+            expression,
+            json,
+        } => (
+            name,
+            project_id,
+            goal,
+            ScheduleTrigger::Cron { expression },
+            json,
+        ),
+        ScheduleCommand::CreateWatch {
+            name,
+            project_id,
+            goal,
+            relative_path,
+            poll_seconds,
+            json,
+        } => (
+            name,
+            project_id,
+            goal,
+            ScheduleTrigger::FileWatch {
+                relative_path,
+                poll_seconds,
+            },
+            json,
+        ),
+        ScheduleCommand::CreateEvent {
+            name,
+            project_id,
+            goal,
+            event_kind,
+            json,
+        } => (
+            name,
+            project_id,
+            goal,
+            ScheduleTrigger::Event { event_kind },
+            json,
+        ),
+        ScheduleCommand::CreateHeartbeat {
+            name,
+            project_id,
+            goal,
+            idle_seconds,
+            busy_seconds,
+            json,
+        } => (
+            name,
+            project_id,
+            goal,
+            ScheduleTrigger::Heartbeat {
+                idle_seconds,
+                busy_seconds,
+            },
+            json,
+        ),
+        _ => return Err("schedule command is not a creation command".into()),
+    };
+    Ok(parts)
+}
+
+async fn list_schedules_cli(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response: ScheduleListResponse = client
+        .get(format!("{host}/api/v1/schedules"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        for schedule in response.schedules {
+            println!("{}: {} ({:?})", schedule.id, schedule.name, schedule.state);
         }
     }
     Ok(())
@@ -2011,7 +2235,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_commands_expose_simple_once_and_interval_forms() {
+    fn scheduler_commands_expose_simple_once_and_interval_triggers() {
         let interval = Cli::try_parse_from([
             "mcg",
             "schedule",
@@ -2042,6 +2266,119 @@ mod tests {
             once.command,
             Command::Schedule {
                 command: ScheduleCommand::CreateOnce { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn scheduler_commands_expose_advanced_triggers() {
+        let project_id = "00000000-0000-0000-0000-000000000001";
+        let cron = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "create-cron",
+            "nightly",
+            project_id,
+            "verify site",
+            "0 2 * * *",
+        ])
+        .expect("cron command");
+        assert!(matches!(
+            cron.command,
+            Command::Schedule {
+                command: ScheduleCommand::CreateCron { expression, .. }
+            } if expression == "0 2 * * *"
+        ));
+        let watch = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "create-watch",
+            "docs",
+            project_id,
+            "review docs",
+            "README.md",
+            "--poll-seconds",
+            "15",
+        ])
+        .expect("watch command");
+        assert!(matches!(
+            watch.command,
+            Command::Schedule {
+                command: ScheduleCommand::CreateWatch {
+                    poll_seconds: 15,
+                    ..
+                }
+            }
+        ));
+        let event = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "create-event",
+            "failures",
+            project_id,
+            "triage failure",
+            "task_failed",
+        ])
+        .expect("event command");
+        assert!(matches!(
+            event.command,
+            Command::Schedule {
+                command: ScheduleCommand::CreateEvent { event_kind, .. }
+            } if event_kind == "task_failed"
+        ));
+        let heartbeat = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "create-heartbeat",
+            "health",
+            project_id,
+            "inspect health",
+            "--idle-seconds",
+            "600",
+            "--busy-seconds",
+            "60",
+        ])
+        .expect("heartbeat command");
+        assert!(matches!(
+            heartbeat.command,
+            Command::Schedule {
+                command: ScheduleCommand::CreateHeartbeat {
+                    idle_seconds: 600,
+                    busy_seconds: 60,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn scheduler_commands_expose_wake_and_notification_controls() {
+        let project_id = "00000000-0000-0000-0000-000000000001";
+        let wake = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "wake",
+            project_id,
+            "agents disagree",
+            "--severity",
+            "high",
+        ])
+        .expect("wake command");
+        assert!(matches!(
+            wake.command,
+            Command::Schedule {
+                command: ScheduleCommand::Wake {
+                    severity: NotificationSeverityArg::High,
+                    ..
+                }
+            }
+        ));
+        let notifications = Cli::try_parse_from(["mcg", "schedule", "notifications", "--all"])
+            .expect("notifications command");
+        assert!(matches!(
+            notifications.command,
+            Command::Schedule {
+                command: ScheduleCommand::Notifications { all: true }
             }
         ));
     }

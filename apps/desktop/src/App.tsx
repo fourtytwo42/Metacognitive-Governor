@@ -6,6 +6,7 @@ import {
   completeOpenAiOAuth,
   configureMcpConnection,
   configureProvider,
+  createSchedule,
   createTask,
   denyRequest,
   discoverProject,
@@ -14,11 +15,14 @@ import {
   listMcpConnections,
   listProviders,
   listApprovals,
+  listSchedules,
+  listSchedulerNotifications,
   listProjects,
   listTasks,
   launchTask,
   loadTaskAudit,
   loadTaskEvents,
+  loadScheduleHistory,
   type McpAuthMode,
   type McpListItem,
   type McpProtocolMode,
@@ -33,19 +37,47 @@ import {
   pickProjectDirectory,
   type ProjectModel,
   type RiskLevel,
+  type ScheduleDefinition,
+  type ScheduleHistoryResponse,
+  type ScheduleTrigger,
+  type SchedulerNotification,
   retryTask,
   resumeTask,
   startOpenAiOAuth,
+  setScheduleState,
   type TaskEnvelope,
   type ApprovalRequest,
   type TaskEventsResponse,
   type ToolAuditResponse,
-  transitionTask
+  transitionTask,
+  acknowledgeSchedulerNotification,
+  wakeSchedule
 } from "./desktop-client";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+function positiveWholeNumber(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive whole number.`);
+  }
+  return parsed;
+}
+
+const SCHEDULE_EVENT_KINDS = [
+  "task_created", "task_started", "task_state_changed", "task_completed", "task_failed",
+  "approval_requested", "approval_resolved", "provider_call_started", "provider_call_completed",
+  "provider_connection_recorded", "provider_catalog_discovered", "provider_credentials_refreshed",
+  "mcp_connection_recorded", "mcp_catalog_discovered", "tool_requested", "tool_completed",
+  "project_discovered", "memory_claim_recorded", "memory_claim_corrected", "memory_claim_state_changed",
+  "organization_revision_recorded", "agent_run_planned", "agent_run_state_changed",
+  "agent_instance_recorded", "agent_instance_state_changed", "agent_lease_recorded",
+  "agent_lease_state_changed", "agent_usage_recorded", "evaluation_checkpointed", "evaluation_recorded",
+  "agent_run_metrics_updated", "agent_turn_completed", "agent_turn_waiting", "agent_turn_failed",
+  "mcg_intervention"
+] as const;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -180,6 +212,21 @@ export function App() {
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [schedules, setSchedules] = useState<ScheduleDefinition[]>([]);
+  const [scheduleNotifications, setScheduleNotifications] = useState<SchedulerNotification[]>([]);
+  const [scheduleHistory, setScheduleHistory] = useState<Record<string, ScheduleHistoryResponse | undefined>>({});
+  const [scheduleName, setScheduleName] = useState("");
+  const [scheduleGoal, setScheduleGoal] = useState("");
+  const [scheduleKind, setScheduleKind] = useState<ScheduleTrigger["kind"]>("interval");
+  const [scheduleDetail, setScheduleDetail] = useState("3600");
+  const [scheduleSecondary, setScheduleSecondary] = useState("30");
+  const [scheduleRisk, setScheduleRisk] = useState<RiskLevel>("medium");
+  const [scheduleMaxTokens, setScheduleMaxTokens] = useState("32768");
+  const [scheduleMaxCost, setScheduleMaxCost] = useState("");
+  const [scheduleMaxDuration, setScheduleMaxDuration] = useState("3600");
+  const [scheduleModelCalls, setScheduleModelCalls] = useState("8");
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -217,6 +264,20 @@ export function App() {
       })
       .catch((error) => {
         if (active) setTaskError(errorMessage(error));
+      });
+    listSchedules()
+      .then((response) => {
+        if (active) setSchedules(response.schedules);
+      })
+      .catch((error) => {
+        if (active) setScheduleError(errorMessage(error));
+      });
+    listSchedulerNotifications()
+      .then((response) => {
+        if (active) setScheduleNotifications(response.notifications);
+      })
+      .catch((error) => {
+        if (active) setScheduleError(errorMessage(error));
       });
     return () => {
       active = false;
@@ -593,6 +654,146 @@ export function App() {
     }
   }
 
+  function configuredScheduleTrigger(): ScheduleTrigger {
+    if (scheduleKind === "once") {
+      const at = new Date(scheduleDetail);
+      if (Number.isNaN(at.getTime())) throw new Error("Choose a valid date and time.");
+      return { kind: "once", at: at.toISOString() };
+    }
+    if (scheduleKind === "interval") {
+      return { kind: "interval", seconds: positiveWholeNumber(scheduleDetail, "Interval") };
+    }
+    if (scheduleKind === "cron") {
+      return { kind: "cron", expression: scheduleDetail };
+    }
+    if (scheduleKind === "file_watch") {
+      return { kind: "file_watch", relative_path: scheduleDetail, poll_seconds: positiveWholeNumber(scheduleSecondary, "Poll interval") };
+    }
+    if (scheduleKind === "event") {
+      return { kind: "event", event_kind: scheduleDetail };
+    }
+    return {
+      kind: "heartbeat",
+      idle_seconds: positiveWholeNumber(scheduleDetail, "Idle heartbeat"),
+      busy_seconds: positiveWholeNumber(scheduleSecondary, "Busy heartbeat")
+    };
+  }
+
+  function replaceSchedule(schedule: ScheduleDefinition) {
+    setSchedules((current) => [schedule, ...current.filter((item) => item.id !== schedule.id)]);
+  }
+
+  async function addSchedule() {
+    if (!selectedProject) {
+      setScheduleError("Select a project before scheduling work.");
+      return;
+    }
+    if (!scheduleName.trim() || !scheduleGoal.trim()) {
+      setScheduleError("Name the schedule and describe its goal.");
+      return;
+    }
+    setScheduleBusy(true);
+    setScheduleError(null);
+    try {
+      const maxCost = scheduleMaxCost.trim() ? Number(scheduleMaxCost) : undefined;
+      if (maxCost !== undefined && (!Number.isFinite(maxCost) || maxCost < 0)) {
+        throw new Error("Cost limit must be zero or a positive dollar amount.");
+      }
+      const schedule = await createSchedule({
+        name: scheduleName.trim(),
+        project_id: selectedProject.project_id,
+        goal: scheduleGoal.trim(),
+        constraints: [],
+        success_conditions: [],
+        risk: scheduleRisk,
+        budget: {
+          max_tokens: positiveWholeNumber(scheduleMaxTokens, "Token limit"),
+          max_cost_usd: maxCost,
+          max_duration_seconds: positiveWholeNumber(scheduleMaxDuration, "Duration limit")
+        },
+        trigger: configuredScheduleTrigger(),
+        context_token_budget: 8192,
+        requested_tools: [],
+        estimated_output_tokens: 4096,
+        max_model_calls: positiveWholeNumber(scheduleModelCalls, "Model call limit")
+      });
+      replaceSchedule(schedule);
+      setScheduleName("");
+      setScheduleGoal("");
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  async function changeScheduleState(scheduleId: string, state: "enabled" | "paused" | "completed") {
+    setScheduleBusy(true);
+    setScheduleError(null);
+    try {
+      replaceSchedule(await setScheduleState(scheduleId, state));
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  async function toggleScheduleHistory(scheduleId: string) {
+    if (scheduleHistory[scheduleId]) {
+      setScheduleHistory((current) => ({ ...current, [scheduleId]: undefined }));
+      return;
+    }
+    setScheduleBusy(true);
+    try {
+      const history = await loadScheduleHistory(scheduleId);
+      setScheduleHistory((current) => ({ ...current, [scheduleId]: history }));
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  async function requestScheduleWake(scheduleId: string) {
+    setScheduleBusy(true);
+    try {
+      await wakeSchedule(scheduleId, "Owner requested immediate attention from the desktop");
+      const [scheduleResponse, notificationResponse] = await Promise.all([
+        listSchedules(),
+        listSchedulerNotifications()
+      ]);
+      setSchedules(scheduleResponse.schedules);
+      setScheduleNotifications(notificationResponse.notifications);
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  async function acknowledgeNotification(notificationId: string) {
+    try {
+      await acknowledgeSchedulerNotification(notificationId);
+      setScheduleNotifications((current) => current.filter((item) => item.id !== notificationId));
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    }
+  }
+
+  function scheduleTriggerLabel(trigger: ScheduleTrigger): string {
+    if (trigger.kind === "once") return new Date(trigger.at).toLocaleString();
+    if (trigger.kind === "interval") {
+      if (trigger.seconds < 60) return `Every ${trigger.seconds} seconds`;
+      if (trigger.seconds % 3600 === 0) return `Every ${trigger.seconds / 3600} ${trigger.seconds === 3600 ? "hour" : "hours"}`;
+      return `Every ${trigger.seconds / 60} minutes`;
+    }
+    if (trigger.kind === "cron") return `Cron ${trigger.expression} UTC`;
+    if (trigger.kind === "file_watch") return `Watch ${trigger.relative_path}`;
+    if (trigger.kind === "event") return `On ${trigger.event_kind.replaceAll("_", " ")}`;
+    return `Heartbeat ${trigger.busy_seconds}s busy / ${trigger.idle_seconds}s idle`;
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -612,7 +813,14 @@ export function App() {
           className="mode-button"
           type="button"
           aria-pressed={advanced}
-          onClick={() => setAdvanced((value) => !value)}
+          onClick={() => {
+            if (advanced && scheduleKind !== "interval") {
+              setScheduleKind("interval");
+              setScheduleDetail("3600");
+              setScheduleSecondary("30");
+            }
+            setAdvanced((value) => !value);
+          }}
         >
           {advanced ? "Simple mode" : "Advanced mode"}
         </button>
@@ -783,6 +991,138 @@ export function App() {
               </>
             )}
           </article>
+        </section>
+
+        <section className="panel scheduler-panel" id="scheduler" aria-label="Scheduler">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">SCHEDULER</p>
+              <h2>Unattended work</h2>
+              <p className="muted">Schedules survive restarts and pause safely for permission or budget.</p>
+            </div>
+            <span className="count-badge">{schedules.filter((schedule) => schedule.state === "enabled").length} active</span>
+          </div>
+          <div className="scheduler-layout">
+            <div className="schedule-composer">
+              <label>
+                Name
+                <input value={scheduleName} onChange={(event) => setScheduleName(event.target.value)} placeholder="Nightly project check" />
+              </label>
+              <label>
+                Scheduled goal
+                <textarea value={scheduleGoal} onChange={(event) => setScheduleGoal(event.target.value)} placeholder="Check the project and fix verified problems" />
+              </label>
+              {!advanced ? <label>
+                Repeat
+                <select value={scheduleDetail} onChange={(event) => {
+                  setScheduleKind("interval");
+                  setScheduleDetail(event.target.value);
+                }}>
+                  <option value="900">Every 15 minutes</option>
+                  <option value="3600">Every hour</option>
+                  <option value="86400">Every day</option>
+                </select>
+              </label> : <div className="scheduler-advanced">
+                <label>
+                  Trigger
+                  <select value={scheduleKind} onChange={(event) => {
+                    const kind = event.target.value as ScheduleTrigger["kind"];
+                    setScheduleKind(kind);
+                    setScheduleDetail(kind === "cron" ? "0 2 * * *" : kind === "file_watch" ? "README.md" : kind === "event" ? "task_failed" : kind === "once" ? "" : "300");
+                    setScheduleSecondary("30");
+                  }}>
+                    <option value="interval">Fixed interval</option>
+                    <option value="once">One time</option>
+                    <option value="cron">Cron (UTC)</option>
+                    <option value="file_watch">File watch</option>
+                    <option value="event">System event</option>
+                    <option value="heartbeat">Adaptive heartbeat</option>
+                  </select>
+                </label>
+                <label>
+                  {scheduleKind === "cron" ? "Five-field cron" : scheduleKind === "file_watch" ? "Project-relative file" : scheduleKind === "event" ? "Event kind" : scheduleKind === "once" ? "Run at" : scheduleKind === "heartbeat" ? "Idle seconds" : "Interval seconds"}
+                  <input
+                    type={scheduleKind === "once" ? "datetime-local" : "text"}
+                    list={scheduleKind === "event" ? "scheduler-event-kinds" : undefined}
+                    value={scheduleDetail}
+                    onChange={(event) => setScheduleDetail(event.target.value)}
+                  />
+                  {scheduleKind === "event" && <datalist id="scheduler-event-kinds">
+                    {SCHEDULE_EVENT_KINDS.map((kind) => <option key={kind} value={kind} />)}
+                  </datalist>}
+                </label>
+                {(scheduleKind === "file_watch" || scheduleKind === "heartbeat") && <label>
+                  {scheduleKind === "file_watch" ? "Poll seconds" : "Busy seconds"}
+                  <input type="number" min="1" value={scheduleSecondary} onChange={(event) => setScheduleSecondary(event.target.value)} />
+                </label>}
+                <label>
+                  Risk
+                  <select value={scheduleRisk} onChange={(event) => setScheduleRisk(event.target.value as RiskLevel)}>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </label>
+                <label>
+                  Token limit
+                  <input type="number" min="1" value={scheduleMaxTokens} onChange={(event) => setScheduleMaxTokens(event.target.value)} />
+                </label>
+                <label>
+                  Cost limit (USD, optional)
+                  <input type="number" min="0" step="0.01" value={scheduleMaxCost} onChange={(event) => setScheduleMaxCost(event.target.value)} placeholder="No dollar limit" />
+                </label>
+                <label>
+                  Duration limit (seconds)
+                  <input type="number" min="1" value={scheduleMaxDuration} onChange={(event) => setScheduleMaxDuration(event.target.value)} />
+                </label>
+                <label>
+                  Model call limit
+                  <input type="number" min="1" value={scheduleModelCalls} onChange={(event) => setScheduleModelCalls(event.target.value)} />
+                </label>
+              </div>}
+              <div className="composer-actions">
+                <span className="muted">{selectedProject ? `Project: ${selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1)}` : "Select a project above"}</span>
+                <button className="primary" type="button" disabled={scheduleBusy || !selectedProject} onClick={addSchedule}>
+                  {scheduleBusy ? "Saving..." : "Create schedule"}
+                </button>
+              </div>
+              {scheduleError && <p className="error-message" role="alert">{scheduleError}</p>}
+            </div>
+            <div className="scheduler-overview">
+              {scheduleNotifications.length > 0 && <div className="notification-list" aria-label="Scheduler notifications">
+                <h3>Needs attention</h3>
+                {scheduleNotifications.map((notification) => <article className={`scheduler-notification severity-${notification.severity}`} key={notification.id}>
+                  <div><strong>{notification.title}</strong><p>{notification.detail}</p></div>
+                  <button className="link-button" type="button" onClick={() => acknowledgeNotification(notification.id)}>Dismiss</button>
+                </article>)}
+              </div>}
+              <div className="schedule-list">
+                {schedules.length === 0 ? <p className="empty-state">No scheduled work yet.</p> : schedules.map((schedule) => <article className="schedule-card" key={schedule.id}>
+                  <div>
+                    <span className={`task-state state-${schedule.state}`}>{schedule.state}</span>
+                    <h3>{schedule.name}</h3>
+                    <p>{scheduleTriggerLabel(schedule.trigger)}</p>
+                    {schedule.next_run_at && <small>Next: {new Date(schedule.next_run_at).toLocaleString()}</small>}
+                    {advanced && <><code>{schedule.id}</code><small>{schedule.goal}</small></>}
+                    {scheduleHistory[schedule.id] && <ol className="occurrence-list">
+                      {scheduleHistory[schedule.id]!.occurrences.map((occurrence) => <li key={occurrence.id}>
+                        <span>{occurrence.state.replaceAll("_", " ")}</span>
+                        <time>{new Date(occurrence.due_at).toLocaleString()}</time>
+                        {occurrence.detail && <small>{occurrence.detail}</small>}
+                      </li>)}
+                    </ol>}
+                  </div>
+                  <div className="task-actions">
+                    {schedule.state === "enabled" ? <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "paused")}>Pause</button> : schedule.state === "paused" && <button className="primary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "enabled")}>Resume</button>}
+                    {advanced && schedule.state !== "completed" && <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => requestScheduleWake(schedule.id)}>Wake now</button>}
+                    <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => toggleScheduleHistory(schedule.id)}>{scheduleHistory[schedule.id] ? "Hide history" : "History"}</button>
+                    {advanced && schedule.state !== "completed" && <button className="link-button" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "completed")}>Remove</button>}
+                  </div>
+                </article>)}
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="panel provider-panel" id="providers">

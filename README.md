@@ -18,8 +18,8 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in active implementation. M0 through M5 have qualified core checkpoints,
-and M6 interface-family work is active; the full vision remains in scope and is
+MCG is in active implementation. M0 through M6 have qualified core checkpoints,
+and M7 durable-autonomy work is active; the full vision remains in scope and is
 delivered through tested, end-to-end milestones.
 
 Start with the [product requirements](MCG_PRD.md) and the
@@ -80,15 +80,21 @@ Use `mcg run evaluate RUN evaluation.json` to submit an immutable objective
 run's Evaluator instance, and `mcg run get RUN` replays the stored report with
 the rest of the run evidence.
 
-Durable unattended work is controlled with `mcg schedule`. One-time jobs accept
-an RFC 3339 timestamp; interval jobs accept a positive number of seconds. The
+Durable unattended work is controlled with `mcg schedule` and the native
+Scheduler dashboard. One-time jobs accept an RFC 3339 timestamp; fixed intervals,
+five-field UTC cron, project-relative file watches, durable system events, and
+adaptive busy/idle heartbeats share the same occurrence contract. The
 daemon claims due work in SQLite, creates the task and occurrence atomically,
 and dispatches through the same governed consumer run path as `mcg task launch`.
 `mcg schedule list/history/pause/resume/remove` expose persisted state without
-deleting execution history. A daemon restart immediately reclaims the same
+deleting execution history. `wake`, `notifications`, and `acknowledge` expose
+subsystem attention requests without silently overriding an owner pause. A daemon restart immediately reclaims the same
 occurrence and task identity, so the launch path observes existing provider/tool
 evidence instead of duplicating side effects. Approval waits and exhausted task
-budgets pause recurring admission until the owner explicitly resumes it.
+budgets pause recurring admission until the owner explicitly resumes it. New
+unattended work defaults to bounded tokens, duration, and model-call count without
+inventing a dollar limit for providers whose cost is unknown; advanced desktop
+settings can add a cost ceiling and tune those limits.
 
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can

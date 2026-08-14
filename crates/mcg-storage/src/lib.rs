@@ -25,7 +25,7 @@ pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
 };
-pub use scheduler::ScheduleClaim;
+pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
@@ -431,6 +431,32 @@ CREATE INDEX IF NOT EXISTS schedule_occurrences_history
     ON schedule_occurrences(schedule_id, due_at, occurrence_id);
 ";
 
+const MIGRATION_14: &str = r"
+CREATE TABLE IF NOT EXISTS schedule_wake_requests (
+    wake_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    wake_json TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id)
+);
+CREATE INDEX IF NOT EXISTS schedule_wake_history
+    ON schedule_wake_requests(schedule_id, requested_at, wake_id);
+CREATE TABLE IF NOT EXISTS scheduler_notifications (
+    notification_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    occurrence_id TEXT,
+    severity TEXT NOT NULL,
+    is_read INTEGER NOT NULL,
+    notification_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    read_at TEXT,
+    FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id),
+    FOREIGN KEY(occurrence_id) REFERENCES schedule_occurrences(occurrence_id)
+);
+CREATE INDEX IF NOT EXISTS scheduler_notifications_unread
+    ON scheduler_notifications(is_read, created_at, notification_id);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -528,6 +554,7 @@ impl SqliteEventStore {
             (11_i64, MIGRATION_11),
             (12_i64, MIGRATION_12),
             (13_i64, MIGRATION_13),
+            (14_i64, MIGRATION_14),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

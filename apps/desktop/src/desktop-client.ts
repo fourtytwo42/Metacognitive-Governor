@@ -168,6 +168,72 @@ export interface TaskMutationResponse {
   event: { sequence: number; kind: string; occurred_at: string };
 }
 
+export type ScheduleState = "enabled" | "paused" | "completed";
+export type ScheduleTrigger =
+  | { kind: "once"; at: string }
+  | { kind: "interval"; seconds: number }
+  | { kind: "cron"; expression: string }
+  | { kind: "file_watch"; relative_path: string; poll_seconds: number }
+  | { kind: "event"; event_kind: string }
+  | { kind: "heartbeat"; idle_seconds: number; busy_seconds: number };
+
+export interface ScheduleDefinition {
+  schema_version: number;
+  id: string;
+  name: string;
+  project_id: string;
+  goal: string;
+  trigger: ScheduleTrigger;
+  state: ScheduleState;
+  next_run_at?: string;
+  watch_fingerprint?: string;
+  last_watch_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateScheduleRequest {
+  name: string;
+  project_id: string;
+  goal: string;
+  constraints: string[];
+  success_conditions: string[];
+  risk?: RiskLevel;
+  budget?: TaskEnvelope["budget"];
+  trigger: ScheduleTrigger;
+  context_token_budget: number;
+  requested_tools: string[];
+  estimated_output_tokens: number;
+  max_model_calls: number;
+}
+
+export interface ScheduleOccurrence {
+  id: string;
+  schedule_id: string;
+  task_id?: string;
+  due_at: string;
+  state: "running" | "recovering" | "waiting_for_approval" | "completed" | "failed" | "budget_exhausted";
+  attempt: number;
+  detail?: string;
+  updated_at: string;
+}
+
+export interface ScheduleListResponse { schedules: ScheduleDefinition[]; }
+export interface ScheduleHistoryResponse { occurrences: ScheduleOccurrence[]; }
+
+export interface SchedulerNotification {
+  id: string;
+  schedule_id: string;
+  occurrence_id?: string;
+  severity: "info" | "warning" | "high";
+  title: string;
+  detail: string;
+  read: boolean;
+  created_at: string;
+}
+
+export interface SchedulerNotificationListResponse { notifications: SchedulerNotification[]; }
+
 export interface TaskEventsResponse {
   events: Array<{
     sequence: number;
@@ -296,6 +362,37 @@ export function discoverMcpConnection(connectionId: string): Promise<McpToolCata
 
 export function listTasks(): Promise<TaskListResponse> {
   return invoke("list_tasks");
+}
+
+export function listSchedules(): Promise<ScheduleListResponse> {
+  return invoke("list_schedules");
+}
+
+export function createSchedule(request: CreateScheduleRequest): Promise<ScheduleDefinition> {
+  return invoke("create_schedule", { request });
+}
+
+export function setScheduleState(scheduleId: string, state: ScheduleState): Promise<ScheduleDefinition> {
+  return invoke("set_schedule_state", { scheduleId, request: { state } });
+}
+
+export function loadScheduleHistory(scheduleId: string): Promise<ScheduleHistoryResponse> {
+  return invoke("schedule_history", { scheduleId });
+}
+
+export function wakeSchedule(scheduleId: string, reason: string): Promise<unknown> {
+  return invoke("wake_schedule", {
+    scheduleId,
+    request: { severity: "warning", reason }
+  });
+}
+
+export function listSchedulerNotifications(): Promise<SchedulerNotificationListResponse> {
+  return invoke("list_scheduler_notifications");
+}
+
+export function acknowledgeSchedulerNotification(notificationId: string): Promise<SchedulerNotification> {
+  return invoke("acknowledge_scheduler_notification", { notificationId });
 }
 
 export function createTask(request: CreateTaskRequest): Promise<TaskMutationResponse> {

@@ -159,6 +159,22 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 .model-list .model-overflow { justify-content: center; color: #8190a2; font-size: .75rem; }
 .error-message { margin: 0; color: #ff9b9b; line-height: 1.45; }
 .mcp-panel { margin-top: 18px; }
+.scheduler-panel { margin-top: 18px; }
+.scheduler-layout { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(0, 1.25fr); gap: 28px; align-items: start; }
+.schedule-composer, .scheduler-overview { display: grid; gap: 14px; min-width: 0; }
+.schedule-composer label, .scheduler-advanced label { display: grid; gap: 7px; color: #aebdcb; font-size: .86rem; }
+.scheduler-advanced { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.schedule-list, .notification-list { display: grid; gap: 10px; }
+.schedule-card, .scheduler-notification { border: 1px solid #243244; background: #0a111acc; border-radius: 12px; padding: 14px; display: flex; justify-content: space-between; gap: 18px; }
+.schedule-card h3, .scheduler-notification p { margin: 5px 0; }
+.schedule-card code, .schedule-card small { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.scheduler-notification { border-left: 3px solid #42d9c8; }
+.scheduler-notification.severity-warning { border-left-color: #f3b95f; }
+.scheduler-notification.severity-high { border-left-color: #ff7085; }
+.occurrence-list { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.occurrence-list li { border-top: 1px solid #1e2a39; padding-top: 8px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.occurrence-list time { color: #8495a7; text-align: right; }
+.occurrence-list small { grid-column: 1 / -1; }
 .section-heading { display: flex; justify-content: space-between; gap: 24px; align-items: start; }
 .count-badge { border: 1px solid #29384b; color: #aebed0; padding: 7px 10px; white-space: nowrap; font-size: .8rem; }
 .mcp-layout { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(0, 1.25fr); gap: 30px; margin-top: 20px; }
@@ -177,7 +193,7 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
   .sidebar { position: static; height: auto; display: grid; grid-template-columns: auto 1fr; gap: 14px; overflow: visible; border-right: 0; border-bottom: 1px solid #1d2736; }
   .sidebar nav { grid-column: 1 / -1; display: flex; overflow-x: auto; }
   .mode-button { grid-column: 2; grid-row: 1; margin: 0; justify-self: end; white-space: nowrap; }
-  .hero-card, .grid, .provider-panel, .provider-setup, .provider-advanced, .mcp-layout, .task-advanced { grid-template-columns: 1fr; }
+  .hero-card, .grid, .provider-panel, .provider-setup, .provider-advanced, .mcp-layout, .task-advanced, .scheduler-layout, .scheduler-advanced { grid-template-columns: 1fr; }
   .provider-setup .primary { justify-self: stretch; }
   .task-card { flex-direction: column; }
   .task-actions { justify-content: flex-start; }

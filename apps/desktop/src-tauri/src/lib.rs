@@ -1,15 +1,19 @@
 use mcg_api::{
-    ApprovalListResponse, CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest,
-    LaunchTaskResponse, McpListResponse, ProjectListResponse, ProviderListResponse,
-    ResolveApprovalRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest,
+    ApprovalListResponse, CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest,
+    LaunchTaskRequest, LaunchTaskResponse, McpListResponse, ProjectListResponse,
+    ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionTaskRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
-use mcg_domain::TaskEnvelope;
+use mcg_domain::{ScheduleDefinition, SchedulerNotification, TaskEnvelope};
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_providers::{ProviderConnection, ProviderModelCatalog};
-use mcg_runtime::{McpMutation, OAuthLoginStart, ProjectMutation, ProviderMutation};
+use mcg_runtime::{
+    McpMutation, OAuthLoginStart, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
+};
 use mcg_tools::ApprovalRequest;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
@@ -268,6 +272,142 @@ async fn list_tasks() -> Result<TaskListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Task list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_schedules() -> Result<ScheduleListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/schedules"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Schedules could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Schedule listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Schedule list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn create_schedule(request: CreateScheduleRequest) -> Result<ScheduleDefinition, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/schedules"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Schedule could not be created: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Schedule creation").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Schedule creation response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn set_schedule_state(
+    schedule_id: String,
+    request: SetScheduleStateRequest,
+) -> Result<ScheduleDefinition, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/schedules/{schedule_id}"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Schedule state could not be changed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Schedule state change").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Schedule state response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn schedule_history(schedule_id: String) -> Result<ScheduleHistoryResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{LOCAL_DAEMON}/api/v1/schedules/{schedule_id}/history"
+        ))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Schedule history could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Schedule history").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Schedule history response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn wake_schedule(
+    schedule_id: String,
+    request: WakeScheduleRequest,
+) -> Result<ScheduleWakeMutation, String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/schedules/{schedule_id}/wake"
+        ))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Schedule wake could not be requested: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Schedule wake").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Schedule wake response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_scheduler_notifications() -> Result<SchedulerNotificationListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/scheduler/notifications"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Scheduler notifications could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Scheduler notifications").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Scheduler notification response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn acknowledge_scheduler_notification(
+    notification_id: String,
+) -> Result<SchedulerNotification, String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/scheduler/notifications/{notification_id}/acknowledge"
+        ))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Scheduler notification could not be acknowledged: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Scheduler notification acknowledgement").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Scheduler notification response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -533,6 +673,13 @@ pub fn run() {
             list_mcp_connections,
             configure_mcp_connection,
             discover_mcp_connection,
+            list_schedules,
+            create_schedule,
+            set_schedule_state,
+            schedule_history,
+            wake_schedule,
+            list_scheduler_notifications,
+            acknowledge_scheduler_notification,
             list_tasks,
             create_task,
             launch_task,

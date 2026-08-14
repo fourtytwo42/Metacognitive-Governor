@@ -12,10 +12,17 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
   await expect(page.getByLabel("Connection id")).toBeVisible();
   await expect(page.getByLabel("Protocol")).toHaveValue("auto");
+  const scheduler = page.getByRole("region", { name: "Scheduler" });
+  await expect(scheduler.getByLabel("Trigger")).toBeVisible();
+  await scheduler.getByLabel("Trigger").selectOption("cron");
+  await expect(scheduler.getByLabel("Five-field cron")).toHaveValue("0 2 * * *");
 
   await page.getByRole("button", { name: "Add API or local provider" }).click();
   await expect(page.getByLabel("Provider type")).toHaveValue("open_ai_compatible");
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
+
+  await page.getByRole("button", { name: "Simple mode" }).click();
+  await expect(scheduler.getByLabel("Repeat")).toHaveValue("3600");
 });
 
 test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {

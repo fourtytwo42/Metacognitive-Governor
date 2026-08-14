@@ -124,7 +124,8 @@ inputs while acknowledging nondeterministic external services.
 
 ### Durable scheduler spine
 
-Migration 13 stores schedule definitions and occurrence history separately.
+Migration 13 stores schedule definitions and occurrence history separately;
+migration 14 adds durable subsystem wake requests and scheduler notifications.
 Claiming due work is a single transaction that advances the schedule, records a
 leased occurrence, creates the durable task projection, and appends its creation
 event. Only one active occurrence is admitted per schedule. Startup expires
@@ -133,12 +134,17 @@ occurrence and task, then calls the idempotent consumer launch boundary. This
 allows provider-turn and governed-tool checkpoints to prevent duplicate billing
 or side effects after a crash.
 
-The current trigger contract supports exact one-time timestamps and fixed
-intervals. Approval/manual-evaluation waits and preflight budget exhaustion are
-safe-pause boundaries, while terminal task state is reconciled into occurrence
-history. Cron expressions, event/file watches, adaptive heartbeats,
-notifications, and the native scheduler dashboard remain later M7 layers over
-this same occurrence/lease contract.
+The trigger contract supports exact one-time timestamps, fixed intervals,
+five-field UTC cron, durable event cursors, content-hashed project-relative file
+watches, and adaptive busy/idle heartbeats. Event schedules exclude their own
+occurrence events to prevent recursive wake loops, while still advancing their
+durable cursors. File watches reject absolute, parent, current-directory, and
+symbolic-link traversal and baseline content before treating a change as a wake.
+Approval/manual-evaluation waits and preflight budget exhaustion are safe-pause
+boundaries, while terminal task state is reconciled into occurrence history and
+notifications. Owner pauses are never overridden by subsystem wake requests.
+Authenticated REST, CLI, Tauri commands, and the simple/advanced native dashboard
+share these definitions and retained history.
 
 ## Provider fabric
 

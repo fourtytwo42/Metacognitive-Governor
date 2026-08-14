@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: The migration-13 durable scheduler spine, authenticated API/CLI controls, daemon worker, restart reclaim, and budget/approval safe-pause behavior are cross-platform qualified; broader M7 triggers and scheduler UI are next.
-- Last meaningful change: Schedule claims atomically create one occurrence/task/event, enforce per-schedule non-overlap, immediately reclaim the same task after daemon restart, and dispatch through the idempotent consumer run path.
-- Next step: Extend M7 with cron, event/file watches, adaptive heartbeats, notifications, and native scheduler UI over the qualified occurrence/lease spine. Preserve the visible OAuth handoff.
+- Current task: M7 cron, durable event and project-file watches, adaptive heartbeat, subsystem wakes, notifications, CLI/API/Tauri controls, and the native simple/advanced scheduler dashboard are Windows-qualified and awaiting exact-commit Ubuntu qualification.
+- Last meaningful change: Migration 14 persists wake requests and notifications; trigger cursors/fingerprints survive reopen, owner pauses remain authoritative, and approval-paused work now reports its eventual terminal outcome.
+- Next step: Commit/push the M7 expansion, run the complete exact commit on Ubuntu, record qualification, then add idempotent schedule creation and the remaining `scheduler.create/list/remove` MCP tool family. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -26,7 +26,7 @@ Durable project context lives here. Update this file whenever information should
 - Consumer Start requires a selected durable project and uses migration 10 to bind each existing task to exactly one running consumer plan. API, CLI, Tauri, and desktop share the launch contract; retries never reissue model work, and model self-report remains insufficient for completion.
 - Guided local-tool approvals can be reviewed and resumed from the desktop task card. Resume revalidates durable authority, the exact approval, current provider/tool metadata, and unchanged project context; stable request identity and the provider-turn checkpoint prevent duplicate inference and tool side effects.
 - Provider/tool turns checkpoint bounded credential-free private execution state after each provider response and before/after governed tool calls. Waiting local or external MCP authority survives restart only with a matching live checkpoint/approval/lease; resume continues the pinned conversation without replaying paid inference, and terminal authority removes the checkpoint atomically.
-- Migration 13 stores one-time/fixed-interval schedule definitions and occurrence history. The daemon worker atomically admits one active occurrence per schedule, creates the associated task/event in the same transaction, immediately reclaims interrupted work under the same identity after restart, and dispatches through consumer launch. Preflight budget exhaustion and approval/manual-evaluation waits pause recurring admission; API and CLI expose list/history/pause/resume/remove without deleting history.
+- Migrations 13-14 store one-time/interval/UTC-cron/event/file-watch/adaptive-heartbeat definitions, occurrence history, subsystem wakes, and notifications. The daemon atomically admits one active occurrence per schedule, persists cursors/fingerprints, prevents self-trigger loops, immediately reclaims interrupted identity after restart, and dispatches through consumer launch. Preflight budget exhaustion and approval/manual-evaluation waits pause recurring admission; REST, CLI, Tauri, and the desktop dashboard expose creation, history, wake, notification, and state controls without deleting history.
 - Consumer plans whose conditions are entirely discovered build/test/static-analysis commands now execute those checks through the governed broker after independent Evaluator completion. Validated reports and completed/failed task/run projections commit atomically; terminal Start replay is observation-only.
 - Guided command evaluation stores its run/project/condition progress in SQLite and requests one approval for the immutable discovered batch. Denial blocks for bounded retry with a new request identity; approved work resumes across daemon restart without another provider turn or repeated completed check.
 - Advanced consumer condition lines accept exact `HTTP STATUS URL` syntax. Runtime grants only the parsed credential-free origin, performs a body-bounded governed GET, captures response bytes as an artifact, and compares observed status exactly; status mismatch, timeout, and connection failure become failed evaluation evidence.
@@ -606,6 +606,15 @@ When sources conflict, use this order:
 - Commands/tests: Focused storage/API tests, isolated file-backed daemon restart tests, workspace check, and strict all-feature/all-target clippy on Windows.
 - Result: Atomicity, non-overlap, immediate restart reclaim, identity preservation, safe pause, authenticated control, and governed dispatch are implemented and qualified on Windows plus exact-commit Ubuntu at `9d0af9d`.
 - Follow-up: Add cron, event/file watches, wake conditions, adaptive heartbeat, notifications, and native scheduler UI over the same occurrence/lease contract.
+
+### 2026-08-14 - Durable Scheduler Triggers And Native Dashboard
+
+- Context: The qualified occurrence/lease spine lacked cron, durable observations, subsystem attention, user-visible outcomes, and a consumer scheduling surface.
+- Decision: Add migration 14 wake/notification records; five-field UTC cron; durable event cursors that exclude their own occurrence tasks; content-hashed, normalized, symlink-rejecting project file watches; adaptive busy/idle heartbeat; safe default token/duration/model-call limits; and owner-pause-preserving wake requests. Expose the contracts through authenticated REST, CLI, Tauri, and a simple/advanced desktop dashboard with history, notifications, budgets, and state controls.
+- Files: `crates/mcg-{domain,storage,runtime,api}/`, `apps/{mcg-daemon,mcg-cli,desktop}/`, `tests/e2e/desktop-smoke.spec.ts`, `README.md`, and scheduler architecture/testing documentation.
+- Commands/tests: Windows strict all-target clippy; broad Rust suites excluding only live-locked daemon/desktop package binaries; 36 API, 19 storage, 39 tool, live GPU45, 11 Vitest, production build, two Playwright flows, docs/diff checks; isolated two-test real daemon restart suite. The in-app and connected Chrome browser plugin both blocked localhost with `ERR_BLOCKED_BY_CLIENT`; local Playwright interaction remained green.
+- Result: Windows gates are green. Multi-year overdue intervals advance in constant time, watch/event state and notifications survive reopen, own events cannot recurse, wake text/schema inputs are bounded, approval completion is reported, and daemon restart preserves the same occurrence/task identity. Exact-commit Ubuntu qualification remains pending.
+- Follow-up: Exact-commit Ubuntu qualification, then idempotent first-party schedule creation and MCP `scheduler.create/list/remove` tools.
 
 ## Known Issues
 

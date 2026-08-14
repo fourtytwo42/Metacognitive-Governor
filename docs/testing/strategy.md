@@ -9,7 +9,7 @@ therefore part of the safety architecture, not a release cleanup activity.
 |---|---|---|---|
 | Rust unit/property | State machines, policies, budgets, parsers, redaction, routing. | Built-in tests, `proptest` where valuable. | Every change. |
 | Migration/storage | Forward migrations, transactions, event/projection agreement, recovery. | Temporary SQLite databases. | Every change. |
-| Scheduler | Atomic occurrence/task claims, non-overlap, restart reclaim, budget/approval safe pause, idempotent dispatch. | Explicit clocks, temporary SQLite databases, daemon reopen, fake providers/tools. | Every scheduler change. |
+| Scheduler | Atomic occurrence/task claims, non-overlap, restart reclaim, cron/event/watch/heartbeat wake behavior, cursor and notification persistence, budget/approval safe pause, and idempotent dispatch. | Explicit clocks, temporary SQLite databases, daemon reopen, real temporary files, fake providers/tools, component and browser UI flows. | Every scheduler change. |
 | Contract | Provider, tool, API, event, MCP, and OpenAI compatibility. | Deterministic fake servers and golden schemas. | Every change. |
 | Integration | Multiple crates with real filesystem/process/SQLite boundaries. | Temporary directories and controlled child processes. | Every change. |
 | UI component | Normal/advanced modes, approvals, progress, errors, accessibility. | Vitest, Testing Library, axe. | Every UI change. |

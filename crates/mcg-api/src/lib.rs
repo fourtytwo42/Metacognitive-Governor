@@ -27,10 +27,11 @@ use mcg_agents::{
     RoleKind, SuccessCondition, TaskComplexity,
 };
 use mcg_domain::{
-    ApprovalId, MemoryClaimId, OrganizationId, OrganizationRevisionId, ProjectId, RiskLevel, RunId,
-    SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, TaskBudget, TaskEnvelope, TaskId,
-    TaskState, ThreadId, WorkItemId,
+    ApprovalId, MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
+    ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
+    ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, TaskBudget, TaskEnvelope, TaskId, TaskState,
+    ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -44,7 +45,7 @@ use mcg_providers::{
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, ConsumerEvaluationProgress,
     McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation,
-    ProviderMutation, RuntimeError, RuntimeStatus,
+    ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ToolAuditRecord,
@@ -332,6 +333,17 @@ pub struct SetScheduleStateRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeScheduleRequest {
+    pub severity: NotificationSeverity,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerNotificationListResponse {
+    pub notifications: Vec<SchedulerNotification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LaunchExecution {
     NotStarted { detail: String },
@@ -421,6 +433,14 @@ const fn default_max_model_calls() -> u16 {
     8
 }
 
+const fn default_schedule_budget() -> TaskBudget {
+    TaskBudget {
+        max_tokens: Some(32_768),
+        max_cost_usd: None,
+        max_duration_seconds: Some(3_600),
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ApprovalListQuery {
     state: Option<ApprovalState>,
@@ -429,6 +449,12 @@ struct ApprovalListQuery {
 #[derive(Debug, Default, Deserialize)]
 struct EventStreamQuery {
     after: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NotificationListQuery {
+    #[serde(default)]
+    include_read: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -549,6 +575,15 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/schedules/{schedule_id}/history",
             get(schedule_history),
+        )
+        .route("/api/v1/schedules/{schedule_id}/wake", post(wake_schedule))
+        .route(
+            "/api/v1/scheduler/notifications",
+            get(list_scheduler_notifications),
+        )
+        .route(
+            "/api/v1/scheduler/notifications/{notification_id}/acknowledge",
+            post(acknowledge_scheduler_notification),
         )
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route(
@@ -748,6 +783,12 @@ pub async fn run_scheduler_tick_at(
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<ScheduleOccurrence>, String> {
     runtime
+        .poll_event_schedules(now)
+        .map_err(|error| error.to_string())?;
+    runtime
+        .poll_file_watches(now)
+        .map_err(|error| error.to_string())?;
+    runtime
         .reconcile_schedule_boundaries(now)
         .map_err(|error| error.to_string())?;
     let lease_owner = format!("scheduler-{}", uuid::Uuid::new_v4());
@@ -867,6 +908,19 @@ async fn create_schedule(
     let next_run_at = match &request.trigger {
         ScheduleTrigger::Once { at } => Some(*at),
         ScheduleTrigger::Interval { .. } => Some(request.first_run_at.unwrap_or(now)),
+        ScheduleTrigger::Cron { .. } | ScheduleTrigger::Heartbeat { .. } => request
+            .trigger
+            .next_after(now, false)
+            .map_err(ApiError::bad_request)?,
+        ScheduleTrigger::FileWatch { .. } | ScheduleTrigger::Event { .. } => None,
+    };
+    let last_event_sequence = if matches!(&request.trigger, ScheduleTrigger::Event { .. }) {
+        state
+            .runtime
+            .latest_event_sequence()
+            .map_err(map_runtime_error)?
+    } else {
+        0
     };
     let schedule = ScheduleDefinition {
         schema_version: SCHEDULE_SCHEMA_VERSION,
@@ -877,7 +931,7 @@ async fn create_schedule(
         constraints: request.constraints,
         success_conditions: request.success_conditions,
         risk: request.risk.unwrap_or(RiskLevel::Medium),
-        budget: request.budget.unwrap_or_default(),
+        budget: request.budget.unwrap_or_else(default_schedule_budget),
         trigger: request.trigger,
         state: ScheduleState::Enabled,
         next_run_at,
@@ -886,6 +940,9 @@ async fn create_schedule(
         requested_tools: request.requested_tools,
         estimated_output_tokens: request.estimated_output_tokens,
         max_model_calls: request.max_model_calls,
+        watch_fingerprint: None,
+        last_watch_at: None,
+        last_event_sequence,
         created_at: now,
         updated_at: now,
     };
@@ -958,6 +1015,49 @@ async fn schedule_history(
             .schedule_occurrences(schedule_id)
             .map_err(map_runtime_error)?,
     }))
+}
+
+async fn wake_schedule(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<String>,
+    Json(request): Json<WakeScheduleRequest>,
+) -> Result<Json<ScheduleWakeMutation>, ApiError> {
+    let schedule_id = schedule_id
+        .parse::<ScheduleId>()
+        .map_err(|_| ApiError::bad_request("schedule id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .wake_schedule(schedule_id, request.severity, &request.reason, Utc::now())
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn list_scheduler_notifications(
+    State(state): State<ApiState>,
+    Query(query): Query<NotificationListQuery>,
+) -> Result<Json<SchedulerNotificationListResponse>, ApiError> {
+    Ok(Json(SchedulerNotificationListResponse {
+        notifications: state
+            .runtime
+            .scheduler_notifications(query.include_read)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn acknowledge_scheduler_notification(
+    State(state): State<ApiState>,
+    Path(notification_id): Path<String>,
+) -> Result<Json<SchedulerNotification>, ApiError> {
+    let notification_id = notification_id
+        .parse::<SchedulerNotificationId>()
+        .map_err(|_| ApiError::bad_request("scheduler notification id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .acknowledge_scheduler_notification(notification_id, Utc::now())
+            .map_err(map_runtime_error)?,
+    ))
 }
 
 async fn create_task(
@@ -2599,6 +2699,19 @@ mod tests {
     }
 
     #[test]
+    fn unattended_schedule_defaults_are_bounded_without_assuming_dollar_cost() {
+        assert_eq!(
+            default_schedule_budget(),
+            TaskBudget {
+                max_tokens: Some(32_768),
+                max_cost_usd: None,
+                max_duration_seconds: Some(3_600),
+            }
+        );
+        assert_eq!(default_max_model_calls(), 8);
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One table documents every accepted and rejected directive.
     fn consumer_condition_parser_requires_exact_safe_syntax() {
         assert_eq!(
@@ -4160,6 +4273,79 @@ form.addEventListener('submit', (event) => {
             history.occurrences[0].state,
             ScheduleOccurrenceState::BudgetExhausted
         );
+        assert_scheduler_notification_and_paused_wake(runtime, created.id).await;
+    }
+
+    async fn assert_scheduler_notification_and_paused_wake(
+        runtime: Arc<AppRuntime>,
+        schedule_id: ScheduleId,
+    ) {
+        let notifications = router(runtime.clone())
+            .oneshot(
+                authorized(Request::get("/api/v1/scheduler/notifications"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("notification response");
+        assert_eq!(notifications.status(), StatusCode::OK);
+        let notifications: SchedulerNotificationListResponse = serde_json::from_slice(
+            &notifications
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("notifications");
+        assert_eq!(notifications.notifications.len(), 1);
+        assert_eq!(
+            notifications.notifications[0].severity,
+            NotificationSeverity::Warning
+        );
+        let notification_id = notifications.notifications[0].id;
+        let acknowledged = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/scheduler/notifications/{notification_id}/acknowledge"
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("acknowledge response");
+        assert_eq!(acknowledged.status(), StatusCode::OK);
+        let acknowledged: SchedulerNotification = serde_json::from_slice(
+            &acknowledged
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("acknowledged notification");
+        assert!(acknowledged.read);
+        let wake_body = serde_json::to_vec(&WakeScheduleRequest {
+            severity: NotificationSeverity::High,
+            reason: "subsystem needs attention".into(),
+        })
+        .expect("wake body");
+        let wake = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/schedules/{schedule_id}/wake"
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(wake_body))
+                .expect("request"),
+            )
+            .await
+            .expect("wake response");
+        assert_eq!(wake.status(), StatusCode::OK);
+        let wake: ScheduleWakeMutation =
+            serde_json::from_slice(&wake.into_body().collect().await.expect("body").to_bytes())
+                .expect("wake mutation");
+        assert_eq!(wake.schedule.state, ScheduleState::Paused);
     }
 
     #[tokio::test]
@@ -4195,6 +4381,9 @@ form.addEventListener('submit', (event) => {
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 2,
+            watch_fingerprint: None,
+            last_watch_at: None,
+            last_event_sequence: 0,
             created_at: now,
             updated_at: now,
         };
@@ -4225,6 +4414,67 @@ form.addEventListener('submit', (event) => {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn file_watch_baselines_then_dispatches_only_after_content_change() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        let watched_path = project_root.path().join("status.txt");
+        std::fs::write(&watched_path, "healthy").expect("write initial watch file");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let now = Utc::now();
+        let schedule = ScheduleDefinition {
+            schema_version: SCHEDULE_SCHEMA_VERSION,
+            id: ScheduleId::new(),
+            name: "status watch".into(),
+            project_id,
+            goal: "inspect a changed status file".into(),
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: RiskLevel::Medium,
+            budget: TaskBudget {
+                max_tokens: Some(4_096),
+                max_cost_usd: Some(1.0),
+                max_duration_seconds: Some(300),
+            },
+            trigger: ScheduleTrigger::FileWatch {
+                relative_path: "status.txt".into(),
+                poll_seconds: 10,
+            },
+            state: ScheduleState::Enabled,
+            next_run_at: None,
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 2,
+            watch_fingerprint: None,
+            last_watch_at: None,
+            last_event_sequence: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime.create_schedule(&schedule).expect("create watch");
+        assert!(
+            run_scheduler_tick_at(runtime.clone(), now)
+                .await
+                .expect("baseline tick")
+                .is_none()
+        );
+        assert!(runtime.tasks().expect("tasks").is_empty());
+        std::fs::write(&watched_path, "unhealthy").expect("change watch file");
+        let occurrence =
+            run_scheduler_tick_at(runtime.clone(), now + chrono::Duration::seconds(11))
+                .await
+                .expect("change tick")
+                .expect("changed file dispatch");
+        assert_eq!(occurrence.schedule_id, schedule.id);
+        assert_eq!(occurrence.state, ScheduleOccurrenceState::Failed);
+        assert_eq!(runtime.tasks().expect("tasks").len(), 1);
     }
 
     #[tokio::test]

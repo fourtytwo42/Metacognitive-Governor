@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
 const client = vi.hoisted(() => ({
@@ -25,7 +25,14 @@ const client = vi.hoisted(() => ({
   taskAudit: vi.fn(),
   pickProject: vi.fn(),
   discoverProject: vi.fn(),
-  listProjects: vi.fn()
+  listProjects: vi.fn(),
+  listSchedules: vi.fn(),
+  createSchedule: vi.fn(),
+  setScheduleState: vi.fn(),
+  scheduleHistory: vi.fn(),
+  wakeSchedule: vi.fn(),
+  listSchedulerNotifications: vi.fn(),
+  acknowledgeSchedulerNotification: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -52,7 +59,14 @@ vi.mock("./desktop-client", () => ({
   loadTaskAudit: client.taskAudit,
   pickProjectDirectory: client.pickProject,
   discoverProject: client.discoverProject,
-  listProjects: client.listProjects
+  listProjects: client.listProjects,
+  listSchedules: client.listSchedules,
+  createSchedule: client.createSchedule,
+  setScheduleState: client.setScheduleState,
+  loadScheduleHistory: client.scheduleHistory,
+  wakeSchedule: client.wakeSchedule,
+  listSchedulerNotifications: client.listSchedulerNotifications,
+  acknowledgeSchedulerNotification: client.acknowledgeSchedulerNotification
 }));
 
 import { App } from "./App";
@@ -82,12 +96,73 @@ beforeEach(() => {
   client.pickProject.mockReset();
   client.discoverProject.mockReset();
   client.listProjects.mockReset();
+  client.listSchedules.mockReset();
+  client.createSchedule.mockReset();
+  client.setScheduleState.mockReset();
+  client.scheduleHistory.mockReset();
+  client.wakeSchedule.mockReset();
+  client.listSchedulerNotifications.mockReset();
+  client.acknowledgeSchedulerNotification.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
   client.listApprovals.mockResolvedValue({ approvals: [] });
+  client.listSchedules.mockResolvedValue({ schedules: [] });
+  client.listSchedulerNotifications.mockResolvedValue({ notifications: [] });
+});
+
+test("simple scheduler creates restart-safe recurring work for a selected project", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000021",
+    project_id: "00000000-0000-4000-8000-000000000022",
+    root: "C:\\Projects\\scheduled",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  const schedule = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000023",
+    name: "Hourly health check",
+    project_id: project.project_id,
+    goal: "Check project health",
+    trigger: { kind: "interval", seconds: 3600 },
+    state: "enabled",
+    next_run_at: "2026-08-14T01:00:00Z",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.createSchedule.mockResolvedValue(schedule);
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  const scheduler = screen.getByRole("region", { name: "Scheduler" });
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  fireEvent.change(within(scheduler).getByLabelText("Trigger"), { target: { value: "cron" } });
+  expect(within(scheduler).getByLabelText("Five-field cron")).toHaveValue("0 2 * * *");
+  fireEvent.click(screen.getByRole("button", { name: "Simple mode" }));
+  expect(within(scheduler).getByLabelText("Repeat")).toHaveValue("3600");
+  fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: schedule.name } });
+  fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: schedule.goal } });
+  fireEvent.click(within(scheduler).getByRole("button", { name: "Create schedule" }));
+
+  expect(await within(scheduler).findByRole("heading", { name: schedule.name })).toBeInTheDocument();
+  expect(client.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+    project_id: project.project_id,
+    trigger: { kind: "interval", seconds: 3600 },
+    budget: {
+      max_tokens: 32768,
+      max_cost_usd: undefined,
+      max_duration_seconds: 3600
+    },
+    max_model_calls: 8
+  }));
 });
 
 test("advanced mode reveals runtime details", () => {

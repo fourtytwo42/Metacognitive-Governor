@@ -24,10 +24,11 @@ use mcg_agents::{
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
-    AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, ProjectId, RunId,
-    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    ScheduleOccurrenceState, ScheduleState, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
-    ToolRequestId, WorkItemId,
+    AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, NotificationSeverity,
+    ProjectId, RunId, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -52,7 +53,7 @@ use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
 };
-pub use mcg_storage::{AgentTurnCommit, ScheduleClaim};
+pub use mcg_storage::{AgentTurnCommit, ScheduleClaim, ScheduleWakeMutation};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
     BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ExecutionLease,
@@ -728,6 +729,105 @@ impl AppRuntime {
     /// Returns an error when durable storage cannot be read.
     pub fn schedules(&self) -> Result<Vec<ScheduleDefinition>, RuntimeError> {
         Ok(self.store()?.schedules()?)
+    }
+
+    /// Returns the greatest committed event cursor for new event-trigger definitions.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn latest_event_sequence(&self) -> Result<u64, RuntimeError> {
+        Ok(self.store()?.latest_event_sequence()?)
+    }
+
+    /// Wakes event-trigger definitions for newly committed matching events.
+    ///
+    /// # Errors
+    /// Returns an error when durable definitions or events cannot be reconciled.
+    pub fn poll_event_schedules(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ScheduleId>, RuntimeError> {
+        Ok(self.store()?.poll_event_schedules(now)?)
+    }
+
+    /// Polls due project-confined file watches and persists changed fingerprints.
+    ///
+    /// # Errors
+    /// Returns an error for invalid project/watch paths or unreadable durable state.
+    pub fn poll_file_watches(&self, now: DateTime<Utc>) -> Result<Vec<ScheduleId>, RuntimeError> {
+        let schedules = self.schedules()?;
+        let mut changed = Vec::new();
+        for schedule in schedules {
+            let ScheduleTrigger::FileWatch {
+                relative_path,
+                poll_seconds,
+            } = &schedule.trigger
+            else {
+                continue;
+            };
+            let poll_due = schedule.last_watch_at.is_none_or(|last| {
+                i64::try_from(*poll_seconds)
+                    .ok()
+                    .and_then(|seconds| last.checked_add_signed(Duration::seconds(seconds)))
+                    .is_some_and(|next| now >= next)
+            });
+            if schedule.state != ScheduleState::Enabled || !poll_due {
+                continue;
+            }
+            let project = self
+                .project(schedule.project_id)?
+                .ok_or(StorageError::ProjectNotFound(schedule.project_id))?;
+            let path = objective_project_file_path(&project.root, relative_path)?;
+            let fingerprint = watch_file_fingerprint(Path::new(&project.root), Path::new(&path))?;
+            if self
+                .store()?
+                .record_watch_observation(schedule.id, fingerprint, now)?
+            {
+                changed.push(schedule.id);
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Records a subsystem wake request without overriding an owner pause.
+    ///
+    /// # Errors
+    /// Returns an error for missing schedules, empty reasons, or persistence failures.
+    pub fn wake_schedule(
+        &self,
+        schedule_id: ScheduleId,
+        severity: NotificationSeverity,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ScheduleWakeMutation, RuntimeError> {
+        Ok(self
+            .store()?
+            .wake_schedule(schedule_id, severity, reason, now)?)
+    }
+
+    /// Lists scheduler notifications.
+    ///
+    /// # Errors
+    /// Returns an error when durable notifications cannot be read.
+    pub fn scheduler_notifications(
+        &self,
+        include_read: bool,
+    ) -> Result<Vec<SchedulerNotification>, RuntimeError> {
+        Ok(self.store()?.scheduler_notifications(include_read)?)
+    }
+
+    /// Acknowledges one scheduler notification idempotently.
+    ///
+    /// # Errors
+    /// Returns an error when the notification is missing or cannot be updated.
+    pub fn acknowledge_scheduler_notification(
+        &self,
+        notification_id: SchedulerNotificationId,
+        now: DateTime<Utc>,
+    ) -> Result<SchedulerNotification, RuntimeError> {
+        Ok(self
+            .store()?
+            .acknowledge_scheduler_notification(notification_id, now)?)
     }
 
     /// Lists the immutable execution history associated with one schedule.
@@ -3532,6 +3632,49 @@ fn objective_project_file_path(project_root: &str, relative: &str) -> Result<Str
         .join(relative)
         .to_string_lossy()
         .into_owned())
+}
+
+fn watch_file_fingerprint(project_root: &Path, target: &Path) -> Result<String, RuntimeError> {
+    const MAX_WATCH_BYTES: u64 = 16 * 1024 * 1024;
+    let relative = target.strip_prefix(project_root).map_err(|_| {
+        StorageError::InvalidData("file watch escaped its durable project root".into())
+    })?;
+    let mut current = project_root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StorageError::InvalidData(
+                    "file watches reject symbolic-link traversal".into(),
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok("missing".into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let metadata = fs::metadata(target)?;
+    if !metadata.is_file() || metadata.len() > MAX_WATCH_BYTES {
+        return Err(StorageError::InvalidData(
+            "file watches require a regular file no larger than 16 MiB".into(),
+        )
+        .into());
+    }
+    let mut file = std::fs::File::open(target)?;
+    let mut hash = Sha256::new();
+    hash.update(b"mcg-file-watch-v1\0");
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
 fn objective_network_origin(value: &str) -> Result<String, RuntimeError> {
