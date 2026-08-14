@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Durable guided objective-batch approval is cross-platform qualified; governed HTTP-status evidence is Windows-focused green and rendered-page evidence is next.
+- Current task: Durable guided objective-batch approval and governed HTTP-status evidence are cross-platform qualified; rendered-page evidence is next.
 - Last meaningful change: Added exact `HTTP STATUS URL` consumer parsing and origin-confined, artifact-captured, restart-checkpointed HTTP evaluation with exact non-2xx comparison and failed transport settlement.
-- Next step: Exact-commit Ubuntu-qualify HTTP evaluation, then add an actual governed rendered-page evaluator before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Add an actual governed rendered-page evaluator before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -510,9 +510,9 @@ When sources conflict, use this order:
 - Context: Consumer plans treated HTTP health conditions as unsupported, and a plain fetch would have bypassed the harness policy/evidence plane or confused transport success with the expected status.
 - Decision: Parse only exact advanced lines of `HTTP STATUS URL`; accept credential-free HTTP(S) URLs and valid status codes; grant only the condition origin; issue a server-owned GET with a 1 MiB response limit; and reuse `HttpExecutor` through `HostExecutor`, broker policy, execution lease, immutable audit, redaction, same-origin redirect enforcement, and artifact storage. Compare the executor's `http.status` evidence exactly, including expected non-2xx responses, and convert execution/timeout failures into failed condition evidence.
 - Files: `crates/mcg-{runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
-- Commands/tests: Strict focused Rust clippy/tests including 27 API tests and all four consumer scenarios; HTTP parser safety cases; public HTTP pass/mismatch/unreachable fixture; nine Vitest flows; frontend typecheck/build; documentation and diff checks.
-- Result: Expected 404 evidence passes with a content-addressed response artifact, 404 when 200 is expected fails, and connection refusal produces an audited failed execution plus atomic failed task/run evaluation rather than an API error. Page rendering remains deliberately unsupported until backed by a real browser engine.
-- Follow-up: Exact-commit Ubuntu qualification, then governed rendered-page evidence.
+- Commands/tests: Strict focused Rust clippy/tests including 27 API tests and all four consumer scenarios; HTTP parser safety cases; public HTTP pass/mismatch/unreachable fixture; nine Vitest flows; frontend typecheck/build; documentation and diff checks; exact commit `aa16d03` complete Ubuntu `./scripts/verify.sh`.
+- Result: Expected 404 evidence passes with a content-addressed response artifact, 404 when 200 is expected fails, and connection refusal produces an audited failed execution plus atomic failed task/run evaluation rather than an API error. Exact Windows-focused and complete Ubuntu native/Tauri/Playwright qualification are green. Page rendering remains deliberately unsupported until backed by a real browser engine.
+- Follow-up: Implement governed rendered-page evidence.
 
 ## Known Issues
 
