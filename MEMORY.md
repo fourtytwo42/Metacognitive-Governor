@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Guided approval, HTTP status, and real Chromium rendered-page evidence are cross-platform qualified; artifact/file and exact-discovered custom command evidence are Windows-qualified and awaiting an exact Ubuntu checkpoint.
+- Current task: Guided approval, HTTP status, real Chromium rendered-page, artifact/file, and exact-discovered custom command evidence are cross-platform qualified; research and screenshot-baseline evidence are next.
 - Last meaningful change: Added typed `FileExists`/`fs.verify`, bounded streaming artifact capture, safe package-script discovery, `FILE EXISTS`, and exact `COMMAND SUCCEEDS` evaluation.
-- Next step: Commit and run the exact artifact/file/custom checkpoint through the complete owner-controlled Ubuntu gate, then add research and screenshot-baseline evidence. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Add research and screenshot-baseline evidence, then expand representative workflows and UI depth. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -187,6 +187,7 @@ When sources conflict, use this order:
 - 2026-08-14: Initial MCP server checkpoint passed Windows focused qualification: 19 `mcg-api` tests, strict full-workspace clippy with warnings denied, formatting, docs validation, and diff hygiene. Contract evidence covers pre-auth hostile-Origin rejection, auth, mirrored-header mismatch, modern discovery, stable tools, status, exact project query, bounded context, memory search, structured results, and encoded `Mcp-Name`. Full workspace tests reached only the expected Windows access-denied replacement of the live `mcg-daemon.exe`; PIDs 85024/74436 remained active and provider listing was still empty, so the visible uncompleted OAuth handoff was preserved. Ubuntu qualification is next.
 - 2026-08-14: Exact MCP server commit `63d3dd4` passed complete owner-controlled Ubuntu `scripts/verify.sh` from a fresh Git archive: strict full-workspace Rust checks/tests including 19 API/MCP tests and live GPU45, documentation, frontend type/unit/build, native Linux Tauri debug build, and Playwright all passed in 215 seconds. No GitHub-hosted automation ran. The fresh mirror is `/home/hendo420/mcg-worktree-63d3dd4`; the older canonical mirror was left untouched because destructive replacement was denied.
 - 2026-08-14: Governed MCP mutation checkpoint passed Windows focused qualification: full-workspace clippy, 19 API tests, 4 runtime tests, 12 storage tests, docs, formatting, and diff hygiene. A provider-backed MCP call creates and executes one durable run; exact retry returns the same one result/instance, a changed-input key conflicts, and `mcg_query_run` replays evidence. The file-backed migration-8 fixture proves atomic creation, restart replay, immutable key conflict, and zero duplicate events.
+- 2026-08-14: Exact file/custom evidence commit `4238ec5` passed an isolated complete `./scripts/verify.sh` in `/home/hendo420/mcg-worktree-4238ec5` with `verify-final.exit=0`: strict Rust workspace gates including 32 tool and 29 API tests, live GPU45, docs, frontend checks/build, sandboxed real Chromium, native Linux Tauri/GTK build, and Playwright. No GitHub-hosted automation ran.
 
 ## Decisions
 
@@ -532,8 +533,8 @@ When sources conflict, use this order:
 - Decision: Add typed `FileExists` and server-owned `fs.verify`; require normalized project-relative paths and regular files; stream at most 1 GiB into content-addressed storage without exposing file bytes as stdout. Make `COMMAND SUCCEEDS` the only executable custom form and require its full command to remain an exact current discovery match. Discover all safely named package scripts as structured runner argv; leave other prose inconclusive.
 - Files: `crates/mcg-{agents,tools,projects,runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
 - Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 32 tool and 29 API tests; real binary artifact and npm custom-command public fixture; nine Vitest flows; frontend typecheck/build; Playwright; docs/diff checks.
-- Result: Windows qualification is green. Binary evidence is bounded, deduplicated, and hash/size checked; a missing file atomically fails task/run; exact discovered custom scripts pass through policy, leases, audit, and structured process execution. Ubuntu exact-commit qualification remains pending.
-- Follow-up: Commit and run complete `./scripts/verify.sh` on the owner-controlled Ubuntu VM, then continue research and screenshot-baseline evaluators.
+- Result: Windows qualification is green. Exact commit `4238ec5` also passed an isolated complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`. Binary evidence is bounded, deduplicated, and hash/size checked; a missing file atomically fails task/run; exact discovered custom scripts pass through policy, leases, audit, and structured process execution.
+- Follow-up: Continue research and screenshot-baseline evaluators.
 
 ## Known Issues
 
