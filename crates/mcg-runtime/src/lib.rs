@@ -52,12 +52,13 @@ use mcg_storage::{
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
-    BrowserExecutor, ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor,
-    HostExecutor, HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor,
-    OutputRedactor, ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver,
-    ResearchEvidenceDocument, ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION,
-    ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
-    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
+    BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ExecutionLease,
+    ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor, HttpExecutor,
+    InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor, ProcessExecutor,
+    ProcessOptions, ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument,
+    ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink,
+    ToolBroker, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest,
+    ToolRequestKind, VerificationEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1612,6 +1613,7 @@ impl AppRuntime {
         for condition in &conditions {
             if let SuccessCondition::HttpResponds { url, .. }
             | SuccessCondition::PageRenders { url }
+            | SuccessCondition::ElementExists { url, .. }
             | SuccessCondition::ScreenshotMatches { url, .. } = condition
             {
                 let origin = objective_network_origin(url)?;
@@ -1677,6 +1679,13 @@ impl AppRuntime {
                     viewport_width: 1_280,
                     viewport_height: 720,
                 }
+            } else if let SuccessCondition::ElementExists { url, selector } = condition {
+                ToolRequestKind::BrowserElementExists {
+                    url: url.clone(),
+                    selector: selector.clone(),
+                    viewport_width: 1_280,
+                    viewport_height: 720,
+                }
             } else if let SuccessCondition::ScreenshotMatches {
                 baseline,
                 expected_baseline_sha256,
@@ -1698,6 +1707,109 @@ impl AppRuntime {
                 ToolRequestKind::FsVerify {
                     path: objective_project_file_path(&project.root, path)?,
                     max_bytes: 1_073_741_824,
+                }
+            } else if let SuccessCondition::BrowserWorkflow {
+                name,
+                path,
+                expected_sha256,
+            } = condition
+            {
+                let absolute_path = objective_project_file_path(&project.root, path)?;
+                let mut workflow_request = ToolRequest::new(
+                    task_id,
+                    format!("Read browser workflow: {path}"),
+                    ToolRequestKind::FsRead {
+                        path: absolute_path.clone(),
+                        max_bytes: 1_048_576,
+                    },
+                );
+                workflow_request.id = objective_stage_request_id(
+                    run_id,
+                    index,
+                    checkpoint.attempt,
+                    condition,
+                    "browser-workflow",
+                )?;
+                workflow_request.timeout_seconds = task
+                    .budget
+                    .max_duration_seconds
+                    .unwrap_or(1_800)
+                    .clamp(1, 86_400);
+                match broker.execute(&workflow_request).await {
+                    Ok(outcome) if outcome.status == ToolOutcomeStatus::Succeeded => {
+                        let workflow_json = outcome.stdout.clone().ok_or_else(|| {
+                            ToolError::Execution(
+                                "browser workflow did not contain UTF-8 JSON".into(),
+                            )
+                        });
+                        let parsed = workflow_json
+                            .as_ref()
+                            .map_err(|error| ToolError::Execution(error.to_string()))
+                            .and_then(|contents| {
+                                serde_json::from_str::<BrowserWorkflowDocument>(contents).map_err(
+                                    |error| {
+                                        ToolError::Execution(format!(
+                                            "browser workflow is not valid JSON: {error}"
+                                        ))
+                                    },
+                                )
+                            });
+                        let artifact = outcome.artifacts.first().cloned().ok_or_else(|| {
+                            ToolError::Execution(
+                                "browser workflow read did not produce an immutable artifact"
+                                    .into(),
+                            )
+                        });
+                        match (workflow_json, parsed, artifact) {
+                            (Ok(workflow_json), Ok(document), Ok(workflow_artifact)) => {
+                                if document.name != *name {
+                                    preparation_error = Some(ToolError::Execution(
+                                        "browser workflow name does not match the bound condition"
+                                            .into(),
+                                    ));
+                                }
+                                if !workflow_artifact
+                                    .sha256
+                                    .eq_ignore_ascii_case(expected_sha256)
+                                {
+                                    preparation_error = Some(ToolError::Execution(
+                                        "browser workflow changed after the objective was bound"
+                                            .into(),
+                                    ));
+                                }
+                                ToolRequestKind::BrowserWorkflow {
+                                    workflow_path: absolute_path,
+                                    expected_sha256: expected_sha256.clone(),
+                                    workflow_artifact,
+                                    workflow_json,
+                                    document,
+                                    viewport_width: 1_280,
+                                    viewport_height: 720,
+                                }
+                            }
+                            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                                preparation_error = Some(error);
+                                ToolRequestKind::FsRead {
+                                    path: absolute_path,
+                                    max_bytes: 1_048_576,
+                                }
+                            }
+                        }
+                    }
+                    Ok(outcome) => {
+                        preparation_error = Some(ToolError::Execution(outcome.summary));
+                        ToolRequestKind::FsRead {
+                            path: absolute_path,
+                            max_bytes: 1_048_576,
+                        }
+                    }
+                    Err(error) => {
+                        preparation_error = Some(error);
+                        ToolRequestKind::FsRead {
+                            path: absolute_path,
+                            max_bytes: 1_048_576,
+                        }
+                    }
                 }
             } else if let SuccessCondition::ResearchSources {
                 evidence_path,
@@ -1826,6 +1938,36 @@ impl AppRuntime {
                 .clamp(1, 86_400);
             let execution = if let Some(error) = preparation_error {
                 Err(error)
+            } else if let ToolRequestKind::BrowserWorkflow { document, .. } = &request.kind {
+                let origins = objective_workflow_origins(document);
+                match origins {
+                    Err(error) => Err(error),
+                    Ok(origins) => {
+                        let mut workflow_capabilities = capabilities.clone();
+                        for origin in origins {
+                            if !workflow_capabilities
+                                .allowed_network_origins
+                                .contains(&origin)
+                            {
+                                workflow_capabilities.allowed_network_origins.push(origin);
+                            }
+                        }
+                        ToolBroker::new(
+                            host.clone(),
+                            control.clone(),
+                            control.clone(),
+                            BrokerControls {
+                                preset: broker_preset,
+                                constitution: OwnerConstitution::secure_defaults(),
+                                capabilities: workflow_capabilities,
+                                leases: Arc::new(control.clone()),
+                                redactor: OutputRedactor::default(),
+                            },
+                        )
+                        .execute(&request)
+                        .await
+                    }
+                }
             } else if let ToolRequestKind::ResearchVerify { document, .. } = &request.kind {
                 let mut research_capabilities = capabilities.clone();
                 let mut origins = BTreeSet::new();
@@ -3134,6 +3276,10 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
             Some(format!("HTTP GET {url} returns {status}"))
         } else if let SuccessCondition::PageRenders { url } = condition {
             Some(format!("Page renders at {url}"))
+        } else if let SuccessCondition::ElementExists { url, selector } = condition {
+            Some(format!("Element {selector} exists at {url}"))
+        } else if let SuccessCondition::BrowserWorkflow { name, path, .. } = condition {
+            Some(format!("Browser workflow {name} from {path}"))
         } else if let SuccessCondition::ScreenshotMatches { baseline, url, .. } = condition {
             Some(format!("Screenshot at {url} matches {baseline}"))
         } else if let SuccessCondition::FileExists { path, .. } = condition {
@@ -3193,10 +3339,34 @@ fn objective_network_origin(value: &str) -> Result<String, RuntimeError> {
     Ok(url.origin().ascii_serialization())
 }
 
+fn objective_workflow_origins(
+    document: &BrowserWorkflowDocument,
+) -> Result<BTreeSet<String>, ToolError> {
+    let start = objective_network_origin(&document.start_url)
+        .map_err(|error| ToolError::Execution(format!("invalid workflow start URL: {error}")))?;
+    let mut origins = BTreeSet::from([start.clone()]);
+    for step in &document.steps {
+        if let BrowserWorkflowStep::AssertUrl { url } = step {
+            let origin = objective_network_origin(url).map_err(|error| {
+                ToolError::Execution(format!("invalid workflow URL assertion: {error}"))
+            })?;
+            if origin != start {
+                return Err(ToolError::Denied(
+                    "browser workflows cannot authorize cross-origin navigation".into(),
+                ));
+            }
+            origins.insert(origin);
+        }
+    }
+    Ok(origins)
+}
+
 fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
     match condition {
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
+        SuccessCondition::ElementExists { .. } => "governed_browser_element",
+        SuccessCondition::BrowserWorkflow { .. } => "governed_browser_workflow",
         SuccessCondition::ScreenshotMatches { .. } => "governed_screenshot_comparison",
         SuccessCondition::FileExists { .. } => "governed_file_artifact",
         SuccessCondition::ResearchSources { .. } => "governed_research_sources",
@@ -3235,9 +3405,14 @@ fn objective_evidence_artifact<'a>(
     condition: &SuccessCondition,
     outcome: &'a ToolOutcome,
 ) -> Option<&'a mcg_tools::ArtifactReference> {
+    if matches!(condition, SuccessCondition::BrowserWorkflow { .. }) {
+        return outcome.artifacts.get(2);
+    }
     if matches!(
         condition,
-        SuccessCondition::PageRenders { .. } | SuccessCondition::ScreenshotMatches { .. }
+        SuccessCondition::PageRenders { .. }
+            | SuccessCondition::ElementExists { .. }
+            | SuccessCondition::ScreenshotMatches { .. }
     ) {
         outcome.artifacts.get(1)
     } else {
@@ -3268,6 +3443,8 @@ fn objective_condition_outcome_detail(
     if matches!(
         condition,
         SuccessCondition::PageRenders { .. }
+            | SuccessCondition::ElementExists { .. }
+            | SuccessCondition::BrowserWorkflow { .. }
             | SuccessCondition::ScreenshotMatches { .. }
             | SuccessCondition::ResearchSources { .. }
     ) {

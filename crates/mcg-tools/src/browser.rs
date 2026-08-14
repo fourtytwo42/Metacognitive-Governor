@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chromiumoxide::{
-    Browser, BrowserConfig,
+    Browser, BrowserConfig, Element, Page,
     cdp::browser_protocol::{
         fetch::{ContinueRequestParams, EventRequestPaused, FailRequestParams},
         network::ErrorReason,
@@ -23,11 +23,13 @@ use futures_util::StreamExt;
 use image::{ImageFormat, ImageReader, Limits};
 use mcg_domain::ToolExecutionId;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
-    ArtifactStore, FilesystemExecutor, TOOL_SCHEMA_VERSION, ToolError, ToolExecutor, ToolOutcome,
-    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
+    ArtifactStore, BrowserWorkflowDocument, BrowserWorkflowStep, FilesystemExecutor,
+    TOOL_SCHEMA_VERSION, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest,
+    ToolRequestKind, VerificationEvidence,
 };
 
 pub struct BrowserExecutor {
@@ -43,6 +45,18 @@ struct RenderState {
     body_present: bool,
     width: u64,
     height: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InteractionTarget {
+    href: Option<String>,
+    target: Option<String>,
+    download: bool,
+    has_form: bool,
+    form_action: Option<String>,
+    form_target: Option<String>,
+    form_method: Option<String>,
 }
 
 impl BrowserExecutor {
@@ -81,7 +95,7 @@ impl BrowserExecutor {
         })
     }
 
-    #[allow(clippy::too_many_lines)] // Keep browser lifecycle cleanup adjacent to evidence capture.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep browser lifecycle cleanup adjacent to evidence capture.
     async fn render(
         &self,
         execution_id: ToolExecutionId,
@@ -90,6 +104,7 @@ impl BrowserExecutor {
         viewport_width: u32,
         viewport_height: u32,
         comparison: Option<(&str, &str, u16, u8)>,
+        element_selector: Option<&str>,
     ) -> Result<ToolOutcome, ToolError> {
         let started_at = Utc::now();
         let target = parse_browser_url(url)?;
@@ -103,6 +118,15 @@ impl BrowserExecutor {
         {
             return Err(ToolError::Invalid(
                 "screenshot changed-pixel tolerance cannot exceed 10000 basis points".into(),
+            ));
+        }
+        if element_selector.is_some_and(|selector| {
+            selector.trim().is_empty()
+                || selector.chars().count() > 512
+                || selector.chars().any(char::is_control)
+        }) {
+            return Err(ToolError::Invalid(
+                "browser element selector must contain 1 to 512 printable characters".into(),
             ));
         }
         let origin = target.origin().ascii_serialization();
@@ -288,7 +312,30 @@ impl BrowserExecutor {
             } else {
                 true
             };
-            let render_passed = ready && laid_out && captured && screenshot_passed;
+            let element_passed = if let Some(selector) = element_selector {
+                match page.find_elements(selector).await {
+                    Ok(elements) => {
+                        let found = !elements.is_empty();
+                        verification.push(VerificationEvidence {
+                            method: "browser.element_exists".into(),
+                            passed: found,
+                            detail: format!("selector={selector}; matches={}", elements.len()),
+                        });
+                        found
+                    }
+                    Err(error) => {
+                        verification.push(VerificationEvidence {
+                            method: "browser.element_exists".into(),
+                            passed: false,
+                            detail: format!("selector={selector}; inspection_failed={error}"),
+                        });
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+            let render_passed = ready && laid_out && captured && screenshot_passed && element_passed;
             let denied = denied_requests.load(Ordering::SeqCst);
             verification.push(VerificationEvidence {
                 method: "browser.network_scope".into(),
@@ -326,6 +373,300 @@ impl BrowserExecutor {
         handler_task.abort();
         render_result
     }
+
+    #[allow(clippy::too_many_lines)] // Browser lifecycle, confinement, steps, and evidence stay adjacent.
+    async fn workflow(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+        parameters: WorkflowParameters<'_>,
+    ) -> Result<ToolOutcome, ToolError> {
+        let started_at = Utc::now();
+        let target = self.validate_workflow(&parameters)?;
+        validate_viewport(parameters.viewport_width, parameters.viewport_height)?;
+        let origin = target.origin().ascii_serialization();
+        let mut builder = BrowserConfig::builder()
+            .enable_request_intercept()
+            .disable_cache()
+            .window_size(parameters.viewport_width, parameters.viewport_height)
+            .request_timeout(Duration::from_secs(request.timeout_seconds))
+            .launch_timeout(Duration::from_secs(request.timeout_seconds.min(30)));
+        if let Some(executable) = &self.executable {
+            if !executable.is_file() {
+                return Err(ToolError::Unavailable(format!(
+                    "configured browser executable does not exist: {}",
+                    executable.display()
+                )));
+            }
+            builder = builder.chrome_executable(executable);
+        }
+        let config = builder
+            .build()
+            .map_err(|error| ToolError::Execution(format!("build browser config: {error}")))?;
+        let (mut browser, mut handler) = Browser::launch(config)
+            .await
+            .map_err(|error| ToolError::Unavailable(format!("launch browser: {error}")))?;
+        let handler_task = tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                if event.is_err() {
+                    break;
+                }
+            }
+        });
+        let page = Arc::new(
+            browser
+                .new_page("about:blank")
+                .await
+                .map_err(|error| ToolError::Execution(format!("open browser page: {error}")))?,
+        );
+        let mut request_events =
+            page.event_listener::<EventRequestPaused>()
+                .await
+                .map_err(|error| {
+                    ToolError::Execution(format!("intercept browser requests: {error}"))
+                })?;
+        let intercept_page = page.clone();
+        let intercept_origin = origin.clone();
+        let denied_requests = Arc::new(AtomicU64::new(0));
+        let denied_for_task = denied_requests.clone();
+        let intercept_task = tokio::spawn(async move {
+            while let Some(event) = request_events.next().await {
+                let allowed = browser_request_allowed(
+                    &event.request.url,
+                    &event.request.method,
+                    &intercept_origin,
+                );
+                let result = if allowed {
+                    intercept_page
+                        .execute(ContinueRequestParams::new(event.request_id.clone()))
+                        .await
+                        .map(|_| ())
+                } else {
+                    denied_for_task.fetch_add(1, Ordering::SeqCst);
+                    intercept_page
+                        .execute(
+                            FailRequestParams::builder()
+                                .request_id(event.request_id.clone())
+                                .error_reason(ErrorReason::BlockedByClient)
+                                .build()
+                                .expect("complete browser failure request"),
+                        )
+                        .await
+                        .map(|_| ())
+                };
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let workflow_result = match tokio::time::timeout(
+            Duration::from_secs(request.timeout_seconds),
+            self.run_workflow(
+                execution_id,
+                request,
+                &parameters,
+                &page,
+                &target,
+                &origin,
+                &denied_requests,
+                started_at,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ToolError::TimedOut),
+        };
+        let _ = browser.close().await;
+        intercept_task.abort();
+        handler_task.abort();
+        workflow_result
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn run_workflow(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+        parameters: &WorkflowParameters<'_>,
+        page: &Page,
+        target: &Url,
+        origin: &str,
+        denied_requests: &AtomicU64,
+        started_at: chrono::DateTime<Utc>,
+    ) -> Result<ToolOutcome, ToolError> {
+        page.goto(target.as_str())
+            .await
+            .map_err(|error| ToolError::Execution(format!("navigate browser page: {error}")))?;
+        page.evaluate(
+            "(() => { const deny = () => null; try { Object.defineProperty(window, 'open', { value: deny, configurable: false, writable: false }); } catch {} try { Object.defineProperty(window, 'showOpenFilePicker', { value: deny, configurable: false, writable: false }); } catch {} try { Object.defineProperty(window, 'showSaveFilePicker', { value: deny, configurable: false, writable: false }); } catch {} })()",
+        )
+        .await
+        .map_err(|error| ToolError::Execution(format!("confine workflow dialogs: {error}")))?;
+        let mut verification = vec![VerificationEvidence {
+            method: "browser.workflow_binding".into(),
+            passed: true,
+            detail: format!(
+                "name={}; steps={}; sha256={}",
+                parameters.document.name,
+                parameters.document.steps.len(),
+                parameters.expected_sha256
+            ),
+        }];
+        let mut steps_passed = true;
+        for (index, step) in parameters.document.steps.iter().enumerate() {
+            let result = execute_workflow_step(page, step, origin).await;
+            let (passed, detail) = match result {
+                Ok(detail) => (true, detail),
+                Err(detail) => (false, detail),
+            };
+            verification.push(VerificationEvidence {
+                method: "browser.workflow_step".into(),
+                passed,
+                detail: format!("step={}; {detail}", index + 1),
+            });
+            if !passed {
+                steps_passed = false;
+                break;
+            }
+            if matches!(
+                step,
+                BrowserWorkflowStep::Click { .. }
+                    | BrowserWorkflowStep::Type { .. }
+                    | BrowserWorkflowStep::Press { .. }
+            ) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let current = current_browser_url(page).await?;
+            if current.origin().ascii_serialization() != origin {
+                steps_passed = false;
+                verification.push(VerificationEvidence {
+                    method: "browser.workflow_origin".into(),
+                    passed: false,
+                    detail: "workflow attempted cross-origin navigation".into(),
+                });
+                break;
+            }
+        }
+
+        let final_url = current_browser_url(page).await?;
+        let state: RenderState = page
+            .evaluate(
+                "({readyState: document.readyState, bodyPresent: !!document.body, width: Math.max(document.documentElement?.scrollWidth || 0, document.body?.scrollWidth || 0), height: Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0)})",
+            )
+            .await
+            .map_err(|error| ToolError::Execution(format!("inspect workflow page: {error}")))?
+            .into_value()
+            .map_err(|error| ToolError::Execution(format!("decode workflow evidence: {error}")))?;
+        let html = page
+            .content_bytes()
+            .await
+            .map_err(|error| ToolError::Execution(format!("capture workflow HTML: {error}")))?;
+        let screenshot = page
+            .screenshot(
+                ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .full_page(false)
+                    .build(),
+            )
+            .await
+            .map_err(|error| {
+                ToolError::Execution(format!("capture workflow screenshot: {error}"))
+            })?;
+        let html_artifact = self.artifacts.capture(&html, "text/html; charset=utf-8")?;
+        let screenshot_artifact = self.artifacts.capture(&screenshot, "image/png")?;
+        let ready = matches!(state.ready_state.as_str(), "interactive" | "complete");
+        let laid_out = state.body_present && state.width > 0 && state.height > 0;
+        let captured = !html.is_empty() && !screenshot.is_empty();
+        verification.extend([
+            VerificationEvidence {
+                method: "browser.ready_state".into(),
+                passed: ready,
+                detail: state.ready_state,
+            },
+            VerificationEvidence {
+                method: "browser.body_layout".into(),
+                passed: laid_out,
+                detail: format!(
+                    "body_present={}; width={}; height={}",
+                    state.body_present, state.width, state.height
+                ),
+            },
+            VerificationEvidence {
+                method: "browser.network_scope".into(),
+                passed: true,
+                detail: format!(
+                    "same_origin={origin}; blocked_requests={}",
+                    denied_requests.load(Ordering::SeqCst)
+                ),
+            },
+        ]);
+        let passed = steps_passed
+            && ready
+            && laid_out
+            && captured
+            && final_url.origin().ascii_serialization() == origin;
+        Ok(ToolOutcome {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id,
+            request_id: request.id,
+            status: if passed {
+                ToolOutcomeStatus::Succeeded
+            } else {
+                ToolOutcomeStatus::Failed
+            },
+            summary: format!(
+                "Browser workflow {} {} at {}",
+                parameters.document.name,
+                if passed { "passed" } else { "failed" },
+                safe_browser_url(&final_url)
+            ),
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            artifacts: vec![
+                parameters.workflow_artifact.clone(),
+                html_artifact,
+                screenshot_artifact,
+            ],
+            verification,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    fn validate_workflow(&self, parameters: &WorkflowParameters<'_>) -> Result<Url, ToolError> {
+        parameters.document.validate().map_err(ToolError::Invalid)?;
+        validate_sha256(parameters.expected_sha256)?;
+        let observed_json_sha = format!("{:x}", Sha256::digest(parameters.workflow_json));
+        if !observed_json_sha.eq_ignore_ascii_case(parameters.expected_sha256)
+            || !observed_json_sha.eq_ignore_ascii_case(&parameters.workflow_artifact.sha256)
+        {
+            return Err(ToolError::Execution(
+                "browser workflow JSON does not match its immutable binding".into(),
+            ));
+        }
+        if !matches!(
+            serde_json::from_str::<BrowserWorkflowDocument>(parameters.workflow_json),
+            Ok(document) if document == *parameters.document
+        ) {
+            return Err(ToolError::Execution(
+                "parsed browser workflow does not match the immutable JSON bytes".into(),
+            ));
+        }
+        let filesystem = self.filesystem.as_ref().ok_or_else(|| {
+            ToolError::Unavailable("browser workflow has no project filesystem capability".into())
+        })?;
+        let current = filesystem.read_bounded_binary(parameters.workflow_path, 1_048_576)?;
+        if current != parameters.workflow_json.as_bytes() {
+            return Err(ToolError::Execution(
+                "browser workflow changed after the objective was bound".into(),
+            ));
+        }
+        let target = parse_browser_url(&parameters.document.start_url)?;
+        Ok(target)
+    }
 }
 
 #[async_trait]
@@ -348,6 +689,48 @@ impl ToolExecutor for BrowserExecutor {
                     *viewport_width,
                     *viewport_height,
                     None,
+                    None,
+                )
+                .await
+            }
+            ToolRequestKind::BrowserElementExists {
+                url,
+                selector,
+                viewport_width,
+                viewport_height,
+            } => {
+                self.render(
+                    execution_id,
+                    request,
+                    url,
+                    *viewport_width,
+                    *viewport_height,
+                    None,
+                    Some(selector),
+                )
+                .await
+            }
+            ToolRequestKind::BrowserWorkflow {
+                workflow_path,
+                expected_sha256,
+                workflow_artifact,
+                workflow_json,
+                document,
+                viewport_width,
+                viewport_height,
+            } => {
+                self.workflow(
+                    execution_id,
+                    request,
+                    WorkflowParameters {
+                        workflow_path,
+                        expected_sha256,
+                        workflow_artifact,
+                        workflow_json,
+                        document,
+                        viewport_width: *viewport_width,
+                        viewport_height: *viewport_height,
+                    },
                 )
                 .await
             }
@@ -372,6 +755,7 @@ impl ToolExecutor for BrowserExecutor {
                         *max_changed_basis_points,
                         *per_channel_threshold,
                     )),
+                    None,
                 )
                 .await
             }
@@ -380,6 +764,206 @@ impl ToolExecutor for BrowserExecutor {
             )),
         }
     }
+}
+
+struct WorkflowParameters<'a> {
+    workflow_path: &'a str,
+    expected_sha256: &'a str,
+    workflow_artifact: &'a crate::ArtifactReference,
+    workflow_json: &'a str,
+    document: &'a BrowserWorkflowDocument,
+    viewport_width: u32,
+    viewport_height: u32,
+}
+
+fn validate_viewport(width: u32, height: u32) -> Result<(), ToolError> {
+    if !(320..=7_680).contains(&width) || !(240..=4_320).contains(&height) {
+        return Err(ToolError::Invalid(
+            "browser viewport must be between 320x240 and 7680x4320".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn current_browser_url(page: &Page) -> Result<Url, ToolError> {
+    let value = page
+        .url()
+        .await
+        .map_err(|error| ToolError::Execution(format!("read browser URL: {error}")))?
+        .ok_or_else(|| ToolError::Execution("browser page did not report a URL".into()))?;
+    parse_browser_url(&value)
+}
+
+async fn execute_workflow_step(
+    page: &Page,
+    step: &BrowserWorkflowStep,
+    origin: &str,
+) -> Result<String, String> {
+    match step {
+        BrowserWorkflowStep::AssertElement { selector } => page
+            .find_elements(selector)
+            .await
+            .map_err(|error| format!("assert_element selector={selector}; error={error}"))
+            .and_then(|elements| {
+                (!elements.is_empty())
+                    .then(|| {
+                        format!(
+                            "assert_element selector={selector}; matches={}",
+                            elements.len()
+                        )
+                    })
+                    .ok_or_else(|| format!("assert_element selector={selector}; matches=0"))
+            }),
+        BrowserWorkflowStep::Click { selector } => {
+            let element = page
+                .find_element(selector)
+                .await
+                .map_err(|error| format!("click selector={selector}; error={error}"))?;
+            validate_interaction_target(&element, origin).await?;
+            element
+                .click()
+                .await
+                .map_err(|error| format!("click selector={selector}; error={error}"))?;
+            Ok(format!("click selector={selector}"))
+        }
+        BrowserWorkflowStep::Type { selector, value } => {
+            let element = page
+                .find_element(selector)
+                .await
+                .map_err(|error| format!("type selector={selector}; error={error}"))?;
+            element
+                .click()
+                .await
+                .map_err(|error| format!("type selector={selector}; error={error}"))?;
+            element
+                .type_str(value)
+                .await
+                .map_err(|error| format!("type selector={selector}; error={error}"))?;
+            Ok(format!(
+                "type selector={selector}; characters={}",
+                value.chars().count()
+            ))
+        }
+        BrowserWorkflowStep::Press { selector, key } => {
+            let element = page
+                .find_element(selector)
+                .await
+                .map_err(|error| format!("press selector={selector}; key={key}; error={error}"))?;
+            validate_interaction_target(&element, origin).await?;
+            element
+                .focus()
+                .await
+                .map_err(|error| format!("press selector={selector}; key={key}; error={error}"))?;
+            element
+                .press_key(key)
+                .await
+                .map_err(|error| format!("press selector={selector}; key={key}; error={error}"))?;
+            Ok(format!("press selector={selector}; key={key}"))
+        }
+        BrowserWorkflowStep::AssertText { selector, contains } => {
+            let element = page
+                .find_element(selector)
+                .await
+                .map_err(|error| format!("assert_text selector={selector}; error={error}"))?;
+            let text = element
+                .inner_text()
+                .await
+                .map_err(|error| format!("assert_text selector={selector}; error={error}"))?
+                .unwrap_or_default();
+            text.contains(contains)
+                .then(|| {
+                    format!(
+                        "assert_text selector={selector}; expected_characters={}",
+                        contains.chars().count()
+                    )
+                })
+                .ok_or_else(|| {
+                    format!("assert_text selector={selector}; expected substring was not found")
+                })
+        }
+        BrowserWorkflowStep::AssertUrl { url } => {
+            let observed = current_browser_url(page)
+                .await
+                .map_err(|error| format!("assert_url error={error}"))?;
+            (observed.as_str() == url)
+                .then(|| format!("assert_url matched={}", safe_browser_url(&observed)))
+                .ok_or_else(|| {
+                    format!(
+                        "assert_url expected={}; observed={}",
+                        sanitized_expected_url(url),
+                        safe_browser_url(&observed)
+                    )
+                })
+        }
+    }
+}
+
+async fn validate_interaction_target(element: &Element, origin: &str) -> Result<(), String> {
+    let response = element
+        .call_js_fn(
+            "function() { const form = this.form || this.closest?.('form') || null; return JSON.stringify({ href: this.href || null, target: this.target || null, download: this.hasAttribute?.('download') || false, hasForm: !!form, formAction: form ? (this.formAction || form.action || null) : null, formTarget: form ? (this.formTarget || form.target || null) : null, formMethod: form ? (this.formMethod || form.method || 'get') : null }); }",
+            false,
+        )
+        .await
+        .map_err(|error| format!("inspect interaction target: {error}"))?;
+    let target_json = response
+        .result
+        .value
+        .ok_or_else(|| "interaction target did not return metadata".to_owned())
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "interaction target metadata was not a string".to_owned())
+        })?;
+    let target: InteractionTarget = serde_json::from_str(&target_json)
+        .map_err(|error| format!("decode interaction target: {error}"))?;
+    if target.download
+        || target
+            .target
+            .as_deref()
+            .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("_self"))
+        || target
+            .form_target
+            .as_deref()
+            .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("_self"))
+    {
+        return Err("interaction would open a new context or download a file".into());
+    }
+    for destination in [target.href.as_deref(), target.form_action.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let url = Url::parse(destination)
+            .map_err(|error| format!("interaction has invalid destination: {error}"))?;
+        if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != origin
+        {
+            return Err("interaction destination is outside the workflow origin".into());
+        }
+    }
+    if target.has_form
+        && !target
+            .form_method
+            .as_deref()
+            .unwrap_or("get")
+            .eq_ignore_ascii_case("get")
+    {
+        return Err("browser workflows cannot submit mutating forms".into());
+    }
+    Ok(())
+}
+
+fn sanitized_expected_url(value: &str) -> String {
+    Url::parse(value).map_or_else(|_| "invalid-url".into(), |url| safe_browser_url(&url))
+}
+
+fn validate_sha256(value: &str) -> Result<(), ToolError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ToolError::Invalid(
+            "expected_sha256 must contain exactly 64 hexadecimal characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 struct ScreenshotDifference {
@@ -544,13 +1128,22 @@ mod tests {
         let html = format!(
             r#"<!doctype html><html><head><title>Before JS</title></head><body><main id="app"></main><img src="{blocked_url}"><script>document.title='Rendered by JS'; document.querySelector('#app').textContent='Hydrated'; fetch('/mutation', {{method: 'POST'}}).catch(() => {{}});</script></body></html>"#
         );
-        let app = Router::new().route(
-            "/",
-            get(move || {
-                let html = html.clone();
-                async move { Html(html) }
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/",
+                get(move || {
+                    let html = html.clone();
+                    async move { Html(html) }
+                }),
+            )
+            .route(
+                "/workflow",
+                get(|| async {
+                    Html(
+                        r#"<!doctype html><html><body><label>Name <input id="name"></label><button id="submit">Continue</button><output id="result"></output><a id="external" href="https://example.com/">External</a><a id="download" href="/file" download>Download</a><a id="new-context" href="/other" target="_blank">New context</a><form method="post" action="/mutation"><button id="post-form-button">Post</button></form><script>document.querySelector('#submit').addEventListener('click',()=>{document.querySelector('#result').textContent='Hello '+document.querySelector('#name').value; history.pushState({},'', '/done');});</script></body></html>"#,
+                    )
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("browser fixture listener");
@@ -597,6 +1190,41 @@ mod tests {
                 .is_some_and(|evidence| evidence.detail.contains("blocked_requests=2"))
         );
 
+        let element_request = ToolRequest::new(
+            request.task_id,
+            "verify hydrated element",
+            ToolRequestKind::BrowserElementExists {
+                url: format!("http://{address}/"),
+                selector: "#app".into(),
+                viewport_width: 1_280,
+                viewport_height: 720,
+            },
+        );
+        let element_outcome = executor
+            .execute(ToolExecutionId::new(), &element_request)
+            .await
+            .expect("element outcome");
+        assert_eq!(element_outcome.status, ToolOutcomeStatus::Succeeded);
+        assert!(element_outcome.verification.iter().any(|evidence| {
+            evidence.method == "browser.element_exists"
+                && evidence.passed
+                && evidence.detail.contains("matches=1")
+        }));
+        let mut missing_request = element_request;
+        if let ToolRequestKind::BrowserElementExists { selector, .. } = &mut missing_request.kind {
+            *selector = "#missing".into();
+        }
+        let missing_outcome = executor
+            .execute(ToolExecutionId::new(), &missing_request)
+            .await
+            .expect("missing element outcome");
+        assert_eq!(missing_outcome.status, ToolOutcomeStatus::Failed);
+        assert!(missing_outcome.verification.iter().any(|evidence| {
+            evidence.method == "browser.element_exists"
+                && !evidence.passed
+                && evidence.detail.contains("matches=0")
+        }));
+
         let project = tempdir().expect("baseline project");
         let baseline_path = project.path().join("baseline.png");
         std::fs::copy(
@@ -617,6 +1245,159 @@ mod tests {
             filesystem,
         )
         .expect("comparison executor");
+        let workflow_path = project.path().join("consumer-workflow.json");
+        let workflow_document = BrowserWorkflowDocument {
+            schema_version: crate::BROWSER_WORKFLOW_SCHEMA_VERSION,
+            name: "consumer greeting".into(),
+            start_url: format!("http://{address}/workflow"),
+            steps: vec![
+                BrowserWorkflowStep::AssertElement {
+                    selector: "#name".into(),
+                },
+                BrowserWorkflowStep::Type {
+                    selector: "#name".into(),
+                    value: "Ada".into(),
+                },
+                BrowserWorkflowStep::Click {
+                    selector: "#submit".into(),
+                },
+                BrowserWorkflowStep::AssertText {
+                    selector: "#result".into(),
+                    contains: "Hello Ada".into(),
+                },
+                BrowserWorkflowStep::AssertUrl {
+                    url: format!("http://{address}/done"),
+                },
+            ],
+        };
+        let workflow_json = serde_json::to_string(&workflow_document).expect("workflow JSON");
+        std::fs::write(&workflow_path, &workflow_json).expect("workflow file");
+        let workflow_artifact = ArtifactStore::open(artifacts.path())
+            .expect("workflow artifacts")
+            .capture(workflow_json.as_bytes(), "application/json")
+            .expect("workflow artifact");
+        let workflow_request = ToolRequest::new(
+            request.task_id,
+            "exercise consumer workflow",
+            ToolRequestKind::BrowserWorkflow {
+                workflow_path: workflow_path.to_string_lossy().into_owned(),
+                expected_sha256: workflow_artifact.sha256.clone(),
+                workflow_artifact,
+                workflow_json: workflow_json.clone(),
+                document: workflow_document.clone(),
+                viewport_width: 1_280,
+                viewport_height: 720,
+            },
+        );
+        let workflow_outcome = comparator
+            .execute(ToolExecutionId::new(), &workflow_request)
+            .await
+            .expect("workflow outcome");
+        assert_eq!(
+            workflow_outcome.status,
+            ToolOutcomeStatus::Succeeded,
+            "{workflow_outcome:#?}"
+        );
+        assert_eq!(workflow_outcome.artifacts.len(), 3);
+        assert_eq!(
+            workflow_outcome
+                .verification
+                .iter()
+                .filter(|evidence| evidence.method == "browser.workflow_step")
+                .count(),
+            5
+        );
+        assert!(
+            workflow_outcome
+                .verification
+                .iter()
+                .filter(|evidence| evidence.method == "browser.workflow_step")
+                .all(|evidence| evidence.passed)
+        );
+        for selector in [
+            "#external",
+            "#download",
+            "#new-context",
+            "#post-form-button",
+        ] {
+            let unsafe_document = BrowserWorkflowDocument {
+                schema_version: crate::BROWSER_WORKFLOW_SCHEMA_VERSION,
+                name: format!("reject unsafe interaction {selector}"),
+                start_url: format!("http://{address}/workflow"),
+                steps: vec![BrowserWorkflowStep::Click {
+                    selector: selector.into(),
+                }],
+            };
+            let unsafe_json =
+                serde_json::to_string(&unsafe_document).expect("unsafe workflow JSON");
+            std::fs::write(&workflow_path, &unsafe_json).expect("unsafe workflow file");
+            let unsafe_artifact = ArtifactStore::open(artifacts.path())
+                .expect("unsafe workflow artifacts")
+                .capture(unsafe_json.as_bytes(), "application/json")
+                .expect("unsafe workflow artifact");
+            let unsafe_request = ToolRequest::new(
+                request.task_id,
+                "reject unsafe browser interaction",
+                ToolRequestKind::BrowserWorkflow {
+                    workflow_path: workflow_path.to_string_lossy().into_owned(),
+                    expected_sha256: unsafe_artifact.sha256.clone(),
+                    workflow_artifact: unsafe_artifact,
+                    workflow_json: unsafe_json,
+                    document: unsafe_document,
+                    viewport_width: 1_280,
+                    viewport_height: 720,
+                },
+            );
+            let unsafe_outcome = comparator
+                .execute(ToolExecutionId::new(), &unsafe_request)
+                .await
+                .expect("unsafe workflow outcome");
+            assert_eq!(unsafe_outcome.status, ToolOutcomeStatus::Failed);
+            assert!(unsafe_outcome.verification.iter().any(|evidence| {
+                evidence.method == "browser.workflow_step" && !evidence.passed
+            }));
+        }
+        let mut failing_document = workflow_document.clone();
+        if let BrowserWorkflowStep::AssertText { contains, .. } = &mut failing_document.steps[3] {
+            *contains = "Goodbye Ada".into();
+        }
+        let failing_json = serde_json::to_string(&failing_document).expect("failing workflow JSON");
+        std::fs::write(&workflow_path, &failing_json).expect("failing workflow file");
+        let failing_artifact = ArtifactStore::open(artifacts.path())
+            .expect("failing workflow artifacts")
+            .capture(failing_json.as_bytes(), "application/json")
+            .expect("failing workflow artifact");
+        let failing_request = ToolRequest::new(
+            request.task_id,
+            "reject failed consumer workflow",
+            ToolRequestKind::BrowserWorkflow {
+                workflow_path: workflow_path.to_string_lossy().into_owned(),
+                expected_sha256: failing_artifact.sha256.clone(),
+                workflow_artifact: failing_artifact,
+                workflow_json: failing_json,
+                document: failing_document,
+                viewport_width: 1_280,
+                viewport_height: 720,
+            },
+        );
+        let failing_outcome = comparator
+            .execute(ToolExecutionId::new(), &failing_request)
+            .await
+            .expect("failing workflow outcome");
+        assert_eq!(failing_outcome.status, ToolOutcomeStatus::Failed);
+        assert!(failing_outcome.verification.iter().any(|evidence| {
+            evidence.method == "browser.workflow_step"
+                && !evidence.passed
+                && evidence.detail.contains("expected substring was not found")
+        }));
+        std::fs::write(&workflow_path, "{}").expect("mutated workflow");
+        assert!(matches!(
+            comparator
+                .execute(ToolExecutionId::new(), &workflow_request)
+                .await,
+            Err(ToolError::Execution(detail)) if detail.contains("changed after the objective was bound")
+        ));
+        std::fs::write(&workflow_path, &workflow_json).expect("restore workflow");
         let comparison_request = ToolRequest::new(
             request.task_id,
             "compare rendered fixture",

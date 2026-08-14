@@ -45,6 +45,8 @@ impl ToolExecutor for HostExecutor {
                 &self.http
             }
             ToolRequestKind::BrowserRender { .. }
+            | ToolRequestKind::BrowserElementExists { .. }
+            | ToolRequestKind::BrowserWorkflow { .. }
             | ToolRequestKind::BrowserScreenshotMatches { .. } => &self.browser,
             ToolRequestKind::ResearchVerify { .. } => &self.research,
             ToolRequestKind::SystemInfo

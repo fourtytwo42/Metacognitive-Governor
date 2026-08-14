@@ -133,6 +133,31 @@ installed Chrome/Chromium discovered locally; it never downloads a browser at ta
 execution time. Linux packages install the managed browser at
 `/opt/metacognitive-governor/browser/chrome` with a path-specific AppArmor profile;
 MCG never disables Chromium's sandbox or Ubuntu's global user-namespace restriction.
+Use `ELEMENT EXISTS URL selector` to require at least one rendered match after
+JavaScript hydration. Use `BROWSER WORKFLOW project/relative/workflow.json` for a
+bounded multi-step interaction. The version-1 JSON document declares a name,
+credential-free same-origin start URL, and 1-64 typed steps: `assert_element`,
+`click`, `type`, `press`, `assert_text`, or `assert_url`. For example:
+
+```json
+{
+  "schema_version": 1,
+  "name": "submit the contact form",
+  "start_url": "http://127.0.0.1:3000/contact",
+  "steps": [
+    { "action": "type", "selector": "#name", "value": "Ada" },
+    { "action": "click", "selector": "#submit" },
+    { "action": "assert_text", "selector": "#result", "contains": "Thanks, Ada" }
+  ]
+}
+```
+
+MCG hashes the workflow before model work and re-reads it through governed project
+authority immediately before execution. The interpreter never accepts arbitrary
+JavaScript. It confines navigation and assertions to the start origin, allows only
+GET/HEAD traffic, and rejects downloads, new browsing contexts, and mutating forms.
+The workflow JSON, final HTML, final screenshot, and per-step pass/fail evidence are
+retained for audit and replay.
 Use `SCREENSHOT MATCHES URL project/relative/baseline.png` for visual regression
 evidence. MCG binds the baseline SHA-256 before model work, renders the URL at
 1280x720, decodes both PNGs with dimension/allocation limits, and compares pixels.

@@ -425,7 +425,8 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ),
             write_path(destination),
         ],
-        ToolRequestKind::BrowserRender { url, .. } => vec![make(
+        ToolRequestKind::BrowserRender { url, .. }
+        | ToolRequestKind::BrowserElementExists { url, .. } => vec![make(
             ActionClass::ProjectRead,
             CapabilityEffect::Read,
             ResourceKind::NetworkOrigin,
@@ -442,6 +443,28 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ),
             read_path(baseline_path),
         ],
+        ToolRequestKind::BrowserWorkflow {
+            workflow_path,
+            document,
+            ..
+        } => {
+            let mut values = vec![read_path(workflow_path)];
+            let mut origins = BTreeSet::from([network_origin(&document.start_url)?]);
+            for step in &document.steps {
+                if let crate::BrowserWorkflowStep::AssertUrl { url } = step {
+                    origins.insert(network_origin(url)?);
+                }
+            }
+            values.extend(origins.into_iter().map(|origin| {
+                make(
+                    ActionClass::ProjectRead,
+                    CapabilityEffect::Read,
+                    ResourceKind::NetworkOrigin,
+                    origin,
+                )
+            }));
+            values
+        }
         ToolRequestKind::ResearchVerify {
             evidence_path,
             document,
@@ -635,7 +658,8 @@ fn primary_resource(request: &ToolRequest) -> String {
         }
         ToolRequestKind::HttpRequest { url, .. }
         | ToolRequestKind::HttpDownload { url, .. }
-        | ToolRequestKind::BrowserRender { url, .. } => sanitized_url_resource(url),
+        | ToolRequestKind::BrowserRender { url, .. }
+        | ToolRequestKind::BrowserElementExists { url, .. } => sanitized_url_resource(url),
         ToolRequestKind::BrowserScreenshotMatches {
             url, baseline_path, ..
         } => format!("{} against {baseline_path}", sanitized_url_resource(url)),
@@ -646,6 +670,14 @@ fn primary_resource(request: &ToolRequest) -> String {
         } => format!(
             "{evidence_path} with {} declared claims",
             document.claims.len()
+        ),
+        ToolRequestKind::BrowserWorkflow {
+            workflow_path,
+            document,
+            ..
+        } => format!(
+            "{workflow_path} against {}",
+            sanitized_url_resource(&document.start_url)
         ),
         ToolRequestKind::McpCall {
             connection_id,

@@ -108,6 +108,11 @@ Screenshot conditions durably bind URL, project-relative baseline, baseline dige
 viewport, per-channel threshold, and maximum changed-area basis points. The evaluator
 must revalidate the baseline digest and attach decoded-pixel evidence; PNG-byte equality
 and model visual self-report are not accepted substitutes.
+Element conditions bind both the credential-free URL and bounded selector. Browser
+workflow conditions bind a project-relative versioned JSON document, its name, and
+digest before model work. Runtime independently reloads the exact bytes, derives
+same-origin network authority from the typed document, and reports each bounded
+interaction/assertion step without granting arbitrary script execution.
 
 ## Authenticated Control Surface
 

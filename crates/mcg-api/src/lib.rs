@@ -44,7 +44,9 @@ use mcg_runtime::{
     McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation,
     ProviderMutation, RuntimeError, RuntimeStatus,
 };
-use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
+use mcg_tools::{
+    ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ToolAuditRecord,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -1311,6 +1313,8 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::StaticAnalysis { .. }
             | SuccessCondition::HttpResponds { .. }
             | SuccessCondition::PageRenders { .. }
+            | SuccessCondition::ElementExists { .. }
+            | SuccessCondition::BrowserWorkflow { .. }
             | SuccessCondition::ScreenshotMatches { .. }
             | SuccessCondition::FileExists { .. }
             | SuccessCondition::ResearchSources { .. }
@@ -1338,6 +1342,16 @@ fn consumer_success_conditions(
         }
         if let SuccessCondition::ResearchSources { required_scope, .. } = condition {
             required_scope.clone_from(&task.goal);
+        }
+        if let SuccessCondition::BrowserWorkflow {
+            name,
+            path,
+            expected_sha256,
+        } = condition
+        {
+            let (document, sha256) = consumer_browser_workflow(&project.root, path)?;
+            name.clone_from(&document.name);
+            *expected_sha256 = sha256;
         }
     }
     for command in &project.commands {
@@ -1392,10 +1406,24 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
             required_scope: String::new(),
         };
     }
+    if let Some(path) = consumer_directive_value(trimmed, "BROWSER WORKFLOW")
+        && let Some(path) = normalized_consumer_file_path(path)
+    {
+        return SuccessCondition::BrowserWorkflow {
+            name: String::new(),
+            path,
+            expected_sha256: String::new(),
+        };
+    }
     if let Some(command) = consumer_directive_value(trimmed, "COMMAND SUCCEEDS") {
         return SuccessCondition::Custom {
             description: format!("COMMAND SUCCEEDS {command}"),
         };
+    }
+    if let Some(value) = consumer_directive_value(trimmed, "ELEMENT EXISTS")
+        && let Some((url, selector)) = consumer_url_and_selector(value)
+    {
+        return SuccessCondition::ElementExists { url, selector };
     }
     if let Some(value) = consumer_directive_value(trimmed, "SCREENSHOT MATCHES")
         && let Some((url, baseline)) = consumer_url_and_file_path(value)
@@ -1495,8 +1523,37 @@ fn consumer_url_and_file_path(value: &str) -> Option<(String, String)> {
     normalized_consumer_file_path(path.trim()).map(|path| (url.to_owned(), path))
 }
 
+fn consumer_url_and_selector(value: &str) -> Option<(String, String)> {
+    let value = value.trim();
+    let boundary = value.find(char::is_whitespace)?;
+    let (url, selector) = value.split_at(boundary);
+    let selector = selector.trim();
+    if selector.is_empty()
+        || selector.chars().count() > 512
+        || selector.chars().any(char::is_control)
+        || !url::Url::parse(url).is_ok_and(|value| {
+            matches!(value.scheme(), "http" | "https")
+                && value.username().is_empty()
+                && value.password().is_none()
+        })
+    {
+        return None;
+    }
+    Some((url.to_owned(), selector.to_owned()))
+}
+
 fn consumer_baseline_sha256(project_root: &str, relative: &str) -> Result<String, ApiError> {
-    let path = std::path::Path::new(project_root).join(relative);
+    let root = std::path::Path::new(project_root)
+        .canonicalize()
+        .map_err(|error| ApiError::bad_request(format!("resolve project root: {error}")))?;
+    let path = root.join(relative).canonicalize().map_err(|error| {
+        ApiError::bad_request(format!("resolve screenshot baseline {relative}: {error}"))
+    })?;
+    if !path.starts_with(&root) {
+        return Err(ApiError::bad_request(
+            "screenshot baseline resolves outside the selected project",
+        ));
+    }
     let mut file = std::fs::File::open(&path).map_err(|error| {
         ApiError::bad_request(format!(
             "open screenshot baseline {}: {error}",
@@ -1529,6 +1586,45 @@ fn consumer_baseline_sha256(project_root: &str, relative: &str) -> Result<String
         digest.update(&buffer[..read]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn consumer_browser_workflow(
+    project_root: &str,
+    relative: &str,
+) -> Result<(BrowserWorkflowDocument, String), ApiError> {
+    let root = std::path::Path::new(project_root)
+        .canonicalize()
+        .map_err(|error| ApiError::bad_request(format!("resolve project root: {error}")))?;
+    let path = root.join(relative).canonicalize().map_err(|error| {
+        ApiError::bad_request(format!("resolve browser workflow {relative}: {error}"))
+    })?;
+    if !path.starts_with(&root) {
+        return Err(ApiError::bad_request(
+            "browser workflow resolves outside the selected project",
+        ));
+    }
+    let metadata = path.metadata().map_err(|error| {
+        ApiError::bad_request(format!(
+            "inspect browser workflow {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() > 1_048_576 {
+        return Err(ApiError::bad_request(
+            "browser workflow must be a regular JSON file no larger than 1 MiB",
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        ApiError::bad_request(format!("read browser workflow {}: {error}", path.display()))
+    })?;
+    let document = serde_json::from_slice::<BrowserWorkflowDocument>(&bytes).map_err(|error| {
+        ApiError::bad_request(format!(
+            "parse browser workflow {}: {error}",
+            path.display()
+        ))
+    })?;
+    document.validate().map_err(ApiError::bad_request)?;
+    Ok((document, format!("{:x}", Sha256::digest(bytes))))
 }
 
 async fn get_agent_run(
@@ -2244,6 +2340,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table documents every accepted and rejected directive.
     fn consumer_condition_parser_requires_exact_safe_syntax() {
         assert_eq!(
             parse_consumer_success_condition("  HTTP 404 https://example.test/health?full=1  "),
@@ -2256,6 +2353,15 @@ mod tests {
             parse_consumer_success_condition("PAGE RENDERS https://example.test/app"),
             SuccessCondition::PageRenders {
                 url: "https://example.test/app".into(),
+            }
+        );
+        assert_eq!(
+            parse_consumer_success_condition(
+                "ELEMENT EXISTS https://example.test/app main [data-ready='true']"
+            ),
+            SuccessCondition::ElementExists {
+                url: "https://example.test/app".into(),
+                selector: "main [data-ready='true']".into(),
             }
         );
         assert_eq!(
@@ -2283,6 +2389,16 @@ mod tests {
         );
         assert_eq!(
             parse_consumer_success_condition(
+                r"BROWSER WORKFLOW tests\browser\consumer-journey.json"
+            ),
+            SuccessCondition::BrowserWorkflow {
+                name: String::new(),
+                path: "tests/browser/consumer-journey.json".into(),
+                expected_sha256: String::new(),
+            }
+        );
+        assert_eq!(
+            parse_consumer_success_condition(
                 "SCREENSHOT MATCHES https://example.test/app tests/baselines/home page.png"
             ),
             SuccessCondition::ScreenshotMatches {
@@ -2305,6 +2421,10 @@ mod tests {
             "PAGE RENDERS https://user:secret@example.test",
             "PAGE RENDERS file:///tmp/page.html",
             "PAGE RENDERS https://example.test extra",
+            "ELEMENT EXISTS https://user:secret@example.test #app",
+            "ELEMENT EXISTS file:///tmp/page.html #app",
+            "ELEMENT EXISTS https://example.test",
+            "ELEMENT EXISTS https://example.test #app\nbutton",
             "FILE EXISTS ../escape.txt",
             "FILE EXISTS /absolute/result.txt",
             "FILE EXISTS C:\\absolute\\result.txt",
@@ -2316,6 +2436,11 @@ mod tests {
             "RESEARCH EVIDENCE C:\\absolute\\report.json",
             "RESEARCH EVIDENCE reports/./answer.json",
             "RESEARCH EVIDENCE ",
+            "BROWSER WORKFLOW ../escape.json",
+            "BROWSER WORKFLOW /absolute/workflow.json",
+            "BROWSER WORKFLOW C:\\absolute\\workflow.json",
+            "BROWSER WORKFLOW tests/./workflow.json",
+            "BROWSER WORKFLOW ",
             "SCREENSHOT MATCHES https://user:secret@example.test baseline.png",
             "SCREENSHOT MATCHES file:///tmp/page.html baseline.png",
             "SCREENSHOT MATCHES https://example.test ../baseline.png",
@@ -4911,11 +5036,44 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("provider");
         let target = format!("{}/render", objective_http_fixture().await);
+        let workflow_directory = project_root.join("tests/browser");
+        std::fs::create_dir_all(&workflow_directory).expect("workflow directory");
+        let workflow_document = BrowserWorkflowDocument {
+            schema_version: mcg_tools::BROWSER_WORKFLOW_SCHEMA_VERSION,
+            name: "hydrated application".into(),
+            start_url: target.clone(),
+            steps: vec![
+                mcg_tools::BrowserWorkflowStep::AssertElement {
+                    selector: "#app".into(),
+                },
+                mcg_tools::BrowserWorkflowStep::AssertText {
+                    selector: "#app".into(),
+                    contains: "Rendered by JavaScript".into(),
+                },
+                mcg_tools::BrowserWorkflowStep::AssertUrl {
+                    url: target.clone(),
+                },
+            ],
+        };
+        let workflow_json =
+            serde_json::to_string_pretty(&workflow_document).expect("workflow JSON");
+        std::fs::write(
+            workflow_directory.join("hydrated-application.json"),
+            &workflow_json,
+        )
+        .expect("workflow file");
+        let workflow_sha = format!("{:x}", Sha256::digest(workflow_json.as_bytes()));
         let mut task = TaskEnvelope::new("Render the JavaScript application");
         task.project_id = Some(project.project_id);
-        task.success_conditions = vec![format!("PAGE RENDERS {target}")];
+        task.success_conditions = vec![
+            format!("PAGE RENDERS {target}"),
+            format!("ELEMENT EXISTS {target} #app"),
+            "BROWSER WORKFLOW tests/browser/hydrated-application.json".into(),
+        ];
         runtime.create_task(&task).expect("task");
-        let response = router(runtime.clone())
+        let app = router(runtime.clone());
+        let response = app
+            .clone()
             .oneshot(
                 authorized(Request::post(format!("/api/v1/tasks/{}/launch", task.id)))
                     .header("content-type", "application/json")
@@ -4966,6 +5124,39 @@ form.addEventListener('submit', (event) => {
         );
         assert_eq!(report.evidence[0].method, "governed_browser_render");
         assert!(report.evidence[0].artifact_sha256.is_some());
+        assert_eq!(
+            report.conditions[1].condition,
+            SuccessCondition::ElementExists {
+                url: target.clone(),
+                selector: "#app".into(),
+            }
+        );
+        assert!(report.conditions[1].passed);
+        assert!(
+            report.conditions[1]
+                .detail
+                .contains("browser.element_exists=true:selector=#app; matches=1")
+        );
+        assert_eq!(report.evidence[1].method, "governed_browser_element");
+        assert!(report.evidence[1].artifact_sha256.is_some());
+        assert!(matches!(
+            &report.conditions[2].condition,
+            SuccessCondition::BrowserWorkflow {
+                name,
+                path,
+                expected_sha256,
+            } if name == "hydrated application"
+                && path == "tests/browser/hydrated-application.json"
+                && expected_sha256 == &workflow_sha
+        ));
+        assert!(report.conditions[2].passed);
+        assert_eq!(report.evidence[2].method, "governed_browser_workflow");
+        assert!(report.evidence[2].artifact_sha256.is_some());
+        assert!(
+            report.conditions[2]
+                .detail
+                .contains("Browser workflow hydrated application passed")
+        );
         let audit = runtime.tool_audit(task.id).expect("browser audit");
         assert!(audit.iter().any(|record| {
             record.phase == ToolAuditPhase::Completion
@@ -4973,6 +5164,47 @@ form.addEventListener('submit', (event) => {
                 && record.result == Some(ToolOutcomeStatus::Succeeded)
                 && record.artifacts.len() == 2
         }));
+        assert!(audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "browser.element_exists"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+                && record.artifacts.len() == 2
+        }));
+        assert!(audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "browser.workflow"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+                && record.artifacts.len() == 3
+        }));
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+
+        let mut missing_task = TaskEnvelope::new("Reject a missing browser workflow");
+        missing_task.project_id = Some(project.project_id);
+        missing_task.success_conditions =
+            vec!["BROWSER WORKFLOW tests/browser/missing.json".into()];
+        runtime.create_task(&missing_task).expect("missing task");
+        let missing = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    missing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&LaunchTaskRequest {
+                        target_path: None,
+                        context_token_budget: 2_048,
+                        requested_tools: Vec::new(),
+                        estimated_output_tokens: 512,
+                        max_model_calls: 4,
+                    })
+                    .expect("launch body"),
+                ))
+                .expect("request"),
+            )
+            .await
+            .expect("missing workflow response");
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
         assert_eq!(model_calls.load(Ordering::SeqCst), 2);
     }
 

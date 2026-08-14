@@ -388,8 +388,11 @@ pub enum SuccessCondition {
     },
     BrowserWorkflow {
         name: String,
+        path: String,
+        expected_sha256: String,
     },
     ElementExists {
+        url: String,
         selector: String,
     },
     ScreenshotMatches {

@@ -587,6 +587,8 @@ mod tests {
             RoleKind::ToolWorker,
             vec![SuccessCondition::BrowserWorkflow {
                 name: "consumer journey".into(),
+                path: "tests/browser/consumer-journey.json".into(),
+                expected_sha256: "0".repeat(64),
             }],
         );
         browser.dependencies.push(implementation.id);

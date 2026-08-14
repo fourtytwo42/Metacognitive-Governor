@@ -75,6 +75,11 @@ substitute. The fixture requires JavaScript-mutated DOM/title evidence, HTML and
 artifacts, exact-origin GET/HEAD confinement, and blocked cross-origin/mutating
 requests. Owner-machine verification installs Chromium before Rust tests and passes
 its local path through `MCG_BROWSER_EXECUTABLE`; runtime never performs that download.
+Element/workflow fixtures additionally cover hydrated selector pass/failure, exact
+workflow syntax and size bounds, immutable file binding, typed interaction order,
+same-origin URL assertions, retained JSON/HTML/PNG artifacts, and terminal replay.
+Negative cases reject unsafe keys, cross-origin destinations, downloads, new browser
+contexts, mutating forms, fabricated text, and post-binding workflow mutation.
 File-objective fixtures cover cross-platform relative-path parsing, traversal and
 absolute-path rejection, regular-file-only enforcement, bounded streaming capture,
 binary digest/size evidence, deduplication, missing files, and audit. Custom command

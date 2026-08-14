@@ -135,6 +135,19 @@ post-render HTML and a viewport PNG as content-addressed artifacts, and records 
 screenshot hash in evaluation evidence. Missing local browser runtime is inconclusive
 and blocks for setup/retry; a browser that launches but cannot render the page fails
 the objective.
+
+`ELEMENT EXISTS URL selector` uses the same browser boundary but adds a bounded CSS
+selector assertion after hydration. `BROWSER WORKFLOW project/relative/file.json`
+binds a versioned JSON workflow and SHA-256 before model work. Evaluation first
+re-reads the file through project-scoped filesystem authority and rejects any byte,
+artifact, name, or parsed-document mismatch. Its interpreter supports only bounded
+element/text/URL assertions plus click, type, and allowlisted key presses; arbitrary
+JavaScript is not a workflow operation. Every asserted URL and post-step page URL
+must remain on the start origin. Request interception permits only same-origin
+GET/HEAD plus `data:`/`blob:` resources, while interaction inspection rejects
+downloads, new contexts, cross-origin destinations, and non-GET forms. Final JSON,
+HTML, PNG, and ordered step evidence are content-addressed and audited.
+
 On Ubuntu with restricted unprivileged user namespaces, the Linux package places its
 browser at a root-owned stable path and installs the repository's path-specific
 AppArmor profile granting `userns` to that executable. Development and release gates
