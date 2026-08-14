@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Cross-platform qualify the integrated watched-work approval/restart/exactly-once scenario as M7 exit evidence.
-- Last meaningful change: A guided project-file watch now has one end-to-end fixture proving baseline/change admission, provider checkpoint, safe approval pause, runtime reopen, exact resume, three single-execution objective checks, occurrence reconciliation, retained notification/history, and no duplicate task/model work.
-- Next step: Commit and push the M7 exit scenario, run the complete exact-commit Ubuntu gate, then begin M8 expanded execution-plane work. Preserve the visible OAuth handoff.
+- Current task: Begin M8 expanded execution-plane work after completing M7 scheduler and durable-autonomy exit evidence at exact implementation commit `6dd62b3`.
+- Last meaningful change: A guided project-file watch has a cross-platform end-to-end fixture proving baseline/change admission, provider checkpoint, safe approval pause, runtime reopen, exact resume, three single-execution objective checks, occurrence reconciliation, retained notification/history, and no duplicate task/model work.
+- Next step: Audit existing browser/computer/sites/remote-tool foundations against M8 and implement the next dependency-ordered platform capability/session contract. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -134,7 +134,8 @@ When sources conflict, use this order:
 
 ## Verification Ledger
 
-- 2026-08-14: The M7 integrated watched-work exit scenario passed the complete available Windows Rust lane while visible OAuth processes remained untouched: 39 API tests plus all unlocked workspace suites, strict all-feature/all-target clippy, real Chromium, and live GPU45. The new fixture proves approval/restart recovery and one-time side effects at the actual scheduler-to-consumer boundary; exact-commit Ubuntu qualification is pending.
+- 2026-08-14: Exact M7 exit implementation commit `6dd62b3` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 308 seconds with `.qualified-commit=6dd62b38fdac16dd095412cd35ff0735fec504e0` and `verify-final.exit=0`: all Rust suites including 39 API tests with the integrated watched-work approval/restart/exactly-once scenario, 19 storage, 39 governed-tool, daemon restart, real Chromium, and live GPU45; native Tauri/GTK; docs; typecheck; 12 Vitest tests; production build; and two Playwright flows. The exact predecessor marker was verified and only its 14.8 GiB regenerable target cache was cleaned before the run, leaving adequate packaging headroom. No GitHub-hosted compute ran.
+- 2026-08-14: The M7 integrated watched-work exit scenario passed the complete available Windows Rust lane while visible OAuth processes remained untouched: 39 API tests plus all unlocked workspace suites, strict all-feature/all-target clippy, real Chromium, and live GPU45. The new fixture proves approval/restart recovery and one-time side effects at the actual scheduler-to-consumer boundary.
 - 2026-08-14: Exact idempotent scheduler/MCP implementation commit `86e54b1` passed complete owner-controlled Ubuntu `./scripts/verify.sh` with `.qualified-commit=86e54b1cd02542f951a0b80773229f0af90113ca` and `verify-final.exit=0`: all Rust suites including 38 API, 19 storage, daemon restart, real Chromium, and live GPU45; native Tauri/GTK; docs; typecheck; 12 Vitest tests; production build; and two Playwright flows. The first native packaging attempt ran out of disk only after every Rust/frontend test passed; the predecessor `a1ea1d4` qualification marker and zero exit were verified, only its regenerable 14.8 GiB Rust target cache was cleaned, and the complete rerun passed in 40 seconds. No GitHub-hosted compute ran.
 - 2026-08-14: Schedule idempotency/MCP checkpoint passed the complete available Windows lane while the visible OAuth daemon/desktop remained untouched: strict all-feature/all-target clippy; broad unlocked Rust suites including 38 API, 19 storage, 39 governed-tool, real Chromium, and live GPU45 tests; two real daemon restart tests in an isolated target; docs, typecheck, 12 Vitest tests, production build, and two Playwright flows. REST requires caller identity and distinguishes `201` creation from `200` replay; MCP invalid budget shapes/bounds fail closed. The isolated 3.9 GiB target cache was cleaned.
 - 2026-08-14: Exact M7 trigger/dashboard commit `a1ea1d4` passed complete owner-controlled Ubuntu `./scripts/verify.sh` with `.qualified-commit=a1ea1d481de2f3db1515a751f3e79df77539bb49` and `verify-final.exit=0`: all Rust suites including 36 API, 19 storage, daemon restart, and live GPU45; native Tauri/GTK; docs; frontend typecheck, 11 Vitest tests, production build, and two Playwright tests. The first native packaging attempt exhausted disk after all Rust tests; the verified `9d0af9d` snapshot marker was checked and only its regenerable 14.1 GiB Rust target cache was cleaned, after which the full gate passed. No GitHub-hosted compute ran.
@@ -637,8 +638,8 @@ When sources conflict, use this order:
 - Decision: Add a real guided file-watch fixture that triggers one scheduled consumer task, checkpoints provider work at owner approval, approves the exact discovered checks, reopens the runtime, resumes without another model call, executes each check once, reconciles the original occurrence, retains completion notification/history, and proves a later tick admits nothing.
 - Files: `crates/mcg-api/src/lib.rs`, `docs/testing/strategy.md`.
 - Commands/tests: Focused scenario, strict workspace clippy, documentation validation, and the broad Windows Rust lane with real Chromium/live GPU45 are green.
-- Result: M7's restart/no-duplicate-side-effect/approval-boundary exit invariant is proven end to end on Windows.
-- Follow-up: Exact-commit Ubuntu qualification, then begin M8.
+- Result: M7's restart/no-duplicate-side-effect/approval-boundary exit invariant is proven end to end on Windows and exact-commit Ubuntu at `6dd62b3`.
+- Follow-up: Begin M8 expanded execution-plane work.
 
 ## Known Issues
 
@@ -656,6 +657,7 @@ When sources conflict, use this order:
 - 2026-08-14: Completed and verified M2 provider fabric on Windows and Ubuntu, including standalone OAuth fixtures and live GPU45 conformance on both platforms.
 - 2026-08-14: Completed and verified M3 typed tools, constitutional capability enforcement, durable approvals/leases/audit/artifacts, worktree isolation, API/CLI control surfaces, and adversarial cross-platform qualification on Windows and Ubuntu.
 - 2026-08-14: Completed and verified M4 project discovery, target-scoped instruction resolution, polling invalidation, bounded context assembly, immutable snapshots, and versioned provenance-bearing memory across Windows and Ubuntu, including real daemon/CLI restart workflows.
+- 2026-08-14: Completed and verified M7 scheduler and durable autonomy across Windows and Ubuntu: all trigger families, leases/restart recovery, notifications/history/UI, bounded unattended policy, caller-idempotent creation across first-party/MCP interfaces, and an integrated watched-work approval/restart scenario proving no duplicate model/tool side effects.
 
 ## Open Follow-ups
 
