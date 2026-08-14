@@ -7,7 +7,7 @@ Durable project context lives here. Update this file whenever information should
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The modern MCP server foundation now exposes authenticated read-only status, project, bounded-context, and memory tools alongside the OpenAI-compatible proxy.
 - Last meaningful change: Added stateless MCP `2026-07-28` `POST /mcp` with `server/discover`, deterministic `tools/list`, `tools/call`, strict mirrored-header checks, pre-auth loopback-Origin validation, private cache hints, and structured tool results. MCP client and governed `mcg_run_agent` work remain.
-- Next step: Qualify the exact MCP server checkpoint on Ubuntu, then implement governed `mcg_run_agent` and the MCP client/configuration boundary while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
+- Next step: Implement governed `mcg_run_agent` and the MCP client/configuration boundary while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
 - Blockers: None documented.
 
 ## Current State
@@ -165,6 +165,7 @@ When sources conflict, use this order:
 - 2026-08-14: Initial M6 OpenAI-compatible proxy checkpoint (full cross-platform qualification pending) added authenticated `/v1/models`, `/v1/responses`, and `/v1/chat/completions`; deterministic alias/capability/cost/local routing; bounded retriable fallback; Responses and Chat buffered/stream normalization; Chat `[DONE]`; usage and physical-route evidence; standard null-content tool history; caller-owned function-call passthrough; and fail-closed `host::`/`mcg::` handling. Three proxy tests plus strict API/provider/runtime clippy and 43 focused tests passed on Windows while the OAuth UAT app remained open.
 - 2026-08-14: Exact provider-proxy commit `ba8580b` passed complete owner-controlled Ubuntu `scripts/verify.sh`: all strict Rust/workspace tests including 16 API/proxy tests and live GPU45, documentation, frontend checks/build, native Linux Tauri build, and Playwright passed. Windows full verification remains deferred only to preserve the still-visible owner OAuth handoff; its focused proxy checks are green.
 - 2026-08-14: Initial MCP server checkpoint passed Windows focused qualification: 19 `mcg-api` tests, strict full-workspace clippy with warnings denied, formatting, docs validation, and diff hygiene. Contract evidence covers pre-auth hostile-Origin rejection, auth, mirrored-header mismatch, modern discovery, stable tools, status, exact project query, bounded context, memory search, structured results, and encoded `Mcp-Name`. Full workspace tests reached only the expected Windows access-denied replacement of the live `mcg-daemon.exe`; PIDs 85024/74436 remained active and provider listing was still empty, so the visible uncompleted OAuth handoff was preserved. Ubuntu qualification is next.
+- 2026-08-14: Exact MCP server commit `63d3dd4` passed complete owner-controlled Ubuntu `scripts/verify.sh` from a fresh Git archive: strict full-workspace Rust checks/tests including 19 API/MCP tests and live GPU45, documentation, frontend type/unit/build, native Linux Tauri debug build, and Playwright all passed in 215 seconds. No GitHub-hosted automation ran. The fresh mirror is `/home/hendo420/mcg-worktree-63d3dd4`; the older canonical mirror was left untouched because destructive replacement was denied.
 
 ## Decisions
 
@@ -358,7 +359,7 @@ When sources conflict, use this order:
 - Files: `crates/mcg-api/src/mcp.rs`, `crates/mcg-api/src/lib.rs`, `crates/mcg-api/Cargo.toml`, `docs/architecture/mcp.md`, `README.md`.
 - Commands/tests: `cargo test -p mcg-api`; `cargo clippy -p mcg-api --all-targets -- -D warnings`; `cargo fmt --all`; `npm run check:docs`; `git diff --check`.
 - Result: Nineteen API tests pass on Windows. Four deterministic tools return structured/private-cache results and hostile Origins, malformed/mismatched mirrored headers, unknown tools, invalid inputs, and internal read failures fail without side effects or credential exposure.
-- Follow-up: Pass the exact checkpoint on Ubuntu, then add governed `mcg_run_agent`, MCP client configuration/discovery/namespace/policy execution, interoperability fixtures, and both-platform UAT.
+- Follow-up: Add governed `mcg_run_agent`, MCP client configuration/discovery/namespace/policy execution, interoperability fixtures, and both-platform UAT.
 
 ## Known Issues
 
