@@ -106,6 +106,7 @@ When sources conflict, use this order:
 - 2026-08-14: `cargo test --workspace` passed 8 initial tests covering task serialization, defaults, policy invariants, auth billing modes, SQLite migration/event append, and API health.
 - 2026-08-14: Frontend typecheck, Vitest (1 test), Vite production build, documentation/link validation, and Playwright E2E (1 test) passed.
 - 2026-08-14: Live daemon/CLI smoke test passed for health, human status, and JSON status; the exact temporary daemon process was stopped afterward.
+- 2026-08-14: The first GitHub Actions frontend run exposed non-deterministic workspace dependency placement: Vitest was hoisted while the explicit jsdom dependency was nested. Moved jsdom 29.1.1 to the root workspace, verified a clean `npm ci`, Vitest, and Playwright run, and updated checkout/setup-node to their current v7 major releases.
 
 ## Decisions
 
@@ -130,6 +131,15 @@ When sources conflict, use this order:
 - Commands/tests: Rust check/fmt/clippy/test; npm documentation/typecheck/unit/build/E2E; live daemon/CLI smoke.
 - Result: M0 foundation is compilable, tested, and ready for durable M1 behavior.
 - Follow-up: Build M1 runtime spine without collapsing established interface boundaries.
+
+### 2026-08-14 - Deterministic Frontend Test Runtime
+
+- Context: GitHub Actions run `31771792457` failed on Ubuntu because root-hoisted Vitest could not resolve workspace-nested jsdom; the same test passed on Windows due to a differently resolved optional dependency.
+- Decision: Declare jsdom at the npm workspace root and rely on the lockfile rather than Vitest's optional peer installation.
+- Files: `package.json`, `apps/desktop/package.json`, `package-lock.json`, `.github/workflows/ci.yml`.
+- Commands/tests: Clean `npm ci`, `npm run test`, and `npm run test:e2e` passed locally.
+- Result: Frontend unit-test environment installation is deterministic across supported CI platforms.
+- Follow-up: Verify the replacement GitHub Actions run is fully green.
 
 ## Known Issues
 
