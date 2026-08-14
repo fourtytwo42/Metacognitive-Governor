@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M3 typed tools, capabilities, and approvals is complete and qualified on Windows and Ubuntu. M4 projects, context, and durable memory is next.
-- Last meaningful change: Pushed M3 implementation checkpoint `ec065d8` and passed the complete owner-machine verifier on the identical source revision on Windows and Ubuntu.
-- Next step: Design and implement M4 project discovery, instruction/context assembly, file invalidation, provenance-bearing claims, and permission-aware durable memory.
+- Current task: M4 projects, context, and durable memory is in progress; its versioned contracts, deterministic discovery, instruction conflict resolution, context compression, invalidation, and memory lifecycle foundation pass workspace tests/lints on Windows.
+- Last meaningful change: Added the `mcg-projects` crate with fixture-tested project models and provenance-bearing claims after closing cross-platform M3.
+- Next step: Persist project snapshots and claim version history in SQLite, expose scoped runtime/API/CLI operations, then qualify restart/correction scenarios on Windows and Ubuntu.
 - Blockers: None documented.
 
 ## Current State
@@ -100,6 +100,7 @@ When sources conflict, use this order:
 - The M1 event log is authoritative; task projections are written in the same SQLite transaction and rebuilt by validated replay at daemon startup.
 - The local API rejects non-loopback binds. All routes except health require a generated persistent bearer token; SSE reconnects can replay from `after` or `Last-Event-ID`.
 - M3 implements typed filesystem, process/shell, HTTP/download, system, Git/worktree/patch, and memory primitives behind one policy broker. SQLite durably stores approval state, execution leases, immutable tool audit, artifact registrations, and associated task events.
+- M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
 - M3 policy evaluates canonical resources, not prompt claims. Invalid or weakened owner constitutions fail closed on every broker request; audit and secret-isolation requirements cannot be disabled. Denied or approval-pending requests are audited before return and never reach a host executor.
@@ -134,6 +135,7 @@ When sources conflict, use this order:
 - 2026-08-14: Fixed `scripts/verify.ps1` to check every native command's `$LASTEXITCODE`. The prior script could print Cargo failures but still return success; the repaired script immediately exposed a missing test import and a fixed-delay process-test race, both of which were corrected.
 - 2026-08-14: The repaired complete Windows verifier passed Rust format/clippy/workspace tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E for the implementation-complete M3 revision.
 - 2026-08-14: Synchronized commit `ec065d8` to the owner-controlled Ubuntu 24.04 VM and passed `scripts/verify.sh`: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. No GitHub-hosted automation ran.
+- 2026-08-14: M4 foundation added 6 tests for stable fixture discovery, Git-root resolution, instruction precedence/conflict surfacing, protected context compression, correction-driven durability, and secret-namespace rejection. Full Rust workspace tests and clippy with warnings denied passed on Windows.
 
 ## Decisions
 
@@ -220,6 +222,15 @@ When sources conflict, use this order:
 - Commands/tests: Five repeated process lifecycle tests and `scripts/verify.ps1` passed on Windows; `scripts/verify.sh` passed on Ubuntu for the identical `ec065d8` archive.
 - Result: All M3 primitive families and durable control surfaces are implemented and qualified on both initially supported platforms, including native desktop and E2E checks.
 - Follow-up: Begin M4 projects, context, and durable memory.
+
+### 2026-08-14 - M4 Project Intelligence Foundation
+
+- Context: Project discovery, context, and memory need stable contracts before storage or interface adapters can safely depend on them.
+- Decision: Create a dedicated `mcg-projects` crate. Snapshot only bounded non-symlink project inputs; resolve known instruction families with explicit precedence and scope; preserve goals/constraints/evidence before transcript during context compression; represent every durable claim with provenance, confidence, freshness, lifecycle state, and version linkage. Secret-like namespaces fail closed.
+- Files: `crates/mcg-projects/`, `crates/mcg-domain/src/lib.rs`, `Cargo.toml`.
+- Commands/tests: `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `git diff --check`.
+- Result: Six new deterministic tests and all prior workspace tests pass on Windows.
+- Follow-up: Add SQLite project/claim persistence and authenticated runtime/API/CLI integration.
 
 ## Known Issues
 
