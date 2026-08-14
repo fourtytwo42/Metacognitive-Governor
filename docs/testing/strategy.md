@@ -62,6 +62,9 @@ The first real-project suite includes:
 - restart the daemon during a long task and resume without duplicate modifications;
 - restart while a guided objective batch awaits approval and resume without a
   repeated model call, completed check, or broadened command authority;
+- trigger a project-file watch in guided mode, restart after exact approval,
+  resume the original task/occurrence, execute each discovered objective check
+  once, retain terminal notification/history, and admit no duplicate task;
 - restart while local or external MCP work awaits approval and prove the exact
   pinned continuation runs without replaying the paid provider response or
   duplicating the governed side effect;

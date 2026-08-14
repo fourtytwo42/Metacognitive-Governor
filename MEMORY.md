@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Continue broader M7 exit scenarios after cross-platform qualification of caller-owned idempotent scheduling and MCP `scheduler.create/list/remove` at exact implementation commit `86e54b1`.
-- Last meaningful change: REST, CLI, desktop, and MCP schedule creation share exact-definition replay/conflict semantics; the desktop retains identity through a failed response, CLI accepts `--schedule-id`, and the complete Windows/Ubuntu gates are green.
-- Next step: Audit the remaining M7 milestone/PRD exit scenarios and implement the next dependency-ordered scheduling/evaluation/recovery gap. Preserve the visible OAuth handoff.
+- Current task: Cross-platform qualify the integrated watched-work approval/restart/exactly-once scenario as M7 exit evidence.
+- Last meaningful change: A guided project-file watch now has one end-to-end fixture proving baseline/change admission, provider checkpoint, safe approval pause, runtime reopen, exact resume, three single-execution objective checks, occurrence reconciliation, retained notification/history, and no duplicate task/model work.
+- Next step: Commit and push the M7 exit scenario, run the complete exact-commit Ubuntu gate, then begin M8 expanded execution-plane work. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -28,6 +28,7 @@ Durable project context lives here. Update this file whenever information should
 - Provider/tool turns checkpoint bounded credential-free private execution state after each provider response and before/after governed tool calls. Waiting local or external MCP authority survives restart only with a matching live checkpoint/approval/lease; resume continues the pinned conversation without replaying paid inference, and terminal authority removes the checkpoint atomically.
 - Migrations 13-14 store one-time/interval/UTC-cron/event/file-watch/adaptive-heartbeat definitions, occurrence history, subsystem wakes, and notifications. The daemon atomically admits one active occurrence per schedule, persists cursors/fingerprints, prevents self-trigger loops, immediately reclaims interrupted identity after restart, and dispatches through consumer launch. Preflight budget exhaustion and approval/manual-evaluation waits pause recurring admission; REST, CLI, Tauri, and the desktop dashboard expose creation, history, wake, notification, and state controls without deleting history.
 - Schedule creation accepts a caller-owned UUID and stores a server-generated SHA-256 definition hash. Exact retries replay one definition (`201` first REST call, `200` replay); changed input conflicts, duplicate storage insertion is atomic, malformed non-empty hashes fail closed, the desktop preserves identity across lost responses, CLI accepts optional `--schedule-id`, and MCP exposes authenticated create/list/remove tools that retain history.
+- M7 integrated exit evidence drives a real guided project-file watch through baseline/change, consumer provider work, exact objective approval, restart recovery, resume, three governed build/test/check executions, terminal occurrence reconciliation/notification, and an additional scheduler tick with one task, two model calls, and no duplicate tool completion.
 - Consumer plans whose conditions are entirely discovered build/test/static-analysis commands now execute those checks through the governed broker after independent Evaluator completion. Validated reports and completed/failed task/run projections commit atomically; terminal Start replay is observation-only.
 - Guided command evaluation stores its run/project/condition progress in SQLite and requests one approval for the immutable discovered batch. Denial blocks for bounded retry with a new request identity; approved work resumes across daemon restart without another provider turn or repeated completed check.
 - Advanced consumer condition lines accept exact `HTTP STATUS URL` syntax. Runtime grants only the parsed credential-free origin, performs a body-bounded governed GET, captures response bytes as an artifact, and compares observed status exactly; status mismatch, timeout, and connection failure become failed evaluation evidence.
@@ -133,6 +134,7 @@ When sources conflict, use this order:
 
 ## Verification Ledger
 
+- 2026-08-14: The M7 integrated watched-work exit scenario passed the complete available Windows Rust lane while visible OAuth processes remained untouched: 39 API tests plus all unlocked workspace suites, strict all-feature/all-target clippy, real Chromium, and live GPU45. The new fixture proves approval/restart recovery and one-time side effects at the actual scheduler-to-consumer boundary; exact-commit Ubuntu qualification is pending.
 - 2026-08-14: Exact idempotent scheduler/MCP implementation commit `86e54b1` passed complete owner-controlled Ubuntu `./scripts/verify.sh` with `.qualified-commit=86e54b1cd02542f951a0b80773229f0af90113ca` and `verify-final.exit=0`: all Rust suites including 38 API, 19 storage, daemon restart, real Chromium, and live GPU45; native Tauri/GTK; docs; typecheck; 12 Vitest tests; production build; and two Playwright flows. The first native packaging attempt ran out of disk only after every Rust/frontend test passed; the predecessor `a1ea1d4` qualification marker and zero exit were verified, only its regenerable 14.8 GiB Rust target cache was cleaned, and the complete rerun passed in 40 seconds. No GitHub-hosted compute ran.
 - 2026-08-14: Schedule idempotency/MCP checkpoint passed the complete available Windows lane while the visible OAuth daemon/desktop remained untouched: strict all-feature/all-target clippy; broad unlocked Rust suites including 38 API, 19 storage, 39 governed-tool, real Chromium, and live GPU45 tests; two real daemon restart tests in an isolated target; docs, typecheck, 12 Vitest tests, production build, and two Playwright flows. REST requires caller identity and distinguishes `201` creation from `200` replay; MCP invalid budget shapes/bounds fail closed. The isolated 3.9 GiB target cache was cleaned.
 - 2026-08-14: Exact M7 trigger/dashboard commit `a1ea1d4` passed complete owner-controlled Ubuntu `./scripts/verify.sh` with `.qualified-commit=a1ea1d481de2f3db1515a751f3e79df77539bb49` and `verify-final.exit=0`: all Rust suites including 36 API, 19 storage, daemon restart, and live GPU45; native Tauri/GTK; docs; frontend typecheck, 11 Vitest tests, production build, and two Playwright tests. The first native packaging attempt exhausted disk after all Rust tests; the verified `9d0af9d` snapshot marker was checked and only its regenerable 14.1 GiB Rust target cache was cleaned, after which the full gate passed. No GitHub-hosted compute ran.
@@ -628,6 +630,15 @@ When sources conflict, use this order:
 - Commands/tests: Focused Windows storage/API/MCP/CLI/desktop suites, TypeScript check, and strict all-feature/all-target clippy are green.
 - Result: Exact retries converge on one durable definition across REST, desktop, CLI scripts, and MCP; conflicting identities and malformed definition hashes fail closed. Windows and exact-commit Ubuntu gates are green at `86e54b1`.
 - Follow-up: Continue broader M7 exit scenarios.
+
+### 2026-08-14 - Integrated M7 Watched-Work Exit Scenario
+
+- Context: Scheduler restart identity, watch persistence, consumer checkpointing, governed objective checks, and approval safe-pause were each qualified separately, but M7 exit evidence needed one adversarial scenario spanning all boundaries.
+- Decision: Add a real guided file-watch fixture that triggers one scheduled consumer task, checkpoints provider work at owner approval, approves the exact discovered checks, reopens the runtime, resumes without another model call, executes each check once, reconciles the original occurrence, retains completion notification/history, and proves a later tick admits nothing.
+- Files: `crates/mcg-api/src/lib.rs`, `docs/testing/strategy.md`.
+- Commands/tests: Focused scenario, strict workspace clippy, documentation validation, and the broad Windows Rust lane with real Chromium/live GPU45 are green.
+- Result: M7's restart/no-duplicate-side-effect/approval-boundary exit invariant is proven end to end on Windows.
+- Follow-up: Exact-commit Ubuntu qualification, then begin M8.
 
 ## Known Issues
 

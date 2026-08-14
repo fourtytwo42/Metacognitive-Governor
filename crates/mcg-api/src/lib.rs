@@ -4733,6 +4733,228 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One watched-work approval/restart/exactly-once exit scenario.
+    async fn watched_guided_work_survives_restart_and_settles_side_effects_once() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("README.md"),
+            "# Watched restart fixture\n",
+        )
+        .expect("readme");
+        std::fs::write(project_root.join("signal.txt"), "baseline\n").expect("watch signal");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"build":"node build.mjs","test":"node test.mjs","check":"node check.mjs"}}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            project_root.join("build.mjs"),
+            "import { mkdirSync } from 'node:fs'; mkdirSync('dist', { recursive: true });\n",
+        )
+        .expect("build script");
+        std::fs::write(project_root.join("test.mjs"), "process.exit(0);\n").expect("test script");
+        std::fs::write(project_root.join("check.mjs"), "process.exit(0);\n").expect("check script");
+
+        let mut config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        config.autonomy = AutonomyPreset::Guided;
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("durable runtime"));
+        let token = std::fs::read_to_string(config.auth_token_path())
+            .expect("auth token")
+            .trim()
+            .to_owned();
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "watched_restart_fixture".into(),
+                    display_name: "Watched Restart Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let now = Utc::now();
+        let schedule = ScheduleDefinition {
+            schema_version: SCHEDULE_SCHEMA_VERSION,
+            id: ScheduleId::new(),
+            definition_hash: String::new(),
+            name: "watched guided verification".into(),
+            project_id: project.project_id,
+            goal: "Run watched project checks with durable owner approval".into(),
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: RiskLevel::Medium,
+            budget: TaskBudget {
+                max_tokens: Some(8_192),
+                max_cost_usd: Some(2.0),
+                max_duration_seconds: Some(600),
+            },
+            trigger: ScheduleTrigger::FileWatch {
+                relative_path: "signal.txt".into(),
+                poll_seconds: 10,
+            },
+            state: ScheduleState::Enabled,
+            next_run_at: None,
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+            watch_fingerprint: None,
+            last_watch_at: None,
+            last_event_sequence: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime.create_schedule(&schedule).expect("create watch");
+        assert!(
+            run_scheduler_tick_at(runtime.clone(), now)
+                .await
+                .expect("baseline tick")
+                .is_none()
+        );
+        std::fs::write(project_root.join("signal.txt"), "changed\n").expect("change signal");
+        let waiting = run_scheduler_tick_at(runtime.clone(), now + chrono::Duration::seconds(11))
+            .await
+            .expect("watch tick")
+            .expect("watch occurrence");
+        assert_eq!(waiting.state, ScheduleOccurrenceState::WaitingForApproval);
+        let task_id = waiting.task_id.expect("scheduled task");
+        let run_id = runtime
+            .task_launch_run_id(task_id)
+            .expect("launch id")
+            .expect("run identity");
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            runtime
+                .schedule(schedule.id)
+                .expect("schedule")
+                .expect("persisted schedule")
+                .state,
+            ScheduleState::Paused
+        );
+        let approval = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("pending approvals")
+            .pop()
+            .expect("objective approval");
+        let app = router(runtime.clone());
+        let approved = app
+            .oneshot(
+                Request::post(format!("/api/v1/approvals/{}/resolve", approval.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"state":"approved","reason":"approve exact watched checks"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("approve response");
+        assert_eq!(approved.status(), StatusCode::OK);
+        drop(runtime);
+
+        let reopened = Arc::new(AppRuntime::open(config).expect("reopen runtime"));
+        assert_eq!(
+            reopened
+                .agent_run_view(run_id)
+                .expect("recovered run")
+                .run
+                .state,
+            AgentRunState::Recovering
+        );
+        let resumed = router(reopened.clone())
+            .oneshot(
+                Request::post(format!("/api/v1/tasks/{task_id}/resume"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&LaunchTaskRequest {
+                            target_path: None,
+                            context_token_budget: 2_048,
+                            requested_tools: Vec::new(),
+                            estimated_output_tokens: 512,
+                            max_model_calls: 4,
+                        })
+                        .expect("resume body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("resume response");
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let resumed: LaunchTaskResponse = serde_json::from_slice(
+            &resumed
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("resume body");
+        assert_eq!(resumed.task.state, TaskState::Completed);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert!(
+            run_scheduler_tick_at(reopened.clone(), now + chrono::Duration::seconds(12))
+                .await
+                .expect("reconcile tick")
+                .is_none()
+        );
+        let history = reopened
+            .schedule_occurrences(schedule.id)
+            .expect("occurrence history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, waiting.id);
+        assert_eq!(history[0].state, ScheduleOccurrenceState::Completed);
+        assert_eq!(reopened.tasks().expect("tasks").len(), 1);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert!(
+            reopened
+                .approvals(Some(ApprovalState::Pending))
+                .expect("pending approvals")
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .consumer_evaluation_checkpoint(task_id)
+                .expect("evaluation checkpoint")
+                .is_none()
+        );
+        assert!(
+            reopened
+                .scheduler_notifications(false)
+                .expect("scheduler notifications")
+                .iter()
+                .any(|notification| {
+                    notification.schedule_id == schedule.id
+                        && notification.title == "Approved scheduled work completed"
+                })
+        );
+        assert_eq!(
+            reopened
+                .tool_audit(task_id)
+                .expect("tool audit")
+                .iter()
+                .filter(|record| record.phase == ToolAuditPhase::Completion)
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)] // One public launch/replay/retry/cancel scenario is intentional evidence.
     async fn consumer_launch_is_durable_idempotent_and_reports_missing_provider() {
         let directory = tempfile::tempdir().expect("temporary runtime");
