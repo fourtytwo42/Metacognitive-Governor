@@ -18,8 +18,8 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in active implementation. M0 through M6 have qualified core checkpoints,
-and M7 durable-autonomy work is active; the full vision remains in scope and is
+MCG is in active implementation. M0 through M7 have qualified core checkpoints,
+and M8 expanded execution-plane work is active; the full vision remains in scope and is
 delivered through tested, end-to-end milestones.
 
 Start with the [product requirements](MCG_PRD.md) and the
@@ -34,6 +34,7 @@ Implementation planning:
 - [M4 project intelligence and memory](docs/architecture/project-intelligence-memory.md)
 - [M5 agent organization and run evidence](docs/architecture/agent-organization.md)
 - [M6 MCP boundary](docs/architecture/mcp.md)
+- [M8 platform capabilities and sessions](docs/architecture/platform-sessions.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
@@ -100,6 +101,15 @@ existing definition, while reuse for different input fails instead of admitting
 duplicate or ambiguous unattended work. CLI creation commands accept
 `--schedule-id UUID` when a script or operator needs retry continuity across
 separate command invocations.
+
+Local browser and computer-use authority is exposed through the native
+Computer & Browser dashboard and `mcg platform`. Capability inventory is a
+privacy-safe observed snapshot, not an optimistic feature list. A caller-owned
+session UUID makes uncertain request retries idempotent across REST, CLI,
+desktop, and MCP. New records remain `requested` until a concrete executor is
+attached; daemon restart changes any live authority to `interrupted` rather than
+silently resuming control. `list`, `history`, and `close` retain the complete
+lifecycle. Persistent browser execution and owner handoff are the next M8 layer.
 
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can

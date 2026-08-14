@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   approveRequest,
   cancelOpenAiOAuth,
+  closePlatformSession,
   completeOpenAiOAuth,
   configureMcpConnection,
   configureProvider,
@@ -18,11 +19,14 @@ import {
   listSchedules,
   listSchedulerNotifications,
   listProjects,
+  listPlatformSessions,
   listTasks,
   launchTask,
   loadTaskAudit,
   loadTaskEvents,
   loadScheduleHistory,
+  loadPlatformCapabilities,
+  loadPlatformSessionHistory,
   type McpAuthMode,
   type McpListItem,
   type McpProtocolMode,
@@ -34,6 +38,10 @@ import {
   type ProviderKind,
   type ProviderListItem,
   type ProviderModel,
+  type PlatformCapabilitySnapshot,
+  type PlatformSession,
+  type PlatformSessionHistoryResponse,
+  type PlatformSessionKind,
   pickProjectDirectory,
   type ProjectModel,
   type RiskLevel,
@@ -43,6 +51,7 @@ import {
   type SchedulerNotification,
   retryTask,
   resumeTask,
+  requestPlatformSession,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
@@ -80,6 +89,10 @@ const SCHEDULE_EVENT_KINDS = [
 ] as const;
 
 function freshScheduleId(): string {
+  return crypto.randomUUID();
+}
+
+function freshPlatformSessionId(): string {
   return crypto.randomUUID();
 }
 
@@ -232,6 +245,15 @@ export function App() {
   const [scheduleModelCalls, setScheduleModelCalls] = useState("8");
   const [scheduleBusy, setScheduleBusy] = useState(false);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [platformCapabilities, setPlatformCapabilities] = useState<PlatformCapabilitySnapshot | null>(null);
+  const [platformSessions, setPlatformSessions] = useState<PlatformSession[]>([]);
+  const [platformHistory, setPlatformHistory] = useState<Record<string, PlatformSessionHistoryResponse | undefined>>({});
+  const [platformSessionId, setPlatformSessionId] = useState(freshPlatformSessionId);
+  const [platformName, setPlatformName] = useState("");
+  const [platformKind, setPlatformKind] = useState<PlatformSessionKind>("browser");
+  const [platformOrigins, setPlatformOrigins] = useState("");
+  const [platformBusy, setPlatformBusy] = useState(false);
+  const [platformError, setPlatformError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -283,6 +305,20 @@ export function App() {
       })
       .catch((error) => {
         if (active) setScheduleError(errorMessage(error));
+      });
+    loadPlatformCapabilities()
+      .then((snapshot) => {
+        if (active) setPlatformCapabilities(snapshot);
+      })
+      .catch((error) => {
+        if (active) setPlatformError(errorMessage(error));
+      });
+    listPlatformSessions()
+      .then((response) => {
+        if (active) setPlatformSessions(response.sessions);
+      })
+      .catch((error) => {
+        if (active) setPlatformError(errorMessage(error));
       });
     return () => {
       active = false;
@@ -801,6 +837,67 @@ export function App() {
     return `Heartbeat ${trigger.busy_seconds}s busy / ${trigger.idle_seconds}s idle`;
   }
 
+  function replacePlatformSession(session: PlatformSession) {
+    setPlatformSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+  }
+
+  async function reservePlatformSession() {
+    if (!platformName.trim()) {
+      setPlatformError("Name the session so it is easy to recognize.");
+      return;
+    }
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const session = await requestPlatformSession({
+        session_id: platformSessionId,
+        kind: platformKind,
+        project_id: selectedProject?.project_id,
+        display_name: platformName.trim(),
+        allowed_origins: platformKind === "browser"
+          ? platformOrigins.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+          : [],
+        lifetime_seconds: 3600
+      });
+      replacePlatformSession(session);
+      setPlatformName("");
+      setPlatformOrigins("");
+      setPlatformSessionId(freshPlatformSessionId());
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function closePlatform(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      replacePlatformSession(await closePlatformSession(sessionId, "Local owner closed the session from the desktop"));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function togglePlatformHistory(sessionId: string) {
+    if (platformHistory[sessionId]) {
+      setPlatformHistory((current) => ({ ...current, [sessionId]: undefined }));
+      return;
+    }
+    setPlatformBusy(true);
+    try {
+      const history = await loadPlatformSessionHistory(sessionId);
+      setPlatformHistory((current) => ({ ...current, [sessionId]: history }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -813,6 +910,7 @@ export function App() {
           <a className="nav-item" href="#projects">Projects</a>
           <a className="nav-item" href="#threads">Threads</a>
           <a className="nav-item" href="#scheduler">Scheduler</a>
+          <a className="nav-item" href="#platform">Computer & browser</a>
           <a className="nav-item" href="#providers">Providers</a>
           <a className="nav-item" href="#mcp">Tools</a>
         </nav>
@@ -998,6 +1096,78 @@ export function App() {
               </>
             )}
           </article>
+        </section>
+
+        <section className="panel scheduler-panel platform-panel" id="platform" aria-label="Computer and browser sessions">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">COMPUTER &amp; BROWSER</p>
+              <h2>Local execution sessions</h2>
+              <p className="muted">Reserve durable local sessions now. MCG reports them as requested until a real executor is attached.</p>
+            </div>
+            <span className="count-badge">{platformSessions.filter((session) => ["requested", "active", "handed_off"].includes(session.state)).length} open</span>
+          </div>
+          {platformCapabilities && <div className="evidence-overview" aria-label="Platform capabilities">
+            {platformCapabilities.capabilities
+              .filter((capability) => advanced || ["browser_automation", "computer_use", "native_desktop"].includes(capability.kind))
+              .map((capability) => <div key={capability.kind}>
+                <span>{capability.kind.replaceAll("_", " ")}</span>
+                <strong>{capability.availability}</strong>
+                {advanced && <small>{capability.detail}</small>}
+              </div>)}
+          </div>}
+          {advanced && platformCapabilities && <p className="muted">Host: {platformCapabilities.os} / {platformCapabilities.architecture} · observed {new Date(platformCapabilities.observed_at).toLocaleString()}</p>}
+          <div className="scheduler-layout">
+            <div className="schedule-composer">
+              <label>
+                Session type
+                <select value={platformKind} onChange={(event) => setPlatformKind(event.target.value as PlatformSessionKind)}>
+                  <option value="browser">Browser</option>
+                  <option value="computer_use">Computer use</option>
+                </select>
+              </label>
+              <label>
+                Name
+                <input value={platformName} onChange={(event) => setPlatformName(event.target.value)} placeholder="Research checkout options" />
+              </label>
+              {platformKind === "browser" && <label>
+                Allowed sites {advanced ? "(one origin per line)" : "(optional)"}
+                <textarea value={platformOrigins} onChange={(event) => setPlatformOrigins(event.target.value)} placeholder="https://example.com" />
+              </label>}
+              <p className="muted">Reservation is local and restart-safe. It will not be labeled active until MCG has attached a verified executor.</p>
+              <button className="primary" type="button" disabled={platformBusy} onClick={reservePlatformSession}>
+                {platformBusy ? "Saving..." : "Reserve session"}
+              </button>
+              {platformError && <p className="error-message" role="alert">{platformError}</p>}
+            </div>
+            <div className="schedule-list">
+              {platformSessions.length === 0 ? <p className="empty-state">No computer or browser sessions yet.</p> : platformSessions.map((session) => <article className="schedule-card" key={session.id}>
+                <div>
+                  <span className={`task-state state-${session.state}`}>{session.state.replaceAll("_", " ")}</span>
+                  <h3>{session.display_name}</h3>
+                  <p>{session.kind === "browser" ? "Browser session" : "Computer-use session"}</p>
+                  {session.state === "requested" && <small>Waiting for a verified executor</small>}
+                  {session.state === "interrupted" && <small>Interrupted at restart; authority was not silently resumed</small>}
+                  {advanced && <>
+                    <code>{session.id}</code>
+                    <small>Owner: {session.owner.replaceAll("_", " ")} · recovery count {session.recovery_count} · expires {new Date(session.expires_at).toLocaleString()}</small>
+                    {session.allowed_origins.map((origin) => <code key={origin}>{origin}</code>)}
+                  </>}
+                  {platformHistory[session.id] && <ol className="occurrence-list">
+                    {platformHistory[session.id]!.events.map((event) => <li key={event.id}>
+                      <span>{event.to_state.replaceAll("_", " ")}</span>
+                      <time>{new Date(event.occurred_at).toLocaleString()}</time>
+                      <small>{event.reason}</small>
+                    </li>)}
+                  </ol>}
+                </div>
+                <div className="task-actions">
+                  <button className="secondary" type="button" disabled={platformBusy} onClick={() => togglePlatformHistory(session.id)}>{platformHistory[session.id] ? "Hide history" : "History"}</button>
+                  {!(["closed", "failed"] as string[]).includes(session.state) && <button className="link-button" type="button" disabled={platformBusy} onClick={() => closePlatform(session.id)}>Close</button>}
+                </div>
+              </article>)}
+            </div>
+          </div>
         </section>
 
         <section className="panel scheduler-panel" id="scheduler" aria-label="Scheduler">

@@ -38,6 +38,20 @@ pub struct BrowserExecutor {
     filesystem: Option<Arc<FilesystemExecutor>>,
 }
 
+/// Reports whether the same browser configuration path used by the executor
+/// can resolve a local Chrome/Chromium runtime without launching it.
+#[must_use]
+pub fn browser_runtime_available(executable: Option<&std::path::Path>) -> bool {
+    let mut builder = BrowserConfig::builder();
+    if let Some(executable) = executable {
+        if !executable.is_file() {
+            return false;
+        }
+        builder = builder.chrome_executable(executable);
+    }
+    builder.build().is_ok()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RenderState {

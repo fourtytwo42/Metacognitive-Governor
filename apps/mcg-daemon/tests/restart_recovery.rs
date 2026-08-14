@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use mcg_api::{CreateTaskRequest, TaskEventsResponse, TaskMutationResponse};
+use mcg_api::{
+    CreatePlatformSessionRequest, CreateTaskRequest, PlatformSessionHistoryResponse,
+    TaskEventsResponse, TaskMutationResponse,
+};
 use mcg_config::AppConfig;
 use mcg_domain::{
-    ProjectId, RiskLevel, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, TaskBudget, TaskEnvelope,
+    PlatformSession, PlatformSessionId, PlatformSessionKind, PlatformSessionState, ProjectId,
+    RiskLevel, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrenceState,
+    ScheduleState, ScheduleTrigger, TaskBudget, TaskEnvelope,
 };
 use mcg_runtime::AppRuntime;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -150,6 +154,82 @@ async fn task_history_and_projection_survive_abrupt_daemon_restart() {
 
     assert_eq!(recovered, created.task);
     assert_eq!(history.events, vec![created.event]);
+    second_server.abort();
+    let _ = second_server.await;
+}
+
+#[tokio::test]
+async fn live_platform_authority_is_interrupted_with_history_after_daemon_restart() {
+    let directory = tempfile::tempdir().expect("temporary data directory");
+    let config = AppConfig::default().with_data_directory(directory.path());
+    let first_runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime should open"));
+    let token = first_runtime.auth().token_for_local_client().to_owned();
+    let (first_host, first_server) = start_server(first_runtime.clone()).await;
+    let client = reqwest::Client::new();
+    let session_id = PlatformSessionId::new();
+    let created: PlatformSession = client
+        .post(format!("{first_host}/api/v1/platform/sessions"))
+        .bearer_auth(&token)
+        .json(&CreatePlatformSessionRequest {
+            session_id,
+            kind: PlatformSessionKind::Browser,
+            project_id: None,
+            task_id: None,
+            display_name: "restart browser reservation".into(),
+            allowed_origins: vec!["https://example.com".into()],
+            lifetime_seconds: 3_600,
+        })
+        .send()
+        .await
+        .expect("request should complete")
+        .error_for_status()
+        .expect("request should succeed")
+        .json()
+        .await
+        .expect("session response should decode");
+    assert_eq!(created.state, PlatformSessionState::Requested);
+
+    first_server.abort();
+    let _ = first_server.await;
+    drop(first_runtime);
+
+    let second_runtime = Arc::new(AppRuntime::open(config).expect("runtime should recover"));
+    assert_eq!(second_runtime.status().recovered_platform_sessions, 1);
+    let (second_host, second_server) = start_server(second_runtime).await;
+    let recovered: PlatformSession = client
+        .get(format!(
+            "{second_host}/api/v1/platform/sessions/{session_id}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("get should complete")
+        .error_for_status()
+        .expect("get should succeed")
+        .json()
+        .await
+        .expect("session should decode");
+    let history: PlatformSessionHistoryResponse = client
+        .get(format!(
+            "{second_host}/api/v1/platform/sessions/{session_id}/history"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("history should complete")
+        .error_for_status()
+        .expect("history should succeed")
+        .json()
+        .await
+        .expect("history should decode");
+    assert_eq!(recovered.state, PlatformSessionState::Interrupted);
+    assert_eq!(recovered.recovery_count, 1);
+    assert_eq!(history.events.len(), 2);
+    assert_eq!(history.events[0].to_state, PlatformSessionState::Requested);
+    assert_eq!(
+        history.events[1].to_state,
+        PlatformSessionState::Interrupted
+    );
     second_server.abort();
     let _ = second_server.await;
 }

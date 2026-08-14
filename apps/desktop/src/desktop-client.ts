@@ -236,6 +236,64 @@ export interface SchedulerNotification {
 
 export interface SchedulerNotificationListResponse { notifications: SchedulerNotification[]; }
 
+export type PlatformCapabilityKind = "browser_automation" | "computer_use" | "native_desktop" | "ssh_client" | "sites";
+export type PlatformCapabilityAvailability = "available" | "unavailable" | "unsupported";
+export interface PlatformCapabilitySnapshot {
+  schema_version: number;
+  id: string;
+  os: string;
+  architecture: string;
+  capabilities: Array<{
+    kind: PlatformCapabilityKind;
+    availability: PlatformCapabilityAvailability;
+    detail: string;
+  }>;
+  observed_at: string;
+}
+
+export type PlatformSessionKind = "browser" | "computer_use";
+export type PlatformSessionState = "requested" | "active" | "handed_off" | "interrupted" | "closed" | "failed";
+export interface PlatformSession {
+  schema_version: number;
+  id: string;
+  definition_hash: string;
+  kind: PlatformSessionKind;
+  state: PlatformSessionState;
+  owner: "mcg" | "local_owner";
+  project_id?: string;
+  task_id?: string;
+  display_name: string;
+  allowed_origins: string[];
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+  closed_at?: string;
+  recovery_count: number;
+}
+
+export interface PlatformSessionEvent {
+  id: string;
+  session_id: string;
+  from_state?: PlatformSessionState;
+  to_state: PlatformSessionState;
+  owner: "mcg" | "local_owner";
+  reason: string;
+  occurred_at: string;
+}
+
+export interface CreatePlatformSessionRequest {
+  session_id: string;
+  kind: PlatformSessionKind;
+  project_id?: string;
+  task_id?: string;
+  display_name: string;
+  allowed_origins: string[];
+  lifetime_seconds: number;
+}
+
+export interface PlatformSessionListResponse { sessions: PlatformSession[]; }
+export interface PlatformSessionHistoryResponse { events: PlatformSessionEvent[]; }
+
 export interface TaskEventsResponse {
   events: Array<{
     sequence: number;
@@ -368,6 +426,26 @@ export function listTasks(): Promise<TaskListResponse> {
 
 export function listSchedules(): Promise<ScheduleListResponse> {
   return invoke("list_schedules");
+}
+
+export function loadPlatformCapabilities(): Promise<PlatformCapabilitySnapshot> {
+  return invoke("platform_capabilities");
+}
+
+export function listPlatformSessions(): Promise<PlatformSessionListResponse> {
+  return invoke("list_platform_sessions");
+}
+
+export function requestPlatformSession(request: CreatePlatformSessionRequest): Promise<PlatformSession> {
+  return invoke("request_platform_session", { request });
+}
+
+export function loadPlatformSessionHistory(sessionId: string): Promise<PlatformSessionHistoryResponse> {
+  return invoke("platform_session_history", { sessionId });
+}
+
+export function closePlatformSession(sessionId: string, reason: string): Promise<PlatformSession> {
+  return invoke("close_platform_session", { sessionId, request: { reason } });
 }
 
 export function createSchedule(request: CreateScheduleRequest): Promise<ScheduleDefinition> {

@@ -65,6 +65,8 @@ detailed in [`tool-policy-plane.md`](tool-policy-plane.md).
 The implemented M4 project discovery, scoped context, watches, and versioned
 memory are detailed in
 [`project-intelligence-memory.md`](project-intelligence-memory.md).
+The M8 host capability, durable session identity, custody, and restart rules are
+detailed in [`platform-sessions.md`](platform-sessions.md).
 Provider, tool, and storage implementations depend on domain contracts; runtime
 orchestrates them through traits. API clients never reach storage directly.
 
@@ -87,6 +89,7 @@ Initial route families:
 /api/v1/models/*
 /api/v1/approvals/*
 /api/v1/schedules/*
+/api/v1/platform/*
 /api/v1/organization/*
 /api/v1/events
 

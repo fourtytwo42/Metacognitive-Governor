@@ -1,13 +1,17 @@
 use mcg_api::{
-    ApprovalListResponse, CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest,
-    LaunchTaskRequest, LaunchTaskResponse, McpListResponse, ProjectListResponse,
-    ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionTaskRequest, WakeScheduleRequest,
+    ApprovalListResponse, ClosePlatformSessionRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest,
+    LaunchTaskResponse, McpListResponse, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SetScheduleStateRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
-use mcg_domain::{ScheduleDefinition, SchedulerNotification, TaskEnvelope};
+use mcg_domain::{
+    PlatformCapabilitySnapshot, PlatformSession, ScheduleDefinition, SchedulerNotification,
+    TaskEnvelope,
+};
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_providers::{ProviderConnection, ProviderModelCatalog};
@@ -289,6 +293,104 @@ async fn list_schedules() -> Result<ScheduleListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Schedule list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn platform_capabilities() -> Result<PlatformCapabilitySnapshot, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/platform/capabilities"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Platform capabilities could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Platform capability listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Platform capability response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_platform_sessions() -> Result<PlatformSessionListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/platform/sessions"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Platform sessions could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Platform session listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Platform session response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn request_platform_session(
+    request: CreatePlatformSessionRequest,
+) -> Result<PlatformSession, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/platform/sessions"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Platform session could not be requested: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Platform session request").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Platform session request response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn platform_session_history(
+    session_id: String,
+) -> Result<PlatformSessionHistoryResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{LOCAL_DAEMON}/api/v1/platform/sessions/{session_id}/history"
+        ))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Platform session history could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Platform session history").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Platform session history response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn close_platform_session(
+    session_id: String,
+    request: ClosePlatformSessionRequest,
+) -> Result<PlatformSession, String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/platform/sessions/{session_id}/close"
+        ))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Platform session could not be closed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Platform session close").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Platform session close response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -674,6 +776,11 @@ pub fn run() {
             configure_mcp_connection,
             discover_mcp_connection,
             list_schedules,
+            platform_capabilities,
+            list_platform_sessions,
+            request_platform_session,
+            platform_session_history,
+            close_platform_session,
             create_schedule,
             set_schedule_state,
             schedule_history,

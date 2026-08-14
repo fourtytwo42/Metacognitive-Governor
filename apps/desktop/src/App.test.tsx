@@ -32,7 +32,12 @@ const client = vi.hoisted(() => ({
   scheduleHistory: vi.fn(),
   wakeSchedule: vi.fn(),
   listSchedulerNotifications: vi.fn(),
-  acknowledgeSchedulerNotification: vi.fn()
+  acknowledgeSchedulerNotification: vi.fn(),
+  loadPlatformCapabilities: vi.fn(),
+  listPlatformSessions: vi.fn(),
+  requestPlatformSession: vi.fn(),
+  loadPlatformSessionHistory: vi.fn(),
+  closePlatformSession: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -66,7 +71,12 @@ vi.mock("./desktop-client", () => ({
   loadScheduleHistory: client.scheduleHistory,
   wakeSchedule: client.wakeSchedule,
   listSchedulerNotifications: client.listSchedulerNotifications,
-  acknowledgeSchedulerNotification: client.acknowledgeSchedulerNotification
+  acknowledgeSchedulerNotification: client.acknowledgeSchedulerNotification,
+  loadPlatformCapabilities: client.loadPlatformCapabilities,
+  listPlatformSessions: client.listPlatformSessions,
+  requestPlatformSession: client.requestPlatformSession,
+  loadPlatformSessionHistory: client.loadPlatformSessionHistory,
+  closePlatformSession: client.closePlatformSession
 }));
 
 import { App } from "./App";
@@ -103,6 +113,11 @@ beforeEach(() => {
   client.wakeSchedule.mockReset();
   client.listSchedulerNotifications.mockReset();
   client.acknowledgeSchedulerNotification.mockReset();
+  client.loadPlatformCapabilities.mockReset();
+  client.listPlatformSessions.mockReset();
+  client.requestPlatformSession.mockReset();
+  client.loadPlatformSessionHistory.mockReset();
+  client.closePlatformSession.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -111,6 +126,19 @@ beforeEach(() => {
   client.listApprovals.mockResolvedValue({ approvals: [] });
   client.listSchedules.mockResolvedValue({ schedules: [] });
   client.listSchedulerNotifications.mockResolvedValue({ notifications: [] });
+  client.loadPlatformCapabilities.mockResolvedValue({
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000070",
+    os: "windows",
+    architecture: "x86_64",
+    capabilities: [
+      { kind: "browser_automation", availability: "unavailable", detail: "no local browser runtime configuration has been verified" },
+      { kind: "computer_use", availability: "unavailable", detail: "product computer-use executor is not attached" },
+      { kind: "native_desktop", availability: "available", detail: "native desktop target is supported" }
+    ],
+    observed_at: "2026-08-14T00:00:00Z"
+  });
+  client.listPlatformSessions.mockResolvedValue({ sessions: [] });
 });
 
 test("simple scheduler creates restart-safe recurring work for a selected project", async () => {
@@ -165,6 +193,42 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
     },
     max_model_calls: 8
   }));
+});
+
+test("platform reservation stays truthful and reuses identity after an uncertain failure", async () => {
+  const session = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000071",
+    definition_hash: "a".repeat(64),
+    kind: "browser",
+    state: "requested",
+    owner: "mcg",
+    display_name: "Research checkout",
+    allowed_origins: ["https://example.com"],
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z",
+    expires_at: "2026-08-14T01:00:00Z",
+    recovery_count: 0
+  };
+  client.requestPlatformSession
+    .mockRejectedValueOnce(new Error("response lost"))
+    .mockResolvedValueOnce(session);
+  render(<App />);
+  const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
+  await within(panel).findByText("browser automation");
+  fireEvent.change(within(panel).getByLabelText("Name"), { target: { value: session.display_name } });
+  fireEvent.change(within(panel).getByLabelText("Allowed sites (optional)"), { target: { value: "https://example.com" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
+  expect(await within(panel).findByRole("alert")).toHaveTextContent("response lost");
+  const firstId = client.requestPlatformSession.mock.calls[0][0].session_id;
+  fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
+  expect(await within(panel).findByRole("heading", { name: session.display_name })).toBeInTheDocument();
+  expect(within(panel).getByText("Waiting for a verified executor")).toBeInTheDocument();
+  expect(client.requestPlatformSession.mock.calls[1][0]).toMatchObject({
+    session_id: firstId,
+    kind: "browser",
+    allowed_origins: ["https://example.com"]
+  });
 });
 
 test("scheduler retries reuse one identity and rotate it only after success", async () => {

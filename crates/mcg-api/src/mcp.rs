@@ -16,10 +16,10 @@ use mcg_agents::{
     TaskComplexity,
 };
 use mcg_domain::{
-    ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger, TaskBudget,
-    TaskEnvelope,
+    PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, TaskBudget, TaskEnvelope,
 };
-use mcg_runtime::AgentDispatchSpec;
+use mcg_runtime::{AgentDispatchSpec, PlatformSessionRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -482,6 +482,73 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_annotations,
         }),
         json!({
+            "name": "mcg_platform_capabilities",
+            "title": "Read MCG Platform Capabilities",
+            "description": "Read the latest privacy-safe host capability snapshot. Availability is reported only for verified local support.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_platform_sessions",
+            "title": "List MCG Platform Sessions",
+            "description": "List durable browser and computer-use session reservations and their explicit authority state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_platform_request",
+            "title": "Request an MCG Platform Session",
+            "description": "Idempotently reserve a browser or computer-use session. Requested does not mean an executor is attached; reuse session_id only for an exact retry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "format": "uuid"},
+                    "kind": {"type": "string", "enum": ["browser", "computer_use"]},
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "task_id": {"type": "string", "format": "uuid"},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "allowed_origins": {"type": "array", "items": {"type": "string", "format": "uri", "maxLength": 2048}, "uniqueItems": true, "maxItems": 32},
+                    "lifetime_seconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+                },
+                "required": ["session_id", "kind", "display_name", "lifetime_seconds"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "mcg_platform_close",
+            "title": "Close an MCG Platform Session",
+            "description": "Close one durable platform session while retaining its immutable lifecycle history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "format": "uuid"},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+                },
+                "required": ["session_id", "reason"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
             "name": "mcg_scheduler_create",
             "title": "Create an MCG Schedule",
             "description": "Idempotently create one bounded durable schedule. Reuse the same schedule_id only for an exact retry of the same definition.",
@@ -644,6 +711,10 @@ async fn call_tool(
         "mcg_scheduler_list" => scheduler_list(state, &arguments),
         "mcg_scheduler_create" => scheduler_create(state, &arguments),
         "mcg_scheduler_remove" => scheduler_remove(state, &arguments),
+        "mcg_platform_capabilities" => platform_capabilities(state, &arguments),
+        "mcg_platform_sessions" => platform_sessions(state, &arguments),
+        "mcg_platform_request" => platform_request(state, &arguments),
+        "mcg_platform_close" => platform_close(state, &arguments),
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -652,6 +723,131 @@ async fn call_tool(
             "Unknown tool name",
         )),
     }
+}
+
+fn platform_capabilities(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &[])?;
+    tool_success(Ok(json!({
+        "capabilities": state.runtime.platform_capabilities()
+    })))
+}
+
+fn platform_sessions(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &[])?;
+    match state.runtime.platform_sessions() {
+        Ok(sessions) => tool_success(Ok(json!({"sessions": sessions}))),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not list durable platform sessions",
+        )),
+    }
+}
+
+fn platform_request(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request =
+        serde_json::from_value::<PlatformRequestArguments>(Value::Object(arguments.clone()));
+    let Ok(request) = request else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Platform session arguments do not match the advertised schema",
+        ));
+    };
+    match state.runtime.request_platform_session(
+        &PlatformSessionRequest {
+            id: request.session_id,
+            kind: request.kind,
+            project_id: request.project_id,
+            task_id: request.task_id,
+            display_name: request.display_name,
+            allowed_origins: request.allowed_origins,
+            lifetime_seconds: request.lifetime_seconds,
+        },
+        Utc::now(),
+    ) {
+        Ok(result) => tool_success(Ok(json!({
+            "replayed": !result.created,
+            "session": result.session
+        }))),
+        Err(error) if error.is_conflict() => Ok(tool_error(
+            "conflict",
+            "session_id was already used with a different definition",
+        )),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "reference_not_found",
+            "The requested project or task is not known to MCG",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_arguments",
+            "The platform session violates a durable runtime invariant",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not reserve the platform session",
+        )),
+    }
+}
+
+fn platform_close(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request =
+        serde_json::from_value::<PlatformCloseArguments>(Value::Object(arguments.clone()));
+    let Ok(request) = request else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Platform close arguments do not match the advertised schema",
+        ));
+    };
+    match state
+        .runtime
+        .close_platform_session(request.session_id, &request.reason, Utc::now())
+    {
+        Ok(session) => tool_success(Ok(json!({"session": session}))),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "session_not_found",
+            "The requested platform session is not known to MCG",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_state",
+            "The platform session cannot be closed from its current state",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not close the platform session",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformRequestArguments {
+    session_id: PlatformSessionId,
+    kind: PlatformSessionKind,
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    #[serde(default)]
+    task_id: Option<mcg_domain::TaskId>,
+    display_name: String,
+    #[serde(default)]
+    allowed_origins: Vec<String>,
+    lifetime_seconds: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformCloseArguments {
+    session_id: PlatformSessionId,
+    reason: String,
 }
 
 fn query_run(

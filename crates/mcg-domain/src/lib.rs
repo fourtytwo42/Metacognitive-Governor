@@ -68,6 +68,9 @@ domain_id!(ScheduleId);
 domain_id!(ScheduleOccurrenceId);
 domain_id!(WakeRequestId);
 domain_id!(SchedulerNotificationId);
+domain_id!(PlatformCapabilitySnapshotId);
+domain_id!(PlatformSessionId);
+domain_id!(PlatformSessionEventId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.
@@ -144,6 +147,123 @@ pub struct TaskBudget {
     pub max_tokens: Option<u64>,
     pub max_cost_usd: Option<f64>,
     pub max_duration_seconds: Option<u64>,
+}
+
+pub const PLATFORM_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformCapabilityKind {
+    BrowserAutomation,
+    ComputerUse,
+    NativeDesktop,
+    SshClient,
+    Sites,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformCapabilityAvailability {
+    Available,
+    Unavailable,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformCapability {
+    pub kind: PlatformCapabilityKind,
+    pub availability: PlatformCapabilityAvailability,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformCapabilitySnapshot {
+    pub schema_version: u16,
+    pub id: PlatformCapabilitySnapshotId,
+    pub os: String,
+    pub architecture: String,
+    pub capabilities: Vec<PlatformCapability>,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformSessionKind {
+    Browser,
+    ComputerUse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformSessionState {
+    Requested,
+    Active,
+    HandedOff,
+    Interrupted,
+    Closed,
+    Failed,
+}
+
+impl PlatformSessionState {
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Requested, Self::Active | Self::Closed | Self::Failed)
+                | (
+                    Self::Active,
+                    Self::HandedOff | Self::Interrupted | Self::Closed | Self::Failed
+                )
+                | (
+                    Self::HandedOff,
+                    Self::Active | Self::Interrupted | Self::Closed | Self::Failed
+                )
+                | (Self::Interrupted, Self::Closed)
+        )
+    }
+
+    #[must_use]
+    pub const fn is_live(self) -> bool {
+        matches!(self, Self::Requested | Self::Active | Self::HandedOff)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformSessionOwner {
+    Mcg,
+    LocalOwner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformSession {
+    pub schema_version: u16,
+    pub id: PlatformSessionId,
+    pub definition_hash: String,
+    pub kind: PlatformSessionKind,
+    pub state: PlatformSessionState,
+    pub owner: PlatformSessionOwner,
+    pub project_id: Option<ProjectId>,
+    pub task_id: Option<TaskId>,
+    pub display_name: String,
+    pub allowed_origins: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub recovery_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformSessionEvent {
+    pub schema_version: u16,
+    pub id: PlatformSessionEventId,
+    pub session_id: PlatformSessionId,
+    pub from_state: Option<PlatformSessionState>,
+    pub to_state: PlatformSessionState,
+    pub owner: PlatformSessionOwner,
+    pub reason: String,
+    pub occurred_at: DateTime<Utc>,
 }
 
 pub const SCHEDULE_SCHEMA_VERSION: u16 = 1;
@@ -560,5 +680,22 @@ mod tests {
         assert!(!TaskState::Completed.can_transition_to(TaskState::Active));
         assert!(TaskState::Pending.can_transition_to(TaskState::Active));
         assert!(TaskState::WaitingForApproval.can_transition_to(TaskState::Blocked));
+    }
+
+    #[test]
+    fn platform_session_state_machine_has_only_explicit_authority_edges() {
+        assert!(PlatformSessionState::Requested.can_transition_to(PlatformSessionState::Active));
+        assert!(PlatformSessionState::Active.can_transition_to(PlatformSessionState::HandedOff));
+        assert!(PlatformSessionState::HandedOff.can_transition_to(PlatformSessionState::Active));
+        assert!(PlatformSessionState::Active.can_transition_to(PlatformSessionState::Interrupted));
+        assert!(PlatformSessionState::Interrupted.can_transition_to(PlatformSessionState::Closed));
+        assert!(
+            !PlatformSessionState::Requested.can_transition_to(PlatformSessionState::HandedOff)
+        );
+        assert!(!PlatformSessionState::Interrupted.can_transition_to(PlatformSessionState::Active));
+        assert!(!PlatformSessionState::Closed.can_transition_to(PlatformSessionState::Active));
+        assert!(PlatformSessionState::Requested.is_live());
+        assert!(PlatformSessionState::HandedOff.is_live());
+        assert!(!PlatformSessionState::Failed.is_live());
     }
 }

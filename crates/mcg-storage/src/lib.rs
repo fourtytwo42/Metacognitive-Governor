@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 mod agents;
 mod mcp;
+mod platform;
 mod providers;
 mod scheduler;
 
@@ -457,6 +458,61 @@ CREATE INDEX IF NOT EXISTS scheduler_notifications_unread
     ON scheduler_notifications(is_read, created_at, notification_id);
 ";
 
+const MIGRATION_15: &str = r"
+CREATE TABLE IF NOT EXISTS platform_capability_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL UNIQUE,
+    snapshot_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS platform_capability_snapshots_observed
+    ON platform_capability_snapshots(observed_at, snapshot_id);
+CREATE TRIGGER IF NOT EXISTS platform_capability_snapshots_no_update
+BEFORE UPDATE ON platform_capability_snapshots BEGIN
+    SELECT RAISE(FAIL, 'platform capability snapshots are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS platform_capability_snapshots_no_delete
+BEFORE DELETE ON platform_capability_snapshots BEGIN
+    SELECT RAISE(FAIL, 'platform capability snapshots are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS platform_sessions (
+    session_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    session_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS platform_sessions_state_expiry
+    ON platform_sessions(state, expires_at, session_id);
+
+CREATE TABLE IF NOT EXISTS platform_session_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    session_id TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES platform_sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS platform_session_events_history
+    ON platform_session_events(session_id, sequence);
+CREATE TRIGGER IF NOT EXISTS platform_session_events_no_update
+BEFORE UPDATE ON platform_session_events BEGIN
+    SELECT RAISE(FAIL, 'platform session events are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS platform_session_events_no_delete
+BEFORE DELETE ON platform_session_events BEGIN
+    SELECT RAISE(FAIL, 'platform session events are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -481,6 +537,8 @@ pub enum StorageError {
     AgentLeaseNotFound(mcg_domain::AgentLeaseId),
     #[error("schedule {0} was not found")]
     ScheduleNotFound(mcg_domain::ScheduleId),
+    #[error("platform session {0} was not found")]
+    PlatformSessionNotFound(mcg_domain::PlatformSessionId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -555,6 +613,7 @@ impl SqliteEventStore {
             (12_i64, MIGRATION_12),
             (13_i64, MIGRATION_13),
             (14_i64, MIGRATION_14),
+            (15_i64, MIGRATION_15),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

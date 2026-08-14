@@ -4,20 +4,22 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
-    CreateMemoryClaimRequest, CreateOrganizationRequest, CreateScheduleRequest, CreateTaskRequest,
-    DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest,
-    LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
-    MemoryClaimListResponse, OrganizationListResponse, OrganizationMutationResponse,
-    PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse, ProjectListResponse,
-    ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    WakeScheduleRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest, EvaluationMutationResponse,
+    ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse, OrganizationListResponse,
+    OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
+    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
+    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
+    TransitionTaskRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
-    MemoryClaimId, NotificationSeverity, OrganizationRevisionId, ProjectId, RunId, ScheduleId,
+    MemoryClaimId, NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot,
+    PlatformSession, PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId,
     ScheduleState, ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope,
     TaskId, TaskState, WorkItemId,
 };
@@ -126,6 +128,59 @@ enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
+    /// Inspect host capabilities and reserve browser/computer sessions.
+    Platform {
+        #[command(subcommand)]
+        command: PlatformCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlatformCommand {
+    /// Show the latest privacy-safe host capability snapshot.
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List durable platform sessions.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reserve a browser session. This does not claim an executor is attached.
+    RequestBrowser {
+        display_name: String,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long = "origin")]
+        origins: Vec<String>,
+        #[arg(long, default_value_t = 3_600)]
+        lifetime_seconds: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reserve a computer-use session. This does not claim an executor is attached.
+    RequestComputer {
+        display_name: String,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long, default_value_t = 3_600)]
+        lifetime_seconds: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show immutable lifecycle history for one session.
+    History { id: String },
+    /// Close a session while retaining its history.
+    Close { id: String, reason: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -746,8 +801,181 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Schedule { command } => {
             run_schedule(&client, host, token.trim(), command).await?;
         }
+        Command::Platform { command } => {
+            run_platform(&client, host, token.trim(), command).await?;
+        }
     }
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keeps the small platform command-to-HTTP mapping together.
+async fn run_platform(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: PlatformCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        PlatformCommand::Capabilities { json } => {
+            let snapshot: PlatformCapabilitySnapshot = client
+                .get(format!("{host}/api/v1/platform/capabilities"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                println!("{} / {}", snapshot.os, snapshot.architecture);
+                for capability in snapshot.capabilities {
+                    println!(
+                        "{:?}: {:?} - {}",
+                        capability.kind, capability.availability, capability.detail
+                    );
+                }
+            }
+        }
+        PlatformCommand::List { json } => {
+            let response: PlatformSessionListResponse = client
+                .get(format!("{host}/api/v1/platform/sessions"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                for session in response.sessions {
+                    println!(
+                        "{}: {} ({:?}, {:?})",
+                        session.id, session.display_name, session.kind, session.state
+                    );
+                }
+            }
+        }
+        PlatformCommand::RequestBrowser {
+            display_name,
+            session_id,
+            project_id,
+            task_id,
+            origins,
+            lifetime_seconds,
+            json,
+        } => {
+            request_platform_session_cli(
+                client,
+                host,
+                token,
+                PlatformSessionKind::Browser,
+                display_name,
+                session_id,
+                project_id,
+                task_id,
+                origins,
+                lifetime_seconds,
+                json,
+            )
+            .await?;
+        }
+        PlatformCommand::RequestComputer {
+            display_name,
+            session_id,
+            project_id,
+            task_id,
+            lifetime_seconds,
+            json,
+        } => {
+            request_platform_session_cli(
+                client,
+                host,
+                token,
+                PlatformSessionKind::ComputerUse,
+                display_name,
+                session_id,
+                project_id,
+                task_id,
+                Vec::new(),
+                lifetime_seconds,
+                json,
+            )
+            .await?;
+        }
+        PlatformCommand::History { id } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let response: PlatformSessionHistoryResponse = client
+                .get(format!("{host}/api/v1/platform/sessions/{id}/history"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        PlatformCommand::Close { id, reason } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let session: PlatformSession = client
+                .post(format!("{host}/api/v1/platform/sessions/{id}/close"))
+                .bearer_auth(token)
+                .json(&mcg_api::ClosePlatformSessionRequest { reason })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}: {:?}", session.id, session.state);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_platform_session_cli(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    kind: PlatformSessionKind,
+    display_name: String,
+    session_id: Option<String>,
+    project_id: Option<String>,
+    task_id: Option<String>,
+    allowed_origins: Vec<String>,
+    lifetime_seconds: u32,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let session_id = match session_id {
+        Some(value) => PlatformSessionId::from_str(&value)?,
+        None => PlatformSessionId::new(),
+    };
+    let session: PlatformSession = client
+        .post(format!("{host}/api/v1/platform/sessions"))
+        .bearer_auth(token)
+        .json(&CreatePlatformSessionRequest {
+            session_id,
+            kind,
+            project_id: project_id
+                .map(|value| ProjectId::from_str(&value))
+                .transpose()?,
+            task_id: task_id.map(|value| TaskId::from_str(&value)).transpose()?,
+            display_name,
+            allowed_origins,
+            lifetime_seconds,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&session)?);
+    } else {
+        println!("{}: requested (waiting for executor)", session.id);
+    }
     Ok(())
 }
 
@@ -2431,6 +2659,43 @@ mod tests {
             notifications.command,
             Command::Schedule {
                 command: ScheduleCommand::Notifications { all: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn platform_commands_preserve_retry_identity_and_explicit_origins() {
+        let session_id = "00000000-0000-4000-8000-000000000088";
+        let request = Cli::try_parse_from([
+            "mcg",
+            "platform",
+            "request-browser",
+            "research",
+            "--session-id",
+            session_id,
+            "--origin",
+            "https://example.com",
+            "--lifetime-seconds",
+            "900",
+        ])
+        .expect("platform request");
+        assert!(matches!(
+            request.command,
+            Command::Platform {
+                command: PlatformCommand::RequestBrowser {
+                    session_id: Some(id),
+                    origins,
+                    lifetime_seconds: 900,
+                    ..
+                }
+            } if id == session_id && origins == ["https://example.com"]
+        ));
+        let capabilities = Cli::try_parse_from(["mcg", "platform", "capabilities", "--json"])
+            .expect("capabilities");
+        assert!(matches!(
+            capabilities.command,
+            Command::Platform {
+                command: PlatformCommand::Capabilities { json: true }
             }
         ));
     }

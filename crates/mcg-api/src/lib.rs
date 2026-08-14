@@ -28,8 +28,9 @@ use mcg_agents::{
 };
 use mcg_domain::{
     ApprovalId, MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
-    ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
-    ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, TaskBudget, TaskEnvelope, TaskId, TaskState,
     ThreadId, WorkItemId,
 };
@@ -44,8 +45,8 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, ConsumerEvaluationProgress,
-    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation,
-    ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
+    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformSessionRequest,
+    ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ToolAuditRecord,
@@ -345,6 +346,35 @@ pub struct SchedulerNotificationListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePlatformSessionRequest {
+    pub session_id: PlatformSessionId,
+    pub kind: PlatformSessionKind,
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+    pub display_name: String,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    pub lifetime_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformSessionListResponse {
+    pub sessions: Vec<PlatformSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformSessionHistoryResponse {
+    pub events: Vec<PlatformSessionEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosePlatformSessionRequest {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LaunchExecution {
     NotStarted { detail: String },
@@ -566,6 +596,23 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
     let state = ApiState { runtime };
     let protected = Router::new()
         .route("/api/v1/system/status", get(status))
+        .route("/api/v1/platform/capabilities", get(platform_capabilities))
+        .route(
+            "/api/v1/platform/sessions",
+            get(list_platform_sessions).post(create_platform_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}",
+            get(get_platform_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/history",
+            get(platform_session_history),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/close",
+            post(close_platform_session),
+        )
         .route(
             "/api/v1/schedules",
             get(list_schedules).post(create_schedule),
@@ -889,6 +936,90 @@ async fn health() -> Json<HealthResponse> {
 
 async fn status(State(state): State<ApiState>) -> Json<RuntimeStatus> {
     Json(state.runtime.status())
+}
+
+async fn platform_capabilities(State(state): State<ApiState>) -> Json<PlatformCapabilitySnapshot> {
+    Json(state.runtime.platform_capabilities())
+}
+
+async fn create_platform_session(
+    State(state): State<ApiState>,
+    Json(request): Json<CreatePlatformSessionRequest>,
+) -> Result<(StatusCode, Json<PlatformSession>), ApiError> {
+    let result = state
+        .runtime
+        .request_platform_session(
+            &PlatformSessionRequest {
+                id: request.session_id,
+                kind: request.kind,
+                project_id: request.project_id,
+                task_id: request.task_id,
+                display_name: request.display_name,
+                allowed_origins: request.allowed_origins,
+                lifetime_seconds: request.lifetime_seconds,
+            },
+            Utc::now(),
+        )
+        .map_err(map_runtime_error)?;
+    Ok((
+        if result.created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(result.session),
+    ))
+}
+
+async fn list_platform_sessions(
+    State(state): State<ApiState>,
+) -> Result<Json<PlatformSessionListResponse>, ApiError> {
+    Ok(Json(PlatformSessionListResponse {
+        sessions: state
+            .runtime
+            .platform_sessions()
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_platform_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformSession>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .platform_session(session_id)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn platform_session_history(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformSessionHistoryResponse>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(PlatformSessionHistoryResponse {
+        events: state
+            .runtime
+            .platform_session_history(session_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn close_platform_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ClosePlatformSessionRequest>,
+) -> Result<Json<PlatformSession>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .close_platform_session(session_id, &request.reason, Utc::now())
+            .map_err(map_runtime_error)?,
+    ))
 }
 
 async fn create_schedule(
@@ -2680,6 +2811,12 @@ fn parse_oauth_session_id(value: &str) -> Result<uuid::Uuid, ApiError> {
         .map_err(|_| ApiError::bad_request("OAuth session id must be a UUID"))
 }
 
+fn parse_platform_session_id(value: &str) -> Result<PlatformSessionId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("platform session id must be a UUID"))
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn map_runtime_error(error: RuntimeError) -> ApiError {
     let provider_error = match &error {
@@ -2731,7 +2868,9 @@ mod tests {
     use http_body_util::BodyExt;
     use mcg_agents::{AgentState, ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::{AppConfig, AutonomyPreset};
-    use mcg_domain::{ArtifactId, EvaluationId, ToolExecutionId, ToolRequestId};
+    use mcg_domain::{
+        ArtifactId, EvaluationId, PLATFORM_SCHEMA_VERSION, ToolExecutionId, ToolRequestId,
+    };
     use mcg_mcp::{
         MCP_CONNECTION_CONTRACT_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpProtocolMode,
         McpTransport,
@@ -2770,6 +2909,107 @@ mod tests {
             }
         );
         assert_eq!(default_max_model_calls(), 8);
+    }
+
+    #[tokio::test]
+    async fn platform_contract_is_authenticated_idempotent_and_history_preserving() {
+        let runtime = test_runtime();
+        let app = router(runtime);
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/platform/capabilities")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let capabilities = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/platform/capabilities"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("capabilities");
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        let capability_json = response_json(capabilities).await;
+        assert_eq!(capability_json["schema_version"], PLATFORM_SCHEMA_VERSION);
+        assert_eq!(
+            capability_json["capabilities"].as_array().map(Vec::len),
+            Some(5)
+        );
+
+        let session_id = PlatformSessionId::new();
+        let create_body = serde_json::json!({
+            "session_id": session_id,
+            "kind": "browser",
+            "display_name": "Owner research",
+            "allowed_origins": ["https://example.com"],
+            "lifetime_seconds": 3600
+        });
+        let create = |body: &serde_json::Value| {
+            authorized(Request::post("/api/v1/platform/sessions"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request")
+        };
+        let first = app
+            .clone()
+            .oneshot(create(&create_body))
+            .await
+            .expect("create");
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(response_json(first).await["state"], "requested");
+
+        let replay = app
+            .clone()
+            .oneshot(create(&create_body))
+            .await
+            .expect("replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+
+        let mut conflict_body = create_body.clone();
+        conflict_body["display_name"] = serde_json::json!("Changed request");
+        let conflict = app
+            .clone()
+            .oneshot(create(&conflict_body))
+            .await
+            .expect("conflict");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+        let close = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/platform/sessions/{session_id}/close"
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"owner finished"}"#))
+                .expect("request"),
+            )
+            .await
+            .expect("close");
+        assert_eq!(close.status(), StatusCode::OK);
+        assert_eq!(response_json(close).await["state"], "closed");
+
+        let history = app
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/platform/sessions/{session_id}/history"
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("history");
+        assert_eq!(history.status(), StatusCode::OK);
+        let history_json = response_json(history).await;
+        assert_eq!(history_json["events"].as_array().map(Vec::len), Some(2));
+        assert_eq!(history_json["events"][1]["to_state"], "closed");
     }
 
     #[test]
@@ -3779,6 +4019,10 @@ form.addEventListener('submit', (event) => {
                 "mcg_query_project",
                 "mcg_query_run",
                 "mcg_scheduler_list",
+                "mcg_platform_capabilities",
+                "mcg_platform_sessions",
+                "mcg_platform_request",
+                "mcg_platform_close",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
                 "mcg_run_agent",
@@ -4101,6 +4345,78 @@ form.addEventListener('submit', (event) => {
             );
         }
         assert_eq!(runtime.schedules().expect("retained schedules").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mcp_platform_tools_report_request_replay_list_and_close() {
+        let runtime = test_runtime();
+        let app = router(runtime.clone());
+        let capabilities = mcp_tool_response(
+            app.clone(),
+            200,
+            "mcg_platform_capabilities",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            capabilities["result"]["structuredContent"]["capabilities"]["capabilities"]
+                .as_array()
+                .map(Vec::len),
+            Some(5)
+        );
+
+        let session_id = PlatformSessionId::new();
+        let arguments = serde_json::json!({
+            "session_id": session_id,
+            "kind": "browser",
+            "display_name": "MCP research",
+            "allowed_origins": ["https://example.com"],
+            "lifetime_seconds": 600
+        });
+        let created =
+            mcp_tool_response(app.clone(), 201, "mcg_platform_request", arguments.clone()).await;
+        assert_eq!(
+            created.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(false))
+        );
+        let replayed =
+            mcp_tool_response(app.clone(), 202, "mcg_platform_request", arguments.clone()).await;
+        assert_eq!(
+            replayed.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        let listed = mcp_tool_response(
+            app.clone(),
+            203,
+            "mcg_platform_sessions",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            listed["result"]["structuredContent"]["sessions"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let closed = mcp_tool_response(
+            app.clone(),
+            204,
+            "mcg_platform_close",
+            serde_json::json!({"session_id": session_id, "reason": "finished"}),
+        )
+        .await;
+        assert_eq!(
+            closed.pointer("/result/structuredContent/session/state"),
+            Some(&serde_json::json!("closed"))
+        );
+        let mut conflict = arguments;
+        conflict["display_name"] = serde_json::json!("changed");
+        let conflict = mcp_tool_response(app, 205, "mcg_platform_request", conflict).await;
+        assert_eq!(
+            conflict.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(runtime.platform_sessions().expect("sessions").len(), 1);
     }
 
     #[tokio::test]

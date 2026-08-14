@@ -25,10 +25,13 @@ use mcg_agents::{
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, NotificationSeverity,
-    ProjectId, RunId, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
-    WorkItemId,
+    PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
+    PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
+    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
+    PlatformSessionOwner, PlatformSessionState, ProjectId, RunId, ScheduleDefinition, ScheduleId,
+    ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope, TaskId,
+    TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -62,7 +65,7 @@ use mcg_tools::{
     ProcessOptions, ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument,
     ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink,
     ToolBroker, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest,
-    ToolRequestKind, VerificationEvidence,
+    ToolRequestKind, VerificationEvidence, browser_runtime_available,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -84,6 +87,26 @@ pub struct RuntimeStatus {
     pub recovered_agent_instances: u64,
     pub recovered_agent_leases: u64,
     pub recovered_schedule_occurrences: u64,
+    pub recovered_platform_sessions: u64,
+    pub expired_platform_sessions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformSessionRequest {
+    pub id: PlatformSessionId,
+    pub kind: PlatformSessionKind,
+    pub project_id: Option<ProjectId>,
+    pub task_id: Option<TaskId>,
+    pub display_name: String,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    pub lifetime_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformSessionCreateResult {
+    pub session: PlatformSession,
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +160,7 @@ impl RuntimeError {
                     | StorageError::AgentInstanceNotFound(_)
                     | StorageError::AgentLeaseNotFound(_)
                     | StorageError::ScheduleNotFound(_)
+                    | StorageError::PlatformSessionNotFound(_)
             )
         )
     }
@@ -474,6 +498,9 @@ pub struct AppRuntime {
     recovered_tool_leases: u64,
     agent_recovery: AgentRecoveryReport,
     recovered_schedule_occurrences: u64,
+    recovered_platform_sessions: u64,
+    expired_platform_sessions: u64,
+    platform_capabilities: PlatformCapabilitySnapshot,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
@@ -511,6 +538,12 @@ impl AppRuntime {
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
         let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
+        let startup_now = Utc::now();
+        let expired_platform_sessions = store.expire_platform_sessions(startup_now)?;
+        let recovered_platform_sessions = store.recover_platform_sessions(startup_now)?;
+        let platform_capabilities = detect_platform_capabilities(&config, startup_now);
+        let platform_capabilities =
+            store.record_platform_capability_snapshot(&platform_capabilities)?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(OsProviderCredentialStore);
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
@@ -522,6 +555,9 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             recovered_schedule_occurrences,
+            recovered_platform_sessions,
+            expired_platform_sessions,
+            platform_capabilities,
             provider_credentials,
             mcp_credentials,
             BrowserAuthorizationConfig::default(),
@@ -560,6 +596,12 @@ impl AppRuntime {
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
         let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
+        let startup_now = Utc::now();
+        let expired_platform_sessions = store.expire_platform_sessions(startup_now)?;
+        let recovered_platform_sessions = store.recover_platform_sessions(startup_now)?;
+        let platform_capabilities = detect_platform_capabilities(&config, startup_now);
+        let platform_capabilities =
+            store.record_platform_capability_snapshot(&platform_capabilities)?;
         let auth = LocalAuth::from_token(token)?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(MemoryProviderCredentialStore::default());
@@ -573,6 +615,9 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             recovered_schedule_occurrences,
+            recovered_platform_sessions,
+            expired_platform_sessions,
+            platform_capabilities,
             provider_credentials,
             mcp_credentials,
             browser_config,
@@ -589,6 +634,9 @@ impl AppRuntime {
         recovered_tool_leases: u64,
         agent_recovery: AgentRecoveryReport,
         recovered_schedule_occurrences: u64,
+        recovered_platform_sessions: u64,
+        expired_platform_sessions: u64,
+        platform_capabilities: PlatformCapabilitySnapshot,
         provider_credentials: Arc<dyn ProviderCredentialStore>,
         mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
@@ -604,6 +652,9 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             recovered_schedule_occurrences,
+            recovered_platform_sessions,
+            expired_platform_sessions,
+            platform_capabilities,
             provider_credentials,
             mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
@@ -639,7 +690,116 @@ impl AppRuntime {
             recovered_agent_instances: self.agent_recovery.instances_expired,
             recovered_agent_leases: self.agent_recovery.leases_expired,
             recovered_schedule_occurrences: self.recovered_schedule_occurrences,
+            recovered_platform_sessions: self.recovered_platform_sessions,
+            expired_platform_sessions: self.expired_platform_sessions,
         }
+    }
+
+    #[must_use]
+    pub fn platform_capabilities(&self) -> PlatformCapabilitySnapshot {
+        self.platform_capabilities.clone()
+    }
+
+    /// Requests a durable platform session reservation. A request remains
+    /// `requested` until a concrete executor attaches and assumes authority.
+    ///
+    /// # Errors
+    /// Returns an error for invalid input, unknown references, identity conflict, or storage failure.
+    pub fn request_platform_session(
+        &self,
+        request: &PlatformSessionRequest,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformSessionCreateResult, RuntimeError> {
+        let definition = serde_json::to_vec(&(
+            PLATFORM_SCHEMA_VERSION,
+            request.kind,
+            request.project_id,
+            request.task_id,
+            request.display_name.trim(),
+            &request.allowed_origins,
+            request.lifetime_seconds,
+        ))
+        .map_err(StorageError::from)?;
+        let session = PlatformSession {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: request.id,
+            definition_hash: format!("{:x}", Sha256::digest(definition)),
+            kind: request.kind,
+            state: PlatformSessionState::Requested,
+            owner: PlatformSessionOwner::Mcg,
+            project_id: request.project_id,
+            task_id: request.task_id,
+            display_name: request.display_name.trim().to_owned(),
+            allowed_origins: request.allowed_origins.clone(),
+            created_at: now,
+            updated_at: now,
+            expires_at: now + Duration::seconds(i64::from(request.lifetime_seconds)),
+            closed_at: None,
+            recovery_count: 0,
+        };
+        let (session, created) = self
+            .store()?
+            .create_platform_session(&session, "local owner requested platform session")?;
+        Ok(PlatformSessionCreateResult { session, created })
+    }
+
+    /// Lists durable platform session projections.
+    ///
+    /// # Errors
+    /// Returns an error when runtime storage cannot be read.
+    pub fn platform_sessions(&self) -> Result<Vec<PlatformSession>, RuntimeError> {
+        let mut store = self.store()?;
+        store.expire_platform_sessions(Utc::now())?;
+        Ok(store.platform_sessions()?)
+    }
+
+    /// Loads one durable platform session.
+    ///
+    /// # Errors
+    /// Returns not-found for an unknown identity or an error when storage cannot be read.
+    pub fn platform_session(
+        &self,
+        session_id: PlatformSessionId,
+    ) -> Result<PlatformSession, RuntimeError> {
+        let mut store = self.store()?;
+        store.expire_platform_sessions(Utc::now())?;
+        store
+            .platform_session(session_id)?
+            .ok_or_else(|| StorageError::PlatformSessionNotFound(session_id).into())
+    }
+
+    /// Loads immutable lifecycle history for one platform session.
+    ///
+    /// # Errors
+    /// Returns not-found for an unknown identity or an error when storage cannot be read.
+    pub fn platform_session_history(
+        &self,
+        session_id: PlatformSessionId,
+    ) -> Result<Vec<PlatformSessionEvent>, RuntimeError> {
+        let mut store = self.store()?;
+        store.expire_platform_sessions(Utc::now())?;
+        Ok(store.platform_session_history(session_id)?)
+    }
+
+    /// Relinquishes a requested or attached session without inventing executor state.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown session, illegal transition, invalid reason, or storage failure.
+    pub fn close_platform_session(
+        &self,
+        session_id: PlatformSessionId,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformSession, RuntimeError> {
+        let mut store = self.store()?;
+        store.expire_platform_sessions(now)?;
+        let (session, _) = store.transition_platform_session(
+            session_id,
+            PlatformSessionState::Closed,
+            reason,
+            now,
+        )?;
+        Ok(session)
     }
 
     /// Persists a task and publishes its committed event.
@@ -4009,6 +4169,64 @@ fn classify_agent_turn_error(error: &AgentTurnError) -> (AgentTurnDisposition, &
             (AgentTurnDisposition::Failed, "tool_timed_out")
         }
         AgentTurnError::Tool(_) => (AgentTurnDisposition::Failed, "tool_failure"),
+    }
+}
+
+fn detect_platform_capabilities(
+    config: &AppConfig,
+    observed_at: DateTime<Utc>,
+) -> PlatformCapabilitySnapshot {
+    let browser_available = browser_runtime_available(config.browser_executable.as_deref());
+    let desktop_supported = matches!(std::env::consts::OS, "windows" | "linux");
+    PlatformCapabilitySnapshot {
+        schema_version: PLATFORM_SCHEMA_VERSION,
+        id: PlatformCapabilitySnapshotId::new(),
+        os: std::env::consts::OS.to_owned(),
+        architecture: std::env::consts::ARCH.to_owned(),
+        capabilities: vec![
+            PlatformCapability {
+                kind: PlatformCapabilityKind::BrowserAutomation,
+                availability: if browser_available {
+                    PlatformCapabilityAvailability::Available
+                } else {
+                    PlatformCapabilityAvailability::Unavailable
+                },
+                detail: if browser_available {
+                    "local browser runtime configuration verified".into()
+                } else {
+                    "no local browser runtime configuration has been verified".into()
+                },
+            },
+            PlatformCapability {
+                kind: PlatformCapabilityKind::ComputerUse,
+                availability: PlatformCapabilityAvailability::Unavailable,
+                detail: "product computer-use executor is not attached".into(),
+            },
+            PlatformCapability {
+                kind: PlatformCapabilityKind::NativeDesktop,
+                availability: if desktop_supported {
+                    PlatformCapabilityAvailability::Available
+                } else {
+                    PlatformCapabilityAvailability::Unsupported
+                },
+                detail: if desktop_supported {
+                    "native desktop target is supported on this operating system".into()
+                } else {
+                    "native desktop target is not supported on this operating system".into()
+                },
+            },
+            PlatformCapability {
+                kind: PlatformCapabilityKind::SshClient,
+                availability: PlatformCapabilityAvailability::Unavailable,
+                detail: "typed SSH executor is not installed".into(),
+            },
+            PlatformCapability {
+                kind: PlatformCapabilityKind::Sites,
+                availability: PlatformCapabilityAvailability::Unavailable,
+                detail: "Sites deployment registry is not installed".into(),
+            },
+        ],
+        observed_at,
     }
 }
 
