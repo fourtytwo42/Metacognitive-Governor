@@ -554,7 +554,7 @@ fn restrict_directory_to_owner(_path: &Path) -> Result<(), ToolError> {
 #[cfg(test)]
 mod tests {
     use axum::{Router, response::Html, routing::get};
-    use tokio::net::TcpListener;
+    use tokio::{net::TcpListener, sync::Notify};
 
     use super::*;
 
@@ -614,6 +614,78 @@ mod tests {
         assert!(profile.is_dir());
         manager.close(session_id).await.expect("close");
         assert!(!profile.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local desktop owner or Computer Use to confirm visible handoff"]
+    async fn visible_handoff_uat_blanks_before_reclaim_and_cleans_profile() {
+        let owner_confirmed = Arc::new(Notify::new());
+        let confirm_signal = owner_confirmed.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new()
+            .route(
+                "/start",
+                get(|| async {
+                    Html(
+                        "<title>MCG Visible Handoff UAT</title>\
+                         <main><h1>MCG Visible Handoff UAT</h1>\
+                         <p>The local owner now controls this governed browser.</p>\
+                         <a href='/owner-complete'>Confirm local control</a></main>",
+                    )
+                }),
+            )
+            .route(
+                "/owner-complete",
+                get(move || {
+                    let signal = confirm_signal.clone();
+                    async move {
+                        signal.notify_one();
+                        Html("<title>Owner control confirmed</title><h1>Owner control confirmed</h1>")
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture server");
+        });
+        let profiles = tempfile::tempdir().expect("profiles");
+        let manager = PersistentBrowserManager::new(
+            std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
+            profiles.path(),
+        )
+        .expect("manager");
+        let session_id = PlatformSessionId::new();
+        let origin = format!("http://{address}");
+        manager
+            .attach(
+                session_id,
+                std::slice::from_ref(&origin),
+                PersistentBrowserMode::Visible,
+            )
+            .await
+            .expect("attach visible browser");
+        manager
+            .navigate(session_id, &format!("{origin}/start"))
+            .await
+            .expect("navigate UAT page");
+        let handed_off = manager.handoff(session_id).await.expect("handoff");
+        assert!(handed_off.handed_off);
+        assert!(handed_off.title.is_none());
+        println!("Visible browser handed off; activate it and select Confirm local control.");
+        if tokio::time::timeout(Duration::from_secs(300), owner_confirmed.notified())
+            .await
+            .is_err()
+        {
+            let _ = manager.close_if_attached(session_id).await;
+            server.abort();
+            panic!("local owner did not confirm visible browser control within five minutes");
+        }
+        let reclaimed = manager.reclaim(session_id).await.expect("privacy reclaim");
+        assert_eq!(reclaimed.safe_url, "about:blank");
+        assert!(!reclaimed.handed_off);
+        manager.close(session_id).await.expect("close");
+        assert!(!profiles.path().join(session_id.to_string()).exists());
         server.abort();
     }
 

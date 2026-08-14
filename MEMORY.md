@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Continue M8 expanded execution plane after exact Windows/Linux qualification of the persistent browser executor.
-- Last meaningful change: One isolated ephemeral Chromium profile/process now persists across bounded session operations; activation follows verified launch, GET/HEAD traffic and downloads fail closed outside immutable origin grants, query/fragment data is never returned, handoff is visible-only, reclaim blanks before MCG reads, and close/expiry removes executor state. REST, CLI, MCP, Tauri, and desktop controls plus real cross-interface/browser tests pass Windows and exact Ubuntu commit `d5de79e`.
-- Next step: Perform real visible handoff/return UAT on Windows and Linux, fix any user-facing defects, then continue computer-use, Sites, monitoring, and typed SSH. Preserve the visible OAuth handoff.
+- Last meaningful change: One isolated ephemeral Chromium profile/process now persists across bounded session operations; activation follows verified launch, GET/HEAD traffic and downloads fail closed outside immutable origin grants, query/fragment data is never returned, handoff is visible-only, reclaim blanks before MCG reads, and close/expiry removes executor state. REST, CLI, MCP, Tauri, and desktop controls plus real cross-interface/browser tests pass Windows and exact Ubuntu commit `d5de79e`; Windows visible handoff/reclaim UAT passed through Computer Use.
+- Next step: Perform equivalent visible handoff/return UAT on Linux, fix any user-facing defects, then continue computer-use, Sites, monitoring, and typed SSH. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -135,6 +135,7 @@ When sources conflict, use this order:
 
 ## Verification Ledger
 
+- 2026-08-14: Windows visible-browser UAT passed through the requested Computer Use skill without touching the existing OAuth daemon/desktop. A reusable ignored fixture launched the actual governed visible Chromium window, moved authority to the local owner, exposed a local confirmation page, accepted one Computer Use click, then proved reclaim privacy-blanked to `about:blank`, closed Chromium, and removed its isolated profile. Accessibility geometry was unavailable, so Computer Use safely re-observed and used the fresh screenshot coordinate once. Equivalent Linux visible UAT remains pending.
 - 2026-08-14: Exact persistent-browser commit `d5de79e` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 311 seconds with `.qualified-commit=d5de79ed556291d63d732ab1af3b01ca2f4baf36` and `verify-final.exit=0`: strict Rust gates including 42 API, 22 storage, 41 tool, 7 runtime, real persistent Chromium, daemon restart, and live GPU45; docs; typecheck; 14 Vitest flows; production build; native Tauri/GTK; and two Playwright flows. The first `935050e` run found and drove the explicit configured-browser fixture fix; a cache-reuse attempt exposed only Tauri absolute-path metadata, so the passing run used a clean target. The previous exact M8 target was marker/path/exit verified and only its 14 GiB regenerable cache removed for headroom; source and evidence remain. No GitHub-hosted compute ran. Visible handoff UAT remains pending.
 - 2026-08-14: Persistent browser execution passed the complete available Windows local lane while visible OAuth processes remained untouched: strict all-feature/all-target clippy; 42 API, 22 storage, 41 tool, 7 runtime, and all other unlocked Rust suites; isolated daemon restart and desktop Rust tests; docs, typecheck, 14 Vitest flows, production build, and two Playwright flows. Real Chromium fixtures prove persistent navigation, cross-origin/mutating-request/download denial, redacted URLs, runtime activation/expiry/history, and one authenticated session controlled across REST and MCP.
 - 2026-08-14: Exact M8 platform-authority commit `7bf25ed` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 306 seconds with `.qualified-commit=7bf25ed59d6b8103f5319362538451e78f8db558` and `verify-final.exit=0`: strict Rust gates including 41 API, 22 storage, 39 governed-tool, real Chromium, live GPU45, and the authenticated platform-session daemon restart fixture; docs; typecheck; 13 Vitest flows; production build; native Tauri/GTK; and two Playwright flows. The exact qualified M7 target cache was marker/path verified and only its regenerable target directory removed for headroom; source snapshot remains. No GitHub-hosted compute ran.
@@ -654,7 +655,7 @@ When sources conflict, use this order:
 - Files: `crates/mcg-tools/src/persistent_browser.rs`, `crates/mcg-{storage,runtime,api}/`, `apps/{mcg-cli,desktop}/`, and `docs/architecture/platform-sessions.md`.
 - Commands/tests: Strict workspace clippy; broad unlocked Rust suites (42 API, 22 storage, 41 tools, 7 runtime); isolated daemon/desktop Rust tests; docs; typecheck; 14 Vitest flows; production build; two Playwright flows. Real Chromium tests cover reused page state, origin enforcement, redaction, expiry cleanup, history, and authenticated REST/MCP interoperability.
 - Result: The complete Windows lane and exact Ubuntu commit `d5de79e` are green. Every primary interface can request, attach, navigate, hand off, reclaim, inspect, and close the same truthful durable browser session. The first exact Ubuntu run of `935050e` correctly failed because the manager's direct real-browser unit fixture used library auto-detection instead of the configured `MCG_BROWSER_EXECUTABLE`; the corrected fixture and complete clean rerun pass.
-- Follow-up: Perform visible native handoff/return UAT on both operating systems.
+- Follow-up: Windows Computer Use UAT is green; perform equivalent visible native handoff/return UAT on Linux.
 
 ## Known Issues
 
@@ -686,7 +687,7 @@ When sources conflict, use this order:
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
 - Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser render, element, typed browser workflow, file, exact-discovered custom, screenshot, and research evaluators to accessibility checks, service-health semantics, and other typed conditions; unsupported conditions deliberately remain nonterminal.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
-- Perform visible browser handoff/reclaim UAT on Windows and Linux before marking the persistent-browser M8 layer complete; exact automated qualification is green at `d5de79e`.
+- Perform visible browser handoff/reclaim UAT on Linux before marking the persistent-browser M8 layer complete; exact automated qualification is green at `d5de79e` and Windows Computer Use UAT is green.
 
 ## Do Not Forget
 
