@@ -163,6 +163,11 @@ replay with one result/instance, conflicting-key rejection, run querying, and
 structured status results. A file-backed storage fixture proves atomic reservation,
 immutable request-key conflict handling, restart replay, and zero duplicate events.
 Unit fixtures cover loopback-Origin classification and encoded `Mcp-Name` handling.
+A complete public-surface fixture calls `mcg_run_agent` with
+`mcp::governed::lookup`, drives a real two-call OpenAI-compatible model loop,
+executes exactly one read-only external MCP call through the broker, returns its
+result to the model, and verifies the durable lease alias plus succeeded tool
+evidence with no approval record.
 
 This is the MCP server plus HTTP client foundation, not the completed MCP feature family. Remaining
 M6 work includes:

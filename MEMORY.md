@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP current HTTP management is available through API, CLI, and native desktop; remote tools execute through governed agent leases.
-- Last meaningful change: Added native simple/advanced MCP management with durable listing, live add/discover, optional protected bearer entry, unit coverage, production frontend build, native Rust checks, and Playwright smoke coverage.
-- Next step: Add stdio/current-to-legacy interoperability and a full public-run remote MCP scenario, then qualify the complete MCP slice on Windows/Ubuntu. Preserve the visible OAuth handoff.
+- Last meaningful change: Added a full public-surface MCP scenario: `mcg_run_agent` creates durable authority, a real model fixture selects only the lease alias, the broker executes one external read call, and terminal turn evidence is persisted without unnecessary approval.
+- Next step: Add stdio/current-to-legacy interoperability, then qualify the complete MCP slice on Windows/Ubuntu and perform native MCP UAT. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -401,6 +401,15 @@ When sources conflict, use this order:
 - Result: All focused Windows native/frontend gates pass. Simple/advanced disclosure, current tool counts, setup request shape, and advanced browser-visible controls are automated.
 - Follow-up: Perform real native Windows/Linux MCP setup UAT after stdio/legacy work and Linux qualification.
 
+### 2026-08-14 - Public Governed MCP Agent Scenario
+
+- Context: Unit tests for transport, binding, policy, and execution do not alone prove that the public MCP server mutation composes every boundary into one useful model/tool loop.
+- Decision: Add deterministic live MCP and OpenAI-compatible fixtures, then call authenticated `mcg_run_agent` with canonical `mcp::governed::lookup` through `POST /mcp`.
+- Files: `crates/mcg-api/src/lib.rs`, `docs/architecture/mcp.md`, `MEMORY.md`.
+- Commands/tests: strict `mcg-api` clippy; exact public scenario test.
+- Result: One durable run exposes only a generated alias, performs exactly one read-only closed-world remote call through the broker, feeds evidence back to the model, persists a succeeded tool outcome, and creates no approval record.
+- Follow-up: Keep this scenario in every full gate; add approval-resume coverage for an open-world MCP tool after expanded run-resume contracts are implemented.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -427,7 +436,7 @@ When sources conflict, use this order:
 - Continue M5 representative useful projects and broader end-to-end evidence while M6 interfaces are built; the durable provider/tool website and independent evaluator scenarios are complete checkpoints, not the full product.
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
-- Complete MCP server subscriptions/interoperability plus MCP client stdio/legacy negotiation; add a public-surface remote-MCP agent scenario and real native MCP UAT.
+- Complete MCP server subscriptions/interoperability plus MCP client stdio/legacy negotiation and real native MCP UAT.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

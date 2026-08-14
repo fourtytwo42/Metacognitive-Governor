@@ -1554,6 +1554,11 @@ fn map_runtime_error(error: RuntimeError) -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use mcg_agents::{ConditionResult, EvaluationEvidence, EvaluationOutcome};
@@ -1685,6 +1690,118 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("caller tool fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn governed_mcp_tool_fixture(calls: Arc<AtomicUsize>) -> String {
+        async fn response(
+            State(calls): State<Arc<AtomicUsize>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let result = match body["method"].as_str().expect("method") {
+                "server/discover" => serde_json::json!({
+                    "supportedVersions": [MCP_PROTOCOL_VERSION],
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "governed-fixture"}
+                }),
+                "tools/list" => serde_json::json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Read deterministic fixture data",
+                        "inputSchema": {"type": "object", "additionalProperties": false},
+                        "annotations": {
+                            "readOnlyHint": true,
+                            "destructiveHint": false,
+                            "openWorldHint": false
+                        }
+                    }],
+                    "serverInfo": {"name": "governed-fixture"}
+                }),
+                "tools/call" => {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({
+                        "isError": false,
+                        "content": [{"type": "text", "text": "governed fixture result"}],
+                        "structuredContent": {"value": 42},
+                        "serverInfo": {"name": "governed-fixture"}
+                    })
+                }
+                _ => unreachable!(),
+            };
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": body["id"].clone(),
+                "result": result
+            }))
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind MCP");
+        let address = listener.local_addr().expect("MCP address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/mcp", post(response))
+                    .with_state(calls),
+            )
+            .await
+            .expect("serve MCP");
+        });
+        format!("http://{address}/mcp")
+    }
+
+    async fn governed_mcp_model_fixture() -> String {
+        async fn response(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let has_result = body.to_string().contains("function_call_output");
+            let output = if has_result {
+                serde_json::json!([{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Remote evidence received"}]
+                }])
+            } else {
+                let name = body
+                    .get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|tools| tools.first())
+                    .and_then(|tool| tool.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("exposed MCP tool");
+                serde_json::json!([{
+                    "type": "function_call",
+                    "call_id": "mcp-call-1",
+                    "name": name,
+                    "arguments": "{}"
+                }])
+            };
+            Json(serde_json::json!({
+                "id": if has_result {"mcp-final"} else {"mcp-call"},
+                "model": "mcp-agent-model",
+                "status": "completed",
+                "output": output,
+                "usage": {"input_tokens": 16, "output_tokens": 4, "total_tokens": 20}
+            }))
+        }
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "mcp-agent-model",
+                            "owned_by": "fixture",
+                            "context_window": 16384,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route("/v1/responses", post(response));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind model");
+        let address = listener.local_addr().expect("model address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve model");
         });
         format!("http://{address}/v1")
     }
@@ -4110,5 +4227,98 @@ form.addEventListener('submit', (event) => {
         let encoded = String::from_utf8(body.to_vec()).expect("UTF-8");
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("authorization"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full public MCP run proves namespace, provider loop, policy, and remote call composition.
+    async fn public_mcp_agent_run_executes_one_governed_remote_tool() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project");
+        std::fs::write(project_root.path().join("README.md"), "fixture project")
+            .expect("fixture file");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "mcp_agent_provider".into(),
+                    display_name: "MCP Agent Provider".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: governed_mcp_model_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+        let remote_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_mcp(
+                McpConnection {
+                    contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+                    id: "governed".into(),
+                    display_name: "Governed Fixture".into(),
+                    transport: McpTransport::StreamableHttp {
+                        url: governed_mcp_tool_fixture(remote_calls.clone()).await,
+                    },
+                    auth_mode: McpAuthMode::None,
+                    protocol_mode: McpProtocolMode::Auto,
+                    enabled: true,
+                },
+                None,
+            )
+            .await
+            .expect("configure MCP");
+
+        let response = router(runtime.clone())
+            .oneshot(mcp_request(
+                &serde_json::json!(501),
+                "tools/call",
+                serde_json::json!({
+                    "name": "mcg_run_agent",
+                    "arguments": {
+                        "request_key": "public-governed-mcp-1",
+                        "project_id": project_id,
+                        "goal": "Use the external lookup once and report its evidence",
+                        "role": "tool_worker",
+                        "requested_tools": ["mcp::governed::lookup"],
+                        "estimated_output_tokens": 256,
+                        "max_model_calls": 4
+                    }
+                })
+                .as_object()
+                .expect("params")
+                .clone(),
+                Some("mcg_run_agent"),
+            ))
+            .await
+            .expect("run response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = response_json(response).await;
+        assert_eq!(
+            response.pointer("/result/isError"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(remote_calls.load(Ordering::SeqCst), 1);
+        let structured = response
+            .pointer("/result/structuredContent")
+            .expect("structured result");
+        assert_eq!(
+            structured.pointer("/run/results/0/tool_outcomes/0/status"),
+            Some(&serde_json::json!("succeeded"))
+        );
+        assert!(
+            structured
+                .pointer("/run/leases/0/tool_permissions/0")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name.starts_with("mcp_governed_lookup_"))
+        );
+        assert!(runtime.approvals(None).expect("approvals").is_empty());
     }
 }
