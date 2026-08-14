@@ -1,5 +1,6 @@
 //! Versioned authenticated loopback HTTP and streaming surface.
 
+mod mcp;
 mod provider_proxy;
 
 use std::{
@@ -507,6 +508,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             post(resolve_approval),
         )
         .route("/api/v1/events/stream", get(stream_events))
+        .route("/mcp", post(mcp::handle))
         .route("/v1/models", get(provider_proxy::models))
         .route("/v1/responses", post(provider_proxy::responses))
         .route(
@@ -573,6 +575,11 @@ async fn require_auth(
     request: Request,
     next: Next,
 ) -> Response {
+    if request.uri().path() == "/mcp"
+        && let Some(response) = mcp::origin_rejection(&headers)
+    {
+        return response;
+    }
     let candidate = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1775,6 +1782,56 @@ form.addEventListener('submit', (event) => {
         request.header("authorization", format!("Bearer {TEST_TOKEN}"))
     }
 
+    fn mcp_request(
+        id: &serde_json::Value,
+        method: &str,
+        mut params: serde_json::Map<String, serde_json::Value>,
+        name: Option<&str>,
+    ) -> Request<Body> {
+        params.insert(
+            "_meta".into(),
+            serde_json::json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "mcg-api-test",
+                    "version": "1.0.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }),
+        );
+        let mut request = authorized(Request::post("/mcp"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", method);
+        if let Some(name) = name {
+            request = request.header("mcp-name", name);
+        }
+        request
+            .body(Body::from(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string(),
+            ))
+            .expect("MCP request")
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("response body")
+                .to_bytes(),
+        )
+        .expect("JSON response")
+    }
+
     #[tokio::test]
     async fn health_is_public_but_status_requires_authentication() {
         let app = router(test_runtime());
@@ -1798,6 +1855,274 @@ form.addEventListener('submit', (event) => {
 
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(status.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Covers the complete stateless MCP read boundary.
+    async fn mcp_server_is_authenticated_header_safe_and_project_aware() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"test":"vitest"}}"#,
+        )
+        .expect("project fixture");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        runtime
+            .create_memory_claim(
+                project.project_id,
+                "project",
+                "package_manager",
+                serde_json::json!("npm"),
+                0.9,
+                ClaimProvenance {
+                    source_kind: mcg_projects::ProvenanceKind::User,
+                    source: "MCP fixture".into(),
+                    task_id: None,
+                    artifact_sha256: None,
+                },
+                None,
+            )
+            .expect("memory claim");
+        let app = router(runtime);
+
+        let valid_discover = mcp_request(
+            &serde_json::json!("discover"),
+            "server/discover",
+            serde_json::Map::new(),
+            None,
+        );
+        let unauthorized = app
+            .clone()
+            .oneshot({
+                let (mut parts, body) = valid_discover.into_parts();
+                parts.headers.remove("authorization");
+                Request::from_parts(parts, body)
+            })
+            .await
+            .expect("unauthorized MCP response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let mut unauthenticated_hostile = mcp_request(
+            &serde_json::json!(0),
+            "server/discover",
+            serde_json::Map::new(),
+            None,
+        );
+        unauthenticated_hostile
+            .headers_mut()
+            .remove("authorization");
+        unauthenticated_hostile
+            .headers_mut()
+            .insert("origin", "https://attacker.example".parse().unwrap());
+        let unauthenticated_hostile = app
+            .clone()
+            .oneshot(unauthenticated_hostile)
+            .await
+            .expect("unauthenticated hostile origin response");
+        assert_eq!(unauthenticated_hostile.status(), StatusCode::FORBIDDEN);
+
+        let mut hostile = mcp_request(
+            &serde_json::json!(1),
+            "server/discover",
+            serde_json::Map::new(),
+            None,
+        );
+        hostile
+            .headers_mut()
+            .insert("origin", "https://attacker.example".parse().unwrap());
+        let hostile = app
+            .clone()
+            .oneshot(hostile)
+            .await
+            .expect("hostile origin response");
+        assert_eq!(hostile.status(), StatusCode::FORBIDDEN);
+
+        let mut mismatch = mcp_request(
+            &serde_json::json!(2),
+            "server/discover",
+            serde_json::Map::new(),
+            None,
+        );
+        mismatch.headers_mut().remove("mcp-method");
+        let mismatch = app
+            .clone()
+            .oneshot(mismatch)
+            .await
+            .expect("header mismatch response");
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(mismatch).await.pointer("/error/code"),
+            Some(&serde_json::json!(-32_020))
+        );
+
+        let discover = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(3),
+                "server/discover",
+                serde_json::Map::new(),
+                None,
+            ))
+            .await
+            .expect("discover response");
+        assert_eq!(discover.status(), StatusCode::OK);
+        let discover = response_json(discover).await;
+        assert_eq!(
+            discover.pointer("/result/supportedVersions/0"),
+            Some(&serde_json::json!("2026-07-28"))
+        );
+        assert_eq!(
+            discover.pointer("/result/cacheScope"),
+            Some(&serde_json::json!("private"))
+        );
+
+        let tools = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(4),
+                "tools/list",
+                serde_json::Map::new(),
+                None,
+            ))
+            .await
+            .expect("tools response");
+        assert_eq!(tools.status(), StatusCode::OK);
+        let tools = response_json(tools).await;
+        let names: Vec<_> = tools["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "mcg_memory_search",
+                "mcg_project_context",
+                "mcg_query_project",
+                "mcg_system_status"
+            ]
+        );
+
+        let status = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(5),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_system_status")),
+                    ("arguments".into(), serde_json::json!({})),
+                ]),
+                Some("mcg_system_status"),
+            ))
+            .await
+            .expect("status tool response");
+        assert_eq!(status.status(), StatusCode::OK);
+        let status = response_json(status).await;
+        assert_eq!(
+            status.pointer("/result/structuredContent/state"),
+            Some(&serde_json::json!("ready"))
+        );
+
+        let query = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(6),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_query_project")),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({"project_id": project.project_id}),
+                    ),
+                ]),
+                Some("mcg_query_project"),
+            ))
+            .await
+            .expect("project tool response");
+        let query = response_json(query).await;
+        assert_eq!(
+            query.pointer("/result/structuredContent/project/project_id"),
+            Some(&serde_json::json!(project.project_id))
+        );
+
+        let context = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(7),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_project_context")),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "project_id": project.project_id,
+                            "token_budget": 4096
+                        }),
+                    ),
+                ]),
+                Some("mcg_project_context"),
+            ))
+            .await
+            .expect("context tool response");
+        let context = response_json(context).await;
+        assert!(
+            context["result"]["structuredContent"]["items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+
+        let memory = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(8),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_memory_search")),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "project_id": project.project_id,
+                            "query": "npm"
+                        }),
+                    ),
+                ]),
+                Some("mcg_memory_search"),
+            ))
+            .await
+            .expect("memory tool response");
+        let memory = response_json(memory).await;
+        assert_eq!(
+            memory.pointer("/result/structuredContent/claims/0/key"),
+            Some(&serde_json::json!("package_manager"))
+        );
+
+        let wrong_name = app
+            .oneshot(mcp_request(
+                &serde_json::json!(9),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_system_status")),
+                    ("arguments".into(), serde_json::json!({})),
+                ]),
+                Some("mcg_query_project"),
+            ))
+            .await
+            .expect("name mismatch response");
+        assert_eq!(wrong_name.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(wrong_name).await.pointer("/error/code"),
+            Some(&serde_json::json!(-32_020))
+        );
     }
 
     #[tokio::test]

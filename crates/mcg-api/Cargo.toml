@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 chrono.workspace = true
 mcg-agents = { path = "../mcg-agents" }
 mcg-domain = { path = "../mcg-domain" }

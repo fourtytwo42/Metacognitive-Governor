@@ -18,8 +18,9 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in active implementation. M0 through M4 are complete; the full vision
-remains in scope and is delivered through tested, end-to-end milestones.
+MCG is in active implementation. M0 through M5 have qualified core checkpoints,
+and M6 interface-family work is active; the full vision remains in scope and is
+delivered through tested, end-to-end milestones.
 
 Start with the [product requirements](MCG_PRD.md) and the
 [product and engineering baseline](docs/decisions/0001-product-engineering-baseline.md).
@@ -32,6 +33,7 @@ Implementation planning:
 - [M3 tool and policy plane](docs/architecture/tool-policy-plane.md)
 - [M4 project intelligence and memory](docs/architecture/project-intelligence-memory.md)
 - [M5 agent organization and run evidence](docs/architecture/agent-organization.md)
+- [M6 MCP boundary](docs/architecture/mcp.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
@@ -96,6 +98,13 @@ bearer token. Initial aliases are `mcg:auto`, `mcg:coder`, `mcg:reasoner`,
 `mcg:cheap`, and `mcg:local`; see
 [`docs/architecture/provider-proxy.md`](docs/architecture/provider-proxy.md) for
 routing, streaming, cost, and caller-owned tool semantics.
+
+Modern MCP clients can use the authenticated stateless Streamable HTTP endpoint
+at `POST /mcp`. The first server checkpoint exposes deterministic read-only
+status, project, context, and memory tools under strict MCP 2026-07-28 metadata,
+header, and loopback-Origin validation. See
+[`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
+the remaining MCP client and governed mutation work.
 
 Start the browser-hosted desktop frontend during UI development:
 

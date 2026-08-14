@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work has started while M5 live OAuth UAT waits for owner authentication. The first OpenAI-compatible provider proxy checkpoint now exposes authenticated Models, Responses, and Chat Completions routing with buffered/stream adapters and caller-owned tool semantics.
-- Last meaningful change: Added `mcg:auto`, `mcg:coder`, `mcg:reasoner`, `mcg:cheap`, and `mcg:local` aliases over the configured provider registry. Unknown costs/locality and reserved host/MCG tool namespaces fail honestly instead of silently weakening policy.
-- Next step: Complete Windows proxy qualification after the visible OAuth handoff is idle, then finish the live subscription callback/model/tool website UAT and continue remaining M6 interfaces.
+- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The modern MCP server foundation now exposes authenticated read-only status, project, bounded-context, and memory tools alongside the OpenAI-compatible proxy.
+- Last meaningful change: Added stateless MCP `2026-07-28` `POST /mcp` with `server/discover`, deterministic `tools/list`, `tools/call`, strict mirrored-header checks, pre-auth loopback-Origin validation, private cache hints, and structured tool results. MCP client and governed `mcg_run_agent` work remain.
+- Next step: Qualify the exact MCP server checkpoint on Ubuntu, then implement governed `mcg_run_agent` and the MCP client/configuration boundary while preserving the visible OAuth handoff. Complete deferred Windows full qualification and live subscription UAT once the handoff is idle.
 - Blockers: None documented.
 
 ## Current State
@@ -19,6 +19,7 @@ Durable project context lives here. Update this file whenever information should
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
+- M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server foundation. Its first four tools are deterministic and read-only; MCP client support and governed mutation remain in scope.
 
 ## User Preferences
 
@@ -103,6 +104,7 @@ When sources conflict, use this order:
 - M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
 - M5 uses a separate `mcg-agents` boundary for versioned organization genomes, roles/instances, work plans, agent leases, success conditions, evaluation evidence, confidence/calibration, and organizational-cost metrics.
 - The M6 provider proxy is authenticated by the installation bearer token and never executes externally supplied caller tools. `/v1/responses` and `/v1/chat/completions` share exact provider routing/fallback rules; authentication errors cannot cross provider or billing boundaries. `mcg:cheap` requires known cost and `mcg:local` accepts only loopback/private endpoints.
+- The M6 MCP server uses one stateless `POST /mcp`; it requires per-request protocol/capability metadata and matching `MCP-Protocol-Version`, `Mcp-Method`, and tool `Mcp-Name` headers. Present Origins must be literal loopback/localhost and are rejected before authentication otherwise. Initial server tools are read-only and return private-cache structured evidence.
 - M5 SQLite migration 5 makes organization revisions, plans, usage, and evaluations immutable evidence while runs, instances, and leases are event-backed current projections. Startup never resumes stale authority: interrupted runs become `recovering` and active instances/leases expire before reassignment.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
@@ -162,6 +164,7 @@ When sources conflict, use this order:
 - 2026-08-14: Exact evaluation commit `8e3188a` passed complete owner-controlled Ubuntu `scripts/verify.sh`: strict Rust format/clippy/workspace tests, the independent-evaluator website scenario, live GPU45, docs, frontend unit/type/build, native Linux Tauri build, and Playwright all passed. Windows full verification remains deferred only to preserve the visible uncompleted OAuth browser session; focused Windows strict checks for changed packages are green.
 - 2026-08-14: Initial M6 OpenAI-compatible proxy checkpoint (full cross-platform qualification pending) added authenticated `/v1/models`, `/v1/responses`, and `/v1/chat/completions`; deterministic alias/capability/cost/local routing; bounded retriable fallback; Responses and Chat buffered/stream normalization; Chat `[DONE]`; usage and physical-route evidence; standard null-content tool history; caller-owned function-call passthrough; and fail-closed `host::`/`mcg::` handling. Three proxy tests plus strict API/provider/runtime clippy and 43 focused tests passed on Windows while the OAuth UAT app remained open.
 - 2026-08-14: Exact provider-proxy commit `ba8580b` passed complete owner-controlled Ubuntu `scripts/verify.sh`: all strict Rust/workspace tests including 16 API/proxy tests and live GPU45, documentation, frontend checks/build, native Linux Tauri build, and Playwright passed. Windows full verification remains deferred only to preserve the still-visible owner OAuth handoff; its focused proxy checks are green.
+- 2026-08-14: Initial MCP server checkpoint passed Windows focused qualification: 19 `mcg-api` tests, strict full-workspace clippy with warnings denied, formatting, docs validation, and diff hygiene. Contract evidence covers pre-auth hostile-Origin rejection, auth, mirrored-header mismatch, modern discovery, stable tools, status, exact project query, bounded context, memory search, structured results, and encoded `Mcp-Name`. Full workspace tests reached only the expected Windows access-denied replacement of the live `mcg-daemon.exe`; PIDs 85024/74436 remained active and provider listing was still empty, so the visible uncompleted OAuth handoff was preserved. Ubuntu qualification is next.
 
 ## Decisions
 
@@ -348,6 +351,15 @@ When sources conflict, use this order:
 - Result: Authenticated API fixture proves device start/complete/cancel/refresh, exact billing isolation, and response secrecy. CLI opens/prints verification and cancels on Ctrl+C. Desktop exposes simple browser login and advanced device-code selection through native daemon commands. Full local cross-platform qualification is green.
 - Follow-up: Complete both-platform qualification and live OAuth UAT, then probe a subscription model for tool-capable real website work.
 
+### 2026-08-14 - Modern MCP Server Foundation
+
+- Context: M6 requires MCG to be an MCP server without reintroducing the retired connection-scoped handshake/session model or giving external clients an ungoverned host-effect path.
+- Decision: Implement the current MCP `2026-07-28` stateless Streamable HTTP contract at authenticated `POST /mcp`; validate loopback Origins before auth, require body/header agreement, advertise only read-safe capabilities, and expose status/project/context/memory through existing runtime reads. Do not expose `mcg_run_agent` until its mutation can create durable governed task/run evidence.
+- Files: `crates/mcg-api/src/mcp.rs`, `crates/mcg-api/src/lib.rs`, `crates/mcg-api/Cargo.toml`, `docs/architecture/mcp.md`, `README.md`.
+- Commands/tests: `cargo test -p mcg-api`; `cargo clippy -p mcg-api --all-targets -- -D warnings`; `cargo fmt --all`; `npm run check:docs`; `git diff --check`.
+- Result: Nineteen API tests pass on Windows. Four deterministic tools return structured/private-cache results and hostile Origins, malformed/mismatched mirrored headers, unknown tools, invalid inputs, and internal read failures fail without side effects or credential exposure.
+- Follow-up: Pass the exact checkpoint on Ubuntu, then add governed `mcg_run_agent`, MCP client configuration/discovery/namespace/policy execution, interoperability fixtures, and both-platform UAT.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -371,9 +383,10 @@ When sources conflict, use this order:
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
-- Complete M5 durable run orchestration and useful end-to-end website/app work.
+- Continue M5 representative useful projects and broader end-to-end evidence while M6 interfaces are built; the durable provider/tool website and independent evaluator scenarios are complete checkpoints, not the full product.
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
+- Complete MCP server mutation/subscriptions/interoperability and the MCP client configuration, credential, discovery, namespace, policy, and agent-tool integration boundaries.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

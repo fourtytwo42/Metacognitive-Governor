@@ -2566,6 +2566,7 @@ name = "mcg-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "http-body-util",
  "mcg-agents",
