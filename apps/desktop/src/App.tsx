@@ -10,6 +10,7 @@ import {
   listMcpConnections,
   listProjects,
   listTasks,
+  launchTask,
   loadTaskEvents,
   type McpAuthMode,
   type McpListItem,
@@ -64,6 +65,7 @@ export function App() {
   const [taskMaxCost, setTaskMaxCost] = useState("");
   const [taskBusy, setTaskBusy] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
+  const [taskLaunch, setTaskLaunch] = useState<Record<string, string>>({});
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
@@ -269,7 +271,23 @@ export function App() {
     }
   }
 
-  async function changeTaskState(taskId: string, state: "active" | "cancelled") {
+  async function startTask(taskId: string) {
+    setTaskBusy(true);
+    setTaskError(null);
+    setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Planning and starting governed work..." }));
+    try {
+      const launched = await launchTask(taskId);
+      replaceTask(launched.task);
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: launched.execution.detail }));
+    } catch (error) {
+      setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Launch failed." }));
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
+  async function changeTaskState(taskId: string, state: "cancelled") {
     setTaskBusy(true);
     setTaskError(null);
     try {
@@ -436,6 +454,7 @@ export function App() {
                   <h3>{task.goal}</h3>
                   {task.project_id && <span className="task-project">{projects.find((project) => project.project_id === task.project_id)?.root ?? "Linked project"}</span>}
                   {advanced && <code>{task.id}</code>}
+                  {taskLaunch[task.id] && <p className="task-progress" role="status">{taskLaunch[task.id]}</p>}
                   {taskHistory[task.id] && <ol className="event-history">
                     {taskHistory[task.id]?.events.map((event) => (
                       <li key={event.sequence}><span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}</li>
@@ -443,7 +462,7 @@ export function App() {
                   </ol>}
                 </div>
                 <div className="task-actions">
-                  {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "active")}>Start task</button>}
+                  {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy || !task.project_id} title={task.project_id ? undefined : "Select a project before starting"} onClick={() => startTask(task.id)}>Start task</button>}
                   {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
                   <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide history" : "History"}</button>
                 </div>

@@ -253,6 +253,37 @@ pub struct ExecuteAgentWorkRequest {
     pub max_model_calls: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchTaskRequest {
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default = "default_context_token_budget")]
+    pub context_token_budget: u32,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
+    #[serde(default = "default_estimated_output_tokens")]
+    pub estimated_output_tokens: u64,
+    #[serde(default = "default_max_model_calls")]
+    pub max_model_calls: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LaunchTaskResponse {
+    pub task: TaskEnvelope,
+    pub run: AgentRunView,
+    pub replayed: bool,
+    pub execution: LaunchExecution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum LaunchExecution {
+    NotStarted { detail: String },
+    AwaitingApproval { detail: String },
+    AwaitingEvaluation { detail: String },
+    Blocked { detail: String },
+}
+
 #[derive(Deserialize)]
 pub struct ConfigureProviderRequest {
     pub connection: ProviderConnection,
@@ -411,6 +442,14 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "runtime_error",
+            message: message.into(),
+        }
+    }
 }
 
 impl From<RuntimeError> for ApiError {
@@ -449,6 +488,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route("/api/v1/tasks/{task_id}/events", get(task_events))
         .route("/api/v1/tasks/{task_id}/tool-audit", get(task_tool_audit))
         .route("/api/v1/tasks/{task_id}/runs", post(plan_agent_run))
+        .route("/api/v1/tasks/{task_id}/launch", post(launch_task))
         .route(
             "/api/v1/organizations",
             get(list_organizations).post(create_default_organization),
@@ -888,6 +928,205 @@ async fn plan_agent_run(
         .agent_run_view(run_id)
         .map_err(map_runtime_error)?;
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+/// Composes the consumer Start action into one durable plan/run reservation and
+/// bounded autonomous execution. The durable launch is idempotent by task id;
+/// replaying Start observes the original run without issuing another model call.
+#[allow(clippy::too_many_lines)] // Keep the complete consumer launch composition visible together.
+async fn launch_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<LaunchTaskRequest>,
+) -> Result<Json<LaunchTaskResponse>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    let task = state
+        .runtime
+        .task(task_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::not_found(format!("task {task_id} was not found")))?;
+    let project_id = task
+        .project_id
+        .ok_or_else(|| ApiError::bad_request("consumer task launch requires a selected project"))?;
+    let project = state
+        .runtime
+        .project(project_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))?;
+    let now = Utc::now();
+    let organization = OrganizationGenome::consumer_default(now);
+    let conditions = consumer_success_conditions(&task, &project);
+    let run_id = RunId::new();
+    let planning = PlanningRequest {
+        run_id,
+        task: task.clone(),
+        complexity: TaskComplexity::Compound,
+        work: vec![PlannedWork {
+            id: WorkItemId::new(),
+            goal: task.goal.clone(),
+            role: RoleKind::Coder,
+            dependencies: Vec::new(),
+            success_conditions: conditions,
+            risk_notes: task.constraints.clone(),
+            budget_weight: 4,
+            estimated_useful_seconds: task.budget.max_duration_seconds.unwrap_or(900),
+        }],
+        require_independent_evaluation: true,
+    };
+    let plan = ExecutivePlanner::default()
+        .plan(&organization, &planning, now)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let run = AgentRun {
+        schema_version: AGENT_RUN_SCHEMA_VERSION,
+        id: run_id,
+        task_id,
+        organization_revision_id: organization.revision_id,
+        state: AgentRunState::Planned,
+        metrics: OrganizationalMetrics::default(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    let launched = state
+        .runtime
+        .launch_task_agent_run(task_id, &organization, &run, &plan)
+        .map_err(map_runtime_error)?;
+    if launched.replayed {
+        let execution = observe_launched_run(&launched.view);
+        return Ok(Json(LaunchTaskResponse {
+            task: launched.task,
+            run: launched.view,
+            replayed: true,
+            execution,
+        }));
+    }
+
+    let mut execution = LaunchExecution::AwaitingEvaluation {
+        detail: "All planned agent turns finished; objective evaluation is still required.".into(),
+    };
+    for item in &launched.view.plan.items {
+        let role = organization
+            .roles
+            .iter()
+            .find(|role| role.id == item.assigned_role)
+            .map(|role| role.kind)
+            .ok_or_else(|| ApiError::internal("planned role was not found"))?;
+        let requested_tools = if role == RoleKind::Coder {
+            request.requested_tools.clone()
+        } else {
+            Vec::new()
+        };
+        let result = state
+            .runtime
+            .execute_agent_work(&AgentDispatchSpec {
+                run_id: launched.view.run.id,
+                work_item_id: item.id,
+                project_id,
+                target_path: request.target_path.clone(),
+                context_token_budget: request.context_token_budget,
+                requested_tools,
+                estimated_output_tokens: request.estimated_output_tokens,
+                max_model_calls: request.max_model_calls,
+            })
+            .await;
+        if let Err(error) = result {
+            execution = match &error {
+                RuntimeError::AgentTurn(AgentTurnError::Tool(
+                    mcg_tools::ToolError::ApprovalRequired { .. },
+                )) => LaunchExecution::AwaitingApproval {
+                    detail: "A governed tool action is waiting for owner approval.".into(),
+                },
+                _ => LaunchExecution::Blocked {
+                    detail: error.to_string(),
+                },
+            };
+            break;
+        }
+    }
+    Ok(Json(LaunchTaskResponse {
+        task: state
+            .runtime
+            .task(task_id)
+            .map_err(map_runtime_error)?
+            .ok_or_else(|| ApiError::internal("launched task disappeared"))?,
+        run: state
+            .runtime
+            .agent_run_view(launched.view.run.id)
+            .map_err(map_runtime_error)?,
+        replayed: false,
+        execution,
+    }))
+}
+
+fn observe_launched_run(view: &AgentRunView) -> LaunchExecution {
+    if view.run.state == AgentRunState::Waiting {
+        LaunchExecution::AwaitingApproval {
+            detail: "This run is waiting for owner approval; no duplicate model work was issued."
+                .into(),
+        }
+    } else if view.results.len() == view.plan.items.len() && view.evaluations.is_empty() {
+        LaunchExecution::AwaitingEvaluation {
+            detail:
+                "Agent turns are durable; objective evaluation is still required before completion."
+                    .into(),
+        }
+    } else if view
+        .leases
+        .iter()
+        .any(|lease| lease.state == mcg_agents::AgentLeaseState::Failed)
+    {
+        LaunchExecution::Blocked {
+            detail: "The prior launch has failed work evidence; use run details to retry safely."
+                .into(),
+        }
+    } else {
+        LaunchExecution::NotStarted {
+            detail: "This task was already launched; no duplicate model work was issued.".into(),
+        }
+    }
+}
+
+fn consumer_success_conditions(
+    task: &TaskEnvelope,
+    project: &ProjectModel,
+) -> Vec<SuccessCondition> {
+    let mut conditions = task
+        .success_conditions
+        .iter()
+        .filter(|description| !description.trim().is_empty())
+        .map(|description| SuccessCondition::Custom {
+            description: description.trim().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    for command in &project.commands {
+        let name = command.name.to_ascii_lowercase();
+        let condition = if name.contains("test") {
+            Some(SuccessCondition::Test {
+                command: command.command.clone(),
+            })
+        } else if name.contains("lint") || name.contains("check") {
+            Some(SuccessCondition::StaticAnalysis {
+                command: command.command.clone(),
+            })
+        } else if name.contains("build") {
+            Some(SuccessCondition::Build {
+                command: command.command.clone(),
+            })
+        } else {
+            None
+        };
+        if let Some(condition) = condition
+            && !conditions.contains(&condition)
+        {
+            conditions.push(condition);
+        }
+    }
+    if conditions.is_empty() {
+        conditions.push(SuccessCondition::Custom {
+            description: format!("Verify the completed goal: {}", task.goal),
+        });
+    }
+    conditions
 }
 
 async fn get_agent_run(
@@ -2747,6 +2986,92 @@ form.addEventListener('submit', (event) => {
             serde_json::from_slice(&listed.into_body().collect().await.expect("body").to_bytes())
                 .expect("task list");
         assert_eq!(listed.tasks, vec![created.task]);
+    }
+
+    #[tokio::test]
+    async fn consumer_launch_is_durable_idempotent_and_reports_missing_provider() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#,
+        )
+        .expect("project fixture");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let mut task = TaskEnvelope::new("Build and test the fixture");
+        task.project_id = Some(project.project_id);
+        runtime.create_task(&task).expect("create task");
+        let app = router(runtime.clone());
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 2,
+        })
+        .expect("launch body");
+        let launch_path = format!("/api/v1/tasks/{}/launch", task.id);
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&launch_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("launch response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let launched: LaunchTaskResponse = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("launch response body");
+        assert!(!launched.replayed);
+        assert_eq!(launched.task.state, TaskState::Active);
+        assert_eq!(launched.run.run.state, AgentRunState::Running);
+        assert_eq!(launched.run.plan.items.len(), 2);
+        assert!(matches!(
+            launched.execution,
+            LaunchExecution::Blocked { .. }
+        ));
+        assert!(launched.run.plan.items.iter().any(|item| {
+            item.success_conditions
+                .iter()
+                .any(|condition| matches!(condition, SuccessCondition::Test { .. }))
+        }));
+
+        let replay = app
+            .oneshot(
+                authorized(Request::post(&launch_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay response");
+        let replayed: LaunchTaskResponse =
+            serde_json::from_slice(&replay.into_body().collect().await.expect("body").to_bytes())
+                .expect("replay body");
+        assert!(replayed.replayed);
+        assert_eq!(replayed.run.run.id, launched.run.run.id);
+        assert!(matches!(
+            replayed.execution,
+            LaunchExecution::NotStarted { .. }
+        ));
+        assert_eq!(runtime.organizations().expect("organizations").len(), 1);
     }
 
     #[tokio::test]

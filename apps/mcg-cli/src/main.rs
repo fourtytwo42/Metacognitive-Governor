@@ -5,12 +5,13 @@ use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, OrganizationListResponse,
-    OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse,
-    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse,
+    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    ProjectHistoryResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
+    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
+    TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -475,6 +476,14 @@ enum TaskCommand {
     Create {
         goal: String,
         #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Idempotently plan and start autonomous governed work for a task.
+    Launch {
+        id: String,
+        #[arg(long)]
         json: bool,
     },
     /// List current durable task projections.
@@ -616,6 +625,7 @@ async fn run_status(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keep task command-to-HTTP routing in one exhaustive match.
 async fn run_task(
     client: &reqwest::Client,
     host: &str,
@@ -623,13 +633,18 @@ async fn run_task(
     command: TaskCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        TaskCommand::Create { goal, json } => {
+        TaskCommand::Create {
+            goal,
+            project_id,
+            json,
+        } => {
+            let project_id = project_id.as_deref().map(ProjectId::from_str).transpose()?;
             let created: TaskMutationResponse = client
                 .post(format!("{host}/api/v1/tasks"))
                 .bearer_auth(token)
                 .json(&CreateTaskRequest {
                     goal,
-                    project_id: None,
+                    project_id,
                     thread_id: None,
                     constraints: Vec::new(),
                     success_conditions: Vec::new(),
@@ -645,6 +660,32 @@ async fn run_task(
                 println!("{}", serde_json::to_string_pretty(&created)?);
             } else {
                 println!("{}", created.task.id);
+            }
+        }
+        TaskCommand::Launch { id, json } => {
+            let task_id = TaskId::from_str(&id)?;
+            let launched: LaunchTaskResponse = client
+                .post(format!("{host}/api/v1/tasks/{task_id}/launch"))
+                .bearer_auth(token)
+                .json(&LaunchTaskRequest {
+                    target_path: None,
+                    context_token_budget: 8_192,
+                    requested_tools: Vec::new(),
+                    estimated_output_tokens: 4_096,
+                    max_model_calls: 8,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&launched)?);
+            } else {
+                println!(
+                    "{}: {:?} ({:?})",
+                    launched.run.run.id, launched.execution, launched.run.run.state
+                );
             }
         }
         TaskCommand::List { json } => {

@@ -45,7 +45,209 @@ pub struct InterfaceRunReceipt {
     pub events: Vec<EventEnvelope>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskLaunchReceipt {
+    pub task: TaskEnvelope,
+    pub run: AgentRun,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
 impl SqliteEventStore {
+    /// Atomically binds an existing pending task to its one consumer run and
+    /// starts both projections. Repeating the operation returns the original
+    /// run and never creates duplicate authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task/run/plan identities or durable state are
+    /// inconsistent, or persistence fails.
+    #[allow(clippy::too_many_lines)]
+    pub fn launch_task_agent_run(
+        &mut self,
+        task_id: mcg_domain::TaskId,
+        genome: &OrganizationGenome,
+        run: &AgentRun,
+        plan: &WorkPlan,
+    ) -> Result<TaskLaunchReceipt, StorageError> {
+        if let Some(run_id) = self
+            .connection
+            .query_row(
+                "SELECT run_id FROM task_launches WHERE task_id = ?1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let run_id = run_id.parse().map_err(|_| {
+                StorageError::InvalidData("stored task launch run id is invalid".into())
+            })?;
+            return Ok(TaskLaunchReceipt {
+                task: self
+                    .load_task(task_id)?
+                    .ok_or(StorageError::TaskNotFound(task_id))?,
+                run: self
+                    .agent_run(run_id)?
+                    .ok_or(StorageError::AgentRunNotFound(run_id))?,
+                replayed: true,
+                events: Vec::new(),
+            });
+        }
+
+        let task = self
+            .load_task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        if task.state != TaskState::Pending
+            || run.schema_version != AGENT_RUN_SCHEMA_VERSION
+            || run.state != AgentRunState::Planned
+            || run.completed_at.is_some()
+            || run.id != plan.run_id
+            || task.id != run.task_id
+            || task.id != plan.task_id
+            || run.organization_revision_id != genome.revision_id
+            || run.organization_revision_id != plan.organization_revision_id
+            || genome.revision != 1
+            || genome.parent_revision_id.is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "task launch identities or initial states are inconsistent".into(),
+            ));
+        }
+        if let Some(project_id) = task.project_id
+            && self.project(project_id)?.is_none()
+        {
+            return Err(StorageError::ProjectNotFound(project_id));
+        }
+        genome
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        plan.validate(genome)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !budgets_within_parent(plan, &task.budget) || !metrics_valid(&run.metrics) {
+            return Err(StorageError::InvalidData(
+                "task launch metrics or aggregate work budgets are invalid".into(),
+            ));
+        }
+        if self.organization(genome.organization_id)?.is_some() {
+            return Err(StorageError::Conflict(
+                "task launch organization identity already exists".into(),
+            ));
+        }
+
+        let mut active_task = task.clone();
+        active_task.transition_to(TaskState::Active)?;
+        let mut running_run = run.clone();
+        running_run.state = AgentRunState::Running;
+        running_run.updated_at = active_task.updated_at;
+        let organization_event = EventEnvelope::new(
+            EventKind::OrganizationRevisionRecorded,
+            None,
+            serde_json::to_value(genome)?,
+        );
+        let planned_event = EventEnvelope::new(
+            EventKind::AgentRunPlanned,
+            Some(task.id),
+            serde_json::json!({"run": run, "plan": plan}),
+        );
+        let active_event = EventEnvelope::new(
+            EventKind::TaskStateChanged,
+            Some(task.id),
+            serde_json::to_value(TaskStateChangedPayload {
+                from: TaskState::Pending,
+                to: TaskState::Active,
+            })?,
+        );
+        let running_event = EventEnvelope::new(
+            EventKind::AgentRunStateChanged,
+            Some(task.id),
+            serde_json::json!({
+                "from": AgentRunState::Planned,
+                "to": AgentRunState::Running,
+                "run": &running_run,
+            }),
+        );
+
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO organization_revisions(
+                revision_id, organization_id, revision, parent_revision_id,
+                organization_json, created_at
+             ) VALUES (?1, ?2, 1, NULL, ?3, ?4)",
+            params![
+                genome.revision_id.to_string(),
+                genome.organization_id.to_string(),
+                serde_json::to_string(genome)?,
+                genome.created_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO organizations(
+                organization_id, current_revision_id, organization_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                genome.organization_id.to_string(),
+                genome.revision_id.to_string(),
+                serde_json::to_string(genome)?,
+                genome.created_at.to_rfc3339(),
+            ],
+        )?;
+        let mut events = vec![Self::insert_event(&transaction, &organization_event)?];
+        transaction.execute(
+            "INSERT INTO agent_runs(
+                run_id, task_id, organization_revision_id, state, run_json,
+                created_at, updated_at, completed_at
+             ) VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, NULL)",
+            params![
+                run.id.to_string(),
+                task.id.to_string(),
+                run.organization_revision_id.to_string(),
+                serde_json::to_string(run)?,
+                run.created_at.to_rfc3339(),
+                run.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO work_plans(run_id, task_id, plan_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                run.id.to_string(),
+                task.id.to_string(),
+                serde_json::to_string(plan)?,
+                plan.created_at.to_rfc3339(),
+            ],
+        )?;
+        events.push(Self::insert_event(&transaction, &planned_event)?);
+        let event = Self::insert_event(&transaction, &active_event)?;
+        Self::upsert_task(&transaction, &active_task, event.sequence)?;
+        events.push(event);
+        let changed = transaction.execute(
+            "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND state = 'planned'",
+            params![
+                serde_json::to_string(&running_run)?,
+                running_run.updated_at.to_rfc3339(),
+                running_run.id.to_string(),
+            ],
+        )?;
+        ensure_single_change(changed, "task launch run could not start atomically")?;
+        events.push(Self::insert_event(&transaction, &running_event)?);
+        transaction.execute(
+            "INSERT INTO task_launches(task_id, run_id, created_at) VALUES (?1, ?2, ?3)",
+            params![
+                task.id.to_string(),
+                running_run.id.to_string(),
+                running_run.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(TaskLaunchReceipt {
+            task: active_task,
+            run: running_run,
+            replayed: false,
+            events,
+        })
+    }
+
     /// Atomically creates an idempotent interface-owned task, organization,
     /// immutable plan, active task projection, and running agent run.
     ///
@@ -1902,6 +2104,77 @@ mod tests {
         AgentInstanceId, AgentLeaseId, EvaluationId, RunId, TaskBudget, UsageRecordId,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn existing_task_launch_is_atomic_idempotent_and_restart_durable() {
+        let directory = tempdir().expect("temp directory");
+        let database = directory.path().join("mcg.sqlite3");
+        let now = Utc::now();
+        let task = TaskEnvelope::new("Build the selected project");
+        let genome = OrganizationGenome::consumer_default(now);
+        let request = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "Build the selected project",
+                RoleKind::Coder,
+                vec![SuccessCondition::Custom {
+                    description: "project meets the requested goal".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &request, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: request.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        let mut store = SqliteEventStore::open(&database).expect("open store");
+        store.create_task(&task).expect("create task");
+        let created = store
+            .launch_task_agent_run(task.id, &genome, &run, &plan)
+            .expect("launch task");
+        assert!(!created.replayed);
+        assert_eq!(created.task.state, TaskState::Active);
+        assert_eq!(created.run.state, AgentRunState::Running);
+        assert_eq!(created.events.len(), 4);
+
+        let replayed = store
+            .launch_task_agent_run(task.id, &genome, &run, &plan)
+            .expect("replay task launch");
+        assert!(replayed.replayed);
+        assert_eq!(replayed.run.id, run.id);
+        assert!(replayed.events.is_empty());
+        drop(store);
+
+        let reopened = SqliteEventStore::open(&database).expect("reopen store");
+        assert_eq!(
+            reopened
+                .load_task(task.id)
+                .expect("task")
+                .expect("task row")
+                .state,
+            TaskState::Active
+        );
+        assert_eq!(
+            reopened
+                .agent_run(run.id)
+                .expect("run")
+                .expect("run row")
+                .state,
+            AgentRunState::Running
+        );
+    }
 
     #[test]
     fn interface_run_creation_is_atomic_idempotent_and_restart_durable() {

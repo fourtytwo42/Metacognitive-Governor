@@ -132,6 +132,16 @@ export interface TaskEventsResponse {
   events: Array<{ sequence: number; kind: string; occurred_at: string }>;
 }
 
+export interface LaunchTaskResponse {
+  task: TaskEnvelope;
+  replayed: boolean;
+  run: { run: { id: string; state: string } };
+  execution: {
+    state: "not_started" | "awaiting_approval" | "awaiting_evaluation" | "blocked";
+    detail: string;
+  };
+}
+
 export function startOpenAiOAuth(method: OpenAiOAuthMethod): Promise<OAuthLoginStart> {
   return invoke("start_openai_oauth", {
     request: {
@@ -181,6 +191,18 @@ export function createTask(request: CreateTaskRequest): Promise<TaskMutationResp
 
 export function transitionTask(taskId: string, state: TaskState): Promise<TaskEnvelope> {
   return invoke("transition_task", { taskId, request: { state } });
+}
+
+export function launchTask(taskId: string): Promise<LaunchTaskResponse> {
+  return invoke("launch_task", {
+    taskId,
+    request: {
+      context_token_budget: 8192,
+      requested_tools: [],
+      estimated_output_tokens: 4096,
+      max_model_calls: 8
+    }
+  });
 }
 
 export function loadTaskEvents(taskId: string): Promise<TaskEventsResponse> {

@@ -80,7 +80,7 @@ Use `mcg run evaluate RUN evaluation.json` to submit an immutable objective
 run's Evaluator instance, and `mcg run get RUN` replays the stored report with
 the rest of the run evidence.
 
-The desktop task composer and `mcg task create/list/get/transition/events` share
+The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can
 set constraints, success conditions, risk, and a cost ceiling. Task cards expose
 only legal start/cancel controls and load ordered event history from SQLite rather
@@ -88,6 +88,13 @@ than reconstructing progress in browser state. “Open folder” uses a native
 Windows/Linux picker, discovers the repository through the daemon, and attaches
 the resulting durable project identity to the task; previously discovered folders
 remain selectable after restart.
+
+`Start task` is a real orchestration boundary rather than a status-only button.
+It reserves one durable run, selects the consumer Coder and independent Evaluator,
+derives useful command-based evidence from project discovery, and advances work
+through configured providers and governed tools. Repeating Start never duplicates
+paid model work, and the UI reports approval, provider, and objective-evaluation
+waits without treating a model's completion message as proof.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

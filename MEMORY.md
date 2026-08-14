@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP HTTP/stdio management and durable task creation/list/start/cancel/history are available through API, CLI, and native desktop.
-- Last meaningful change: Replaced the disabled project button with a security-scoped native Tauri folder picker, daemon project discovery, durable project/task association, and restart-selectable project listing.
-- Next step: Qualify native project selection on Ubuntu, then add representative third-party MCP interoperability and native task/MCP UAT. Preserve the visible OAuth handoff.
+- Current task: Consumer orchestration now has an idempotent real launch path; approval resume, safe retry, cancellation propagation, and objective evaluation/terminal settlement are the next dependency-ordered slice.
+- Last meaningful change: Replaced the desktop status-only Start action with atomic one-run reservation, consumer planning, bounded Coder/Evaluator advancement, durable replay observation, and matching API/CLI/Tauri contracts.
+- Next step: Add explicit approval-resume and retry authority, cascade cancellation through run/instance/lease state, then implement objective success-condition execution and terminal task/run settlement. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -20,6 +20,7 @@ Durable project context lives here. Update this file whenever information should
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
 - M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. Its client supports current/legacy HTTP and stdio configuration/discovery/calls through API, CLI, and desktop; expanded run-control/evaluation contracts remain in scope.
+- Consumer Start requires a selected durable project and uses migration 10 to bind each existing task to exactly one running consumer plan. API, CLI, Tauri, and desktop share the launch contract; retries never reissue model work, and model self-report remains insufficient for completion.
 
 ## User Preferences
 
@@ -450,6 +451,15 @@ When sources conflict, use this order:
 - Result: Folder cancellation is side-effect free; selection/discovery visibly identifies the project and sends its id in task creation. Focused Windows and complete Ubuntu automation are green; native dialog UAT remains required on both platforms.
 - Follow-up: Real native folder-picker UAT, then consumer project/run orchestration.
 
+### 2026-08-14 - Idempotent Consumer Task Launch
+
+- Context: Desktop Start only changed a task projection to active and did not plan or execute governed work.
+- Decision: Require a selected durable project; atomically bind each existing task to one consumer organization/run using migration 10; derive candidate build/test/static-analysis conditions from project discovery; advance Coder then independent Evaluator through existing provider/tool authority; and return durable blocked/approval/evaluation observations without treating model text as objective completion. Launch replay never executes duplicate model work.
+- Files: `crates/mcg-{storage,runtime,api}/`, `apps/mcg-cli/`, `apps/desktop/`, `docs/architecture/runtime-spine.md`, `README.md`.
+- Commands/tests: Strict focused Rust clippy; 43 targeted Rust tests; TypeScript; six Vitest flows; production Vite build; Playwright smoke; docs and diff checks.
+- Result: Atomic/restart-durable one-run reservation, missing-provider reporting, inferred command evidence, CLI/Tauri/desktop launch, and UI progress are green on Windows. Existing provider/tool/evaluator fixtures remain green. Objective evaluation and terminal settlement are intentionally still required.
+- Follow-up: Implement approval resume, bounded retry, cancellation propagation, objective condition execution, terminal settlement, and then the complete Ubuntu qualification.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -477,6 +487,7 @@ When sources conflict, use this order:
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
+- Complete consumer-run approval resume, safe retry, cancellation propagation, objective evaluation, and terminal task/run settlement; current Start launches real work but deliberately stops short of claiming objective completion.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

@@ -1369,6 +1369,34 @@ impl AppRuntime {
         })
     }
 
+    /// Atomically starts the single consumer run associated with an existing
+    /// durable task. A retry returns the original task/run view and never
+    /// creates duplicate execution authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when task, organization, plan, project, budget, or
+    /// persistence invariants fail.
+    pub fn launch_task_agent_run(
+        &self,
+        task_id: TaskId,
+        genome: &OrganizationGenome,
+        run: &AgentRun,
+        plan: &WorkPlan,
+    ) -> Result<InterfaceAgentRun, RuntimeError> {
+        let receipt = self
+            .store()?
+            .launch_task_agent_run(task_id, genome, run, plan)?;
+        for event in &receipt.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(InterfaceAgentRun {
+            task: receipt.task,
+            view: self.agent_run_view(receipt.run.id)?,
+            replayed: receipt.replayed,
+        })
+    }
+
     /// Transitions a durable agent run and publishes its event.
     ///
     /// # Errors

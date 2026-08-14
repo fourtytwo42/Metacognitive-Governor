@@ -45,6 +45,7 @@ are explicit overrides for controlled tests and alternate local clients.
 | `GET` | `/api/v1/tasks` | List current projections in deterministic newest-updated order |
 | `GET` | `/api/v1/tasks/{id}` | Read the task projection |
 | `POST` | `/api/v1/tasks/{id}` | Apply a validated state transition |
+| `POST` | `/api/v1/tasks/{id}/launch` | Idempotently plan, start, and advance consumer work |
 | `GET` | `/api/v1/tasks/{id}/events` | Read ordered durable task history |
 | `GET` | `/api/v1/events/stream` | Receive committed events over SSE |
 
@@ -60,7 +61,14 @@ stable task ids. A dedicated Rust command opens the platform-native Tauri folder
 dialog, returns only the selected local path, performs daemon-side project
 discovery, and associates the durable project id with the task. Existing projects
 are loaded after restart and can be reselected without granting browser code a
-general filesystem scope. The CLI mirrors listing with `mcg task list`.
+general filesystem scope. Start requires that durable project identity; it
+atomically binds the task to exactly one consumer organization/run, derives
+candidate build/test/static-analysis conditions from discovered commands, and
+advances Coder then independent Evaluator turns through the existing provider
+and tool authority boundaries. A repeated launch observes durable progress and
+does not issue duplicate model work. Model output is never objective completion:
+the run remains visibly awaiting evaluation until evidence is recorded. The CLI
+mirrors the flow with `mcg task create --project-id ...` and `mcg task launch`.
 
 ## Verification evidence
 
@@ -68,7 +76,9 @@ Automated tests cover schema round trips, legal and illegal transitions, injecte
 projection failure with event rollback, projection repair, reopen persistence,
 authentication rejection, live streaming, durable stream replay, non-loopback bind
 rejection, and an abrupt daemon-server restart followed by API projection/history
-comparison.
+comparison. Consumer-launch fixtures additionally prove atomic one-run
+reservation, restart durability, deterministic project-command success
+conditions, missing-provider reporting, and retry idempotency.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

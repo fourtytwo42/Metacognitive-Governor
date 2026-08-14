@@ -1,7 +1,7 @@
 use mcg_api::{
-    CreateTaskRequest, DiscoverProjectRequest, McpListResponse, ProjectListResponse,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    TransitionTaskRequest,
+    CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest, LaunchTaskResponse,
+    McpListResponse, ProjectListResponse, StartOpenAiOAuthRequest, TaskEventsResponse,
+    TaskListResponse, TaskMutationResponse, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::TaskEnvelope;
@@ -239,6 +239,27 @@ async fn transition_task(
 }
 
 #[tauri::command]
+async fn launch_task(
+    task_id: String,
+    request: LaunchTaskRequest,
+) -> Result<LaunchTaskResponse, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/launch"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Task could not be launched: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task launch").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task launch response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn task_events(task_id: String) -> Result<TaskEventsResponse, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/events"))
@@ -341,6 +362,7 @@ pub fn run() {
             discover_mcp_connection,
             list_tasks,
             create_task,
+            launch_task,
             transition_task,
             task_events,
             pick_project_directory,

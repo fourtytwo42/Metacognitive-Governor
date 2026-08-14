@@ -345,6 +345,24 @@ CREATE TABLE IF NOT EXISTS mcp_tool_catalogs (
 );
 ";
 
+const MIGRATION_10: &str = r"
+CREATE TABLE IF NOT EXISTS task_launches (
+    task_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id)
+);
+CREATE TRIGGER IF NOT EXISTS task_launches_no_update
+BEFORE UPDATE ON task_launches BEGIN
+    SELECT RAISE(FAIL, 'task launch records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS task_launches_no_delete
+BEFORE DELETE ON task_launches BEGIN
+    SELECT RAISE(FAIL, 'task launch records are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -436,6 +454,7 @@ impl SqliteEventStore {
             (7_i64, MIGRATION_7),
             (8_i64, MIGRATION_8),
             (9_i64, MIGRATION_9),
+            (10_i64, MIGRATION_10),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

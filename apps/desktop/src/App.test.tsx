@@ -11,6 +11,7 @@ const client = vi.hoisted(() => ({
   discoverMcp: vi.fn(),
   listTasks: vi.fn(),
   createTask: vi.fn(),
+  launchTask: vi.fn(),
   transitionTask: vi.fn(),
   taskEvents: vi.fn(),
   pickProject: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("./desktop-client", () => ({
   discoverMcpConnection: client.discoverMcp,
   listTasks: client.listTasks,
   createTask: client.createTask,
+  launchTask: client.launchTask,
   transitionTask: client.transitionTask,
   loadTaskEvents: client.taskEvents,
   pickProjectDirectory: client.pickProject,
@@ -47,6 +49,7 @@ beforeEach(() => {
   client.discoverMcp.mockReset();
   client.listTasks.mockReset();
   client.createTask.mockReset();
+  client.launchTask.mockReset();
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
   client.pickProject.mockReset();
@@ -180,9 +183,21 @@ test("advanced MCP setup passes stdio executable arguments without a credential"
 });
 
 test("consumer task flow creates, starts, and reveals durable history", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
   const pendingTask = {
     schema_version: 1,
     id: "00000000-0000-4000-8000-000000000001",
+    project_id: project.project_id,
     goal: "Build a durable site",
     constraints: [],
     success_conditions: [],
@@ -196,7 +211,13 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
     task: pendingTask,
     event: { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at }
   });
-  client.transitionTask.mockResolvedValue({ ...pendingTask, state: "active" });
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.launchTask.mockResolvedValue({
+    task: { ...pendingTask, state: "active" },
+    replayed: false,
+    run: { run: { id: "00000000-0000-4000-8000-000000000020", state: "running" } },
+    execution: { state: "awaiting_evaluation", detail: "Objective evaluation is still required." }
+  });
   client.taskEvents.mockResolvedValue({
     events: [
       { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at },
@@ -205,12 +226,16 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   });
   render(<App />);
 
+  await screen.findByRole("option", { name: "sample" });
+  fireEvent.change(screen.getByLabelText("Project"), {
+    target: { value: project.project_id }
+  });
   fireEvent.change(screen.getByLabelText("Goal"), { target: { value: pendingTask.goal } });
   fireEvent.click(screen.getByRole("button", { name: "Create task" }));
   expect(await screen.findByRole("heading", { name: pendingTask.goal })).toBeInTheDocument();
   expect(client.createTask).toHaveBeenCalledWith({
     goal: pendingTask.goal,
-    project_id: undefined,
+    project_id: project.project_id,
     constraints: [],
     success_conditions: [],
     risk: undefined,
@@ -219,7 +244,8 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
 
   fireEvent.click(screen.getByRole("button", { name: "Start task" }));
   expect(await screen.findByText("active")).toBeInTheDocument();
-  expect(client.transitionTask).toHaveBeenCalledWith(pendingTask.id, "active");
+  expect(client.launchTask).toHaveBeenCalledWith(pendingTask.id);
+  expect(screen.getByText("Objective evaluation is still required.")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "History" }));
   expect(await screen.findByText("task transitioned")).toBeInTheDocument();
