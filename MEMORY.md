@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Guided objective approval and HTTP evidence are cross-platform qualified; real Chromium rendered-page evidence is Windows-focused green and awaits full exact-commit qualification.
+- Current task: Guided approval, HTTP status, and real Chromium rendered-page evidence are cross-platform qualified; artifact/file and custom objective evidence are next.
 - Last meaningful change: Added typed `browser.render`, exact `PAGE RENDERS URL` parsing, an ephemeral CDP renderer with pre-send origin/method interception, post-JavaScript DOM checks, and HTML/PNG evidence.
-- Next step: Complete all Windows gates and exact-commit Ubuntu qualification for browser rendering, then add artifact/file and custom-condition evaluators. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Add artifact/file and custom-condition evaluators, followed by research and screenshot-baseline evidence. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -521,9 +521,9 @@ When sources conflict, use this order:
 - Context: `PageRenders` required evidence from a JavaScript-capable browser across daemon, CLI, and desktop flows; treating fetched HTML as rendering would be false evidence, while unrestricted page scripts could silently broaden network authority or mutate services.
 - Decision: Add typed `browser.render` backed by ephemeral Chromium over CDP. Parse only exact `PAGE RENDERS URL`; require credential-free HTTP(S); use a fresh profile and bounded 1280x720 viewport; intercept every request before send; allow only GET/HEAD to the condition origin plus data/blob resources; and block cross-origin and mutating requests. Verify post-JavaScript ready state/body layout, then content-address rendered HTML and a viewport PNG. Use configured `MCG_BROWSER_EXECUTABLE` or local system detection with no runtime download. Browser unavailability is inconclusive/blocking; launched-browser render failure fails the condition.
 - Files: `crates/mcg-{config,tools,runtime,api}/`, workspace manifests/lock, owner verification scripts, `README.md`, runtime/testing documentation.
-- Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 30 tool and 28 API tests; real Chromium tool fixture; public consumer render launch fixture; nine Vitest flows; frontend typecheck/build; docs/diff checks.
-- Result: Windows-focused gates prove JavaScript changes the DOM/title, two render artifacts are audited, screenshot hash reaches the independent report, a cross-origin image plus same-origin POST are blocked before network send, and a missing configured browser is reported as unavailable rather than false objective failure. Initial exact Ubuntu commit `4bca0c7` correctly failed because the Playwright developer Chromium was denied user namespaces by AppArmor. The VM now has the same browser copied to the root-owned product path with the path-specific repository profile loaded; the focused real-browser test passes there with the Chromium sandbox enabled. No password was persisted.
-- Follow-up: Full Windows gates, exact-commit Ubuntu real-browser/native qualification, then artifact/file and custom condition evaluators.
+- Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 30 tool and 28 API tests; real Chromium tool fixture; public consumer render launch fixture; nine Vitest flows; frontend typecheck/build; docs/diff checks; exact commit `20c5f81` complete Ubuntu `./scripts/verify.sh`.
+- Result: Windows-focused and complete Ubuntu gates prove JavaScript changes the DOM/title, two render artifacts are audited, screenshot hash reaches the independent report, a cross-origin image plus same-origin POST are blocked before network send, and missing browser is unavailable rather than false objective failure. Initial commit `4bca0c7` correctly failed on Ubuntu AppArmor; root-owned managed browser plus the path-specific profile fixed it without disabling sandbox or global restriction. Exact `20c5f81` passed all Rust, live-provider, native Tauri/GTK, frontend, and Playwright gates. No password was persisted.
+- Follow-up: Artifact/file and custom condition evaluators, then expanded browser workflow/screenshot evidence.
 
 ## Known Issues
 
