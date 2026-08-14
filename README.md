@@ -111,8 +111,10 @@ MCG can also connect to current stateless Streamable HTTP MCP servers. Use
 on standard input when needed. `mcg mcp list`, `tools`, and `discover` inspect
 the secret-free durable catalog. Public endpoints require HTTPS, credentials are
 stored only in the operating-system credential store, and configuration is not
-committed unless live discovery succeeds. Stdio transport and legacy negotiation
-remain the next MCP client integration slice. The desktop includes simple
+committed unless live discovery succeeds. HTTP automatic mode probes the current
+protocol first and can fall back to the `2025-11-25` initialize/session flow;
+strict current and legacy pins are available. Stdio transport remains the next
+MCP client integration slice. The desktop includes simple
 URL-first setup plus advanced id/protocol/bearer controls and durable tool counts.
 Agent work can explicitly request a
 discovered tool as `mcp::SERVER_ID::REMOTE_TOOL`; MCG exposes a provider-safe

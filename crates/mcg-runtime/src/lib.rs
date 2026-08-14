@@ -27,8 +27,9 @@ use mcg_domain::{
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
-    McpAuthMode, McpConnection, McpCredential, McpCredentialStore, McpError, McpToolCatalog,
-    MemoryMcpCredentialStore, ModernHttpMcpClient, OsMcpCredentialStore,
+    LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpConnection, McpCredential,
+    McpCredentialStore, McpError, McpProtocolMode, McpToolCatalog, MemoryMcpCredentialStore,
+    NegotiatingHttpMcpClient, OsMcpCredentialStore,
 };
 use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
@@ -260,7 +261,7 @@ impl ToolExecutor for RuntimeMcpExecutor {
                 "external MCP executor received a non-MCP request".into(),
             ));
         };
-        let (connection, descriptor) = {
+        let (mut connection, descriptor, protocol_version) = {
             let store = self
                 .store
                 .lock()
@@ -273,12 +274,13 @@ impl ToolExecutor for RuntimeMcpExecutor {
                 .mcp_catalog(connection_id)
                 .map_err(|error| ToolError::Execution(error.to_string()))?
                 .ok_or_else(|| ToolError::Invalid("MCP tool catalog was not found".into()))?;
+            let protocol_version = catalog.protocol_version.clone();
             let descriptor = catalog
                 .tools
                 .into_iter()
                 .find(|tool| tool.name == *tool_name)
                 .ok_or_else(|| ToolError::Invalid("MCP tool was not discovered".into()))?;
-            (connection, descriptor)
+            (connection, descriptor, protocol_version)
         };
         if !connection.enabled {
             return Err(ToolError::Denied("MCP connection is disabled".into()));
@@ -291,7 +293,9 @@ impl ToolExecutor for RuntimeMcpExecutor {
         }
         let credential = load_mcp_credential(self.credentials.as_ref(), &connection)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let client = ModernHttpMcpClient::new(connection, credential)
+        connection.protocol_mode = protocol_mode_for_catalog(&protocol_version)
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let client = NegotiatingHttpMcpClient::new(connection, credential)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
         let started_at = Utc::now();
         let result = client
@@ -978,7 +982,7 @@ impl AppRuntime {
         }
         save_mcp_credential(self.mcp_credentials.as_ref(), &connection, credential)?;
         let client_credential = load_mcp_credential(self.mcp_credentials.as_ref(), &connection)?;
-        let client = match ModernHttpMcpClient::new(connection.clone(), client_credential) {
+        let client = match NegotiatingHttpMcpClient::new(connection.clone(), client_credential) {
             Ok(client) => client,
             Err(error) => {
                 let _ = self.mcp_credentials.delete(&connection.id);
@@ -1025,7 +1029,7 @@ impl AppRuntime {
                 StorageError::InvalidData(format!("MCP connection {connection_id} was not found"))
             })?;
         let credential = load_mcp_credential(self.mcp_credentials.as_ref(), &connection)?;
-        let catalog = ModernHttpMcpClient::new(connection, credential)?
+        let catalog = NegotiatingHttpMcpClient::new(connection, credential)?
             .discover()
             .await?;
         let event = self.store()?.record_mcp_catalog(&catalog)?;
@@ -2026,6 +2030,16 @@ fn mcp_tool_classification(annotations: &serde_json::Value) -> (bool, bool, bool
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(!read_only);
     (read_only, destructive, value("openWorldHint", true))
+}
+
+fn protocol_mode_for_catalog(protocol_version: &str) -> Result<McpProtocolMode, McpError> {
+    match protocol_version {
+        MCP_PROTOCOL_VERSION => Ok(McpProtocolMode::Modern20260728),
+        LEGACY_MCP_PROTOCOL_VERSION => Ok(McpProtocolMode::Legacy),
+        other => Err(McpError::Negotiation(format!(
+            "stored MCP catalog uses unsupported protocol version {other}"
+        ))),
+    }
 }
 
 #[allow(clippy::too_many_lines)] // One exhaustive schema registry is easier to audit than scattered schemas.

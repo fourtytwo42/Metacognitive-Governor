@@ -107,6 +107,15 @@ fragments. Bearer values live under a separate MCP service in the native OS
 credential store and never enter SQLite, events, API list responses, or CLI
 arguments.
 
+HTTP protocol mode can be automatic, current-only, or legacy-only. Automatic
+mode sends current `server/discover` first and falls back only for structured
+era/header negotiation failures. The legacy path performs `initialize` for
+`2025-11-25`, retains an optional `Mcp-Session-Id` for the bounded operation,
+sends `notifications/initialized`, and supports JSON or SSE JSON-RPC responses.
+The negotiated era is stored in the catalog; agent execution pins directly to
+that era so it cannot silently renegotiate to a different contract after
+authority was issued.
+
 SQLite migration 9 persists connection metadata and the latest deterministic
 tool catalog. Configuration follows a discover-before-commit transaction shape:
 the protected credential is written, live `server/discover` and `tools/list`
@@ -172,7 +181,7 @@ evidence with no approval record.
 This is the MCP server plus HTTP client foundation, not the completed MCP feature family. Remaining
 M6 work includes:
 
-- stdio transport and legacy protocol negotiation/interoperability;
+- stdio transport with bounded current probe and same-process legacy fallback;
 - expanded MCP run decomposition, independent evaluation, approval-resume,
   completion, and cancellation contracts;
 - request-scoped SSE progress and opt-in subscription streams where useful;

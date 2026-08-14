@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP current HTTP management is available through API, CLI, and native desktop; remote tools execute through governed agent leases.
-- Last meaningful change: Added a full public-surface MCP scenario: `mcg_run_agent` creates durable authority, a real model fixture selects only the lease alias, the broker executes one external read call, and terminal turn evidence is persisted without unnecessary approval.
-- Next step: Add stdio/current-to-legacy interoperability, then qualify the complete MCP slice on Windows/Ubuntu and perform native MCP UAT. Preserve the visible OAuth handoff.
+- Last meaningful change: Added current-first HTTP negotiation with structured fallback to a bounded `2025-11-25` initialize/session flow, optional session headers, initialized notification, JSON/SSE response decoding, strict era pins, and catalog-era execution pinning.
+- Next step: Add stdio current probe/same-process legacy fallback, then qualify the complete MCP slice on Windows/Ubuntu and perform native MCP UAT. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -410,6 +410,15 @@ When sources conflict, use this order:
 - Result: One durable run exposes only a generated alias, performs exactly one read-only closed-world remote call through the broker, feeds evidence back to the model, persists a succeeded tool outcome, and creates no approval record.
 - Follow-up: Keep this scenario in every full gate; add approval-resume coverage for an open-world MCP tool after expanded run-resume contracts are implemented.
 
+### 2026-08-14 - HTTP MCP Legacy Negotiation
+
+- Context: Most deployed MCP servers still use initialize-capable protocol revisions, while consumers need safe automatic compatibility without weakening strict pin behavior.
+- Decision: Probe current `2026-07-28` first in automatic HTTP mode and fall back only on structured protocol/header negotiation errors. Implement bounded `2025-11-25` initialize, optional session-header continuity, initialized notification, deterministic tools, JSON/SSE envelopes, and strict current/legacy modes. Persist the negotiated era and pin agent calls to it.
+- Files: `crates/mcg-mcp/src/{legacy,negotiation}.rs`, `crates/mcg-runtime/src/lib.rs`, `docs/architecture/mcp.md`, `README.md`.
+- Commands/tests: strict MCP/runtime clippy and tests; dual-era fixture with current rejection, legacy session assertion, discovery ordering, and tool call.
+- Result: Automatic HTTP compatibility reaches a legacy session without relaunching or leaking credentials; strict modes remain explicit and current HTTP behavior stays green.
+- Follow-up: Implement the stdio process lifecycle with a five-second current probe and same-process initialize fallback.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -436,7 +445,7 @@ When sources conflict, use this order:
 - Continue M5 representative useful projects and broader end-to-end evidence while M6 interfaces are built; the durable provider/tool website and independent evaluator scenarios are complete checkpoints, not the full product.
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
-- Complete MCP server subscriptions/interoperability plus MCP client stdio/legacy negotiation and real native MCP UAT.
+- Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

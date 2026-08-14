@@ -8,7 +8,11 @@
 mod client;
 mod contracts;
 mod credentials;
+mod legacy;
+mod negotiation;
 
 pub use client::*;
 pub use contracts::*;
 pub use credentials::*;
+pub use legacy::*;
+pub use negotiation::*;
