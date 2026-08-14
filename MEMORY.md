@@ -4,6 +4,7 @@ Durable project context lives here. Update this file whenever information should
 
 ## Active Handoff
 
+- Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M1 durable runtime spine is implemented and verified on owner-controlled Windows and Ubuntu machines; ready to begin M2 provider fabric.
 - Last meaningful change: Added versioned task/events, atomic SQLite event/projection writes, replay recovery, local bearer authentication, resumable SSE, expanded CLI, and cross-platform local verification scripts.
 - Next step: Implement M2 provider contracts, explicit authentication modes, discovery/probes, routing/cost metadata, OpenRouter/OpenAI-compatible adapters, GPU45 conformance, and standalone OpenAI OAuth research/adapter.
@@ -29,6 +30,7 @@ Durable project context lives here. Update this file whenever information should
 - Deeply integrate automated unit, integration, scenario, contract, and end-to-end testing.
 - Run builds and automated tests locally only. Do not use GitHub Actions or any GitHub-hosted automation that can incur usage charges.
 - Use the owner-controlled Ubuntu VM at `192.168.50.109` for Linux desktop, daemon, CLI, and test qualification; never persist its credentials in repository files or memory.
+- Production completion requires the agent to perform real user acceptance testing on both Windows and Linux through computer-use or equivalent user-facing interaction, fix material defects found, and leave minimal routine human regression work.
 - Keep the full PRD vision in scope; use multiple real projects, initially websites/apps, to refine the system.
 - Support OpenAI OAuth and API keys, OpenRouter, local OpenAI-compatible servers, and arbitrary OpenAI-compatible providers with user-supplied credentials.
 - Discover provider models/capabilities from endpoints and probes, display known costs, and represent unknown costs honestly.
@@ -161,6 +163,14 @@ When sources conflict, use this order:
 - Commands/tests: Both local platform scripts passed; native Windows and Linux desktop binaries built; real daemon/CLI forced-restart smoke tests passed on both platforms.
 - Result: The requested M1 runtime spine is complete and cross-platform qualified without GitHub automation.
 - Follow-up: Begin M2 provider fabric while retaining M1 invariants and local-only verification.
+
+### 2026-08-14 - Production Completion Goal
+
+- Context: The owner explicitly established the end gate for the full project.
+- Decision: Keep the goal active until the complete PRD and all interfaces are production-ready on Windows and Linux, comprehensive tests pass on owner-controlled machines, installers and lifecycle behavior are qualified, and the agent completes real UAT on both platforms using computer-use or equivalent methods.
+- Files: `MEMORY.md`; active Codex goal for this task.
+- Result: Passing builds or automated tests alone cannot complete the goal; material defects, missing interfaces, unverified release gates, or substantial remaining human regression work keep it active.
+- Follow-up: Continue with M2 provider fabric, then progress through the dependency-ordered roadmap and final cross-platform UAT.
 
 ## Known Issues
 
