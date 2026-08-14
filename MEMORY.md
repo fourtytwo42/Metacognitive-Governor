@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Provenance-backed research evidence is Windows-focused green and awaits exact Ubuntu qualification.
+- Current task: Provenance-backed research evidence is cross-platform qualified; broader browser workflows, UI depth, and representative projects are next.
 - Last meaningful change: Added scope-bound `RESEARCH EVIDENCE`, two-stage governed file/network authorization, immutable JSON/source artifacts, bounded quote/freshness/conflict validation, and terminal replay coverage.
-- Next step: Commit and run exact Ubuntu qualification for research evidence, then expand representative workflows and UI depth. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Expand representative workflows and UI depth, beginning with typed browser workflows/element-accessibility evidence and richer consumer task progress. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -126,6 +126,7 @@ When sources conflict, use this order:
 
 ## Verification Ledger
 
+- 2026-08-14: Exact provenance-backed research commit `7566cf4` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 291 seconds. The verified marker and `verify-final.exit=0` remain in `/home/hendo420/mcg-worktree-7566cf4`; all Rust gates (38 tool and 31 API tests plus live GPU45), docs, frontend, native Tauri/GTK, real Chromium, and Playwright passed. The superseded exact `4e5c432` snapshot was path/marker/exit verified and removed first to recover 13 GB; its source remains in Git. No GitHub-hosted automation ran.
 - 2026-07-12: Read `AGENTS.md` and `MEMORY.md`; identified stale project-specific memory and preserved the repository-local instruction logic.
 - 2026-07-12: Checked the workspace root; confirmed `AGENTS.md` and `MEMORY.md` are present and no `.git` directory is present at this level.
 - 2026-08-13: Read all 60 sections of `MCG_PRD.md`; inspected the workspace with `rg --files` and `git status`; confirmed it contains only the three Markdown files and is not a Git repository.
@@ -554,8 +555,8 @@ When sources conflict, use this order:
 - Decision: Parse `RESEARCH EVIDENCE project/relative/report.json`; bind report scope to the exact task goal; capture its bounded UTF-8 bytes through governed filesystem read; derive exact credential-free network origins only after parsing; and execute typed `research.verify` through policy, leases, audit, and the hardened HTTP executor. Revalidate JSON SHA/artifact identity, cap claims/citations/sources, share one timeout, retain every fetched body, validate optional age and conflict references, and leave semantic truth/support to the independent Evaluator.
 - Files: `crates/mcg-{agents,tools,runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
 - Commands/tests: Strict full-workspace Windows clippy; 38 tool tests including real HTML/plain-text sources; 31 API tests including public pass/fabricated-quote-fail/replay; focused runtime/agent tests; docs and diff checks.
-- Result: Windows-focused gates are green. The report points to the immutable JSON SHA, audited `research.verify` retains JSON plus deterministically ordered source artifacts and URL/digest evidence, scope mismatch and post-binding mutation fail, optional freshness/conflict invariants are bounded, and terminal replay adds no model call, fetch, or audit record.
-- Follow-up: Commit the slice and run exact complete Ubuntu `./scripts/verify.sh`; then broaden workflows and remaining typed objective evaluators.
+- Result: Windows-focused gates are green. Exact commit `7566cf4` also passed complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`. The report points to the immutable JSON SHA, audited `research.verify` retains JSON plus deterministically ordered source artifacts and URL/digest evidence, scope mismatch and post-binding mutation fail, optional freshness/conflict invariants are bounded, and terminal replay adds no model call, fetch, or audit record.
+- Follow-up: Broaden representative workflows, UI depth, and remaining typed objective evaluators.
 
 ## Known Issues
 
