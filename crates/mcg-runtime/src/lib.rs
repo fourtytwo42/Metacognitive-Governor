@@ -26,6 +26,12 @@ use mcg_projects::{
     MemoryError, MemoryLifecycle, MemoryLifecycleAction, ProjectDiscoverer, ProjectDiscoveryError,
     ProjectModel, SnapshotInvalidation, render_managed_memory,
 };
+use mcg_providers::{
+    MemoryProviderCredentialStore, ModelRequest, ModelResponse, OAuthTokenSet,
+    OsProviderCredentialStore, ProviderConnection, ProviderCredential, ProviderCredentialStore,
+    ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, RouteCandidate,
+    clear_provider_credentials, save_provider_credentials,
+};
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, RecoveryReport, SqliteEventStore,
     StorageError,
@@ -75,6 +81,8 @@ pub enum RuntimeError {
     Memory(#[from] MemoryError),
     #[error(transparent)]
     AgentTurn(#[from] AgentTurnError),
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
     #[error("runtime storage lock was poisoned")]
     StorageLock,
     #[error("local authentication token is invalid")]
@@ -167,6 +175,41 @@ pub struct AgentRunView {
     pub results: Vec<AgentTurnResult>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderMutation {
+    pub connection: ProviderConnection,
+    pub catalog: ProviderModelCatalog,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Clone)]
+pub struct RuntimeProviderGateway {
+    registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
+}
+
+impl std::fmt::Debug for RuntimeProviderGateway {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeProviderGateway")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl AgentModelGateway for RuntimeProviderGateway {
+    async fn create_response(
+        &self,
+        target: &ProviderModelRef,
+        request: ModelRequest,
+    ) -> Result<ModelResponse, ProviderError> {
+        self.registry
+            .read()
+            .await
+            .create_response(target, request)
+            .await
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalAuth {
     token: String,
@@ -243,6 +286,8 @@ pub struct AppRuntime {
     recovery: RecoveryReport,
     recovered_tool_leases: u64,
     agent_recovery: AgentRecoveryReport,
+    provider_credentials: Arc<dyn ProviderCredentialStore>,
+    provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -254,6 +299,7 @@ impl std::fmt::Debug for AppRuntime {
             .field("recovery", &self.recovery)
             .field("recovered_tool_leases", &self.recovered_tool_leases)
             .field("agent_recovery", &self.agent_recovery)
+            .field("provider_registry", &self.provider_registry)
             .finish_non_exhaustive()
     }
 }
@@ -274,6 +320,8 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        let provider_credentials: Arc<dyn ProviderCredentialStore> =
+            Arc::new(OsProviderCredentialStore);
         Ok(Self::assemble(
             config,
             store,
@@ -281,6 +329,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            provider_credentials,
         ))
     }
 
@@ -295,6 +344,8 @@ impl AppRuntime {
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
         let auth = LocalAuth::from_token(token)?;
+        let provider_credentials: Arc<dyn ProviderCredentialStore> =
+            Arc::new(MemoryProviderCredentialStore::default());
         Ok(Self::assemble(
             config,
             store,
@@ -302,6 +353,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            provider_credentials,
         ))
     }
 
@@ -312,6 +364,7 @@ impl AppRuntime {
         recovery: RecoveryReport,
         recovered_tool_leases: u64,
         agent_recovery: AgentRecoveryReport,
+        provider_credentials: Arc<dyn ProviderCredentialStore>,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(256);
         Self {
@@ -322,6 +375,8 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            provider_credentials,
+            provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
         }
     }
 
@@ -659,6 +714,160 @@ impl AppRuntime {
     pub fn managed_memory(&self, project_id: ProjectId) -> Result<String, RuntimeError> {
         let claims = self.memory_claims(project_id, None, false)?;
         Ok(render_managed_memory(project_id, &claims))
+    }
+
+    /// Lists persisted secret-free provider connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn provider_connections(&self) -> Result<Vec<ProviderConnection>, RuntimeError> {
+        Ok(self.store()?.provider_connections()?)
+    }
+
+    /// Loads the latest durable discovery snapshot for a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn provider_catalog(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<ProviderModelCatalog>, RuntimeError> {
+        Ok(self.store()?.provider_catalog(connection_id)?)
+    }
+
+    #[must_use]
+    pub fn provider_gateway(&self) -> RuntimeProviderGateway {
+        RuntimeProviderGateway {
+            registry: self.provider_registry.clone(),
+        }
+    }
+
+    /// Returns the currently discovered in-memory routes available to agent turns.
+    pub async fn provider_route_candidates(&self) -> Vec<RouteCandidate> {
+        self.provider_registry.read().await.route_candidates()
+    }
+
+    /// Creates a provider connection, stores credentials only in the protected
+    /// operating-system store, discovers models, and persists secret-free evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate/invalid metadata, mismatched credentials,
+    /// protected-store failure, discovery failure, or durable persistence failure.
+    pub async fn configure_provider(
+        &self,
+        connection: ProviderConnection,
+        primary: Option<&ProviderCredential>,
+        oauth: Option<&OAuthTokenSet>,
+    ) -> Result<ProviderMutation, RuntimeError> {
+        if self.store()?.provider_connection(&connection.id)?.is_some() {
+            return Err(StorageError::Conflict(format!(
+                "provider connection {} already exists",
+                connection.id
+            ))
+            .into());
+        }
+        save_provider_credentials(
+            self.provider_credentials.as_ref(),
+            &connection.id,
+            connection.auth_mode,
+            primary,
+            oauth,
+        )?;
+        {
+            let mut registry = self.provider_registry.write().await;
+            if let Err(error) =
+                registry.register_connection(connection.clone(), self.provider_credentials.as_ref())
+            {
+                let _ =
+                    clear_provider_credentials(self.provider_credentials.as_ref(), &connection.id);
+                return Err(error.into());
+            }
+        }
+        let discovery_result = self
+            .provider_registry
+            .write()
+            .await
+            .discover(&connection.id)
+            .await;
+        let models = match discovery_result {
+            Ok(models) => models,
+            Err(error) => {
+                self.provider_registry
+                    .write()
+                    .await
+                    .unregister(&connection.id);
+                let _ =
+                    clear_provider_credentials(self.provider_credentials.as_ref(), &connection.id);
+                return Err(error.into());
+            }
+        };
+        let catalog = ProviderModelCatalog {
+            connection_id: connection.id.clone(),
+            models,
+            discovered_at: Utc::now(),
+        };
+        let persistence_result = {
+            let mut store = self.store()?;
+            store.record_provider_configuration(&connection, &catalog, Utc::now())
+        };
+        let events = match persistence_result {
+            Ok(events) => events,
+            Err(error) => {
+                self.provider_registry
+                    .write()
+                    .await
+                    .unregister(&connection.id);
+                let _ =
+                    clear_provider_credentials(self.provider_credentials.as_ref(), &connection.id);
+                return Err(error.into());
+            }
+        };
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(ProviderMutation {
+            connection,
+            catalog,
+            events,
+        })
+    }
+
+    /// Re-registers a durable provider if needed, performs live discovery, and
+    /// replaces its durable secret-free catalog snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, credential-store, provider, or persistence errors.
+    pub async fn discover_provider(
+        &self,
+        connection_id: &str,
+    ) -> Result<ProviderModelCatalog, RuntimeError> {
+        let connection = self
+            .store()?
+            .provider_connection(connection_id)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(format!(
+                    "provider connection {connection_id} was not found"
+                ))
+            })?;
+        let models = {
+            let mut registry = self.provider_registry.write().await;
+            if !registry.provider_ids().iter().any(|id| id == connection_id) {
+                registry.register_connection(connection, self.provider_credentials.as_ref())?;
+            }
+            registry.discover(connection_id).await?
+        };
+        let catalog = ProviderModelCatalog {
+            connection_id: connection_id.to_owned(),
+            models,
+            discovered_at: Utc::now(),
+        };
+        let event = self.store()?.record_provider_catalog(&catalog)?;
+        let _ = self.event_sender.send(event);
+        Ok(catalog)
     }
 
     /// Records a validated immutable organization revision and publishes it.

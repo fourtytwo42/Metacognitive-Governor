@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod agents;
+mod providers;
 
 pub use agents::{AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition};
 
@@ -292,6 +293,20 @@ BEFORE DELETE ON agent_turn_results BEGIN
 END;
 ";
 
+const MIGRATION_7: &str = r"
+CREATE TABLE IF NOT EXISTS provider_connections (
+    connection_id TEXT PRIMARY KEY,
+    connection_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_catalogs (
+    connection_id TEXT PRIMARY KEY,
+    catalog_json TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    FOREIGN KEY(connection_id) REFERENCES provider_connections(connection_id)
+);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -380,6 +395,7 @@ impl SqliteEventStore {
             (4_i64, MIGRATION_4),
             (5_i64, MIGRATION_5),
             (6_i64, MIGRATION_6),
+            (7_i64, MIGRATION_7),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

@@ -1,6 +1,7 @@
 use std::{fmt, pin::Pin, time::Duration};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,9 +102,15 @@ impl ProviderConnection {
                 self.contract_version
             )));
         }
-        if self.id.trim().is_empty() || self.display_name.trim().is_empty() {
+        if self.id.is_empty()
+            || self.id.len() > 128
+            || !self.id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+            || self.display_name.trim().is_empty()
+        {
             return Err(ProviderError::Configuration(
-                "provider id and display name are required".into(),
+                "provider id must use 1-128 ASCII letters, digits, '-' or '_'; display name is required".into(),
             ));
         }
         let url = reqwest::Url::parse(&self.base_url)
@@ -167,6 +174,13 @@ pub struct ModelDescriptor {
     pub price: Option<ModelPrice>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelCatalog {
+    pub connection_id: String,
+    pub models: Vec<ModelDescriptor>,
+    pub discovered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

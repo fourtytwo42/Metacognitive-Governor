@@ -12,6 +12,7 @@ mcg-agents = { path = "../mcg-agents" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
 mcg-projects = { path = "../mcg-projects" }
+mcg-providers = { path = "../mcg-providers" }
 mcg-runtime = { path = "../mcg-runtime" }
 mcg-tools = { path = "../mcg-tools" }
 serde.workspace = true
@@ -20,6 +21,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true

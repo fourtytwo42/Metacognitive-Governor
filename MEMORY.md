@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M5 organization and useful work is in progress; durable planning/execution evidence and authenticated organization/run API and CLI surfaces pass the complete Windows gate.
-- Last meaningful change: Organization creation/list/inspection and stable-key run planning/inspection/start/resume/cancel are authenticated and durable. A real daemon restart smoke exposed and fixed task-projection replay deleting rows referenced by agent runs.
-- Next step: Add configured provider/broker registries plus safe instance/lease dispatch, then exercise real provider-backed website work and qualify the checkpoint on Ubuntu.
+- Current task: M5 organization and useful work is in progress; durable provider registry plus organization/run controls pass the complete Windows gate.
+- Last meaningful change: Provider credentials now use a native OS-store boundary; secret-free connections/catalogs are atomic SQLite migration 7 evidence; authenticated API/CLI configuration and restart rediscovery passed against real GPU45.
+- Next step: Qualify the provider-registry checkpoint on Ubuntu, then add safe instance/lease dispatch and execute real provider-backed website work.
 - Blockers: None documented.
 
 ## Current State
@@ -147,6 +147,7 @@ When sources conflict, use this order:
 - 2026-08-14: M5 bounded turn tests route a context-constrained Coder through a priced capable model, decode `fs.read` into the typed tool plane, feed its broker outcome back using exact Responses function-call items, and return a final response. Authentication failure makes one provider call with no fallback; an unleased `fs.write` produces zero tool calls. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: M5 runtime turn commit test used the durable runtime, organization/run/instance/lease state, a two-call provider fixture, and the real policy broker to execute typed `fs.read`. Migration 6 atomically stored one immutable final result, three usage records, assigned model, run metrics, completed instance/lease, and ordered events. Restart evidence also verifies approval waiting retains authority for resume while later failure creates no usage/result. Complete workspace tests and strict workspace clippy passed on Windows.
 - 2026-08-14: Authenticated M5 API/CLI control surfaces created a consumer organization, planned atomic and dependency-ordered work, started a run, and returned its full durable evidence view. Real restart smoke found task replay's delete/reinsert strategy violated agent-run foreign keys; replay now upserts authoritative tasks and only removes unexpected orphans. The repaired database restarted into `recovering`, CLI inspection passed, and `scripts/verify.ps1` passed the full Windows Rust/frontend/docs/native/Playwright gate.
+- 2026-08-14: Configured provider registry added native OS credential-store isolation, exact registered/discovered target dispatch, SQLite migration 7 connection/catalog evidence, and authenticated `mcg provider` API/CLI operations. Failed initial discovery is atomic and leaves no connection, route, or credential slot. Full Windows verification passed. Real CLI GPU45 discovery found 10 models at `http://192-168-50-189.nip.io:30001/v1`, and restart rediscovery returned the same catalog; the temporary daemons were stopped.
 
 ## Decisions
 
@@ -305,6 +306,15 @@ When sources conflict, use this order:
 - Commands/tests: Real daemon/CLI create-plan-start-restart-inspect smoke; `scripts/verify.ps1`.
 - Result: The full Windows gate passes, including 9 API tests, 10 storage tests, all workspace tests/clippy, documentation, frontend, native Tauri build, and Playwright E2E. The interrupted run recovered with its plan intact.
 - Follow-up: Build configured provider/broker registries and safe instance/lease dispatch, then repeat full qualification on Ubuntu.
+
+### 2026-08-14 - Durable Configured Provider Registry
+
+- Context: Useful runs need configured endpoints to survive restart without persisting secrets or allowing the router to call undeclared targets.
+- Decision: Store secrets only through the native OS credential-store boundary; store validated connection metadata and model catalogs in migration 7; register and call exact provider/model identities; make initial discovery plus both projections/events atomic; accept API/bearer credentials only through request bodies and CLI standard input, never command arguments. OAuth connections remain restricted to the dedicated login flow.
+- Files: `crates/mcg-{providers,storage,runtime,api}/`, `apps/mcg-cli/`, `docs/architecture/provider-fabric.md`.
+- Commands/tests: `scripts/verify.ps1`; real daemon/CLI GPU45 configure/list/models/restart/discover smoke.
+- Result: Full Windows qualification passes. GPU45 returned 10 dynamically discovered models before and after restart. A wrong console URL exposed failed-setup debris and opaque CLI errors; both were fixed with atomic setup rollback and surfaced API error bodies.
+- Follow-up: Run the identical checkpoint on Ubuntu, then create bounded instances/leases and dispatch work through the real registry and tool broker.
 
 ## Known Issues
 

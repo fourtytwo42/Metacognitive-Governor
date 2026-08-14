@@ -1275,7 +1275,7 @@ impl SqliteEventStore {
         })
     }
 
-    fn read_optional_json<T: serde::de::DeserializeOwned>(
+    pub(crate) fn read_optional_json<T: serde::de::DeserializeOwned>(
         &self,
         sql: &str,
         parameter: &str,
@@ -1302,7 +1302,7 @@ impl SqliteEventStore {
             .collect()
     }
 
-    fn read_all_json<T: serde::de::DeserializeOwned>(
+    pub(crate) fn read_all_json<T: serde::de::DeserializeOwned>(
         &self,
         sql: &str,
     ) -> Result<Vec<T>, StorageError> {

@@ -31,14 +31,19 @@ use mcg_events::EventEnvelope;
 use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
 };
+use mcg_providers::{
+    ProviderAuthMode, ProviderConnection, ProviderCredential, ProviderModelCatalog,
+};
 use mcg_runtime::{
-    AgentRunView, AppRuntime, MemoryClaimMutation, ProjectMutation, RuntimeError, RuntimeStatus,
+    AgentRunView, AppRuntime, MemoryClaimMutation, ProjectMutation, ProviderMutation, RuntimeError,
+    RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::trace::TraceLayer;
+use zeroize::Zeroize;
 
 #[derive(Clone)]
 struct ApiState {
@@ -216,6 +221,32 @@ pub struct TransitionAgentRunRequest {
     pub state: AgentRunState,
 }
 
+#[derive(Deserialize)]
+pub struct ConfigureProviderRequest {
+    pub connection: ProviderConnection,
+    #[serde(default)]
+    pub credential: Option<String>,
+}
+
+impl Drop for ConfigureProviderRequest {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderListItem {
+    pub connection: ProviderConnection,
+    pub catalog: Option<ProviderModelCatalog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderListResponse {
+    pub providers: Vec<ProviderListItem>,
+}
+
 const fn default_budget_weight() -> u32 {
     1
 }
@@ -287,6 +318,22 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn unprocessable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "provider_authentication",
+            message: message.into(),
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "provider_error",
+            message: message.into(),
+        }
+    }
 }
 
 impl From<RuntimeError> for ApiError {
@@ -336,6 +383,18 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/runs/{run_id}/transition",
             post(transition_agent_run),
+        )
+        .route(
+            "/api/v1/providers",
+            get(list_providers).post(configure_provider),
+        )
+        .route(
+            "/api/v1/providers/{connection_id}/models",
+            get(get_provider_models),
+        )
+        .route(
+            "/api/v1/providers/{connection_id}/discover",
+            post(discover_provider),
         )
         .route(
             "/api/v1/projects",
@@ -742,6 +801,82 @@ async fn transition_agent_run(
         .map_err(map_runtime_error)
 }
 
+async fn configure_provider(
+    State(state): State<ApiState>,
+    Json(mut request): Json<ConfigureProviderRequest>,
+) -> Result<(StatusCode, Json<ProviderMutation>), ApiError> {
+    if matches!(
+        request.connection.auth_mode,
+        ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+    ) {
+        return Err(ApiError::bad_request(
+            "ChatGPT OAuth connections must be created through an OAuth login flow",
+        ));
+    }
+    let primary = request
+        .credential
+        .take()
+        .map(ProviderCredential::new)
+        .transpose()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mutation = state
+        .runtime
+        .configure_provider(request.connection.clone(), primary.as_ref(), None)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(mutation)))
+}
+
+async fn list_providers(
+    State(state): State<ApiState>,
+) -> Result<Json<ProviderListResponse>, ApiError> {
+    let providers = state
+        .runtime
+        .provider_connections()
+        .map_err(map_runtime_error)?
+        .into_iter()
+        .map(|connection| {
+            let catalog = state
+                .runtime
+                .provider_catalog(&connection.id)
+                .map_err(map_runtime_error)?;
+            Ok(ProviderListItem {
+                connection,
+                catalog,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Json(ProviderListResponse { providers }))
+}
+
+async fn get_provider_models(
+    State(state): State<ApiState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<ProviderModelCatalog>, ApiError> {
+    state
+        .runtime
+        .provider_catalog(&connection_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "provider catalog for {connection_id} was not found"
+            ))
+        })
+}
+
+async fn discover_provider(
+    State(state): State<ApiState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<ProviderModelCatalog>, ApiError> {
+    state
+        .runtime
+        .discover_provider(&connection_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 async fn discover_project(
     State(state): State<ApiState>,
     Json(request): Json<DiscoverProjectRequest>,
@@ -1077,6 +1212,17 @@ fn parse_memory_claim_id(value: &str) -> Result<MemoryClaimId, ApiError> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn map_runtime_error(error: RuntimeError) -> ApiError {
+    if let RuntimeError::Provider(provider) = &error {
+        return match provider {
+            mcg_providers::ProviderError::Configuration(_) => {
+                ApiError::bad_request(error.to_string())
+            }
+            mcg_providers::ProviderError::Authentication(_) => {
+                ApiError::unprocessable(error.to_string())
+            }
+            _ => ApiError::bad_gateway(error.to_string()),
+        };
+    }
     if error.is_not_found() {
         ApiError::not_found(error.to_string())
     } else if error.is_invalid_request() {
@@ -1094,6 +1240,7 @@ mod tests {
     use http_body_util::BodyExt;
     use mcg_config::AppConfig;
     use mcg_domain::{ArtifactId, ToolExecutionId, ToolRequestId};
+    use mcg_providers::{CONTRACT_VERSION, ProviderKind};
     use mcg_tools::{
         ApprovalRepository, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditSink, ToolOutcomeStatus,
     };
@@ -1108,6 +1255,30 @@ mod tests {
             AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
                 .expect("runtime should open"),
         )
+    }
+
+    async fn model_discovery_fixture() -> String {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "object": "list",
+                    "data": [{
+                        "id": "fixture-model",
+                        "object": "model",
+                        "owned_by": "fixture"
+                    }]
+                }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture server");
+        });
+        format!("http://{address}/v1")
     }
 
     fn authorized(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -1684,5 +1855,93 @@ mod tests {
             .expect("durable run view");
         assert_eq!(durable.run.state, AgentRunState::Running);
         assert_eq!(durable.plan, view.plan);
+    }
+
+    #[tokio::test]
+    async fn anonymous_provider_configuration_discovers_and_persists_secret_free_catalog() {
+        let runtime = test_runtime();
+        let app = router(runtime.clone());
+        let request = serde_json::json!({
+            "connection": {
+                "contract_version": CONTRACT_VERSION,
+                "id": "fixture_local",
+                "display_name": "Fixture Local",
+                "kind": ProviderKind::OpenAiCompatible,
+                "base_url": model_discovery_fixture().await,
+                "auth_mode": ProviderAuthMode::None,
+                "organization": null,
+                "project": null
+            }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/providers"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("provider response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let mutation: ProviderMutation = serde_json::from_slice(&body).expect("mutation");
+        assert_eq!(mutation.catalog.models[0].id, "fixture-model");
+        assert_eq!(runtime.provider_route_candidates().await.len(), 1);
+
+        let failed_request = serde_json::json!({
+            "connection": {
+                "contract_version": CONTRACT_VERSION,
+                "id": "bad_endpoint",
+                "display_name": "Bad Endpoint",
+                "kind": ProviderKind::OpenAiCompatible,
+                "base_url": format!("{}/wrong", model_discovery_fixture().await),
+                "auth_mode": ProviderAuthMode::None,
+                "organization": null,
+                "project": null
+            }
+        });
+        let failed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/providers"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(failed_request.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("failed provider response");
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            runtime.provider_connections().expect("connections").len(),
+            1
+        );
+        assert_eq!(runtime.provider_route_candidates().await.len(), 1);
+
+        let response = app
+            .oneshot(
+                authorized(Request::get("/api/v1/providers"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let list: ProviderListResponse = serde_json::from_slice(&body).expect("list");
+        assert_eq!(list.providers.len(), 1);
+        let encoded = String::from_utf8(body.to_vec()).expect("UTF-8");
+        assert!(!encoded.contains("credential"));
+        assert!(!encoded.contains("token"));
     }
 }

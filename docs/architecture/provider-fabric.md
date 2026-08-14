@@ -38,8 +38,11 @@ The standalone OAuth implementation does not invoke Codex or read Codex credenti
 files. Browser login uses a state-validated loopback callback and PKCE. Device login
 shows a verification URL and one-time code, then polls until completion. Both return
 redacting, non-serializable tokens and support refresh-token rotation. Durable token
-storage will use MCG's operating-system credential-store integration; tokens must
-not be written to provider configuration or logs.
+storage uses MCG's operating-system credential-store boundary backed by Windows
+Credential Manager, Linux Secret Service, or macOS Keychain. API keys, bearer
+tokens, and the three OAuth token slots are isolated from SQLite, events, request
+debug output, and CLI arguments. Tokens must not be written to provider
+configuration or logs.
 
 OpenAI documents ChatGPT subscription and API-key sign-in as distinct login paths
 with different billing and administration behavior in its
@@ -58,6 +61,14 @@ available. The common conformance probe then runs one buffered and one streaming
 Responses request and records supported, unsupported, or indeterminate evidence.
 Tool and structured-output quality are not guessed from model prose; later evals
 separate protocol support from model reliability.
+
+SQLite migration 7 stores only validated connection metadata and the latest
+discovered model catalog. Initial discovery must succeed before the connection,
+catalog, and two global events commit atomically. A failed setup unregisters the
+candidate and clears any newly written credential slots. The runtime registry
+accepts only exact registered provider identities and exact discovered model
+targets; it reconstructs a durable provider lazily after daemon restart and
+refreshes its catalog through authenticated API/CLI operations.
 
 ## Routing and accounting
 
@@ -79,7 +90,7 @@ The common probe runs against:
 - an in-memory deterministic provider;
 - an HTTP fixture with model discovery, buffered Responses, and SSE;
 - GPU45 when `MCG_LIVE_GPU45=1` is set;
-- future configured OpenAI/OpenRouter connections when their credentials are
+- configured OpenAI/OpenRouter connections when their credentials are
   deliberately supplied on an owner-controlled machine.
 
 GPU45 currently returns a terminal SSE response even for `stream: false`; the

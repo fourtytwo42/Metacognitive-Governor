@@ -16,11 +16,14 @@ mcg-api = { path = "../../crates/mcg-api" }
 mcg-config = { path = "../../crates/mcg-config" }
 mcg-domain = { path = "../../crates/mcg-domain" }
 mcg-projects = { path = "../../crates/mcg-projects" }
+mcg-providers = { path = "../../crates/mcg-providers" }
 mcg-runtime = { path = "../../crates/mcg-runtime" }
 mcg-tools = { path = "../../crates/mcg-tools" }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

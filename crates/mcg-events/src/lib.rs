@@ -20,6 +20,8 @@ pub enum EventKind {
     ApprovalResolved,
     ProviderCallStarted,
     ProviderCallCompleted,
+    ProviderConnectionRecorded,
+    ProviderCatalogDiscovered,
     ToolRequested,
     ToolCompleted,
     ProjectDiscovered,
@@ -55,6 +57,8 @@ impl EventKind {
             Self::ApprovalResolved => "approval_resolved",
             Self::ProviderCallStarted => "provider_call_started",
             Self::ProviderCallCompleted => "provider_call_completed",
+            Self::ProviderConnectionRecorded => "provider_connection_recorded",
+            Self::ProviderCatalogDiscovered => "provider_catalog_discovered",
             Self::ToolRequested => "tool_requested",
             Self::ToolCompleted => "tool_completed",
             Self::ProjectDiscovered => "project_discovered",
@@ -94,6 +98,12 @@ impl EventKind {
             "approval_resolved" | "ApprovalResolved" => Ok(Self::ApprovalResolved),
             "provider_call_started" | "ProviderCallStarted" => Ok(Self::ProviderCallStarted),
             "provider_call_completed" | "ProviderCallCompleted" => Ok(Self::ProviderCallCompleted),
+            "provider_connection_recorded" | "ProviderConnectionRecorded" => {
+                Ok(Self::ProviderConnectionRecorded)
+            }
+            "provider_catalog_discovered" | "ProviderCatalogDiscovered" => {
+                Ok(Self::ProviderCatalogDiscovered)
+            }
             "tool_requested" | "ToolRequested" => Ok(Self::ToolRequested),
             "tool_completed" | "ToolCompleted" => Ok(Self::ToolCompleted),
             "project_discovered" | "ProjectDiscovered" => Ok(Self::ProjectDiscovered),

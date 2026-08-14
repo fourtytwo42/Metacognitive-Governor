@@ -1,4 +1,4 @@
-use std::{path::PathBuf, str::FromStr};
+use std::{io::Read, path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
@@ -7,8 +7,8 @@ use mcg_api::{
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
     ManagedMemoryResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
-    ProjectHistoryResponse, ProjectListResponse, ResolveApprovalRequest, TaskEventsResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
+    ProjectHistoryResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
+    TaskEventsResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
     TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
@@ -16,8 +16,29 @@ use mcg_domain::{
     MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, TaskEnvelope, TaskId, TaskState,
 };
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
-use mcg_runtime::{AgentRunView, MemoryClaimMutation, ProjectMutation, RuntimeStatus};
+use mcg_providers::{
+    CONTRACT_VERSION, ProviderAuthMode, ProviderConnection, ProviderKind, ProviderModelCatalog,
+};
+use mcg_runtime::{
+    AgentRunView, MemoryClaimMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
+};
 use mcg_tools::{ApprovalRequest, ApprovalState};
+use serde::Serialize;
+use zeroize::Zeroize;
+
+#[derive(Serialize)]
+struct ProviderConfigurePayload {
+    connection: ProviderConnection,
+    credential: Option<String>,
+}
+
+impl Drop for ProviderConfigurePayload {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mcg", version, about = "MetaCognitive Governor CLI")]
@@ -64,6 +85,70 @@ enum Command {
         #[command(subcommand)]
         command: RunCommand,
     },
+    /// Configure and discover model providers.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommand {
+    /// Add a provider and immediately discover its models.
+    Add {
+        id: String,
+        name: String,
+        base_url: String,
+        #[arg(long, value_enum, default_value_t = ProviderKindArg::Compatible)]
+        kind: ProviderKindArg,
+        #[arg(long, value_enum, default_value_t = ProviderAuthArg::None)]
+        auth: ProviderAuthArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List configured providers and their latest catalogs.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the latest durable model catalog.
+    Models { id: String },
+    /// Refresh live model discovery.
+    Discover { id: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProviderKindArg {
+    Openai,
+    Openrouter,
+    Compatible,
+}
+
+impl From<ProviderKindArg> for ProviderKind {
+    fn from(value: ProviderKindArg) -> Self {
+        match value {
+            ProviderKindArg::Openai => Self::OpenAi,
+            ProviderKindArg::Openrouter => Self::OpenRouter,
+            ProviderKindArg::Compatible => Self::OpenAiCompatible,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProviderAuthArg {
+    None,
+    ApiKey,
+    BearerToken,
+}
+
+impl From<ProviderAuthArg> for ProviderAuthMode {
+    fn from(value: ProviderAuthArg) -> Self {
+        match value {
+            ProviderAuthArg::None => Self::None,
+            ProviderAuthArg::ApiKey => Self::ApiKey,
+            ProviderAuthArg::BearerToken => Self::BearerToken,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -345,6 +430,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_organization(&client, host, token.trim(), command).await?;
         }
         Command::Run { command } => run_agent(&client, host, token.trim(), command).await?,
+        Command::Provider { command } => {
+            run_provider(&client, host, token.trim(), command).await?;
+        }
     }
 
     Ok(())
@@ -592,6 +680,140 @@ async fn run_agent(
         RunCommand::Cancel { id } => {
             transition_run(client, host, token, &id, AgentRunState::Cancelled).await?;
         }
+    }
+    Ok(())
+}
+
+async fn run_provider(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ProviderCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ProviderCommand::Add {
+            id,
+            name,
+            base_url,
+            kind,
+            auth,
+            json,
+        } => {
+            add_provider(client, host, token, id, name, base_url, kind, auth, json).await?;
+        }
+        ProviderCommand::List { json } => {
+            let response: ProviderListResponse = client
+                .get(format!("{host}/api/v1/providers"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.providers.is_empty() {
+                println!("No providers configured.");
+            } else {
+                for provider in response.providers {
+                    println!(
+                        "{}  {}  {:?}  {} model(s)",
+                        provider.connection.id,
+                        provider.connection.display_name,
+                        provider.connection.auth_mode,
+                        provider.catalog.map_or(0, |catalog| catalog.models.len())
+                    );
+                }
+            }
+        }
+        ProviderCommand::Models { id } => {
+            let catalog: ProviderModelCatalog = client
+                .get(format!("{host}/api/v1/providers/{id}/models"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&catalog)?);
+        }
+        ProviderCommand::Discover { id } => {
+            let catalog: ProviderModelCatalog = client
+                .post(format!("{host}/api/v1/providers/{id}/discover"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!(
+                "{}: {} model(s)",
+                catalog.connection_id,
+                catalog.models.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors the explicit CLI fields without a second command DTO.
+async fn add_provider(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: String,
+    name: String,
+    base_url: String,
+    kind: ProviderKindArg,
+    auth: ProviderAuthArg,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_mode: ProviderAuthMode = auth.into();
+    let credential = if auth_mode == ProviderAuthMode::None {
+        None
+    } else {
+        let mut secret = String::new();
+        std::io::stdin().read_to_string(&mut secret)?;
+        let trimmed = secret.trim_end_matches(['\r', '\n']).to_owned();
+        secret.zeroize();
+        if trimmed.is_empty() {
+            return Err("provider credential must be supplied on standard input".into());
+        }
+        Some(trimmed)
+    };
+    let body = ProviderConfigurePayload {
+        connection: ProviderConnection {
+            contract_version: CONTRACT_VERSION,
+            id,
+            display_name: name,
+            kind: kind.into(),
+            base_url,
+            auth_mode,
+            organization: None,
+            project: None,
+        },
+        credential,
+    };
+    let response = client
+        .post(format!("{host}/api/v1/providers"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await?;
+        return Err(format!("provider setup failed ({status}): {detail}").into());
+    }
+    let mutation: ProviderMutation = response.json().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&mutation)?);
+    } else {
+        println!(
+            "{}: {} model(s) discovered",
+            mutation.connection.id,
+            mutation.catalog.models.len()
+        );
     }
     Ok(())
 }

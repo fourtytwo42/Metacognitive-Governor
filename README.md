@@ -72,6 +72,12 @@ existing task, and inspect or control the resulting run with `mcg organization`
 and `mcg run`. Run `mcg organization --help` or `mcg run --help` for the exact
 commands and JSON-file schema.
 
+Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
+For API-key or bearer authentication, select `--auth api-key` or
+`--auth bearer-token` and pipe the credential on standard input; credentials are
+never accepted as command-line arguments. Use `mcg provider list`, `models`, and
+`discover` to inspect the secret-free durable catalog.
+
 Start the browser-hosted desktop frontend during UI development:
 
 ```powershell
