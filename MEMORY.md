@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP HTTP/stdio management and durable task creation/list/start/cancel/history are available through API, CLI, and native desktop.
-- Last meaningful change: Added deterministic task listing from SQLite through authenticated API/Tauri/CLI, plus simple goal creation and advanced constraints/success/risk/cost controls with durable history in the desktop.
-- Next step: Qualify the desktop task slice on Ubuntu, then add representative third-party MCP interoperability and native task/MCP UAT. Preserve the visible OAuth handoff.
+- Last meaningful change: Replaced the disabled project button with a security-scoped native Tauri folder picker, daemon project discovery, durable project/task association, and restart-selectable project listing.
+- Next step: Qualify native project selection on Ubuntu, then add representative third-party MCP interoperability and native task/MCP UAT. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -439,6 +439,15 @@ When sources conflict, use this order:
 - Commands/tests: strict focused Rust clippy/tests; frontend typecheck; five Vitest flows; production Vite build; docs and diff checks.
 - Result: One durable task can be created, listed, started/cancelled, and observed with ordered event evidence through desktop, CLI, and API contracts; focused Windows and complete Ubuntu gates are green while the live Windows OAuth process remains preserved.
 - Follow-up: Perform native Windows/Linux UAT, then connect project/run orchestration into the consumer flow.
+
+### 2026-08-14 - Native Project Selection
+
+- Context: The consumer task composer still had a disabled “Open folder” button and could not associate work with the existing durable project model.
+- Decision: Use the official Tauri 2 dialog plugin only behind a dedicated async Rust command, return one local directory path, discover it through the authenticated daemon, and bind tasks by durable project id. Do not grant frontend code general filesystem scope. Load existing projects on startup for restart-safe reselection.
+- Files: workspace/app Cargo manifests and lock, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/{desktop-client,App,App.test,styles}.tsx`, `docs/architecture/runtime-spine.md`, `README.md`.
+- Commands/tests: strict native clippy/test; frontend typecheck and six Vitest flows; production build; diff check.
+- Result: Folder cancellation is side-effect free; selection/discovery visibly identifies the project and sends its id in task creation. Focused Windows automation is green; native dialog UAT remains required on both platforms.
+- Follow-up: Cross-platform build qualification and real native folder-picker UAT.
 
 ## Known Issues
 

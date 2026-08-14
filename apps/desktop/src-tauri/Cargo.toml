@@ -22,6 +22,7 @@ mcg-runtime = { path = "../../../crates/mcg-runtime" }
 reqwest.workspace = true
 serde.workspace = true
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 uuid.workspace = true
 webbrowser.workspace = true
 zeroize.workspace = true

@@ -84,7 +84,10 @@ The desktop task composer and `mcg task create/list/get/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can
 set constraints, success conditions, risk, and a cost ceiling. Task cards expose
 only legal start/cancel controls and load ordered event history from SQLite rather
-than reconstructing progress in browser state.
+than reconstructing progress in browser state. “Open folder” uses a native
+Windows/Linux picker, discovers the repository through the daemon, and attaches
+the resulting durable project identity to the task; previously discovered folders
+remain selectable after restart.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

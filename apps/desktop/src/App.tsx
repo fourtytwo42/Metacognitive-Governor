@@ -5,8 +5,10 @@ import {
   completeOpenAiOAuth,
   configureMcpConnection,
   createTask,
+  discoverProject,
   discoverMcpConnection,
   listMcpConnections,
+  listProjects,
   listTasks,
   loadTaskEvents,
   type McpAuthMode,
@@ -16,6 +18,8 @@ import {
   openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
+  pickProjectDirectory,
+  type ProjectModel,
   type RiskLevel,
   startOpenAiOAuth,
   type TaskEnvelope,
@@ -61,6 +65,8 @@ export function App() {
   const [taskBusy, setTaskBusy] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
+  const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
+  const [projects, setProjects] = useState<ProjectModel[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -74,6 +80,13 @@ export function App() {
     listTasks()
       .then((response) => {
         if (active) setTasks(response.tasks);
+      })
+      .catch((error) => {
+        if (active) setTaskError(errorMessage(error));
+      });
+    listProjects()
+      .then((response) => {
+        if (active) setProjects(response.projects);
       })
       .catch((error) => {
         if (active) setTaskError(errorMessage(error));
@@ -232,6 +245,7 @@ export function App() {
       const maxCost = Number(taskMaxCost);
       const created = await createTask({
         goal: taskGoal.trim(),
+        project_id: selectedProject?.project_id,
         constraints: advanced
           ? taskConstraints.split("\n").map((value) => value.trim()).filter(Boolean)
           : [],
@@ -277,6 +291,25 @@ export function App() {
     try {
       const events = await loadTaskEvents(taskId);
       setTaskHistory((history) => ({ ...history, [taskId]: events }));
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
+  async function chooseProject() {
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const root = await pickProjectDirectory();
+      if (!root) return;
+      const mutation = await discoverProject(root);
+      setSelectedProject(mutation.project);
+      setProjects((current) => [
+        mutation.project,
+        ...current.filter((project) => project.project_id !== mutation.project.project_id)
+      ]);
     } catch (error) {
       setTaskError(errorMessage(error));
     } finally {
@@ -358,8 +391,27 @@ export function App() {
                 <input type="number" min="0" step="0.01" value={taskMaxCost} onChange={(event) => setTaskMaxCost(event.target.value)} />
               </label>
             </div>}
+            {selectedProject && <div className="selected-project" role="status">
+              <div>
+                <strong>{selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1) ?? selectedProject.root}</strong>
+                <span>{selectedProject.root}</span>
+              </div>
+              <button className="link-button" type="button" onClick={() => setSelectedProject(null)}>Remove</button>
+            </div>}
             <div className="composer-actions">
-              <button className="secondary" type="button" disabled title="Project folder selection is coming next">Open folder</button>
+              {projects.length > 0 && <label className="project-select">
+                Project
+                <select
+                  value={selectedProject?.project_id ?? ""}
+                  onChange={(event) => setSelectedProject(
+                    projects.find((project) => project.project_id === event.target.value) ?? null
+                  )}
+                >
+                  <option value="">None</option>
+                  {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                </select>
+              </label>}
+              <button className="secondary" type="button" disabled={taskBusy} onClick={chooseProject}>Open folder</button>
               <button className="primary" type="button" disabled={taskBusy} onClick={addTask}>
                 {taskBusy ? "Creating..." : "Create task"}
               </button>
@@ -382,6 +434,7 @@ export function App() {
                 <div className="task-card-main">
                   <span className={`task-state state-${task.state}`}>{task.state.replaceAll("_", " ")}</span>
                   <h3>{task.goal}</h3>
+                  {task.project_id && <span className="task-project">{projects.find((project) => project.project_id === task.project_id)?.root ?? "Linked project"}</span>}
                   {advanced && <code>{task.id}</code>}
                   {taskHistory[task.id] && <ol className="event-history">
                     {taskHistory[task.id]?.events.map((event) => (

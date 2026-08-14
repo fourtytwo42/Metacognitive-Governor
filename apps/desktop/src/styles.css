@@ -64,6 +64,7 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .task-card-main { min-width: 0; }
 .task-card h3 { margin: 9px 0 5px; font-size: 1rem; line-height: 1.45; overflow-wrap: anywhere; }
 .task-card code { color: #65dccc; font-size: .74rem; }
+.task-project { display: block; margin: 5px 0; color: #8199a9; font-size: .76rem; overflow-wrap: anywhere; }
 .task-state { display: inline-block; padding: 4px 7px; border: 1px solid #33455c; color: #aebed0; font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; }
 .state-active { border-color: #42d9c8; color: #65dccc; }
 .state-waiting_for_approval, .state-blocked { border-color: #f6bf54; color: #f6bf54; }
@@ -73,6 +74,12 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .event-history { margin: 14px 0 0; padding: 12px 12px 12px 35px; background: #070b12; color: #aebed0; font-size: .8rem; }
 .event-history li { padding: 3px 0; }
 .event-history span { display: inline-block; min-width: 28px; color: #65788e; }
+.selected-project { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 12px; border: 1px solid #2d756d; background: #42d9c80b; }
+.selected-project div { min-width: 0; display: grid; gap: 4px; }
+.selected-project strong { color: #dffaf6; }
+.selected-project span { color: #8199a9; font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-select { margin-right: auto; display: flex; align-items: center; gap: 8px; color: #a8b6c6; font-size: .78rem; }
+.project-select select { max-width: 180px; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
 .panel { padding: 24px; min-height: 230px; }

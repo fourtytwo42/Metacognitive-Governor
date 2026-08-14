@@ -12,7 +12,10 @@ const client = vi.hoisted(() => ({
   listTasks: vi.fn(),
   createTask: vi.fn(),
   transitionTask: vi.fn(),
-  taskEvents: vi.fn()
+  taskEvents: vi.fn(),
+  pickProject: vi.fn(),
+  discoverProject: vi.fn(),
+  listProjects: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -26,7 +29,10 @@ vi.mock("./desktop-client", () => ({
   listTasks: client.listTasks,
   createTask: client.createTask,
   transitionTask: client.transitionTask,
-  loadTaskEvents: client.taskEvents
+  loadTaskEvents: client.taskEvents,
+  pickProjectDirectory: client.pickProject,
+  discoverProject: client.discoverProject,
+  listProjects: client.listProjects
 }));
 
 import { App } from "./App";
@@ -43,9 +49,13 @@ beforeEach(() => {
   client.createTask.mockReset();
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
+  client.pickProject.mockReset();
+  client.discoverProject.mockReset();
+  client.listProjects.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listMcp.mockResolvedValue({ connections: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
+  client.listProjects.mockResolvedValue({ projects: [] });
 });
 
 test("advanced mode reveals runtime details", () => {
@@ -200,6 +210,7 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   expect(await screen.findByRole("heading", { name: pendingTask.goal })).toBeInTheDocument();
   expect(client.createTask).toHaveBeenCalledWith({
     goal: pendingTask.goal,
+    project_id: undefined,
     constraints: [],
     success_conditions: [],
     risk: undefined,
@@ -213,4 +224,50 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   fireEvent.click(screen.getByRole("button", { name: "History" }));
   expect(await screen.findByText("task transitioned")).toBeInTheDocument();
   expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
+});
+
+test("native project selection discovers the folder and associates the new task", async () => {
+  const root = "C:\\Projects\\sample";
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root,
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.pickProject.mockResolvedValue(root);
+  client.discoverProject.mockResolvedValue({ project });
+  client.createTask.mockResolvedValue({
+    task: {
+      schema_version: 1,
+      id: "00000000-0000-4000-8000-000000000012",
+      project_id: project.project_id,
+      goal: "Improve the sample",
+      constraints: [],
+      success_conditions: [],
+      risk: "medium",
+      budget: {},
+      state: "pending",
+      created_at: project.observed_at,
+      updated_at: project.observed_at
+    },
+    event: { sequence: 1, kind: "task_created", occurred_at: project.observed_at }
+  });
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+  expect((await screen.findAllByText("sample")).length).toBeGreaterThan(0);
+  expect(screen.getByText(root)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "Improve the sample" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create task" }));
+
+  expect(await screen.findByRole("heading", { name: "Improve the sample" })).toBeInTheDocument();
+  expect(client.discoverProject).toHaveBeenCalledWith(root);
+  expect(client.createTask).toHaveBeenCalledWith(expect.objectContaining({
+    project_id: project.project_id
+  }));
 });

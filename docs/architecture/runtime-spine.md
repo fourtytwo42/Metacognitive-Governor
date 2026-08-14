@@ -56,7 +56,11 @@ The native desktop uses this same authenticated boundary. Simple mode creates a
 goal-only pending task, lists current projections, starts or cancels legal states,
 and loads durable event history on demand. Advanced mode adds one-per-line
 constraints and success conditions, explicit risk, an optional cost ceiling, and
-stable task ids. The CLI mirrors listing with `mcg task list`.
+stable task ids. A dedicated Rust command opens the platform-native Tauri folder
+dialog, returns only the selected local path, performs daemon-side project
+discovery, and associates the durable project id with the task. Existing projects
+are loaded after restart and can be reselected without granting browser code a
+general filesystem scope. The CLI mirrors listing with `mcg task list`.
 
 ## Verification evidence
 

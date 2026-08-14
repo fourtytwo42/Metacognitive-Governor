@@ -92,10 +92,31 @@ export interface TaskEnvelope {
 
 export interface CreateTaskRequest {
   goal: string;
+  project_id?: string;
   constraints: string[];
   success_conditions: string[];
   risk?: RiskLevel;
   budget?: TaskEnvelope["budget"];
+}
+
+export interface ProjectModel {
+  id: string;
+  project_id: string;
+  root: string;
+  observed_at: string;
+  repository: { is_git: boolean; branch?: string; dirty: boolean };
+  languages: string[];
+  build_systems: string[];
+  test_systems: string[];
+  instructions: { conflicts: unknown[] };
+}
+
+export interface ProjectMutation {
+  project: ProjectModel;
+}
+
+export interface ProjectListResponse {
+  projects: ProjectModel[];
 }
 
 export interface TaskListResponse {
@@ -164,4 +185,16 @@ export function transitionTask(taskId: string, state: TaskState): Promise<TaskEn
 
 export function loadTaskEvents(taskId: string): Promise<TaskEventsResponse> {
   return invoke("task_events", { taskId });
+}
+
+export function pickProjectDirectory(): Promise<string | null> {
+  return invoke("pick_project_directory");
+}
+
+export function discoverProject(root: string): Promise<ProjectMutation> {
+  return invoke("discover_project", { request: { root, project_id: null } });
+}
+
+export function listProjects(): Promise<ProjectListResponse> {
+  return invoke("list_projects");
 }

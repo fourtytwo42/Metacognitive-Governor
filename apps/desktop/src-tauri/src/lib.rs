@@ -1,13 +1,15 @@
 use mcg_api::{
-    CreateTaskRequest, McpListResponse, StartOpenAiOAuthRequest, TaskEventsResponse,
-    TaskListResponse, TaskMutationResponse, TransitionTaskRequest,
+    CreateTaskRequest, DiscoverProjectRequest, McpListResponse, ProjectListResponse,
+    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::TaskEnvelope;
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
-use mcg_runtime::{McpMutation, OAuthLoginStart, ProviderMutation};
+use mcg_runtime::{McpMutation, OAuthLoginStart, ProjectMutation, ProviderMutation};
 use serde::{Deserialize, Serialize};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -254,6 +256,55 @@ async fn task_events(task_id: String) -> Result<TaskEventsResponse, String> {
 }
 
 #[tauri::command]
+async fn pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    app.dialog()
+        .file()
+        .set_title("Choose a project folder")
+        .blocking_pick_folder()
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|_| "The selected folder is not a local filesystem path".to_owned())
+        })
+        .transpose()
+}
+
+#[tauri::command]
+async fn discover_project(request: DiscoverProjectRequest) -> Result<ProjectMutation, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/projects/discover"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Project discovery could not start: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Project discovery").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Project discovery response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_projects() -> Result<ProjectListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/projects"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Projects could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Project listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Project list response was invalid: {error}"))
+}
+
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
 fn open_external_url(url: String) -> Result<(), String> {
     let parsed = validate_external_url(&url)?;
@@ -278,6 +329,7 @@ fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
 /// Panics when Tauri cannot initialize or run the application event loop.
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             runtime_label,
             start_openai_oauth,
@@ -291,6 +343,9 @@ pub fn run() {
             create_task,
             transition_task,
             task_events,
+            pick_project_directory,
+            discover_project,
+            list_projects,
             open_external_url
         ])
         .run(tauri::generate_context!())
