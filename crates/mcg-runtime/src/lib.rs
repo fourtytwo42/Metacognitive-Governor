@@ -1054,6 +1054,21 @@ impl AppRuntime {
         })
     }
 
+    /// Records immutable objective evaluation evidence and publishes its event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the report does not cover its run's success
+    /// conditions or violates the organization's evaluator/evidence policy.
+    pub fn record_evaluation(
+        &self,
+        report: &EvaluationReport,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let event = self.store()?.record_evaluation(report)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
+    }
+
     /// Atomically records a planned run and immutable work plan.
     ///
     /// # Errors

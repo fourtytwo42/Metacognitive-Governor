@@ -1294,10 +1294,19 @@ impl SqliteEventStore {
             }
             mcg_agents::EvaluationOutcome::Inconclusive => true,
         };
+        let plan_requires_independent_evaluation = genome.evaluation.require_independent_evaluation
+            || plan.items.iter().any(|item| {
+                genome.roles.iter().any(|role| {
+                    role.id == item.assigned_role && role.kind == mcg_agents::RoleKind::Evaluator
+                })
+            });
+        let independent_evaluator_present =
+            !plan_requires_independent_evaluation || report.evaluator_instance_id.is_some();
         if report.schema_version != AGENT_RUN_SCHEMA_VERSION
             || report.task_id != run.task_id
             || report.conditions.is_empty()
             || (genome.evaluation.require_objective_evidence && report.evidence.is_empty())
+            || !independent_evaluator_present
             || report.confidence.basis_points > 10_000
             || !covers_plan
             || !outcome_consistent

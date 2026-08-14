@@ -5,11 +5,11 @@ use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
-    ExecuteAgentWorkRequest, ManagedMemoryResponse, MemoryClaimHistoryResponse,
-    MemoryClaimListResponse, OrganizationListResponse, OrganizationMutationResponse,
-    PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse, ProjectListResponse,
-    ProviderListResponse, ResolveApprovalRequest, StartOpenAiOAuthRequest, TaskEventsResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, ManagedMemoryResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, OrganizationListResponse,
+    OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse,
+    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, StartOpenAiOAuthRequest,
+    TaskEventsResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
     TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
@@ -240,6 +240,8 @@ enum RunCommand {
         #[arg(long, default_value_t = 8)]
         max_model_calls: u16,
     },
+    /// Record an immutable `EvaluationReport` JSON file for a run.
+    Evaluate { id: String, file: PathBuf },
     /// Cancel a run.
     Cancel { id: String },
 }
@@ -664,6 +666,7 @@ async fn run_organization(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the complete run command family visible together.
 async fn run_agent(
     client: &reqwest::Client,
     host: &str,
@@ -758,6 +761,21 @@ async fn run_agent(
                 .json()
                 .await?;
             println!("{}", serde_json::to_string_pretty(&commit)?);
+        }
+        RunCommand::Evaluate { id, file } => {
+            let run_id = RunId::from_str(&id)?;
+            let report: mcg_agents::EvaluationReport =
+                serde_json::from_slice(&std::fs::read(file)?)?;
+            let mutation: EvaluationMutationResponse = client
+                .post(format!("{host}/api/v1/runs/{run_id}/evaluations"))
+                .bearer_auth(token)
+                .json(&report)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&mutation)?);
         }
         RunCommand::Cancel { id } => {
             transition_run(client, host, token, &id, AgentRunState::Cancelled).await?;
@@ -1392,6 +1410,25 @@ async fn resolve_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluation_file_command_is_available_for_replayable_evidence() {
+        let cli = Cli::try_parse_from([
+            "mcg",
+            "run",
+            "evaluate",
+            "00000000-0000-0000-0000-000000000001",
+            "evaluation.json",
+        ])
+        .expect("evaluation command");
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                command: RunCommand::Evaluate { id, file }
+            } if id == "00000000-0000-0000-0000-000000000001"
+                && file == std::path::Path::new("evaluation.json")
+        ));
+    }
 
     #[test]
     fn memory_values_accept_plain_consumer_strings_and_structured_json() {

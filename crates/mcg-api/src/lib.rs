@@ -19,9 +19,9 @@ use axum::{
 };
 use chrono::Utc;
 use mcg_agents::{
-    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, ExecutivePlanner,
-    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
-    SuccessCondition, TaskComplexity,
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationReport,
+    ExecutivePlanner, OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
+    RoleKind, SuccessCondition, TaskComplexity,
 };
 use mcg_domain::{
     ApprovalId, MemoryClaimId, OrganizationId, OrganizationRevisionId, ProjectId, RiskLevel, RunId,
@@ -84,6 +84,12 @@ pub struct TransitionTaskRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskMutationResponse {
     pub task: TaskEnvelope,
+    pub event: EventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluationMutationResponse {
+    pub report: EvaluationReport,
     pub event: EventEnvelope,
 }
 
@@ -417,6 +423,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             get(get_organization),
         )
         .route("/api/v1/runs/{run_id}", get(get_agent_run))
+        .route("/api/v1/runs/{run_id}/evaluations", post(record_evaluation))
         .route(
             "/api/v1/runs/{run_id}/work/{work_item_id}/execute",
             post(execute_agent_work),
@@ -828,6 +835,26 @@ async fn get_agent_run(
         .agent_run_view(run_id)
         .map(Json)
         .map_err(map_runtime_error)
+}
+
+async fn record_evaluation(
+    State(state): State<ApiState>,
+    Path(run_id): Path<RunId>,
+    Json(report): Json<EvaluationReport>,
+) -> Result<(StatusCode, Json<EvaluationMutationResponse>), ApiError> {
+    if report.run_id != run_id {
+        return Err(ApiError::bad_request(
+            "evaluation run does not match the request path",
+        ));
+    }
+    let event = state
+        .runtime
+        .record_evaluation(&report)
+        .map_err(map_runtime_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(EvaluationMutationResponse { report, event }),
+    ))
 }
 
 async fn transition_agent_run(
@@ -1400,8 +1427,9 @@ fn map_runtime_error(error: RuntimeError) -> ApiError {
 mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
+    use mcg_agents::{ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::AppConfig;
-    use mcg_domain::{ArtifactId, ToolExecutionId, ToolRequestId};
+    use mcg_domain::{ArtifactId, EvaluationId, ToolExecutionId, ToolRequestId};
     use mcg_providers::{
         BrowserAuthorizationConfig, CHATGPT_CODEX_BASE_URL, CONTRACT_VERSION,
         DeviceAuthorizationConfig, ProviderKind,
@@ -1573,17 +1601,40 @@ form.addEventListener('submit', (event) => {
                                         == Some("function_call_output")
                                 })
                             });
-                        let output = if has_tool_result {
-                            vec![serde_json::json!({
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": "LaunchPad was built and is ready to open."}]
-                            })]
+                        let has_write_tool = body
+                            .get("tools")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|tools| {
+                                tools.iter().any(|tool| {
+                                    tool.pointer("/function/name")
+                                        .or_else(|| tool.get("name"))
+                                        .and_then(serde_json::Value::as_str)
+                                        == Some("fs.write")
+                                })
+                            });
+                        let (response_id, output) = if has_tool_result {
+                            (
+                                "website-complete",
+                                vec![serde_json::json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "LaunchPad was built and is ready to open."}]
+                                })],
+                            )
+                        } else if has_write_tool {
+                            ("website-tools", (*tool_calls).clone())
                         } else {
-                            (*tool_calls).clone()
+                            (
+                                "evaluation-complete",
+                                vec![serde_json::json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "Independent evaluation reviewed the durable write evidence."}]
+                                })],
+                            )
                         };
                         Json(serde_json::json!({
-                            "id": if has_tool_result { "website-complete" } else { "website-tools" },
+                            "id": response_id,
                             "model": "website-builder",
                             "status": "completed",
                             "output": output,
@@ -2549,7 +2600,7 @@ form.addEventListener('submit', (event) => {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // Full provider -> governed tools -> durable evidence contract.
-    async fn coder_builds_complete_website_through_governed_tools() {
+    async fn website_is_built_and_independently_evaluated_with_durable_evidence() {
         let directory = tempfile::tempdir().expect("temporary runtime");
         let project_root = directory.path().join("launchpad");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -2589,11 +2640,35 @@ form.addEventListener('submit', (event) => {
                             .into(),
                 }],
             )],
-            require_independent_evaluation: false,
+            require_independent_evaluation: true,
         };
         let plan = ExecutivePlanner::default()
             .plan(&organization, &planning, now)
             .expect("work plan");
+        let coder_role = organization
+            .roles
+            .iter()
+            .find(|role| role.kind == RoleKind::Coder)
+            .expect("coder role")
+            .id;
+        let evaluator_role = organization
+            .roles
+            .iter()
+            .find(|role| role.kind == RoleKind::Evaluator)
+            .expect("evaluator role")
+            .id;
+        let coder_item = plan
+            .items
+            .iter()
+            .find(|item| item.assigned_role == coder_role)
+            .expect("coder work")
+            .clone();
+        let evaluator_item = plan
+            .items
+            .iter()
+            .find(|item| item.assigned_role == evaluator_role)
+            .expect("evaluator work")
+            .clone();
         let run = AgentRun {
             schema_version: AGENT_RUN_SCHEMA_VERSION,
             id: planning.run_id,
@@ -2631,7 +2706,7 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("provider");
 
-        let endpoint = format!("/api/v1/runs/{}/work/{}/execute", run.id, plan.items[0].id);
+        let endpoint = format!("/api/v1/runs/{}/work/{}/execute", run.id, coder_item.id);
         let body = serde_json::to_vec(&ExecuteAgentWorkRequest {
             project_id: project.project_id,
             target_path: None,
@@ -2663,12 +2738,12 @@ form.addEventListener('submit', (event) => {
             "execution failed: {}",
             String::from_utf8_lossy(&bytes)
         );
-        let commit: AgentTurnCommit = serde_json::from_slice(&bytes).expect("turn commit");
+        let coder_commit: AgentTurnCommit = serde_json::from_slice(&bytes).expect("turn commit");
 
-        assert_eq!(commit.result.response.id, "website-complete");
-        assert_eq!(commit.result.model_calls.len(), 2);
-        assert_eq!(commit.result.tool_outcomes.len(), 3);
-        assert!(commit.result.tool_outcomes.iter().all(|outcome| {
+        assert_eq!(coder_commit.result.response.id, "website-complete");
+        assert_eq!(coder_commit.result.model_calls.len(), 2);
+        assert_eq!(coder_commit.result.tool_outcomes.len(), 3);
+        assert!(coder_commit.result.tool_outcomes.iter().all(|outcome| {
             outcome.status == ToolOutcomeStatus::Succeeded
                 && outcome
                     .verification
@@ -2696,8 +2771,144 @@ form.addEventListener('submit', (event) => {
             3
         );
         assert!(audit.iter().all(|record| record.tool == "fs.write"));
+
+        let evaluator_endpoint =
+            format!("/api/v1/runs/{}/work/{}/execute", run.id, evaluator_item.id);
+        let evaluator_body = serde_json::to_vec(&ExecuteAgentWorkRequest {
+            project_id: project.project_id,
+            target_path: None,
+            context_token_budget: 1_024,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 256,
+            max_model_calls: 1,
+        })
+        .expect("evaluator request");
+        let evaluator_response = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(&evaluator_endpoint))
+                    .header("content-type", "application/json")
+                    .body(Body::from(evaluator_body))
+                    .expect("evaluator request"),
+            )
+            .await
+            .expect("evaluator response");
+        assert_eq!(evaluator_response.status(), StatusCode::OK);
+        let evaluator_commit: AgentTurnCommit = serde_json::from_slice(
+            &evaluator_response
+                .into_body()
+                .collect()
+                .await
+                .expect("evaluator body")
+                .to_bytes(),
+        )
+        .expect("evaluator commit");
+        assert_eq!(evaluator_commit.instance.role_id, evaluator_role);
+        assert_eq!(evaluator_commit.result.response.id, "evaluation-complete");
+        assert!(evaluator_commit.result.tool_outcomes.is_empty());
+
+        let condition = coder_item.success_conditions[0].clone();
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: EvaluationId::new(),
+            run_id: run.id,
+            task_id: task.id,
+            evaluator_instance_id: Some(evaluator_commit.instance.id),
+            conditions: vec![ConditionResult {
+                condition,
+                passed: true,
+                detail: "three project files and their interaction/accessibility hooks were independently inspected"
+                    .into(),
+            }],
+            outcome: EvaluationOutcome::Passed,
+            confidence: mcg_agents::ConfidenceEstimate::new(9_500, 3).expect("confidence"),
+            regressions: Vec::new(),
+            evidence: coder_commit
+                .result
+                .tool_outcomes
+                .iter()
+                .filter_map(|outcome| outcome.verification.first())
+                .map(|verification| EvaluationEvidence {
+                    method: verification.method.clone(),
+                    artifact_sha256: Some(verification.detail.clone()),
+                    event_sequence: coder_commit.events.last().map(|event| event.sequence),
+                    detail: "governed filesystem write passed read-after-write verification".into(),
+                })
+                .collect(),
+            evaluated_at: Utc::now(),
+        };
+        let evaluation_endpoint = format!("/api/v1/runs/{}/evaluations", run.id);
+        let unauthorized = router(runtime.clone())
+            .oneshot(
+                Request::post(&evaluation_endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&report).expect("evaluation report"),
+                    ))
+                    .expect("unauthorized evaluation request"),
+            )
+            .await
+            .expect("unauthorized evaluation response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let mut missing_evaluator = report.clone();
+        missing_evaluator.evaluator_instance_id = None;
+        let rejected = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(&evaluation_endpoint))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&missing_evaluator).expect("invalid report"),
+                    ))
+                    .expect("invalid evaluation request"),
+            )
+            .await
+            .expect("invalid evaluation response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            runtime
+                .agent_run_view(run.id)
+                .expect("run")
+                .evaluations
+                .is_empty()
+        );
+
+        let evaluation_response = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(&evaluation_endpoint))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&report).expect("evaluation report"),
+                    ))
+                    .expect("evaluation request"),
+            )
+            .await
+            .expect("evaluation response");
+        assert_eq!(evaluation_response.status(), StatusCode::CREATED);
+        let mutation: EvaluationMutationResponse = serde_json::from_slice(
+            &evaluation_response
+                .into_body()
+                .collect()
+                .await
+                .expect("evaluation body")
+                .to_bytes(),
+        )
+        .expect("evaluation mutation");
+        assert_eq!(mutation.report, report);
+
         let durable = runtime.agent_run_view(run.id).expect("durable run");
-        assert_eq!(durable.results, vec![commit.result]);
+        assert_eq!(durable.results.len(), 2);
+        assert!(
+            durable
+                .results
+                .iter()
+                .any(|result| result == &coder_commit.result)
+        );
+        assert!(
+            durable
+                .results
+                .iter()
+                .any(|result| result == &evaluator_commit.result)
+        );
+        assert_eq!(durable.evaluations, vec![report]);
     }
 
     #[tokio::test]

@@ -73,6 +73,10 @@ and `mcg run`. Run `mcg organization --help` or `mcg run --help` for the exact
 commands and JSON-file schema. After starting a run, `mcg run execute` dispatches
 one ready work item through configured providers and project-confined governed
 tools; run, work-item, and project UUIDs are explicit positional arguments.
+Use `mcg run evaluate RUN evaluation.json` to submit an immutable objective
+`EvaluationReport`. Independent-review plans require the report to identify the
+run's Evaluator instance, and `mcg run get RUN` replays the stored report with
+the rest of the run evidence.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

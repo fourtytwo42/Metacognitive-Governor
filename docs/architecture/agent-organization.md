@@ -87,6 +87,13 @@ the same persistent local bearer authentication as the rest of the daemon.
 The CLI exposes these operations through `mcg organization` and `mcg run`.
 Human output stays concise for creation and transitions, while inspection and
 plan-file operations return the complete JSON evidence needed by scripts.
+Objective reports are recorded through authenticated
+`POST /api/v1/runs/{run}/evaluations` or `mcg run evaluate RUN REPORT.json`.
+Reports are immutable, must cover every planned success condition, and must carry
+objective evidence when the organization requires it. If organization policy or
+the plan calls for independent evaluation, the report must identify an actual
+Evaluator instance from the same run; a self-report or unrelated instance fails
+before any evaluation event is stored.
 
 Dispatch resolves project, work item, assigned role, dependencies, context,
 server-owned tool schemas, provider routes, organization concurrency, lease
