@@ -1,7 +1,6 @@
 # M3 Tool and Policy Plane
 
-- Status: Implemented and locally qualified on Windows; Linux qualification is
-  required before closing M3.
+- Status: Implemented and locally qualified on Windows and Linux.
 - Date: 2026-08-14.
 - Governing milestone: M3 in `docs/roadmap/milestones.md`.
 

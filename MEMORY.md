@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M3 typed tools, capabilities, and approvals is implementation-complete and Windows-qualified; Ubuntu qualification remains before closing the milestone.
-- Last meaningful change: Completed the remaining typed host executors, durable SQLite approval/lease/audit/artifact lifecycle, authenticated API/CLI surfaces, and a correctly fail-fast local verifier.
-- Next step: Commit and push the Windows-green M3 checkpoint, qualify the same revision on the owner-controlled Ubuntu VM, fix any platform defects, and close M3 only when both platforms pass.
+- Current task: M3 typed tools, capabilities, and approvals is complete and qualified on Windows and Ubuntu. M4 projects, context, and durable memory is next.
+- Last meaningful change: Pushed M3 implementation checkpoint `ec065d8` and passed the complete owner-machine verifier on the identical source revision on Windows and Ubuntu.
+- Next step: Design and implement M4 project discovery, instruction/context assembly, file invalidation, provenance-bearing claims, and permission-aware durable memory.
 - Blockers: None documented.
 
 ## Current State
@@ -133,6 +133,7 @@ When sources conflict, use this order:
 - 2026-08-14: Completed 27 `mcg-tools`, 8 policy, 7 storage, 3 runtime, and 7 API tests for the full M3 boundary. Focused tests use real temporary processes, repositories/worktrees, local HTTP servers, content-addressed artifacts, and SQLite lifecycle/restart behavior.
 - 2026-08-14: Fixed `scripts/verify.ps1` to check every native command's `$LASTEXITCODE`. The prior script could print Cargo failures but still return success; the repaired script immediately exposed a missing test import and a fixed-delay process-test race, both of which were corrected.
 - 2026-08-14: The repaired complete Windows verifier passed Rust format/clippy/workspace tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E for the implementation-complete M3 revision.
+- 2026-08-14: Synchronized commit `ec065d8` to the owner-controlled Ubuntu 24.04 VM and passed `scripts/verify.sh`: Rust format/clippy/workspace tests, documentation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E. No GitHub-hosted automation ran.
 
 ## Decisions
 
@@ -216,9 +217,9 @@ When sources conflict, use this order:
 - Context: M3 requires every supported host effect to use typed contracts, constitutional capability checks, durable approvals/evidence, and externally observable verification.
 - Decision: Keep host execution exhaustive behind `HostToolExecutor`; use exact executable/shell capability entries, project-confined filesystem/Git paths, credential references, bounded/redacted output, no automatic HTTP redirects, and atomic SQLite approval/audit/event transactions. Do not expose raw execution over transport until project orchestration can construct safe scoped capabilities.
 - Files: `crates/mcg-tools/`, `crates/mcg-policy/`, `crates/mcg-storage/`, `crates/mcg-runtime/`, `crates/mcg-api/`, `apps/mcg-cli/`, `docs/architecture/tool-policy-plane.md`, `scripts/verify.ps1`.
-- Commands/tests: Five repeated process lifecycle tests and `scripts/verify.ps1` passed on Windows; Ubuntu `scripts/verify.sh` remains required for milestone closure.
-- Result: All M3 primitive families and durable control surfaces are implemented. Windows qualification is green, including native desktop and E2E checks.
-- Follow-up: Qualify the identical revision on Ubuntu, then close M3 and begin M4 projects/context/memory.
+- Commands/tests: Five repeated process lifecycle tests and `scripts/verify.ps1` passed on Windows; `scripts/verify.sh` passed on Ubuntu for the identical `ec065d8` archive.
+- Result: All M3 primitive families and durable control surfaces are implemented and qualified on both initially supported platforms, including native desktop and E2E checks.
+- Follow-up: Begin M4 projects, context, and durable memory.
 
 ## Known Issues
 
@@ -234,6 +235,7 @@ When sources conflict, use this order:
 - 2026-08-14: Completed and verified M0 architecture, roadmap, test strategy, Rust/Tauri/React workspace, CI, daemon/CLI smoke path, and initial UI/invariant tests.
 - 2026-08-14: Completed and verified the requested M1 runtime spine on Windows and Ubuntu, then disabled and removed GitHub-hosted automation.
 - 2026-08-14: Completed and verified M2 provider fabric on Windows and Ubuntu, including standalone OAuth fixtures and live GPU45 conformance on both platforms.
+- 2026-08-14: Completed and verified M3 typed tools, constitutional capability enforcement, durable approvals/leases/audit/artifacts, worktree isolation, API/CLI control surfaces, and adversarial cross-platform qualification on Windows and Ubuntu.
 
 ## Open Follow-ups
 
@@ -242,7 +244,7 @@ When sources conflict, use this order:
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
-- Complete Ubuntu qualification of M3, then begin M4 projects, context, and durable memory.
+- Begin M4 projects, context, and durable memory.
 
 ## Do Not Forget
 
