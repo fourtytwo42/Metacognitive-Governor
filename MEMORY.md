@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Typed element and multi-step browser workflow evidence is Windows-qualified; exact Ubuntu qualification is next.
+- Current task: Typed element and multi-step browser workflow evidence is cross-platform qualified; desktop task/evidence/provider/project UX is next.
 - Last meaningful change: Added `ELEMENT EXISTS` and immutable `BROWSER WORKFLOW` with a bounded non-script language, same-origin GET/HEAD confinement, unsafe-interaction rejection, and JSON/HTML/PNG evidence.
-- Next step: Commit/push the browser workflow slice and run the complete verifier from that exact commit on Ubuntu, then deepen desktop task/evidence/provider/project UX. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Next step: Deepen desktop task/evidence/provider/project UX around representative useful projects. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -193,7 +193,7 @@ When sources conflict, use this order:
 - 2026-08-14: Governed MCP mutation checkpoint passed Windows focused qualification: full-workspace clippy, 19 API tests, 4 runtime tests, 12 storage tests, docs, formatting, and diff hygiene. A provider-backed MCP call creates and executes one durable run; exact retry returns the same one result/instance, a changed-input key conflicts, and `mcg_query_run` replays evidence. The file-backed migration-8 fixture proves atomic creation, restart replay, immutable key conflict, and zero duplicate events.
 - 2026-08-14: Exact file/custom evidence commit `4238ec5` passed an isolated complete `./scripts/verify.sh` in `/home/hendo420/mcg-worktree-4238ec5` with `verify-final.exit=0`: strict Rust workspace gates including 32 tool and 29 API tests, live GPU45, docs, frontend checks/build, sandboxed real Chromium, native Linux Tauri/GTK build, and Playwright. No GitHub-hosted automation ran.
 - 2026-08-14: Exact screenshot-baseline commit `4e5c432` passed complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`, including 33 tool/30 API tests, decoded-pixel Chromium comparison, live GPU45, docs/frontend, native Tauri/GTK, and Playwright. The first exact code commit proved a small 404 change was correctly within the 1% tolerance; the corrected full-viewport fixture passed. A later attempt exhausted disk while both generated snapshots remained; the failed snapshot was path-verified and removed, the exact rerun passed, and the superseded qualified `4238ec5` snapshot was removed after verifying both markers. Source remains in Git; 14 GB VM headroom remained.
-- 2026-08-14: Typed element/workflow evidence passed the Windows local lane: strict workspace clippy; all Rust suites except the intentionally live-locked daemon/desktop packages, including 39 tool and 31 API tests; live GPU45; frontend typecheck, 9 Vitest tests, production build, Playwright, docs, and diff hygiene. Real Chromium fixtures prove hydration, five-step success, assertion failure, immutable-file mutation rejection, and fail-closed cross-origin/download/new-context/POST-form interactions. Exact Ubuntu qualification remains pending.
+- 2026-08-14: Typed element/workflow evidence passed the Windows local lane and exact commit `f9f9fc6` passed complete Ubuntu `./scripts/verify.sh` in 299 seconds with `verify-final.exit=0`: strict workspace clippy/tests including 39 tool and 31 API tests, restart recovery, live GPU45, real Chromium, native Tauri/GTK, frontend typecheck, 9 Vitest tests, production build, Playwright, docs, and diff hygiene. Fixtures prove hydration, five-step success, assertion failure, immutable-file mutation rejection, and fail-closed cross-origin/download/new-context/POST-form interactions. The retained exact snapshot is `/home/hendo420/mcg-worktree-f9f9fc6`; the superseded verified `7566cf4` snapshot was removed after exact marker validation.
 
 ## Decisions
 
@@ -559,6 +559,15 @@ When sources conflict, use this order:
 - Commands/tests: Strict full-workspace Windows clippy; 38 tool tests including real HTML/plain-text sources; 31 API tests including public pass/fabricated-quote-fail/replay; focused runtime/agent tests; docs and diff checks.
 - Result: Windows-focused gates are green. Exact commit `7566cf4` also passed complete Ubuntu `./scripts/verify.sh` with `verify-final.exit=0`. The report points to the immutable JSON SHA, audited `research.verify` retains JSON plus deterministically ordered source artifacts and URL/digest evidence, scope mismatch and post-binding mutation fail, optional freshness/conflict invariants are bounded, and terminal replay adds no model call, fetch, or audit record.
 - Follow-up: Broaden representative workflows, UI depth, and remaining typed objective evaluators.
+
+### 2026-08-14 - Immutable Typed Browser Workflow Evidence
+
+- Context: A rendered-page snapshot could not prove that a real consumer journey remained usable, while arbitrary browser scripting would bypass the typed policy boundary and could navigate, download, or mutate remote services.
+- Decision: Add `ELEMENT EXISTS URL selector` and `BROWSER WORKFLOW project/relative/file.json`. Bind version-1 JSON bytes/name/SHA before model work; re-read through governed project authority; interpret only bounded element/text/URL assertions, clicks, typing, and allowlisted keys; and confine the browser to same-origin GET/HEAD. Inspect interaction targets before action and reject downloads, new contexts, cross-origin destinations, and non-GET forms.
+- Files: `crates/mcg-{agents,tools,runtime,api}/`, `README.md`, `docs/architecture/{runtime-spine,agent-organization}.md`, `docs/testing/strategy.md`.
+- Commands/tests: Windows strict workspace clippy and broad Rust suites excluding visible live-locked binaries; 39 tool and 31 API tests; live GPU45; frontend typecheck, 9 Vitest tests, build, Playwright, and docs. Exact `f9f9fc6` complete Ubuntu `./scripts/verify.sh` in 299 seconds.
+- Result: Element checks objectively pass/fail after hydration. Browser workflows retain immutable JSON, final HTML/PNG, and ordered step evidence; intended multi-step interaction passes, false text fails, file mutation is rejected, unsafe interactions fail before action, and a missing workflow fails before model spend. Windows and Ubuntu qualification are green with no GitHub-hosted automation.
+- Follow-up: Build richer consumer task progress and evidence UX, provider/project setup flows, accessibility evidence, and representative end-to-end projects.
 
 ## Known Issues
 
