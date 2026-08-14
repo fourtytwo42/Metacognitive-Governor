@@ -1,5 +1,9 @@
-use mcg_api::{McpListResponse, StartOpenAiOAuthRequest};
+use mcg_api::{
+    CreateTaskRequest, McpListResponse, StartOpenAiOAuthRequest, TaskEventsResponse,
+    TaskListResponse, TaskMutationResponse, TransitionTaskRequest,
+};
 use mcg_config::AppConfig;
+use mcg_domain::TaskEnvelope;
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_runtime::{McpMutation, OAuthLoginStart, ProviderMutation};
@@ -177,6 +181,79 @@ async fn discover_mcp_connection(connection_id: String) -> Result<McpToolCatalog
 }
 
 #[tauri::command]
+async fn list_tasks() -> Result<TaskListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/tasks"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Tasks could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn create_task(request: CreateTaskRequest) -> Result<TaskMutationResponse, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/tasks"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Task could not be created: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task creation").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task creation response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn transition_task(
+    task_id: String,
+    request: TransitionTaskRequest,
+) -> Result<TaskEnvelope, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Task state could not be changed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task transition").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task transition response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn task_events(task_id: String) -> Result<TaskEventsResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/tasks/{task_id}/events"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Task history could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Task history").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Task history response was invalid: {error}"))
+}
+
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
 fn open_external_url(url: String) -> Result<(), String> {
     let parsed = validate_external_url(&url)?;
@@ -210,6 +287,10 @@ pub fn run() {
             list_mcp_connections,
             configure_mcp_connection,
             discover_mcp_connection,
+            list_tasks,
+            create_task,
+            transition_task,
+            task_events,
             open_external_url
         ])
         .run(tauri::generate_context!())

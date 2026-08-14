@@ -2643,6 +2643,7 @@ version = "0.1.0"
 dependencies = [
  "mcg-api",
  "mcg-config",
+ "mcg-domain",
  "mcg-events",
  "mcg-mcp",
  "mcg-runtime",

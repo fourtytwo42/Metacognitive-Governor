@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP HTTP/stdio management is available through API, CLI, and native desktop; remote tools execute through governed agent leases.
-- Last meaningful change: Added bounded stdio process transport with a five-second current probe, same-process legacy fallback, strict pins, deterministic cleanup, unified governed execution, CLI configuration, and advanced desktop controls.
-- Next step: Qualify the complete MCP slice on Windows/Ubuntu, add representative third-party interoperability fixtures, and perform native MCP UAT. Preserve the visible OAuth handoff.
+- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP HTTP/stdio management and durable task creation/list/start/cancel/history are available through API, CLI, and native desktop.
+- Last meaningful change: Added deterministic task listing from SQLite through authenticated API/Tauri/CLI, plus simple goal creation and advanced constraints/success/risk/cost controls with durable history in the desktop.
+- Next step: Qualify the desktop task slice on Ubuntu, then add representative third-party MCP interoperability and native task/MCP UAT. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -429,6 +429,15 @@ When sources conflict, use this order:
 - Commands/tests: Modern and legacy spawned-process fixtures; focused Rust compile/tests; desktop Vitest and production build; CLI help smoke.
 - Result: Modern stdio discovery/call and same-process automatic legacy fallback pass on Windows and in the complete Ubuntu gate; governed runtime configuration/execution now dispatches by durable transport, and all primary management interfaces accept stdio without persisting a credential.
 - Follow-up: Run the complete Windows gate after the live OAuth handoff is released; add third-party SDK interoperability plus native UAT.
+
+### 2026-08-14 - Native Durable Task Control
+
+- Context: API and CLI could create and inspect tasks, but the consumer desktop hero was still a visual scaffold and SQLite had no public current-task listing.
+- Decision: Add deterministic newest-updated task listing in storage/runtime/API; route create/list/transition/history through authenticated native Tauri commands; make simple mode goal-only and advanced mode expose constraints, success conditions, risk, cost ceiling, and ids. Expose only legal pending start, nonterminal cancel, and read-only history controls.
+- Files: `crates/mcg-{storage,runtime,api}/`, `apps/mcg-cli/src/main.rs`, `apps/desktop/src-tauri/`, `apps/desktop/src/{desktop-client,App,App.test,styles}.tsx`, `docs/architecture/runtime-spine.md`, `README.md`.
+- Commands/tests: strict focused Rust clippy/tests; frontend typecheck; five Vitest flows; production Vite build; docs and diff checks.
+- Result: One durable task can be created, listed, started/cancelled, and observed with ordered event evidence through desktop, CLI, and API contracts; focused Windows gates are green while the live OAuth process remains preserved.
+- Follow-up: Complete Ubuntu qualification and native UAT, then connect project/run orchestration into the consumer flow.
 
 ## Known Issues
 

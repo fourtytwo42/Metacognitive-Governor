@@ -4,8 +4,11 @@ import {
   cancelOpenAiOAuth,
   completeOpenAiOAuth,
   configureMcpConnection,
+  createTask,
   discoverMcpConnection,
   listMcpConnections,
+  listTasks,
+  loadTaskEvents,
   type McpAuthMode,
   type McpListItem,
   type McpProtocolMode,
@@ -13,7 +16,11 @@ import {
   openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
-  startOpenAiOAuth
+  type RiskLevel,
+  startOpenAiOAuth,
+  type TaskEnvelope,
+  type TaskEventsResponse,
+  transitionTask
 } from "./desktop-client";
 
 const progress = [
@@ -45,6 +52,15 @@ export function App() {
   const [mcpCredential, setMcpCredential] = useState("");
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState<string | null>(null);
+  const [tasks, setTasks] = useState<TaskEnvelope[]>([]);
+  const [taskGoal, setTaskGoal] = useState("");
+  const [taskConstraints, setTaskConstraints] = useState("");
+  const [taskSuccess, setTaskSuccess] = useState("");
+  const [taskRisk, setTaskRisk] = useState<RiskLevel>("medium");
+  const [taskMaxCost, setTaskMaxCost] = useState("");
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
+  const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
 
   useEffect(() => {
     let active = true;
@@ -54,6 +70,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setMcpError(errorMessage(error));
+      });
+    listTasks()
+      .then((response) => {
+        if (active) setTasks(response.tasks);
+      })
+      .catch((error) => {
+        if (active) setTaskError(errorMessage(error));
       });
     return () => {
       active = false;
@@ -191,6 +214,76 @@ export function App() {
     }
   }
 
+  function replaceTask(task: TaskEnvelope) {
+    setTasks((current) => [
+      task,
+      ...current.filter((candidate) => candidate.id !== task.id)
+    ]);
+  }
+
+  async function addTask() {
+    if (!taskGoal.trim()) {
+      setTaskError("Describe what you want MCG to accomplish.");
+      return;
+    }
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const maxCost = Number(taskMaxCost);
+      const created = await createTask({
+        goal: taskGoal.trim(),
+        constraints: advanced
+          ? taskConstraints.split("\n").map((value) => value.trim()).filter(Boolean)
+          : [],
+        success_conditions: advanced
+          ? taskSuccess.split("\n").map((value) => value.trim()).filter(Boolean)
+          : [],
+        risk: advanced ? taskRisk : undefined,
+        budget: advanced && taskMaxCost.trim() && Number.isFinite(maxCost)
+          ? { max_cost_usd: maxCost }
+          : undefined
+      });
+      replaceTask(created.task);
+      setTaskGoal("");
+      setTaskConstraints("");
+      setTaskSuccess("");
+      setTaskMaxCost("");
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
+  async function changeTaskState(taskId: string, state: "active" | "cancelled") {
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      replaceTask(await transitionTask(taskId, state));
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
+  async function toggleTaskHistory(taskId: string) {
+    if (taskHistory[taskId]) {
+      setTaskHistory((history) => ({ ...history, [taskId]: undefined }));
+      return;
+    }
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const events = await loadTaskEvents(taskId);
+      setTaskHistory((history) => ({ ...history, [taskId]: events }));
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -199,7 +292,8 @@ export function App() {
           <span>MCG</span>
         </div>
         <nav>
-          <a className="nav-item active" href="#projects">Projects</a>
+          <a className="nav-item active" href="#tasks">Tasks</a>
+          <a className="nav-item" href="#projects">Projects</a>
           <a className="nav-item" href="#threads">Threads</a>
           <a className="nav-item" href="#scheduler">Scheduler</a>
           <a className="nav-item" href="#providers">Providers</a>
@@ -215,7 +309,7 @@ export function App() {
         </button>
       </aside>
 
-      <main className="workspace" id="projects">
+      <main className="workspace" id="tasks">
         <header className="topbar">
           <div>
             <p className="eyebrow">METACOGNITIVE GOVERNOR</p>
@@ -226,24 +320,86 @@ export function App() {
 
         <section className="hero-card">
           <div>
-            <p className="eyebrow">START A PROJECT</p>
-            <h2>What would you like to build?</h2>
+            <p className="eyebrow">NEW TASK</p>
+            <h2>What would you like MCG to do?</h2>
             <p className="muted">
               Open a folder or describe a goal. MCG will choose the smallest useful
               organization, work within your permissions, and verify the result.
             </p>
           </div>
           <div className="composer">
-            <label htmlFor="goal">Project goal</label>
-            <textarea id="goal" placeholder="Build and test a responsive website…" />
+            <label htmlFor="goal">Goal</label>
+            <textarea
+              id="goal"
+              value={taskGoal}
+              onChange={(event) => setTaskGoal(event.target.value)}
+              placeholder="Build and test a responsive website..."
+            />
+            {advanced && <div className="advanced-fields task-advanced">
+              <label>
+                Constraints (one per line)
+                <textarea value={taskConstraints} onChange={(event) => setTaskConstraints(event.target.value)} />
+              </label>
+              <label>
+                Success conditions (one per line)
+                <textarea value={taskSuccess} onChange={(event) => setTaskSuccess(event.target.value)} />
+              </label>
+              <label>
+                Risk
+                <select value={taskRisk} onChange={(event) => setTaskRisk(event.target.value as RiskLevel)}>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="critical">Critical</option>
+                </select>
+              </label>
+              <label>
+                Maximum cost (USD, optional)
+                <input type="number" min="0" step="0.01" value={taskMaxCost} onChange={(event) => setTaskMaxCost(event.target.value)} />
+              </label>
+            </div>}
             <div className="composer-actions">
-              <button className="secondary" type="button">Open folder</button>
-              <button className="primary" type="button">Start</button>
+              <button className="secondary" type="button" disabled title="Project folder selection is coming next">Open folder</button>
+              <button className="primary" type="button" disabled={taskBusy} onClick={addTask}>
+                {taskBusy ? "Creating..." : "Create task"}
+              </button>
             </div>
+            {taskError && <p className="error-message" role="alert">{taskError}</p>}
           </div>
         </section>
 
-        <section className="grid">
+        <section className="panel task-panel" aria-label="Tasks">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">DURABLE WORK</p>
+              <h2>Tasks</h2>
+            </div>
+            <span className="count-badge">{tasks.length} total</span>
+          </div>
+          <div className="task-list">
+            {tasks.length === 0 ? <p className="empty-state">No tasks yet.</p> : tasks.map((task) => (
+              <article className="task-card" key={task.id}>
+                <div className="task-card-main">
+                  <span className={`task-state state-${task.state}`}>{task.state.replaceAll("_", " ")}</span>
+                  <h3>{task.goal}</h3>
+                  {advanced && <code>{task.id}</code>}
+                  {taskHistory[task.id] && <ol className="event-history">
+                    {taskHistory[task.id]?.events.map((event) => (
+                      <li key={event.sequence}><span>{event.sequence}</span>{event.kind.replaceAll("_", " ")}</li>
+                    ))}
+                  </ol>}
+                </div>
+                <div className="task-actions">
+                  {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "active")}>Start task</button>}
+                  {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
+                  <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide history" : "History"}</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="grid" id="projects">
           <article className="panel">
             <p className="eyebrow">FOUNDATION STATUS</p>
             <h2>Ready for implementation</h2>

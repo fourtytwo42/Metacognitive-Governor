@@ -92,6 +92,11 @@ pub struct TaskMutationResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskListResponse {
+    pub tasks: Vec<TaskEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvaluationMutationResponse {
     pub report: EvaluationReport,
     pub event: EventEnvelope,
@@ -436,7 +441,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
     let state = ApiState { runtime };
     let protected = Router::new()
         .route("/api/v1/system/status", get(status))
-        .route("/api/v1/tasks", post(create_task))
+        .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route(
             "/api/v1/tasks/{task_id}",
             get(get_task).post(transition_task),
@@ -672,6 +677,12 @@ async fn create_task(
         StatusCode::CREATED,
         Json(TaskMutationResponse { task, event }),
     ))
+}
+
+async fn list_tasks(State(state): State<ApiState>) -> Result<Json<TaskListResponse>, ApiError> {
+    Ok(Json(TaskListResponse {
+        tasks: state.runtime.tasks().map_err(map_runtime_error)?,
+    }))
 }
 
 async fn get_task(
@@ -2700,6 +2711,7 @@ form.addEventListener('submit', (event) => {
         })
         .expect("request should serialize");
         let response = app
+            .clone()
             .oneshot(
                 authorized(Request::post("/api/v1/tasks"))
                     .header("content-type", "application/json")
@@ -2720,8 +2732,21 @@ form.addEventListener('submit', (event) => {
             serde_json::from_slice(&bytes).expect("response should deserialize");
         assert_eq!(
             runtime.task(created.task.id).expect("task should read"),
-            Some(created.task)
+            Some(created.task.clone())
         );
+        let listed = app
+            .oneshot(
+                authorized(Request::get("/api/v1/tasks"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("list response");
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed: TaskListResponse =
+            serde_json::from_slice(&listed.into_body().collect().await.expect("body").to_bytes())
+                .expect("task list");
+        assert_eq!(listed.tasks, vec![created.task]);
     }
 
     #[tokio::test]

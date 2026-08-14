@@ -42,6 +42,7 @@ are explicit overrides for controlled tests and alternate local clients.
 | `GET` | `/api/v1/system/health` | Unauthenticated local liveness probe |
 | `GET` | `/api/v1/system/status` | Recovery and runtime status |
 | `POST` | `/api/v1/tasks` | Atomically create a task and event |
+| `GET` | `/api/v1/tasks` | List current projections in deterministic newest-updated order |
 | `GET` | `/api/v1/tasks/{id}` | Read the task projection |
 | `POST` | `/api/v1/tasks/{id}` | Apply a validated state transition |
 | `GET` | `/api/v1/tasks/{id}/events` | Read ordered durable task history |
@@ -50,6 +51,12 @@ are explicit overrides for controlled tests and alternate local clients.
 The SSE endpoint emits sequence IDs and stable event names. A reconnecting client
 can supply `?after=<sequence>` or `Last-Event-ID` to replay durable missed events
 before switching to the live broadcast stream.
+
+The native desktop uses this same authenticated boundary. Simple mode creates a
+goal-only pending task, lists current projections, starts or cancels legal states,
+and loads durable event history on demand. Advanced mode adds one-per-line
+constraints and success conditions, explicit risk, an optional cost ceiling, and
+stable task ids. The CLI mirrors listing with `mcg task list`.
 
 ## Verification evidence
 

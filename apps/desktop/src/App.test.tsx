@@ -8,7 +8,11 @@ const client = vi.hoisted(() => ({
   open: vi.fn(),
   listMcp: vi.fn(),
   configureMcp: vi.fn(),
-  discoverMcp: vi.fn()
+  discoverMcp: vi.fn(),
+  listTasks: vi.fn(),
+  createTask: vi.fn(),
+  transitionTask: vi.fn(),
+  taskEvents: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -18,7 +22,11 @@ vi.mock("./desktop-client", () => ({
   openExternalUrl: client.open,
   listMcpConnections: client.listMcp,
   configureMcpConnection: client.configureMcp,
-  discoverMcpConnection: client.discoverMcp
+  discoverMcpConnection: client.discoverMcp,
+  listTasks: client.listTasks,
+  createTask: client.createTask,
+  transitionTask: client.transitionTask,
+  loadTaskEvents: client.taskEvents
 }));
 
 import { App } from "./App";
@@ -31,8 +39,13 @@ beforeEach(() => {
   client.listMcp.mockReset();
   client.configureMcp.mockReset();
   client.discoverMcp.mockReset();
+  client.listTasks.mockReset();
+  client.createTask.mockReset();
+  client.transitionTask.mockReset();
+  client.taskEvents.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listMcp.mockResolvedValue({ connections: [] });
+  client.listTasks.mockResolvedValue({ tasks: [] });
 });
 
 test("advanced mode reveals runtime details", () => {
@@ -154,4 +167,50 @@ test("advanced MCP setup passes stdio executable arguments without a credential"
     }),
     undefined
   );
+});
+
+test("consumer task flow creates, starts, and reveals durable history", async () => {
+  const pendingTask = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000001",
+    goal: "Build a durable site",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "pending",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.createTask.mockResolvedValue({
+    task: pendingTask,
+    event: { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at }
+  });
+  client.transitionTask.mockResolvedValue({ ...pendingTask, state: "active" });
+  client.taskEvents.mockResolvedValue({
+    events: [
+      { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at },
+      { sequence: 2, kind: "task_transitioned", occurred_at: pendingTask.created_at }
+    ]
+  });
+  render(<App />);
+
+  fireEvent.change(screen.getByLabelText("Goal"), { target: { value: pendingTask.goal } });
+  fireEvent.click(screen.getByRole("button", { name: "Create task" }));
+  expect(await screen.findByRole("heading", { name: pendingTask.goal })).toBeInTheDocument();
+  expect(client.createTask).toHaveBeenCalledWith({
+    goal: pendingTask.goal,
+    constraints: [],
+    success_conditions: [],
+    risk: undefined,
+    budget: undefined
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Start task" }));
+  expect(await screen.findByText("active")).toBeInTheDocument();
+  expect(client.transitionTask).toHaveBeenCalledWith(pendingTask.id, "active");
+
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  expect(await screen.findByText("task transitioned")).toBeInTheDocument();
+  expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
 });

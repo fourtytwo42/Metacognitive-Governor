@@ -9,8 +9,8 @@ use mcg_api::{
     MemoryClaimHistoryResponse, MemoryClaimListResponse, OrganizationListResponse,
     OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse,
     ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -477,6 +477,11 @@ enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List current durable task projections.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Read a task projection.
     Get {
         id: String,
@@ -642,6 +647,9 @@ async fn run_task(
                 println!("{}", created.task.id);
             }
         }
+        TaskCommand::List { json } => {
+            list_tasks(client, host, token, json).await?;
+        }
         TaskCommand::Get { id, json } => {
             let task_id = TaskId::from_str(&id)?;
             let task: TaskEnvelope = client
@@ -696,6 +704,32 @@ async fn run_task(
                 .json()
                 .await?;
             println!("{}: {}", task.id, task.state);
+        }
+    }
+    Ok(())
+}
+
+async fn list_tasks(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response: TaskListResponse = client
+        .get(format!("{host}/api/v1/tasks"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else if response.tasks.is_empty() {
+        println!("No tasks.");
+    } else {
+        for task in response.tasks {
+            println!("{}  {}  {}", task.id, task.state, task.goal);
         }
     }
     Ok(())

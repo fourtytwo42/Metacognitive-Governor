@@ -60,6 +60,57 @@ export interface McpMutation {
   catalog: McpToolCatalog;
 }
 
+export type TaskState =
+  | "pending"
+  | "active"
+  | "waiting_for_approval"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface TaskEnvelope {
+  schema_version: number;
+  id: string;
+  project_id?: string;
+  thread_id?: string;
+  goal: string;
+  constraints: string[];
+  success_conditions: string[];
+  risk: RiskLevel;
+  budget: {
+    max_tokens?: number;
+    max_cost_usd?: number;
+    max_duration_seconds?: number;
+  };
+  state: TaskState;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTaskRequest {
+  goal: string;
+  constraints: string[];
+  success_conditions: string[];
+  risk?: RiskLevel;
+  budget?: TaskEnvelope["budget"];
+}
+
+export interface TaskListResponse {
+  tasks: TaskEnvelope[];
+}
+
+export interface TaskMutationResponse {
+  task: TaskEnvelope;
+  event: { sequence: number; kind: string; occurred_at: string };
+}
+
+export interface TaskEventsResponse {
+  events: Array<{ sequence: number; kind: string; occurred_at: string }>;
+}
+
 export function startOpenAiOAuth(method: OpenAiOAuthMethod): Promise<OAuthLoginStart> {
   return invoke("start_openai_oauth", {
     request: {
@@ -97,4 +148,20 @@ export function configureMcpConnection(
 
 export function discoverMcpConnection(connectionId: string): Promise<McpToolCatalog> {
   return invoke("discover_mcp_connection", { connectionId });
+}
+
+export function listTasks(): Promise<TaskListResponse> {
+  return invoke("list_tasks");
+}
+
+export function createTask(request: CreateTaskRequest): Promise<TaskMutationResponse> {
+  return invoke("create_task", { request });
+}
+
+export function transitionTask(taskId: string, state: TaskState): Promise<TaskEnvelope> {
+  return invoke("transition_task", { taskId, request: { state } });
+}
+
+export function loadTaskEvents(taskId: string): Promise<TaskEventsResponse> {
+  return invoke("task_events", { taskId });
 }

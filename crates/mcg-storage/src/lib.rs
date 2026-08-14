@@ -565,6 +565,24 @@ impl SqliteEventStore {
             .transpose()
     }
 
+    /// Lists current task projections in newest-updated order with a stable id
+    /// tie-breaker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when a row cannot be read or decoded.
+    pub fn tasks(&self) -> Result<Vec<TaskEnvelope>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT task_json FROM tasks ORDER BY updated_at DESC, task_id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            let json = row?;
+            serde_json::from_str(&json).map_err(StorageError::from)
+        })
+        .collect()
+    }
+
     /// Returns all events for a task in durable sequence order.
     ///
     /// # Errors

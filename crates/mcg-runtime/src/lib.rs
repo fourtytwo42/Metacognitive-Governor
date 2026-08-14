@@ -653,6 +653,15 @@ impl AppRuntime {
         Ok(self.store()?.load_task(task_id)?)
     }
 
+    /// Lists current durable task projections in deterministic display order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn tasks(&self) -> Result<Vec<TaskEnvelope>, RuntimeError> {
+        Ok(self.store()?.tasks()?)
+    }
+
     /// Loads a task's ordered event history.
     ///
     /// # Errors
