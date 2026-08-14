@@ -1,8 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   cancelOpenAiOAuth,
   completeOpenAiOAuth,
+  configureMcpConnection,
+  discoverMcpConnection,
+  listMcpConnections,
+  type McpAuthMode,
+  type McpListItem,
+  type McpProtocolMode,
   openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
@@ -26,6 +32,29 @@ export function App() {
   const [providerStatus, setProviderStatus] = useState("Not connected");
   const [busy, setBusy] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const [mcpConnections, setMcpConnections] = useState<McpListItem[]>([]);
+  const [mcpName, setMcpName] = useState("");
+  const [mcpId, setMcpId] = useState("");
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpAuth, setMcpAuth] = useState<McpAuthMode>("none");
+  const [mcpProtocol, setMcpProtocol] = useState<McpProtocolMode>("auto");
+  const [mcpCredential, setMcpCredential] = useState("");
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [mcpError, setMcpError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    listMcpConnections()
+      .then((response) => {
+        if (active) setMcpConnections(response.connections);
+      })
+      .catch((error) => {
+        if (active) setMcpError(errorMessage(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function startLogin() {
     setBusy(true);
@@ -87,6 +116,68 @@ export function App() {
     }
   }
 
+  function generatedMcpId(): string {
+    const source = (mcpId || mcpName || "server").toLowerCase();
+    const slug = source.replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+    return (slug || "server").slice(0, 128);
+  }
+
+  async function addMcpServer() {
+    if (!mcpName.trim() || !mcpUrl.trim()) {
+      setMcpError("Server name and URL are required.");
+      return;
+    }
+    if (advanced && mcpAuth === "bearer_token" && !mcpCredential) {
+      setMcpError("Enter the bearer token for this server.");
+      return;
+    }
+    setMcpBusy(true);
+    setMcpError(null);
+    try {
+      const mutation = await configureMcpConnection(
+        {
+          contract_version: 1,
+          id: generatedMcpId(),
+          display_name: mcpName.trim(),
+          transport: { kind: "streamable_http", url: mcpUrl.trim() },
+          auth_mode: advanced ? mcpAuth : "none",
+          protocol_mode: advanced ? mcpProtocol : "auto",
+          enabled: true
+        },
+        advanced && mcpAuth === "bearer_token" ? mcpCredential : undefined
+      );
+      setMcpConnections((connections) => [
+        ...connections.filter((item) => item.connection.id !== mutation.connection.id),
+        { connection: mutation.connection, catalog: mutation.catalog }
+      ]);
+      setMcpName("");
+      setMcpId("");
+      setMcpUrl("");
+      setMcpCredential("");
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function refreshMcpServer(connectionId: string) {
+    setMcpBusy(true);
+    setMcpError(null);
+    try {
+      const catalog = await discoverMcpConnection(connectionId);
+      setMcpConnections((connections) =>
+        connections.map((item) =>
+          item.connection.id === connectionId ? { ...item, catalog } : item
+        )
+      );
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -99,6 +190,7 @@ export function App() {
           <a className="nav-item" href="#threads">Threads</a>
           <a className="nav-item" href="#scheduler">Scheduler</a>
           <a className="nav-item" href="#providers">Providers</a>
+          <a className="nav-item" href="#mcp">Tools</a>
         </nav>
         <button
           className="mode-button"
@@ -212,6 +304,116 @@ export function App() {
             )}
             <p className="provider-state">{providerStatus}</p>
             {providerError && <p className="error-message" role="alert">{providerError}</p>}
+          </div>
+        </section>
+
+        <section className="panel mcp-panel" id="mcp">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">CONNECTED TOOLS</p>
+              <h2>MCP servers</h2>
+              <p className="muted">
+                Add a tool server. MCG discovers its capabilities before saving it and
+                keeps remote actions inside normal permissions and approvals.
+              </p>
+            </div>
+            <span className="count-badge">{mcpConnections.length} connected</span>
+          </div>
+
+          <div className="mcp-layout">
+            <div className="mcp-form" aria-label="Add MCP server">
+              <label>
+                Server name
+                <input
+                  value={mcpName}
+                  onChange={(event) => setMcpName(event.target.value)}
+                  placeholder="My tools"
+                />
+              </label>
+              <label>
+                Server URL
+                <input
+                  value={mcpUrl}
+                  onChange={(event) => setMcpUrl(event.target.value)}
+                  placeholder="https://tools.example.com/mcp"
+                  inputMode="url"
+                />
+              </label>
+              {advanced && (
+                <div className="advanced-fields">
+                  <label>
+                    Connection id
+                    <input
+                      value={mcpId}
+                      onChange={(event) => setMcpId(event.target.value)}
+                      placeholder="Generated from the name"
+                    />
+                  </label>
+                  <label>
+                    Protocol
+                    <select
+                      value={mcpProtocol}
+                      onChange={(event) => setMcpProtocol(event.target.value as McpProtocolMode)}
+                    >
+                      <option value="auto">Automatic</option>
+                      <option value="modern20260728">2026-07-28 only</option>
+                      <option value="legacy">Legacy only</option>
+                    </select>
+                  </label>
+                  <label>
+                    Authentication
+                    <select
+                      value={mcpAuth}
+                      onChange={(event) => setMcpAuth(event.target.value as McpAuthMode)}
+                    >
+                      <option value="none">None</option>
+                      <option value="bearer_token">Bearer token</option>
+                    </select>
+                  </label>
+                  {mcpAuth === "bearer_token" && (
+                    <label>
+                      Bearer token
+                      <input
+                        type="password"
+                        value={mcpCredential}
+                        onChange={(event) => setMcpCredential(event.target.value)}
+                        autoComplete="off"
+                      />
+                    </label>
+                  )}
+                </div>
+              )}
+              <button className="primary" type="button" disabled={mcpBusy} onClick={addMcpServer}>
+                {mcpBusy ? "Checking server…" : "Add server"}
+              </button>
+              {mcpError && <p className="error-message" role="alert">{mcpError}</p>}
+            </div>
+
+            <div className="connection-list" aria-label="Configured MCP servers">
+              {mcpConnections.length === 0 ? (
+                <p className="empty-state">No tool servers connected yet.</p>
+              ) : (
+                mcpConnections.map((item) => (
+                  <article className="connection-card" key={item.connection.id}>
+                    <div>
+                      <h3>{item.connection.display_name}</h3>
+                      <p>
+                        {item.catalog?.tools.length ?? 0} tools · {item.catalog?.protocol_version ?? "Not discovered"}
+                      </p>
+                      {advanced && <code>{item.connection.id}</code>}
+                    </div>
+                    <button
+                      className="secondary"
+                      type="button"
+                      disabled={mcpBusy}
+                      onClick={() => refreshMcpServer(item.connection.id)}
+                    >
+                      Refresh
+                    </button>
+                  </article>
+                ))
+              )}
+            </div>
           </div>
         </section>
       </main>

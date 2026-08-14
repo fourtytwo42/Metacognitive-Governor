@@ -126,6 +126,13 @@ Authenticated management endpoints are:
 The CLI exposes the same foundation through `mcg mcp add-http`, `list`, `tools`,
 and `discover`.
 
+The native desktop exposes the same authenticated daemon boundary. Simple mode
+asks only for a display name and URL and uses automatic current protocol with no
+authentication. Advanced mode reveals the stable connection id, protocol pin,
+and optional bearer field. The submitted secret is cleared from React state
+after successful configuration and is never returned in the durable connection
+list. Connection cards show discovered tool counts and support explicit refresh.
+
 ## Agent namespace and policy execution
 
 An agent dispatch explicitly requests a discovered remote identity as
@@ -165,4 +172,4 @@ M6 work includes:
   completion, and cancellation contracts;
 - request-scoped SSE progress and opt-in subscription streams where useful;
 - interoperability fixtures against representative third-party MCP SDKs and
-  desktop simple/advanced configuration and both-platform UAT.
+  both-platform native desktop UAT.

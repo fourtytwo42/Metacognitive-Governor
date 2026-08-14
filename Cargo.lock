@@ -2644,12 +2644,15 @@ dependencies = [
  "mcg-api",
  "mcg-config",
  "mcg-events",
+ "mcg-mcp",
  "mcg-runtime",
  "reqwest",
+ "serde",
  "tauri",
  "tauri-build",
  "uuid",
  "webbrowser",
+ "zeroize",
 ]
 
 [[package]]

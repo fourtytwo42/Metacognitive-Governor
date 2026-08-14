@@ -5,14 +5,20 @@ const client = vi.hoisted(() => ({
   start: vi.fn(),
   complete: vi.fn(),
   cancel: vi.fn(),
-  open: vi.fn()
+  open: vi.fn(),
+  listMcp: vi.fn(),
+  configureMcp: vi.fn(),
+  discoverMcp: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
   startOpenAiOAuth: client.start,
   completeOpenAiOAuth: client.complete,
   cancelOpenAiOAuth: client.cancel,
-  openExternalUrl: client.open
+  openExternalUrl: client.open,
+  listMcpConnections: client.listMcp,
+  configureMcpConnection: client.configureMcp,
+  discoverMcpConnection: client.discoverMcp
 }));
 
 import { App } from "./App";
@@ -22,7 +28,11 @@ beforeEach(() => {
   client.complete.mockReset();
   client.cancel.mockReset();
   client.open.mockReset();
+  client.listMcp.mockReset();
+  client.configureMcp.mockReset();
+  client.discoverMcp.mockReset();
   client.open.mockResolvedValue(undefined);
+  client.listMcp.mockResolvedValue({ connections: [] });
 });
 
 test("advanced mode reveals runtime details", () => {
@@ -60,4 +70,45 @@ test("OpenAI subscription login exposes verification then confirms connection", 
   fireEvent.click(screen.getByRole("button", { name: "I’ve authorized MCG" }));
   expect(await screen.findByText("OpenAI Subscription connected")).toBeInTheDocument();
   expect(client.complete).toHaveBeenCalledWith("fixture-session");
+});
+
+test("simple MCP setup discovers a server without exposing advanced credentials", async () => {
+  client.configureMcp.mockResolvedValue({
+    connection: {
+      contract_version: 1,
+      id: "my_tools",
+      display_name: "My Tools",
+      transport: { kind: "streamable_http", url: "https://tools.example.com/mcp" },
+      auth_mode: "none",
+      protocol_mode: "auto",
+      enabled: true
+    },
+    catalog: {
+      connection_id: "my_tools",
+      protocol_version: "2026-07-28",
+      server_info: { name: "fixture" },
+      tools: [{ name: "lookup" }],
+      discovered_at: "2026-08-14T00:00:00Z",
+      expires_at: "2026-08-14T00:05:00Z"
+    }
+  });
+  render(<App />);
+
+  expect(screen.queryByLabelText("Bearer token")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Server name"), { target: { value: "My Tools" } });
+  fireEvent.change(screen.getByLabelText("Server URL"), {
+    target: { value: "https://tools.example.com/mcp" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add server" }));
+
+  expect(await screen.findByRole("heading", { name: "My Tools" })).toBeInTheDocument();
+  expect(screen.getByText("1 tools · 2026-07-28")).toBeInTheDocument();
+  expect(client.configureMcp).toHaveBeenCalledWith(
+    expect.objectContaining({
+      id: "my_tools",
+      auth_mode: "none",
+      protocol_mode: "auto"
+    }),
+    undefined
+  );
 });

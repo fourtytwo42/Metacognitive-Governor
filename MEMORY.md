@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. The MCP server and current HTTP client are implemented; discovered remote tools now execute through namespaced agent leases and the normal policy broker.
-- Last meaningful change: Added canonical `mcp::connection::tool` resolution, bounded provider-safe aliases, internal immutable bindings, conservative annotation classification, policy/approval/audit/execution-lease routing, and pre-call catalog revalidation.
-- Next step: Add stdio/legacy interoperability and expose MCP management in the desktop UI, then qualify the complete MCP slice on Windows/Ubuntu. Preserve the visible OAuth handoff.
+- Current task: M6 interface-family work continues while live OAuth UAT waits for owner authentication. MCP current HTTP management is available through API, CLI, and native desktop; remote tools execute through governed agent leases.
+- Last meaningful change: Added native simple/advanced MCP management with durable listing, live add/discover, optional protected bearer entry, unit coverage, production frontend build, native Rust checks, and Playwright smoke coverage.
+- Next step: Add stdio/current-to-legacy interoperability and a full public-run remote MCP scenario, then qualify the complete MCP slice on Windows/Ubuntu. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -392,6 +392,15 @@ When sources conflict, use this order:
 - Result: All applicable Windows tests pass, including binding/argument-isolation, read-versus-open-world policy, live discovery/call normalization, runtime namespace/executor integration, and all prior API/provider/storage scenarios.
 - Follow-up: Add stdio/current-to-legacy negotiation, desktop management/UAT, and one complete remote-MCP agent scenario through the public run surface.
 
+### 2026-08-14 - Native MCP Management
+
+- Context: The consumer release requires every primary interface on day one, with complexity hidden by default and advanced protocol/auth controls available when needed.
+- Decision: Add native daemon commands and a desktop MCP panel. Simple mode accepts only server name/URL and chooses automatic current protocol with no auth; advanced mode reveals stable id, protocol pin, and bearer token. Load only secret-free durable list/catalog data, clear the submitted token after success, and provide explicit rediscovery.
+- Files: `apps/desktop/src/{App.tsx,desktop-client.ts,styles.css,App.test.tsx}`, `apps/desktop/src-tauri/`, `tests/e2e/desktop-smoke.spec.ts`.
+- Commands/tests: strict `mcg-desktop` clippy/tests; frontend typecheck; three Vitest flows; production Vite build; Playwright smoke; `git diff --check`.
+- Result: All focused Windows native/frontend gates pass. Simple/advanced disclosure, current tool counts, setup request shape, and advanced browser-visible controls are automated.
+- Follow-up: Perform real native Windows/Linux MCP setup UAT after stdio/legacy work and Linux qualification.
+
 ## Known Issues
 
 - The archived original PRD intentionally retains mojibake for provenance; canonical split specifications have repaired UTF-8 text.
@@ -418,7 +427,7 @@ When sources conflict, use this order:
 - Continue M5 representative useful projects and broader end-to-end evidence while M6 interfaces are built; the durable provider/tool website and independent evaluator scenarios are complete checkpoints, not the full product.
 - Persist standalone provider-proxy usage/conversations and attach optional governed project/task context; initial proxy responses currently return usage without a durable proxy ledger.
 - Add independent browser/evaluator evidence to representative governed website work as M5 progresses.
-- Complete MCP server subscriptions/interoperability plus MCP client stdio/legacy negotiation and desktop management boundaries; add a public-surface remote-MCP agent scenario.
+- Complete MCP server subscriptions/interoperability plus MCP client stdio/legacy negotiation; add a public-surface remote-MCP agent scenario and real native MCP UAT.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
 
 ## Do Not Forget

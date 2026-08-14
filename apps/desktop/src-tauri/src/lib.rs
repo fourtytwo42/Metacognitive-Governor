@@ -1,10 +1,27 @@
-use mcg_api::StartOpenAiOAuthRequest;
+use mcg_api::{McpListResponse, StartOpenAiOAuthRequest};
 use mcg_config::AppConfig;
 use mcg_events::EventEnvelope;
-use mcg_runtime::{OAuthLoginStart, ProviderMutation};
+use mcg_mcp::{McpConnection, McpToolCatalog};
+use mcg_runtime::{McpMutation, OAuthLoginStart, ProviderMutation};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 const LOCAL_DAEMON: &str = "http://127.0.0.1:7777";
+
+#[derive(Deserialize, Serialize)]
+struct ConfigureMcpCommand {
+    connection: McpConnection,
+    credential: Option<String>,
+}
+
+impl Drop for ConfigureMcpCommand {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
+}
 
 #[tauri::command]
 const fn runtime_label() -> &'static str {
@@ -106,6 +123,60 @@ async fn refresh_openai_oauth(connection_id: String) -> Result<EventEnvelope, St
 }
 
 #[tauri::command]
+async fn list_mcp_connections() -> Result<McpListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/mcp/connections"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("MCP connections could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "MCP connection listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("MCP connection response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn configure_mcp_connection(request: ConfigureMcpCommand) -> Result<McpMutation, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/mcp/connections"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("MCP connection could not be configured: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "MCP connection setup").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("MCP setup response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn discover_mcp_connection(connection_id: String) -> Result<McpToolCatalog, String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/mcp/connections/{connection_id}/discover"
+        ))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("MCP discovery could not start: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "MCP discovery").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("MCP discovery response was invalid: {error}"))
+}
+
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
 fn open_external_url(url: String) -> Result<(), String> {
     let parsed = validate_external_url(&url)?;
@@ -136,6 +207,9 @@ pub fn run() {
             complete_openai_oauth,
             cancel_openai_oauth,
             refresh_openai_oauth,
+            list_mcp_connections,
+            configure_mcp_connection,
+            discover_mcp_connection,
             open_external_url
         ])
         .run(tauri::generate_context!())

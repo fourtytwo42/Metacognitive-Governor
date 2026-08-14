@@ -16,11 +16,14 @@ tauri-build.workspace = true
 mcg-api = { path = "../../../crates/mcg-api" }
 mcg-config = { path = "../../../crates/mcg-config" }
 mcg-events = { path = "../../../crates/mcg-events" }
+mcg-mcp = { path = "../../../crates/mcg-mcp" }
 mcg-runtime = { path = "../../../crates/mcg-runtime" }
 reqwest.workspace = true
+serde.workspace = true
 tauri.workspace = true
 uuid.workspace = true
 webbrowser.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
