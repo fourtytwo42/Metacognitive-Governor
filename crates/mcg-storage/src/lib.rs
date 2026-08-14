@@ -19,11 +19,13 @@ use uuid::Uuid;
 mod agents;
 mod mcp;
 mod providers;
+mod scheduler;
 
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
 };
+pub use scheduler::ScheduleClaim;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
@@ -398,6 +400,37 @@ CREATE INDEX IF NOT EXISTS agent_turn_checkpoints_task
     ON agent_turn_checkpoints(task_id, updated_at);
 ";
 
+const MIGRATION_13: &str = r"
+CREATE TABLE IF NOT EXISTS schedules (
+    schedule_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    next_run_at TEXT,
+    schedule_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedules_due
+    ON schedules(state, next_run_at, schedule_id);
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+    occurrence_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    task_id TEXT UNIQUE,
+    due_at TEXT NOT NULL,
+    state TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    occurrence_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(schedule_id, due_at),
+    FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS schedule_occurrences_claim
+    ON schedule_occurrences(state, lease_expires_at, occurrence_id);
+CREATE INDEX IF NOT EXISTS schedule_occurrences_history
+    ON schedule_occurrences(schedule_id, due_at, occurrence_id);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -420,6 +453,8 @@ pub enum StorageError {
     AgentInstanceNotFound(mcg_domain::AgentInstanceId),
     #[error("agent lease {0} was not found")]
     AgentLeaseNotFound(mcg_domain::AgentLeaseId),
+    #[error("schedule {0} was not found")]
+    ScheduleNotFound(mcg_domain::ScheduleId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -492,6 +527,7 @@ impl SqliteEventStore {
             (10_i64, MIGRATION_10),
             (11_i64, MIGRATION_11),
             (12_i64, MIGRATION_12),
+            (13_i64, MIGRATION_13),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

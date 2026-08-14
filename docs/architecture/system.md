@@ -122,6 +122,24 @@ recovery, reconciles running child processes, and resumes only work whose policy
 permits unattended continuation. Replay reconstructs decisions from recorded
 inputs while acknowledging nondeterministic external services.
 
+### Durable scheduler spine
+
+Migration 13 stores schedule definitions and occurrence history separately.
+Claiming due work is a single transaction that advances the schedule, records a
+leased occurrence, creates the durable task projection, and appends its creation
+event. Only one active occurrence is admitted per schedule. Startup expires
+in-flight scheduler authority immediately; the next tick reclaims the original
+occurrence and task, then calls the idempotent consumer launch boundary. This
+allows provider-turn and governed-tool checkpoints to prevent duplicate billing
+or side effects after a crash.
+
+The current trigger contract supports exact one-time timestamps and fixed
+intervals. Approval/manual-evaluation waits and preflight budget exhaustion are
+safe-pause boundaries, while terminal task state is reconciled into occurrence
+history. Cron expressions, event/file watches, adaptive heartbeats,
+notifications, and the native scheduler dashboard remain later M7 layers over
+this same occurrence/lease contract.
+
 ## Provider fabric
 
 Providers implement one canonical streaming interface. Discovery combines:

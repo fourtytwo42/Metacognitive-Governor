@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
+use chrono::{Duration, Utc};
 use mcg_api::{CreateTaskRequest, TaskEventsResponse, TaskMutationResponse};
 use mcg_config::AppConfig;
-use mcg_domain::TaskEnvelope;
+use mcg_domain::{
+    ProjectId, RiskLevel, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, TaskBudget, TaskEnvelope,
+};
 use mcg_runtime::AppRuntime;
 use tokio::{net::TcpListener, task::JoinHandle};
 
@@ -17,6 +21,61 @@ async fn start_server(runtime: Arc<AppRuntime>) -> (String, JoinHandle<()>) {
             .expect("server should run");
     });
     (format!("http://{address}"), server)
+}
+
+fn restart_schedule(now: chrono::DateTime<Utc>) -> ScheduleDefinition {
+    ScheduleDefinition {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        id: ScheduleId::new(),
+        name: "restart recovery".into(),
+        project_id: ProjectId::new(),
+        goal: "recover exactly once".into(),
+        constraints: Vec::new(),
+        success_conditions: Vec::new(),
+        risk: RiskLevel::Medium,
+        budget: TaskBudget {
+            max_tokens: Some(4_096),
+            max_cost_usd: Some(1.0),
+            max_duration_seconds: Some(300),
+        },
+        trigger: ScheduleTrigger::Interval { seconds: 60 },
+        state: ScheduleState::Enabled,
+        next_run_at: Some(now),
+        target_path: None,
+        context_token_budget: 4_096,
+        requested_tools: Vec::new(),
+        estimated_output_tokens: 1_024,
+        max_model_calls: 2,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[test]
+fn in_flight_schedule_reclaims_same_task_immediately_after_restart() {
+    let directory = tempfile::tempdir().expect("temporary data directory");
+    let config = AppConfig::default().with_data_directory(directory.path());
+    let now = Utc::now();
+    let schedule = restart_schedule(now);
+    let first = AppRuntime::open(config.clone()).expect("open first runtime");
+    first.create_schedule(&schedule).expect("persist schedule");
+    let original = first
+        .claim_due_schedule(now, "first-daemon", 300)
+        .expect("claim occurrence")
+        .expect("due occurrence");
+    drop(first);
+
+    let recovered = AppRuntime::open(config).expect("recover runtime");
+    assert_eq!(recovered.status().recovered_schedule_occurrences, 1);
+    let replay = recovered
+        .claim_due_schedule(now + Duration::seconds(1), "second-daemon", 300)
+        .expect("reclaim occurrence")
+        .expect("recovered occurrence");
+    assert_eq!(replay.task.id, original.task.id);
+    assert_eq!(replay.occurrence.id, original.occurrence.id);
+    assert_eq!(replay.occurrence.attempt, 2);
+    assert_eq!(replay.occurrence.state, ScheduleOccurrenceState::Recovering);
+    assert!(replay.task_created_event.is_none());
 }
 
 #[tokio::test]

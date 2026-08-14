@@ -25,7 +25,9 @@ use mcg_agents::{
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, ProjectId, RunId,
-    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ScheduleOccurrenceState, ScheduleState, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
+    ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -46,11 +48,11 @@ use mcg_providers::{
     ProviderModelCatalog, ProviderModelRef, ProviderRegistry, RouteCandidate, RoutingPolicy,
     ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
-pub use mcg_storage::AgentTurnCommit;
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
 };
+pub use mcg_storage::{AgentTurnCommit, ScheduleClaim};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
     BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ExecutionLease,
@@ -80,6 +82,7 @@ pub struct RuntimeStatus {
     pub recovered_agent_runs: u64,
     pub recovered_agent_instances: u64,
     pub recovered_agent_leases: u64,
+    pub recovered_schedule_occurrences: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +135,7 @@ impl RuntimeError {
                     | StorageError::AgentRunNotFound(_)
                     | StorageError::AgentInstanceNotFound(_)
                     | StorageError::AgentLeaseNotFound(_)
+                    | StorageError::ScheduleNotFound(_)
             )
         )
     }
@@ -468,6 +472,7 @@ pub struct AppRuntime {
     recovery: RecoveryReport,
     recovered_tool_leases: u64,
     agent_recovery: AgentRecoveryReport,
+    recovered_schedule_occurrences: u64,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
@@ -504,6 +509,7 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(OsProviderCredentialStore);
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
@@ -514,6 +520,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            recovered_schedule_occurrences,
             provider_credentials,
             mcp_credentials,
             BrowserAuthorizationConfig::default(),
@@ -551,6 +558,7 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
         let auth = LocalAuth::from_token(token)?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(MemoryProviderCredentialStore::default());
@@ -563,6 +571,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            recovered_schedule_occurrences,
             provider_credentials,
             mcp_credentials,
             browser_config,
@@ -578,6 +587,7 @@ impl AppRuntime {
         recovery: RecoveryReport,
         recovered_tool_leases: u64,
         agent_recovery: AgentRecoveryReport,
+        recovered_schedule_occurrences: u64,
         provider_credentials: Arc<dyn ProviderCredentialStore>,
         mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
@@ -592,6 +602,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            recovered_schedule_occurrences,
             provider_credentials,
             mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
@@ -626,6 +637,7 @@ impl AppRuntime {
             recovered_agent_runs: self.agent_recovery.runs_marked_recovering,
             recovered_agent_instances: self.agent_recovery.instances_expired,
             recovered_agent_leases: self.agent_recovery.leases_expired,
+            recovered_schedule_occurrences: self.recovered_schedule_occurrences,
         }
     }
 
@@ -688,6 +700,109 @@ impl AppRuntime {
     /// Returns an error when storage cannot be read.
     pub fn tasks(&self) -> Result<Vec<TaskEnvelope>, RuntimeError> {
         Ok(self.store()?.tasks()?)
+    }
+
+    /// Persists a validated unattended-work schedule.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage rejects or cannot persist the definition.
+    pub fn create_schedule(&self, schedule: &ScheduleDefinition) -> Result<(), RuntimeError> {
+        self.store()?.create_schedule(schedule)?;
+        Ok(())
+    }
+
+    /// Loads one durable schedule.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn schedule(
+        &self,
+        schedule_id: ScheduleId,
+    ) -> Result<Option<ScheduleDefinition>, RuntimeError> {
+        Ok(self.store()?.schedule(schedule_id)?)
+    }
+
+    /// Lists all durable schedules in stable creation order.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn schedules(&self) -> Result<Vec<ScheduleDefinition>, RuntimeError> {
+        Ok(self.store()?.schedules()?)
+    }
+
+    /// Lists the immutable execution history associated with one schedule.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn schedule_occurrences(
+        &self,
+        schedule_id: ScheduleId,
+    ) -> Result<Vec<ScheduleOccurrence>, RuntimeError> {
+        Ok(self.store()?.schedule_occurrences(schedule_id)?)
+    }
+
+    /// Changes whether a durable schedule may claim new work.
+    ///
+    /// # Errors
+    /// Returns an error for invalid state changes or persistence failures.
+    pub fn set_schedule_state(
+        &self,
+        schedule_id: ScheduleId,
+        state: ScheduleState,
+        now: DateTime<Utc>,
+    ) -> Result<ScheduleDefinition, RuntimeError> {
+        Ok(self.store()?.set_schedule_state(schedule_id, state, now)?)
+    }
+
+    /// Atomically claims either expired scheduled work or the next due occurrence.
+    ///
+    /// # Errors
+    /// Returns an error for invalid lease bounds or persistence failures.
+    pub fn claim_due_schedule(
+        &self,
+        now: DateTime<Utc>,
+        lease_owner: &str,
+        lease_seconds: i64,
+    ) -> Result<Option<ScheduleClaim>, RuntimeError> {
+        let claim = self
+            .store()?
+            .claim_due_schedule(now, lease_owner, lease_seconds)?;
+        if let Some(event) = claim
+            .as_ref()
+            .and_then(|claim| claim.task_created_event.as_ref())
+        {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(claim)
+    }
+
+    /// Settles approval-waiting scheduler history after its task reaches a terminal state.
+    ///
+    /// # Errors
+    /// Returns an error when durable state cannot be read or updated atomically.
+    pub fn reconcile_schedule_boundaries(&self, now: DateTime<Utc>) -> Result<u64, RuntimeError> {
+        Ok(self.store()?.reconcile_schedule_boundaries(now)?)
+    }
+
+    /// Settles a claimed occurrence while enforcing its lease authority.
+    ///
+    /// # Errors
+    /// Returns an error for lost authority, invalid state, or persistence failures.
+    pub fn finish_schedule_occurrence(
+        &self,
+        occurrence_id: ScheduleOccurrenceId,
+        lease_owner: &str,
+        state: ScheduleOccurrenceState,
+        detail: String,
+        now: DateTime<Utc>,
+    ) -> Result<ScheduleOccurrence, RuntimeError> {
+        Ok(self.store()?.finish_schedule_occurrence(
+            occurrence_id,
+            lease_owner,
+            state,
+            detail,
+            now,
+        )?)
     }
 
     /// Loads a task's ordered event history.

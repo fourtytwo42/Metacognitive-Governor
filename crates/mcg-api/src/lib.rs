@@ -28,7 +28,9 @@ use mcg_agents::{
 };
 use mcg_domain::{
     ApprovalId, MemoryClaimId, OrganizationId, OrganizationRevisionId, ProjectId, RiskLevel, RunId,
-    TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, TaskBudget, TaskEnvelope, TaskId,
+    TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -57,6 +59,14 @@ use zeroize::Zeroize;
 #[derive(Clone)]
 struct ApiState {
     runtime: Arc<AppRuntime>,
+}
+
+struct AbortTask(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +288,49 @@ pub struct LaunchTaskResponse {
     pub execution: LaunchExecution,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateScheduleRequest {
+    pub name: String,
+    pub project_id: ProjectId,
+    pub goal: String,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub success_conditions: Vec<String>,
+    #[serde(default)]
+    pub risk: Option<RiskLevel>,
+    #[serde(default)]
+    pub budget: Option<TaskBudget>,
+    pub trigger: ScheduleTrigger,
+    #[serde(default)]
+    pub first_run_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default = "default_context_token_budget")]
+    pub context_token_budget: u32,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
+    #[serde(default = "default_estimated_output_tokens")]
+    pub estimated_output_tokens: u64,
+    #[serde(default = "default_max_model_calls")]
+    pub max_model_calls: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleListResponse {
+    pub schedules: Vec<ScheduleDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleHistoryResponse {
+    pub occurrences: Vec<ScheduleOccurrence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetScheduleStateRequest {
+    pub state: ScheduleState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LaunchExecution {
@@ -485,6 +538,18 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
     let state = ApiState { runtime };
     let protected = Router::new()
         .route("/api/v1/system/status", get(status))
+        .route(
+            "/api/v1/schedules",
+            get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}",
+            get(get_schedule).post(set_schedule_state),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}/history",
+            get(schedule_history),
+        )
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route(
             "/api/v1/tasks/{task_id}",
@@ -655,9 +720,91 @@ where
             "MCG local API must bind to a loopback address",
         ));
     }
-    axum::serve(listener, router(runtime))
+    let scheduler = AbortTask(tokio::spawn(scheduler_loop(runtime.clone())));
+    let result = axum::serve(listener, router(runtime))
         .with_graceful_shutdown(shutdown)
-        .await
+        .await;
+    drop(scheduler);
+    result
+}
+
+async fn scheduler_loop(runtime: Arc<AppRuntime>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(error) = run_scheduler_tick_at(runtime.clone(), Utc::now()).await {
+            tracing::error!(%error, "durable scheduler tick failed");
+        }
+    }
+}
+
+/// Claims and advances at most one due durable schedule occurrence.
+///
+/// # Errors
+/// Returns a redacted runtime or execution error after settling claimed work safely.
+pub async fn run_scheduler_tick_at(
+    runtime: Arc<AppRuntime>,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<ScheduleOccurrence>, String> {
+    runtime
+        .reconcile_schedule_boundaries(now)
+        .map_err(|error| error.to_string())?;
+    let lease_owner = format!("scheduler-{}", uuid::Uuid::new_v4());
+    let Some(claim) = runtime
+        .claim_due_schedule(now, &lease_owner, 300)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let request = LaunchTaskRequest {
+        target_path: claim.schedule.target_path.clone(),
+        context_token_budget: claim.schedule.context_token_budget,
+        requested_tools: claim.schedule.requested_tools.clone(),
+        estimated_output_tokens: claim.schedule.estimated_output_tokens,
+        max_model_calls: claim.schedule.max_model_calls,
+    };
+    let launched = launch_task(
+        State(ApiState {
+            runtime: runtime.clone(),
+        }),
+        Path(claim.task.id.to_string()),
+        Json(request),
+    )
+    .await;
+    let (occurrence_state, detail, launch_error) = match launched {
+        Ok(Json(response)) => match response.execution {
+            LaunchExecution::Completed { detail } => {
+                (ScheduleOccurrenceState::Completed, detail, None)
+            }
+            LaunchExecution::AwaitingApproval { detail }
+            | LaunchExecution::AwaitingEvaluation { detail }
+            | LaunchExecution::NotStarted { detail } => {
+                (ScheduleOccurrenceState::WaitingForApproval, detail, None)
+            }
+            LaunchExecution::Blocked { detail } | LaunchExecution::Failed { detail } => {
+                (ScheduleOccurrenceState::Failed, detail, None)
+            }
+        },
+        Err(error) => (
+            ScheduleOccurrenceState::Failed,
+            error.message.clone(),
+            Some(error.message),
+        ),
+    };
+    let occurrence = runtime
+        .finish_schedule_occurrence(
+            claim.occurrence.id,
+            &lease_owner,
+            occurrence_state,
+            detail,
+            Utc::now(),
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(error) = launch_error {
+        return Err(error);
+    }
+    Ok(Some(occurrence))
 }
 
 async fn require_auth(
@@ -699,6 +846,118 @@ async fn health() -> Json<HealthResponse> {
 
 async fn status(State(state): State<ApiState>) -> Json<RuntimeStatus> {
     Json(state.runtime.status())
+}
+
+async fn create_schedule(
+    State(state): State<ApiState>,
+    Json(request): Json<CreateScheduleRequest>,
+) -> Result<(StatusCode, Json<ScheduleDefinition>), ApiError> {
+    if state
+        .runtime
+        .project(request.project_id)
+        .map_err(map_runtime_error)?
+        .is_none()
+    {
+        return Err(ApiError::not_found(format!(
+            "project {} was not found",
+            request.project_id
+        )));
+    }
+    let now = Utc::now();
+    let next_run_at = match &request.trigger {
+        ScheduleTrigger::Once { at } => Some(*at),
+        ScheduleTrigger::Interval { .. } => Some(request.first_run_at.unwrap_or(now)),
+    };
+    let schedule = ScheduleDefinition {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        id: ScheduleId::new(),
+        name: request.name,
+        project_id: request.project_id,
+        goal: request.goal,
+        constraints: request.constraints,
+        success_conditions: request.success_conditions,
+        risk: request.risk.unwrap_or(RiskLevel::Medium),
+        budget: request.budget.unwrap_or_default(),
+        trigger: request.trigger,
+        state: ScheduleState::Enabled,
+        next_run_at,
+        target_path: request.target_path,
+        context_token_budget: request.context_token_budget,
+        requested_tools: request.requested_tools,
+        estimated_output_tokens: request.estimated_output_tokens,
+        max_model_calls: request.max_model_calls,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .runtime
+        .create_schedule(&schedule)
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(schedule)))
+}
+
+async fn list_schedules(
+    State(state): State<ApiState>,
+) -> Result<Json<ScheduleListResponse>, ApiError> {
+    Ok(Json(ScheduleListResponse {
+        schedules: state.runtime.schedules().map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_schedule(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<String>,
+) -> Result<Json<ScheduleDefinition>, ApiError> {
+    let schedule_id = schedule_id
+        .parse::<ScheduleId>()
+        .map_err(|_| ApiError::bad_request("schedule id is invalid"))?;
+    state
+        .runtime
+        .schedule(schedule_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("schedule {schedule_id} was not found")))
+}
+
+async fn set_schedule_state(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<String>,
+    Json(request): Json<SetScheduleStateRequest>,
+) -> Result<Json<ScheduleDefinition>, ApiError> {
+    let schedule_id = schedule_id
+        .parse::<ScheduleId>()
+        .map_err(|_| ApiError::bad_request("schedule id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .set_schedule_state(schedule_id, request.state, Utc::now())
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn schedule_history(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<String>,
+) -> Result<Json<ScheduleHistoryResponse>, ApiError> {
+    let schedule_id = schedule_id
+        .parse::<ScheduleId>()
+        .map_err(|_| ApiError::bad_request("schedule id is invalid"))?;
+    if state
+        .runtime
+        .schedule(schedule_id)
+        .map_err(map_runtime_error)?
+        .is_none()
+    {
+        return Err(ApiError::not_found(format!(
+            "schedule {schedule_id} was not found"
+        )));
+    }
+    Ok(Json(ScheduleHistoryResponse {
+        occurrences: state
+            .runtime
+            .schedule_occurrences(schedule_id)
+            .map_err(map_runtime_error)?,
+    }))
 }
 
 async fn create_task(
@@ -3797,6 +4056,175 @@ form.addEventListener('submit', (event) => {
             serde_json::from_slice(&listed.into_body().collect().await.expect("body").to_bytes())
                 .expect("task list");
         assert_eq!(listed.tasks, vec![created.task]);
+    }
+
+    #[tokio::test]
+    async fn authenticated_scheduler_controls_and_budget_safe_pause_are_durable() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("README.md"), "scheduled fixture")
+            .expect("write project fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let now = Utc::now();
+        let body = serde_json::to_vec(&CreateScheduleRequest {
+            name: "bounded check".into(),
+            project_id,
+            goal: "perform a bounded unattended check".into(),
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: None,
+            budget: Some(TaskBudget {
+                max_tokens: Some(10),
+                max_cost_usd: Some(1.0),
+                max_duration_seconds: Some(60),
+            }),
+            trigger: ScheduleTrigger::Interval { seconds: 60 },
+            first_run_at: Some(now),
+            target_path: None,
+            context_token_budget: 1_024,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 100,
+            max_model_calls: 1,
+        })
+        .expect("serialize schedule");
+        let app = router(runtime.clone());
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/schedules")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let created = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/schedules"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: ScheduleDefinition = serde_json::from_slice(
+            &created
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("created schedule");
+
+        assert!(
+            run_scheduler_tick_at(runtime.clone(), now)
+                .await
+                .expect("scheduler tick")
+                .is_none()
+        );
+        let persisted = runtime
+            .schedule(created.id)
+            .expect("read schedule")
+            .expect("schedule exists");
+        assert_eq!(persisted.state, ScheduleState::Paused);
+        assert!(runtime.tasks().expect("tasks").is_empty());
+        let history = app
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/schedules/{}/history",
+                    created.id
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("history response");
+        assert_eq!(history.status(), StatusCode::OK);
+        let history: ScheduleHistoryResponse = serde_json::from_slice(
+            &history
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("history");
+        assert_eq!(history.occurrences.len(), 1);
+        assert_eq!(
+            history.occurrences[0].state,
+            ScheduleOccurrenceState::BudgetExhausted
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_dispatches_through_the_idempotent_consumer_run_path() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("README.md"), "scheduled fixture")
+            .expect("write fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let now = Utc::now();
+        let schedule = ScheduleDefinition {
+            schema_version: SCHEDULE_SCHEMA_VERSION,
+            id: ScheduleId::new(),
+            name: "dispatch check".into(),
+            project_id,
+            goal: "exercise the governed run path".into(),
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: RiskLevel::Medium,
+            budget: TaskBudget {
+                max_tokens: Some(4_096),
+                max_cost_usd: Some(1.0),
+                max_duration_seconds: Some(300),
+            },
+            trigger: ScheduleTrigger::Interval { seconds: 60 },
+            state: ScheduleState::Enabled,
+            next_run_at: Some(now),
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 2,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime.create_schedule(&schedule).expect("create schedule");
+        let occurrence = run_scheduler_tick_at(runtime.clone(), now)
+            .await
+            .expect("scheduler tick")
+            .expect("settled occurrence");
+        assert_eq!(occurrence.state, ScheduleOccurrenceState::Failed);
+        let task_id = occurrence.task_id.expect("scheduled task identity");
+        assert!(
+            runtime
+                .task_launch_run_id(task_id)
+                .expect("launch id")
+                .is_some()
+        );
+        assert_eq!(runtime.tasks().expect("tasks").len(), 1);
+        assert!(
+            run_scheduler_tick_at(runtime.clone(), now)
+                .await
+                .expect("second tick")
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .schedule_occurrences(schedule.id)
+                .expect("history")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

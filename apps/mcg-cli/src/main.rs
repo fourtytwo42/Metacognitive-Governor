@@ -4,19 +4,20 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
-    CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse,
-    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
-    ProjectHistoryResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreateScheduleRequest, CreateTaskRequest,
+    DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest,
+    LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
+    MemoryClaimListResponse, OrganizationListResponse, OrganizationMutationResponse,
+    PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse, ProjectListResponse,
+    ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SetScheduleStateRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
-    MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, TaskEnvelope, TaskId, TaskState,
-    WorkItemId,
+    MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
@@ -118,6 +119,46 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Create and control durable unattended work.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScheduleCommand {
+    /// Run once at an RFC 3339 timestamp.
+    CreateOnce {
+        name: String,
+        project_id: String,
+        goal: String,
+        at: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run repeatedly, starting immediately.
+    CreateInterval {
+        name: String,
+        project_id: String,
+        goal: String,
+        seconds: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List durable schedules.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show occurrence history.
+    History { id: String },
+    /// Allow a paused schedule to claim work again.
+    Resume { id: String },
+    /// Stop a schedule without deleting its history.
+    Pause { id: String },
+    /// Permanently stop a schedule while retaining its history.
+    Remove { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -610,8 +651,163 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Mcp { command } => {
             run_mcp(&client, host, token.trim(), command).await?;
         }
+        Command::Schedule { command } => {
+            run_schedule(&client, host, token.trim(), command).await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn run_schedule(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ScheduleCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ScheduleCommand::CreateOnce {
+            name,
+            project_id,
+            goal,
+            at,
+            json,
+        } => {
+            let at = chrono::DateTime::parse_from_rfc3339(&at)?.with_timezone(&chrono::Utc);
+            create_schedule_cli(
+                client,
+                host,
+                token,
+                name,
+                ProjectId::from_str(&project_id)?,
+                goal,
+                ScheduleTrigger::Once { at },
+                json,
+            )
+            .await?;
+        }
+        ScheduleCommand::CreateInterval {
+            name,
+            project_id,
+            goal,
+            seconds,
+            json,
+        } => {
+            create_schedule_cli(
+                client,
+                host,
+                token,
+                name,
+                ProjectId::from_str(&project_id)?,
+                goal,
+                ScheduleTrigger::Interval { seconds },
+                json,
+            )
+            .await?;
+        }
+        ScheduleCommand::List { json } => {
+            let response: ScheduleListResponse = client
+                .get(format!("{host}/api/v1/schedules"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                for schedule in response.schedules {
+                    println!("{}: {} ({:?})", schedule.id, schedule.name, schedule.state);
+                }
+            }
+        }
+        ScheduleCommand::History { id } => {
+            let id = ScheduleId::from_str(&id)?;
+            let response: ScheduleHistoryResponse = client
+                .get(format!("{host}/api/v1/schedules/{id}/history"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        ScheduleCommand::Resume { id } => {
+            set_schedule_state_cli(client, host, token, &id, ScheduleState::Enabled).await?;
+        }
+        ScheduleCommand::Pause { id } => {
+            set_schedule_state_cli(client, host, token, &id, ScheduleState::Paused).await?;
+        }
+        ScheduleCommand::Remove { id } => {
+            set_schedule_state_cli(client, host, token, &id, ScheduleState::Completed).await?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_schedule_cli(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    name: String,
+    project_id: ProjectId,
+    goal: String,
+    trigger: ScheduleTrigger,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let schedule: mcg_domain::ScheduleDefinition = client
+        .post(format!("{host}/api/v1/schedules"))
+        .bearer_auth(token)
+        .json(&CreateScheduleRequest {
+            name,
+            project_id,
+            goal,
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: None,
+            budget: None,
+            trigger,
+            first_run_at: None,
+            target_path: None,
+            context_token_budget: 16_384,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 4_096,
+            max_model_calls: 8,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&schedule)?);
+    } else {
+        println!("{}", schedule.id);
+    }
+    Ok(())
+}
+
+async fn set_schedule_state_cli(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+    state: ScheduleState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let id = ScheduleId::from_str(id)?;
+    let schedule: mcg_domain::ScheduleDefinition = client
+        .post(format!("{host}/api/v1/schedules/{id}"))
+        .bearer_auth(token)
+        .json(&SetScheduleStateRequest { state })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    println!("{}: {:?}", schedule.id, schedule.state);
     Ok(())
 }
 
@@ -1812,5 +2008,41 @@ mod tests {
             parse_cli_value(r#"{"enabled":true}"#),
             serde_json::json!({"enabled": true})
         );
+    }
+
+    #[test]
+    fn scheduler_commands_expose_simple_once_and_interval_forms() {
+        let interval = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "create-interval",
+            "health",
+            "00000000-0000-0000-0000-000000000001",
+            "check site",
+            "300",
+        ])
+        .expect("interval command");
+        assert!(matches!(
+            interval.command,
+            Command::Schedule {
+                command: ScheduleCommand::CreateInterval { seconds: 300, .. }
+            }
+        ));
+        let once = Cli::try_parse_from([
+            "mcg",
+            "schedule",
+            "create-once",
+            "release",
+            "00000000-0000-0000-0000-000000000001",
+            "verify release",
+            "2026-08-15T03:00:00Z",
+        ])
+        .expect("once command");
+        assert!(matches!(
+            once.command,
+            Command::Schedule {
+                command: ScheduleCommand::CreateOnce { .. }
+            }
+        ));
     }
 }

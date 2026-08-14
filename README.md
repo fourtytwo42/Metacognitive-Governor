@@ -80,6 +80,16 @@ Use `mcg run evaluate RUN evaluation.json` to submit an immutable objective
 run's Evaluator instance, and `mcg run get RUN` replays the stored report with
 the rest of the run evidence.
 
+Durable unattended work is controlled with `mcg schedule`. One-time jobs accept
+an RFC 3339 timestamp; interval jobs accept a positive number of seconds. The
+daemon claims due work in SQLite, creates the task and occurrence atomically,
+and dispatches through the same governed consumer run path as `mcg task launch`.
+`mcg schedule list/history/pause/resume/remove` expose persisted state without
+deleting execution history. A daemon restart immediately reclaims the same
+occurrence and task identity, so the launch path observes existing provider/tool
+evidence instead of duplicating side effects. Approval waits and exhausted task
+budgets pause recurring admission until the owner explicitly resumes it.
+
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can
 set constraints, success conditions, risk, and a cost ceiling. Task cards expose

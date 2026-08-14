@@ -2733,6 +2733,7 @@ dependencies = [
 name = "mcg-cli"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "mcg-agents",
  "mcg-api",
@@ -2763,6 +2764,7 @@ dependencies = [
 name = "mcg-daemon"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "mcg-api",
  "mcg-config",
  "mcg-domain",

@@ -64,6 +64,8 @@ domain_id!(AgentLeaseId);
 domain_id!(WorkItemId);
 domain_id!(EvaluationId);
 domain_id!(UsageRecordId);
+domain_id!(ScheduleId);
+domain_id!(ScheduleOccurrenceId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.
@@ -140,6 +142,74 @@ pub struct TaskBudget {
     pub max_tokens: Option<u64>,
     pub max_cost_usd: Option<f64>,
     pub max_duration_seconds: Option<u64>,
+}
+
+pub const SCHEDULE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleState {
+    Enabled,
+    Paused,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ScheduleTrigger {
+    Once { at: DateTime<Utc> },
+    Interval { seconds: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleDefinition {
+    pub schema_version: u16,
+    pub id: ScheduleId,
+    pub name: String,
+    pub project_id: ProjectId,
+    pub goal: String,
+    pub constraints: Vec<String>,
+    pub success_conditions: Vec<String>,
+    pub risk: RiskLevel,
+    pub budget: TaskBudget,
+    pub trigger: ScheduleTrigger,
+    pub state: ScheduleState,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub target_path: Option<String>,
+    pub context_token_budget: u32,
+    pub requested_tools: Vec<String>,
+    pub estimated_output_tokens: u64,
+    pub max_model_calls: u16,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleOccurrenceState {
+    Running,
+    Recovering,
+    WaitingForApproval,
+    Completed,
+    Failed,
+    BudgetExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleOccurrence {
+    pub schema_version: u16,
+    pub id: ScheduleOccurrenceId,
+    pub schedule_id: ScheduleId,
+    pub task_id: Option<TaskId>,
+    pub due_at: DateTime<Utc>,
+    pub state: ScheduleOccurrenceState,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub attempt: u32,
+    pub detail: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
