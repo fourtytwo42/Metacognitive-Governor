@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use mcg_domain::{ApprovalId, ArtifactId, LeaseId, TaskId, ToolExecutionId, ToolRequestId};
+use mcg_domain::{
+    ApprovalId, ArtifactId, LeaseId, ManagedProcessId, TaskId, ToolExecutionId, ToolRequestId,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -52,6 +54,8 @@ pub struct ProcessOptions {
     #[serde(default)]
     pub env: Vec<ProcessEnvironmentVariable>,
     pub stdin: ProcessStream,
+    #[serde(default)]
+    pub stdin_data: Option<String>,
     pub stdout: ProcessStream,
     pub stderr: ProcessStream,
 }
@@ -108,14 +112,14 @@ pub enum ToolRequestKind {
         options: ProcessOptions,
     },
     ProcessStatus {
-        process_id: String,
+        process_id: ManagedProcessId,
     },
     ProcessStdin {
-        process_id: String,
+        process_id: ManagedProcessId,
         data: String,
     },
     ProcessKill {
-        process_id: String,
+        process_id: ManagedProcessId,
     },
     ShellExec {
         shell: String,
@@ -160,6 +164,23 @@ pub enum ToolRequestKind {
         reference: String,
         create: bool,
     },
+    GitWorktreeCreate {
+        repository: String,
+        worktree: String,
+        branch: String,
+        base_reference: String,
+    },
+    GitWorktreeRemove {
+        repository: String,
+        worktree: String,
+        force: bool,
+    },
+    GitApplyPatch {
+        repository: String,
+        patch: String,
+        three_way: bool,
+        check_only: bool,
+    },
     MemorySearch {
         query: String,
         limit: u64,
@@ -200,6 +221,9 @@ impl ToolRequestKind {
             Self::GitDiff { .. } => "git.diff",
             Self::GitCommit { .. } => "git.commit",
             Self::GitCheckout { .. } => "git.checkout",
+            Self::GitWorktreeCreate { .. } => "git.worktree_create",
+            Self::GitWorktreeRemove { .. } => "git.worktree_remove",
+            Self::GitApplyPatch { .. } => "git.apply_patch",
             Self::MemorySearch { .. } => "memory.search",
             Self::MemoryRead { .. } => "memory.read",
             Self::MemoryWrite { .. } => "memory.write",
@@ -210,7 +234,10 @@ impl ToolRequestKind {
     pub const fn is_destructive(&self) -> bool {
         matches!(
             self,
-            Self::FsDelete { .. } | Self::ProcessKill { .. } | Self::GitCheckout { .. }
+            Self::FsDelete { .. }
+                | Self::ProcessKill { .. }
+                | Self::GitCheckout { .. }
+                | Self::GitWorktreeRemove { .. }
         )
     }
 
@@ -232,6 +259,12 @@ impl ToolRequestKind {
                 | Self::HttpDownload { .. }
                 | Self::GitCommit { .. }
                 | Self::GitCheckout { .. }
+                | Self::GitWorktreeCreate { .. }
+                | Self::GitWorktreeRemove { .. }
+                | Self::GitApplyPatch {
+                    check_only: false,
+                    ..
+                }
                 | Self::MemoryWrite { .. }
         )
     }
@@ -377,6 +410,10 @@ pub struct ToolAuditRecord {
     pub phase: ToolAuditPhase,
     pub decision: String,
     pub result: Option<ToolOutcomeStatus>,
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactReference>,
+    #[serde(default)]
+    pub verification: Vec<VerificationEvidence>,
     pub recorded_at: DateTime<Utc>,
 }
 

@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
 mcg-config = { path = "../mcg-config" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
@@ -18,6 +20,9 @@ subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

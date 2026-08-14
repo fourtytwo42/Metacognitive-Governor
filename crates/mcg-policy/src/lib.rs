@@ -50,6 +50,8 @@ pub enum ResourceKind {
     File,
     Directory,
     Process,
+    ManagedProcess,
+    System,
     Shell,
     NetworkOrigin,
     EnvironmentVariable,
@@ -57,6 +59,13 @@ pub enum ResourceKind {
     Memory,
     Constitution,
     Credential,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityAccess {
+    Allowed,
+    Denied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +89,8 @@ pub struct CapabilityPolicy {
     #[serde(default)]
     pub allowed_executables: Vec<String>,
     #[serde(default)]
+    pub allowed_shells: Vec<String>,
+    #[serde(default)]
     pub allowed_network_origins: Vec<String>,
     #[serde(default)]
     pub allowed_environment_variables: Vec<String>,
@@ -89,6 +100,8 @@ pub struct CapabilityPolicy {
     pub memory_write_prefixes: Vec<String>,
     pub allow_shell: bool,
     pub allow_git_mutation: bool,
+    pub managed_process_control: CapabilityAccess,
+    pub system_inspection: CapabilityAccess,
 }
 
 impl CapabilityPolicy {
@@ -106,12 +119,21 @@ impl CapabilityPolicy {
                 "npm".into(),
                 "python".into(),
             ],
+            allowed_shells: vec![
+                "bash".into(),
+                "cmd".into(),
+                "powershell".into(),
+                "pwsh".into(),
+                "sh".into(),
+            ],
             allowed_network_origins: Vec::new(),
             allowed_environment_variables: Vec::new(),
             memory_read_prefixes: vec!["project/".into(), "task/".into()],
             memory_write_prefixes: vec!["project/".into(), "task/".into()],
             allow_shell: false,
             allow_git_mutation: true,
+            managed_process_control: CapabilityAccess::Allowed,
+            system_inspection: CapabilityAccess::Allowed,
         }
     }
 }
@@ -372,7 +394,15 @@ fn capability_contains(policy: &CapabilityPolicy, request: &CapabilityRequest) -
             .allowed_executables
             .iter()
             .any(|item| item.eq_ignore_ascii_case(&request.resource)),
-        ResourceKind::Shell => policy.allow_shell,
+        ResourceKind::ManagedProcess => policy.managed_process_control == CapabilityAccess::Allowed,
+        ResourceKind::System => policy.system_inspection == CapabilityAccess::Allowed,
+        ResourceKind::Shell => {
+            policy.allow_shell
+                && policy
+                    .allowed_shells
+                    .iter()
+                    .any(|shell| shell.eq_ignore_ascii_case(&request.resource))
+        }
         ResourceKind::NetworkOrigin => policy
             .allowed_network_origins
             .iter()
@@ -525,5 +555,28 @@ mod tests {
             ),
         );
         assert!(matches!(decision, PolicyDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn executable_and_shell_paths_require_exact_capability_entries() {
+        let mut capabilities = CapabilityPolicy::project("/project");
+        capabilities.allow_shell = true;
+        for (kind, resource) in [
+            (ResourceKind::Process, "/untrusted/git"),
+            (ResourceKind::Shell, "/untrusted/bash"),
+        ] {
+            let decision = evaluate_capability(
+                AutonomyPreset::Autonomous,
+                &OwnerConstitution::secure_defaults(),
+                &capabilities,
+                &capability_request(
+                    ActionClass::BuildOrTest,
+                    CapabilityEffect::Execute,
+                    kind,
+                    resource,
+                ),
+            );
+            assert!(matches!(decision, PolicyDecision::Deny { .. }));
+        }
     }
 }

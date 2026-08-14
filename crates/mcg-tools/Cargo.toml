@@ -12,14 +12,19 @@ chrono.workspace = true
 mcg-config = { path = "../mcg-config" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-policy = { path = "../mcg-policy" }
+futures-util.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 

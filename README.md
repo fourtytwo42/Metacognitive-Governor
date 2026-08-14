@@ -18,9 +18,9 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in active implementation. M0 foundations and the M1 durable runtime spine
-are complete; the full vision remains in scope and is delivered through tested,
-end-to-end milestones.
+MCG is in active implementation. M0 through M2 are complete and M3 is undergoing
+cross-platform qualification; the full vision remains in scope and is delivered
+through tested, end-to-end milestones.
 
 Start with the [product requirements](MCG_PRD.md) and the
 [product and engineering baseline](docs/decisions/0001-product-engineering-baseline.md).
@@ -29,6 +29,8 @@ Implementation planning:
 
 - [System architecture](docs/architecture/system.md)
 - [M1 runtime spine](docs/architecture/runtime-spine.md)
+- [M2 provider fabric](docs/architecture/provider-fabric.md)
+- [M3 tool and policy plane](docs/architecture/tool-policy-plane.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 

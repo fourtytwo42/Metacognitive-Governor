@@ -1,8 +1,27 @@
 use std::fmt;
 
+use async_trait::async_trait;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::ToolError;
+use crate::{CredentialReference, ToolError};
+
+#[async_trait]
+pub trait CredentialResolver: Send + Sync {
+    async fn resolve(&self, reference: &CredentialReference) -> Result<SecretMaterial, ToolError>;
+}
+
+#[derive(Debug, Default)]
+pub struct RejectingCredentialResolver;
+
+#[async_trait]
+impl CredentialResolver for RejectingCredentialResolver {
+    async fn resolve(&self, reference: &CredentialReference) -> Result<SecretMaterial, ToolError> {
+        Err(ToolError::Denied(format!(
+            "credential reference {}/{} is unavailable",
+            reference.provider, reference.key
+        )))
+    }
+}
 
 /// Executor-only secret material. It cannot be serialized and debug output is redacted.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]

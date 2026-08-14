@@ -13,9 +13,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
-    ApprovalRequest, ApprovalState, LeaseRegistry, LeaseState, OutputRedactor, TOOL_SCHEMA_VERSION,
-    ToolAuditPhase, ToolAuditRecord, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus,
-    ToolRequest, ToolRequestKind,
+    ApprovalRequest, ApprovalState, ExecutionLeaseRepository, LeaseState, OutputRedactor,
+    TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditRecord, ToolError, ToolExecutor, ToolOutcome,
+    ToolOutcomeStatus, ToolRequest, ToolRequestKind,
 };
 
 #[async_trait]
@@ -39,7 +39,7 @@ pub struct ToolBroker<E, A, L> {
     preset: AutonomyPreset,
     constitution: OwnerConstitution,
     capabilities: CapabilityPolicy,
-    leases: LeaseRegistry,
+    leases: Arc<dyn ExecutionLeaseRepository>,
     redactor: OutputRedactor,
 }
 
@@ -47,7 +47,7 @@ pub struct BrokerControls {
     pub preset: AutonomyPreset,
     pub constitution: OwnerConstitution,
     pub capabilities: CapabilityPolicy,
-    pub leases: LeaseRegistry,
+    pub leases: Arc<dyn ExecutionLeaseRepository>,
     pub redactor: OutputRedactor,
 }
 
@@ -193,19 +193,22 @@ where
             None,
         )
         .await?;
-        let lease = self.leases.acquire(
-            request.id,
-            execution_id,
-            Duration::seconds(
-                i64::try_from(request.timeout_seconds)
-                    .map_err(|_| ToolError::Invalid("timeout is too large".into()))?,
-            ),
-        )?;
+        let lease = self
+            .leases
+            .acquire(
+                request.id,
+                execution_id,
+                Duration::seconds(
+                    i64::try_from(request.timeout_seconds)
+                        .map_err(|_| ToolError::Invalid("timeout is too large".into()))?,
+                ),
+            )
+            .await?;
         let execution = self.executor.execute(execution_id, request).await;
         let mut outcome = match execution {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.leases.finish(lease.id, LeaseState::Failed)?;
+                self.leases.finish(lease.id, LeaseState::Failed).await?;
                 self.audit
                     .record(ToolAuditRecord {
                         schema_version: TOOL_SCHEMA_VERSION,
@@ -218,6 +221,8 @@ where
                         phase: ToolAuditPhase::Completion,
                         decision: "execution failed".into(),
                         result: Some(ToolOutcomeStatus::Failed),
+                        artifacts: Vec::new(),
+                        verification: Vec::new(),
                         recorded_at: Utc::now(),
                     })
                     .await?;
@@ -225,20 +230,22 @@ where
             }
         };
         if outcome.execution_id != execution_id || outcome.request_id != request.id {
-            self.leases.finish(lease.id, LeaseState::Failed)?;
+            self.leases.finish(lease.id, LeaseState::Failed).await?;
             return Err(ToolError::Execution(
                 "executor returned mismatched request or execution identity".into(),
             ));
         }
         self.redactor.redact_outcome(&mut outcome);
-        self.leases.finish(
-            lease.id,
-            if outcome.status == ToolOutcomeStatus::Succeeded {
-                LeaseState::Completed
-            } else {
-                LeaseState::Failed
-            },
-        )?;
+        self.leases
+            .finish(
+                lease.id,
+                if outcome.status == ToolOutcomeStatus::Succeeded {
+                    LeaseState::Completed
+                } else {
+                    LeaseState::Failed
+                },
+            )
+            .await?;
         self.audit
             .record(ToolAuditRecord {
                 schema_version: TOOL_SCHEMA_VERSION,
@@ -251,6 +258,8 @@ where
                 phase: ToolAuditPhase::Completion,
                 decision: "execution completed".into(),
                 result: Some(outcome.status),
+                artifacts: outcome.artifacts.clone(),
+                verification: outcome.verification.clone(),
                 recorded_at: Utc::now(),
             })
             .await?;
@@ -278,6 +287,8 @@ where
                 phase: ToolAuditPhase::Decision,
                 decision,
                 result,
+                artifacts: Vec::new(),
+                verification: Vec::new(),
                 recorded_at: Utc::now(),
             })
             .await
@@ -374,15 +385,15 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
         | ToolRequestKind::ProcessKill { process_id } => vec![make(
             ActionClass::BuildOrTest,
             CapabilityEffect::Execute,
-            ResourceKind::Process,
-            process_id.clone(),
+            ResourceKind::ManagedProcess,
+            process_id.to_string(),
         )],
-        ToolRequestKind::ShellExec { cwd, .. } => vec![
+        ToolRequestKind::ShellExec { shell, cwd, .. } => vec![
             make(
                 ActionClass::BuildOrTest,
                 CapabilityEffect::Execute,
                 ResourceKind::Shell,
-                "shell".into(),
+                executable_name(shell),
             ),
             read_path(cwd),
         ],
@@ -414,7 +425,7 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
         ToolRequestKind::SystemInfo | ToolRequestKind::SystemProcesses => vec![make(
             ActionClass::ProjectRead,
             CapabilityEffect::Read,
-            ResourceKind::Process,
+            ResourceKind::System,
             "system".into(),
         )],
         ToolRequestKind::SystemEnv { names } => names
@@ -437,9 +448,60 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             )]
         }
         ToolRequestKind::GitCommit { repository, .. }
-        | ToolRequestKind::GitCheckout { repository, .. } => vec![make(
+        | ToolRequestKind::GitApplyPatch {
+            repository,
+            check_only: false,
+            ..
+        } => vec![make(
             ActionClass::ReversibleProjectWrite,
             CapabilityEffect::Write,
+            ResourceKind::GitRepository,
+            repository.clone(),
+        )],
+        ToolRequestKind::GitWorktreeCreate {
+            repository,
+            worktree,
+            ..
+        } => vec![
+            make(
+                ActionClass::ReversibleProjectWrite,
+                CapabilityEffect::Write,
+                ResourceKind::GitRepository,
+                repository.clone(),
+            ),
+            write_path(worktree),
+        ],
+        ToolRequestKind::GitCheckout { repository, .. } => vec![make(
+            ActionClass::DestructiveDelete,
+            CapabilityEffect::Delete,
+            ResourceKind::GitRepository,
+            repository.clone(),
+        )],
+        ToolRequestKind::GitWorktreeRemove {
+            repository,
+            worktree,
+            ..
+        } => vec![
+            make(
+                ActionClass::DestructiveDelete,
+                CapabilityEffect::Delete,
+                ResourceKind::GitRepository,
+                repository.clone(),
+            ),
+            make(
+                ActionClass::DestructiveDelete,
+                CapabilityEffect::Delete,
+                ResourceKind::Directory,
+                worktree.clone(),
+            ),
+        ],
+        ToolRequestKind::GitApplyPatch {
+            repository,
+            check_only: true,
+            ..
+        } => vec![make(
+            ActionClass::ProjectRead,
+            CapabilityEffect::Read,
             ResourceKind::GitRepository,
             repository.clone(),
         )],
@@ -478,11 +540,15 @@ fn network_origin(value: &str) -> Result<String, ToolError> {
 }
 
 fn executable_name(value: &str) -> String {
-    Path::new(value)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or(value)
-        .to_ascii_lowercase()
+    let path = Path::new(value);
+    if path.components().count() == 1 {
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(value)
+            .to_ascii_lowercase()
+    } else {
+        value.to_ascii_lowercase()
+    }
 }
 
 fn primary_resource(request: &ToolRequest) -> String {
@@ -497,14 +563,28 @@ fn primary_resource(request: &ToolRequest) -> String {
             format!("{from} -> {to}")
         }
         ToolRequestKind::HttpRequest { url, .. } | ToolRequestKind::HttpDownload { url, .. } => {
-            url.clone()
+            sanitized_url_resource(url)
         }
         ToolRequestKind::GitStatus { repository }
         | ToolRequestKind::GitDiff { repository, .. }
         | ToolRequestKind::GitCommit { repository, .. }
-        | ToolRequestKind::GitCheckout { repository, .. } => repository.clone(),
+        | ToolRequestKind::GitCheckout { repository, .. }
+        | ToolRequestKind::GitWorktreeCreate { repository, .. }
+        | ToolRequestKind::GitWorktreeRemove { repository, .. }
+        | ToolRequestKind::GitApplyPatch { repository, .. } => repository.clone(),
         _ => request.kind.stable_name().into(),
     }
+}
+
+fn sanitized_url_resource(value: &str) -> String {
+    Url::parse(value).map_or_else(
+        |_| "invalid-url".into(),
+        |mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        },
+    )
 }
 
 #[derive(Default, Clone)]
@@ -585,7 +665,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{ToolNamespace, VerificationEvidence};
+    use crate::{LeaseRegistry, ToolNamespace, VerificationEvidence};
 
     struct CountingExecutor(Arc<AtomicUsize>);
 
@@ -637,7 +717,7 @@ mod tests {
                 preset: AutonomyPreset::Autonomous,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities: CapabilityPolicy::project(root.path()),
-                leases: LeaseRegistry::default(),
+                leases: Arc::new(LeaseRegistry::default()),
                 redactor: OutputRedactor::default(),
             },
         );
@@ -675,7 +755,7 @@ mod tests {
                 preset: AutonomyPreset::Autonomous,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities: CapabilityPolicy::project(root.path()),
-                leases: LeaseRegistry::default(),
+                leases: Arc::new(LeaseRegistry::default()),
                 redactor: OutputRedactor::default(),
             },
         );

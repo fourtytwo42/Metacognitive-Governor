@@ -51,6 +51,7 @@ domain_id!(ToolExecutionId);
 domain_id!(ApprovalId);
 domain_id!(LeaseId);
 domain_id!(ArtifactId);
+domain_id!(ManagedProcessId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -3,8 +3,13 @@
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
-use mcg_domain::{TaskEnvelope, TaskId, TaskState};
+use mcg_domain::{
+    ApprovalId, LeaseId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+};
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
+use mcg_tools::{
+    ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease, LeaseState, ToolAuditRecord,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 use uuid::Uuid;
@@ -36,6 +41,64 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 ";
 
+const MIGRATION_3: &str = r"
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    tool_request_id TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    approval_json TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS approvals_task_state ON approvals(task_id, state);
+
+CREATE TABLE IF NOT EXISTS execution_leases (
+    lease_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL UNIQUE,
+    tool_request_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    lease_json TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS execution_leases_request_state
+    ON execution_leases(tool_request_id, state);
+
+CREATE TABLE IF NOT EXISTS tool_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    tool_request_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    audit_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    UNIQUE(execution_id, phase)
+);
+CREATE INDEX IF NOT EXISTS tool_audit_task_sequence ON tool_audit(task_id, sequence);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    sha256 TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    relative_path TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifacts_sha256 ON artifacts(sha256);
+
+CREATE TRIGGER IF NOT EXISTS tool_audit_no_update
+BEFORE UPDATE ON tool_audit BEGIN
+    SELECT RAISE(FAIL, 'tool audit records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_audit_no_delete
+BEFORE DELETE ON tool_audit BEGIN
+    SELECT RAISE(FAIL, 'tool audit records are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -46,6 +109,8 @@ pub enum StorageError {
     InvalidData(String),
     #[error("task {0} was not found")]
     TaskNotFound(TaskId),
+    #[error("storage conflict: {0}")]
+    Conflict(String),
     #[error(transparent)]
     InvalidTransition(#[from] mcg_domain::InvalidTaskTransition),
 }
@@ -103,7 +168,11 @@ impl SqliteEventStore {
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );",
         )?;
-        for (version, sql) in [(1_i64, MIGRATION_1), (2_i64, MIGRATION_2)] {
+        for (version, sql) in [
+            (1_i64, MIGRATION_1),
+            (2_i64, MIGRATION_2),
+            (3_i64, MIGRATION_3),
+        ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
                 [version],
@@ -327,6 +396,441 @@ impl SqliteEventStore {
         })
     }
 
+    /// Persists a pending approval and its event atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-pending input, duplicate request identity, or failed persistence.
+    pub fn create_approval(
+        &mut self,
+        approval: &ApprovalRequest,
+    ) -> Result<EventEnvelope, StorageError> {
+        if approval.state != ApprovalState::Pending {
+            return Err(StorageError::InvalidData(
+                "new approvals must be pending".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::ApprovalRequested,
+            Some(approval.task_id),
+            serde_json::to_value(approval)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO approvals(
+                approval_id, tool_request_id, task_id, state, approval_json,
+                requested_at, expires_at, resolved_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![
+                approval.id.to_string(),
+                approval.tool_request_id.to_string(),
+                approval.task_id.to_string(),
+                approval_state_name(approval.state),
+                serde_json::to_string(approval)?,
+                approval.requested_at.to_rfc3339(),
+                approval.expires_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads an approval by tool request, expiring it durably when necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or expiration cannot be committed.
+    pub fn approval_for_request(
+        &mut self,
+        request_id: ToolRequestId,
+    ) -> Result<Option<ApprovalRequest>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT approval_json FROM approvals WHERE tool_request_id = ?1",
+                [request_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(json) = json else {
+            return Ok(None);
+        };
+        let mut approval: ApprovalRequest = serde_json::from_str(&json)?;
+        if approval.state == ApprovalState::Pending && approval.expires_at <= Utc::now() {
+            approval.state = ApprovalState::Expired;
+            let event = EventEnvelope::new(
+                EventKind::ApprovalResolved,
+                Some(approval.task_id),
+                serde_json::to_value(&approval)?,
+            );
+            let transaction = self.connection.transaction()?;
+            transaction.execute(
+                "UPDATE approvals SET state = ?1, approval_json = ?2, resolved_at = ?3
+                 WHERE approval_id = ?4 AND state = 'pending'",
+                params![
+                    approval_state_name(approval.state),
+                    serde_json::to_string(&approval)?,
+                    Utc::now().to_rfc3339(),
+                    approval.id.to_string(),
+                ],
+            )?;
+            Self::insert_event(&transaction, &event)?;
+            transaction.commit()?;
+        }
+        Ok(Some(approval))
+    }
+
+    /// Loads one approval by its durable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn approval(
+        &self,
+        approval_id: ApprovalId,
+    ) -> Result<Option<ApprovalRequest>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT approval_json FROM approvals WHERE approval_id = ?1",
+                [approval_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    /// Lists approvals in deterministic request order, optionally filtered by state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn approvals(
+        &self,
+        state: Option<ApprovalState>,
+    ) -> Result<Vec<ApprovalRequest>, StorageError> {
+        let (sql, parameter) = state.map_or_else(
+            || {
+                (
+                    "SELECT approval_json FROM approvals ORDER BY requested_at, approval_id",
+                    None,
+                )
+            },
+            |state| {
+                (
+                    "SELECT approval_json FROM approvals WHERE state = ?1
+                     ORDER BY requested_at, approval_id",
+                    Some(approval_state_name(state).to_owned()),
+                )
+            },
+        );
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = if let Some(parameter) = parameter {
+            statement
+                .query_map([parameter], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
+    }
+
+    /// Resolves one pending, unexpired approval and appends the resolution event atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the approval is absent, terminal, expired, or the resolution is invalid.
+    pub fn resolve_approval(
+        &mut self,
+        resolution: &ApprovalResolution,
+    ) -> Result<(ApprovalRequest, EventEnvelope), StorageError> {
+        if !matches!(
+            resolution.state,
+            ApprovalState::Approved | ApprovalState::Denied | ApprovalState::Cancelled
+        ) {
+            return Err(StorageError::InvalidData(
+                "approval resolution must be approved, denied, or cancelled".into(),
+            ));
+        }
+        let json = self
+            .connection
+            .query_row(
+                "SELECT approval_json FROM approvals WHERE approval_id = ?1",
+                [resolution.approval_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::Conflict("approval was not found".into()))?;
+        let mut approval: ApprovalRequest = serde_json::from_str(&json)?;
+        if approval.state != ApprovalState::Pending || approval.expires_at <= Utc::now() {
+            return Err(StorageError::Conflict(
+                "approval is no longer pending and unexpired".into(),
+            ));
+        }
+        approval.state = resolution.state;
+        let event = EventEnvelope::new(
+            EventKind::ApprovalResolved,
+            Some(approval.task_id),
+            serde_json::json!({"approval": approval, "resolution": resolution}),
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE approvals SET state = ?1, approval_json = ?2, resolved_at = ?3
+             WHERE approval_id = ?4 AND state = 'pending'",
+            params![
+                approval_state_name(approval.state),
+                serde_json::to_string(&approval)?,
+                resolution.resolved_at.to_rfc3339(),
+                approval.id.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "approval was resolved concurrently".into(),
+            ));
+        }
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((approval, event))
+    }
+
+    /// Appends an immutable tool audit record, artifact references, and matching event atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate phases, invalid sizes, or failed persistence.
+    pub fn record_tool_audit(
+        &mut self,
+        audit: &ToolAuditRecord,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event_kind = match audit.phase {
+            mcg_tools::ToolAuditPhase::Decision => EventKind::ToolRequested,
+            mcg_tools::ToolAuditPhase::Completion => EventKind::ToolCompleted,
+        };
+        let event = EventEnvelope::new(
+            event_kind,
+            Some(audit.task_id),
+            serde_json::to_value(audit)?,
+        );
+        let transaction = self.connection.transaction()?;
+        for artifact in &audit.artifacts {
+            transaction.execute(
+                "INSERT OR IGNORE INTO artifacts(
+                    artifact_id, sha256, media_type, size_bytes, relative_path, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    artifact.id.to_string(),
+                    artifact.sha256,
+                    artifact.media_type,
+                    i64::try_from(artifact.size_bytes).map_err(|_| {
+                        StorageError::InvalidData("artifact size exceeds SQLite range".into())
+                    })?,
+                    artifact.relative_path,
+                    audit.recorded_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO tool_audit(
+                execution_id, tool_request_id, task_id, phase, audit_json, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                audit.execution_id.to_string(),
+                audit.request_id.to_string(),
+                audit.task_id.to_string(),
+                tool_audit_phase_name(audit.phase),
+                serde_json::to_string(audit)?,
+                audit.recorded_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Loads immutable tool audit history for a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when rows or JSON are invalid.
+    pub fn tool_audit_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Vec<ToolAuditRecord>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT audit_json FROM tool_audit WHERE task_id = ?1 ORDER BY sequence")?;
+        let rows = statement
+            .query_map([task_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .collect()
+    }
+
+    /// Acquires a durable, exclusive execution lease for a tool request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict when an unexpired active lease already exists.
+    pub fn acquire_tool_lease(
+        &mut self,
+        request_id: ToolRequestId,
+        execution_id: ToolExecutionId,
+        duration: chrono::Duration,
+    ) -> Result<ExecutionLease, StorageError> {
+        if duration <= chrono::Duration::zero() {
+            return Err(StorageError::InvalidData(
+                "lease duration must be positive".into(),
+            ));
+        }
+        let now = Utc::now();
+        let transaction = self.connection.transaction()?;
+        let active: Option<String> = transaction
+            .query_row(
+                "SELECT lease_json FROM execution_leases
+                 WHERE tool_request_id = ?1 AND state = 'active'
+                 ORDER BY acquired_at DESC LIMIT 1",
+                [request_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(json) = active {
+            let mut prior: ExecutionLease = serde_json::from_str(&json)?;
+            if prior.expires_at > now {
+                return Err(StorageError::Conflict(
+                    "tool request already has an active lease".into(),
+                ));
+            }
+            prior.state = LeaseState::Expired;
+            transaction.execute(
+                "UPDATE execution_leases SET state = 'expired', lease_json = ?1
+                 WHERE lease_id = ?2 AND state = 'active'",
+                params![serde_json::to_string(&prior)?, prior.id.to_string()],
+            )?;
+        }
+        let lease = ExecutionLease {
+            schema_version: mcg_tools::TOOL_SCHEMA_VERSION,
+            id: LeaseId::new(),
+            execution_id,
+            tool_request_id: request_id,
+            state: LeaseState::Active,
+            acquired_at: now,
+            expires_at: now + duration,
+            heartbeat_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO execution_leases(
+                lease_id, execution_id, tool_request_id, state, lease_json,
+                acquired_at, expires_at, heartbeat_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                lease.id.to_string(),
+                lease.execution_id.to_string(),
+                lease.tool_request_id.to_string(),
+                lease_state_name(lease.state),
+                serde_json::to_string(&lease)?,
+                lease.acquired_at.to_rfc3339(),
+                lease.expires_at.to_rfc3339(),
+                lease.heartbeat_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(lease)
+    }
+
+    /// Finishes one active durable execution lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict when the lease is absent, expired, or terminal.
+    pub fn finish_tool_lease(
+        &mut self,
+        lease_id: LeaseId,
+        state: LeaseState,
+    ) -> Result<(), StorageError> {
+        if state == LeaseState::Active {
+            return Err(StorageError::InvalidData(
+                "lease finish requires a terminal state".into(),
+            ));
+        }
+        let json = self
+            .connection
+            .query_row(
+                "SELECT lease_json FROM execution_leases WHERE lease_id = ?1",
+                [lease_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::Conflict("lease was not found".into()))?;
+        let mut lease: ExecutionLease = serde_json::from_str(&json)?;
+        if lease.state != LeaseState::Active || lease.expires_at <= Utc::now() {
+            return Err(StorageError::Conflict("lease is not active".into()));
+        }
+        lease.state = state;
+        lease.heartbeat_at = Utc::now();
+        let changed = self.connection.execute(
+            "UPDATE execution_leases SET state = ?1, lease_json = ?2, heartbeat_at = ?3
+             WHERE lease_id = ?4 AND state = 'active'",
+            params![
+                lease_state_name(state),
+                serde_json::to_string(&lease)?,
+                lease.heartbeat_at.to_rfc3339(),
+                lease.id.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "lease was finished concurrently".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Expires all active tool leases during daemon recovery.
+    ///
+    /// Host processes do not survive daemon ownership loss, so even a future
+    /// wall-clock expiry cannot keep a recovered lease active.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when lease JSON is invalid or recovery cannot commit.
+    pub fn recover_tool_leases(&mut self) -> Result<u64, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT lease_json FROM execution_leases WHERE state = 'active'")?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut leases = rows
+            .into_iter()
+            .map(|json| serde_json::from_str::<ExecutionLease>(&json))
+            .collect::<Result<Vec<_>, _>>()?;
+        let transaction = self.connection.transaction()?;
+        for lease in &mut leases {
+            lease.state = LeaseState::Expired;
+            lease.heartbeat_at = Utc::now();
+            transaction.execute(
+                "UPDATE execution_leases SET state = 'expired', lease_json = ?1,
+                    heartbeat_at = ?2 WHERE lease_id = ?3 AND state = 'active'",
+                params![
+                    serde_json::to_string(lease)?,
+                    lease.heartbeat_at.to_rfc3339(),
+                    lease.id.to_string(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(leases.len().try_into().unwrap_or(u64::MAX))
+    }
+
     /// Rebuilds task projections from the authoritative event log.
     ///
     /// # Errors
@@ -393,9 +897,41 @@ impl SqliteEventStore {
     }
 }
 
+const fn approval_state_name(state: ApprovalState) -> &'static str {
+    match state {
+        ApprovalState::Pending => "pending",
+        ApprovalState::Approved => "approved",
+        ApprovalState::Denied => "denied",
+        ApprovalState::Expired => "expired",
+        ApprovalState::Cancelled => "cancelled",
+    }
+}
+
+const fn lease_state_name(state: LeaseState) -> &'static str {
+    match state {
+        LeaseState::Active => "active",
+        LeaseState::Completed => "completed",
+        LeaseState::Failed => "failed",
+        LeaseState::Expired => "expired",
+        LeaseState::Cancelled => "cancelled",
+    }
+}
+
+const fn tool_audit_phase_name(phase: mcg_tools::ToolAuditPhase) -> &'static str {
+    match phase {
+        mcg_tools::ToolAuditPhase::Decision => "decision",
+        mcg_tools::ToolAuditPhase::Completion => "completion",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcg_domain::{ApprovalId, ArtifactId};
+    use mcg_tools::{
+        ArtifactReference, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolOutcomeStatus,
+        VerificationEvidence,
+    };
 
     #[test]
     fn task_and_event_survive_reopen_with_consistent_sequence() {
@@ -486,5 +1022,122 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(store.event_count().expect("count should read"), 0);
+    }
+
+    #[test]
+    fn approval_survives_reopen_and_resolution_is_evented() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mcg.db");
+        let task_id = TaskId::new();
+        let request_id = ToolRequestId::new();
+        let approval = ApprovalRequest {
+            schema_version: TOOL_SCHEMA_VERSION,
+            id: ApprovalId::new(),
+            tool_request_id: request_id,
+            task_id,
+            action: "fs.delete".into(),
+            resource: "project/generated".into(),
+            reason: "destructive action".into(),
+            state: ApprovalState::Pending,
+            requested_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        {
+            let mut store = SqliteEventStore::open(&path).expect("store");
+            store.create_approval(&approval).expect("create approval");
+        }
+        let mut reopened = SqliteEventStore::open(&path).expect("reopen");
+        assert_eq!(
+            reopened
+                .approval_for_request(request_id)
+                .expect("read approval"),
+            Some(approval.clone())
+        );
+        let resolution = ApprovalResolution {
+            approval_id: approval.id,
+            state: ApprovalState::Approved,
+            resolved_by: "owner".into(),
+            reason: None,
+            resolved_at: Utc::now(),
+        };
+        let (resolved, event) = reopened
+            .resolve_approval(&resolution)
+            .expect("resolve approval");
+        assert_eq!(resolved.state, ApprovalState::Approved);
+        assert_eq!(event.kind, EventKind::ApprovalResolved);
+        assert_eq!(reopened.event_count().expect("event count"), 2);
+    }
+
+    #[test]
+    fn tool_audit_is_immutable_and_registers_artifact_with_event() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        let task_id = TaskId::new();
+        let audit = ToolAuditRecord {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id: ToolExecutionId::new(),
+            request_id: ToolRequestId::new(),
+            task_id,
+            tool: "fs.read".into(),
+            resource: "project/file".into(),
+            request_fingerprint: "a".repeat(64),
+            phase: ToolAuditPhase::Completion,
+            decision: "execution completed".into(),
+            result: Some(ToolOutcomeStatus::Succeeded),
+            artifacts: vec![ArtifactReference {
+                id: ArtifactId::new(),
+                sha256: "b".repeat(64),
+                media_type: "text/plain".into(),
+                size_bytes: 7,
+                relative_path: "bb/hash".into(),
+            }],
+            verification: vec![VerificationEvidence {
+                method: "sha256".into(),
+                passed: true,
+                detail: "b".repeat(64),
+            }],
+            recorded_at: Utc::now(),
+        };
+        let event = store.record_tool_audit(&audit).expect("record audit");
+        assert_eq!(event.kind, EventKind::ToolCompleted);
+        assert_eq!(
+            store.tool_audit_for_task(task_id).expect("audit history"),
+            vec![audit]
+        );
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM tool_audit", [])
+                .is_err()
+        );
+        let artifacts: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .expect("artifact count");
+        assert_eq!(artifacts, 1);
+    }
+
+    #[test]
+    fn restart_recovery_expires_active_tool_leases() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mcg.db");
+        let lease_id;
+        {
+            let mut store = SqliteEventStore::open(&path).expect("store");
+            lease_id = store
+                .acquire_tool_lease(
+                    ToolRequestId::new(),
+                    ToolExecutionId::new(),
+                    chrono::Duration::hours(1),
+                )
+                .expect("lease")
+                .id;
+        }
+        let mut reopened = SqliteEventStore::open(&path).expect("reopen");
+        assert_eq!(reopened.recover_tool_leases().expect("recover leases"), 1);
+        assert!(
+            reopened
+                .finish_tool_lease(lease_id, LeaseState::Completed)
+                .is_err()
+        );
     }
 }

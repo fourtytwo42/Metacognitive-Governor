@@ -1,10 +1,14 @@
 use std::{path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use mcg_api::{CreateTaskRequest, TaskEventsResponse, TaskMutationResponse, TransitionTaskRequest};
+use mcg_api::{
+    ApprovalListResponse, CreateTaskRequest, ResolveApprovalRequest, TaskEventsResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest,
+};
 use mcg_config::AppConfig;
 use mcg_domain::{TaskEnvelope, TaskId, TaskState};
 use mcg_runtime::RuntimeStatus;
+use mcg_tools::{ApprovalRequest, ApprovalState};
 
 #[derive(Debug, Parser)]
 #[command(name = "mcg", version, about = "MetaCognitive Governor CLI")]
@@ -31,6 +35,11 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Inspect and resolve owner approval requests.
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -49,8 +58,45 @@ enum TaskCommand {
     },
     /// Read a task's ordered event history.
     Events { id: String },
+    /// Read immutable tool audit evidence for a task.
+    Audit { id: String },
     /// Apply a validated task state transition.
     Transition { id: String, state: TaskStateArg },
+}
+
+#[derive(Debug, Subcommand)]
+enum ApprovalCommand {
+    /// List pending approvals by default.
+    List {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one approval.
+    Get {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve a pending action.
+    Approve {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Deny a pending action.
+    Deny {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Cancel a pending action.
+    Cancel {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -99,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Status { json } => run_status(&client, host, token.trim(), json).await?,
         Command::Task { command } => run_task(&client, host, token.trim(), command).await?,
+        Command::Approval { command } => run_approval(&client, host, token.trim(), command).await?,
     }
 
     Ok(())
@@ -185,6 +232,18 @@ async fn run_task(
                 .await?;
             println!("{}", serde_json::to_string_pretty(&events)?);
         }
+        TaskCommand::Audit { id } => {
+            let task_id = TaskId::from_str(&id)?;
+            let audit: ToolAuditResponse = client
+                .get(format!("{host}/api/v1/tasks/{task_id}/tool-audit"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&audit)?);
+        }
         TaskCommand::Transition { id, state } => {
             let task_id = TaskId::from_str(&id)?;
             let task: TaskEnvelope = client
@@ -201,5 +260,87 @@ async fn run_task(
             println!("{}: {}", task.id, task.state);
         }
     }
+    Ok(())
+}
+
+async fn run_approval(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ApprovalCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ApprovalCommand::List { all, json } => {
+            let suffix = if all { "" } else { "?state=pending" };
+            let response: ApprovalListResponse = client
+                .get(format!("{host}/api/v1/approvals{suffix}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.approvals.is_empty() {
+                println!("No approvals.");
+            } else {
+                for approval in response.approvals {
+                    println!(
+                        "{}  {:?}  {}  {}",
+                        approval.id, approval.state, approval.action, approval.resource
+                    );
+                }
+            }
+        }
+        ApprovalCommand::Get { id, json } => {
+            let approval: ApprovalRequest = client
+                .get(format!("{host}/api/v1/approvals/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&approval)?);
+            } else {
+                println!("{}: {:?}", approval.id, approval.state);
+                println!("Action: {}", approval.action);
+                println!("Resource: {}", approval.resource);
+                println!("Reason: {}", approval.reason);
+            }
+        }
+        ApprovalCommand::Approve { id, reason } => {
+            resolve_approval(client, host, token, &id, ApprovalState::Approved, reason).await?;
+        }
+        ApprovalCommand::Deny { id, reason } => {
+            resolve_approval(client, host, token, &id, ApprovalState::Denied, reason).await?;
+        }
+        ApprovalCommand::Cancel { id, reason } => {
+            resolve_approval(client, host, token, &id, ApprovalState::Cancelled, reason).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_approval(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+    state: ApprovalState,
+    reason: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let approval: ApprovalRequest = client
+        .post(format!("{host}/api/v1/approvals/{id}/resolve"))
+        .bearer_auth(token)
+        .json(&ResolveApprovalRequest { state, reason })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    println!("{}: {:?}", approval.id, approval.state);
     Ok(())
 }

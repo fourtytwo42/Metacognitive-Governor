@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use mcg_domain::{ArtifactId, LeaseId, ToolExecutionId, ToolRequestId};
 use sha2::{Digest, Sha256};
@@ -87,6 +88,17 @@ pub struct LeaseRegistry {
     leases: Arc<Mutex<Vec<ExecutionLease>>>,
 }
 
+#[async_trait]
+pub trait ExecutionLeaseRepository: Send + Sync {
+    async fn acquire(
+        &self,
+        request_id: ToolRequestId,
+        execution_id: ToolExecutionId,
+        duration: Duration,
+    ) -> Result<ExecutionLease, ToolError>;
+    async fn finish(&self, lease_id: LeaseId, state: LeaseState) -> Result<(), ToolError>;
+}
+
 impl LeaseRegistry {
     /// Acquires one active execution lease for a request.
     ///
@@ -157,6 +169,22 @@ impl LeaseRegistry {
         lease.state = state;
         lease.heartbeat_at = Utc::now();
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ExecutionLeaseRepository for LeaseRegistry {
+    async fn acquire(
+        &self,
+        request_id: ToolRequestId,
+        execution_id: ToolExecutionId,
+        duration: Duration,
+    ) -> Result<ExecutionLease, ToolError> {
+        Self::acquire(self, request_id, execution_id, duration)
+    }
+
+    async fn finish(&self, lease_id: LeaseId, state: LeaseState) -> Result<(), ToolError> {
+        Self::finish(self, lease_id, state)
     }
 }
 

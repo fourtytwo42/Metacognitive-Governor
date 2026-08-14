@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: M3 typed tools, capabilities, and approvals is in progress; its versioned contracts and policy/broker foundation compile and pass focused tests.
-- Last meaningful change: Pushed M3 control-plane and capability-safe filesystem checkpoint `96a378f` (`Establish M3 tool policy boundary`) to private `origin/main`.
-- Next step: Implement structured process/shell, HTTP, system, Git, and memory executors, then add worktree isolation and durable SQLite/API wiring.
+- Current task: M3 typed tools, capabilities, and approvals is implementation-complete and Windows-qualified; Ubuntu qualification remains before closing the milestone.
+- Last meaningful change: Completed the remaining typed host executors, durable SQLite approval/lease/audit/artifact lifecycle, authenticated API/CLI surfaces, and a correctly fail-fast local verifier.
+- Next step: Commit and push the Windows-green M3 checkpoint, qualify the same revision on the owner-controlled Ubuntu VM, fix any platform defects, and close M3 only when both platforms pass.
 - Blockers: None documented.
 
 ## Current State
@@ -99,6 +99,7 @@ When sources conflict, use this order:
 - Provider auth modes are explicit and billing-aware: browser OAuth, device-code OAuth, API key, bearer token, or none. OAuth failure never mutates a connection into API-key billing.
 - The M1 event log is authoritative; task projections are written in the same SQLite transaction and rebuilt by validated replay at daemon startup.
 - The local API rejects non-loopback binds. All routes except health require a generated persistent bearer token; SSE reconnects can replay from `after` or `Last-Event-ID`.
+- M3 implements typed filesystem, process/shell, HTTP/download, system, Git/worktree/patch, and memory primitives behind one policy broker. SQLite durably stores approval state, execution leases, immutable tool audit, artifact registrations, and associated task events.
 - Provider credentials are runtime-only redacting values and are not serializable; persisted provider connections contain an explicit auth mode but no secret. OpenAI-compatible requests omit absent optional fields, and buffered calls tolerate providers such as GPU45 that always return a terminal Responses SSE stream.
 - OpenAI browser OAuth uses loopback PKCE; device OAuth uses the verification-code flow; both are standalone from Codex, support refresh-token rotation, and route subscription inference only through `https://chatgpt.com/backend-api/codex`. API-key billing is a separate explicit connection and never an OAuth fallback.
 - M3 policy evaluates canonical resources, not prompt claims. Invalid or weakened owner constitutions fail closed on every broker request; audit and secret-isolation requirements cannot be disabled. Denied or approval-pending requests are audited before return and never reach a host executor.
@@ -129,6 +130,9 @@ When sources conflict, use this order:
 - 2026-08-14: M3 contract/policy/broker checkpoint passed 14 focused tests plus formatting, clippy with warnings denied, and `git diff --check`. Tests cover schema round-trip, immutable constitutional gates, secret/protected/path-scope bypasses, zero-side-effect denial/approval, content-addressed artifacts, secret redaction, and duplicate active leases.
 - 2026-08-14: M3 capability-safe filesystem checkpoint passed the complete Rust workspace test and clippy gates on Windows. Ten `mcg-tools` tests cover traversal/sibling denial, atomic write/patch/read, stale-hash conflict isolation, artifact hashes, approvals/audit, redaction, and leases. `cap-std` 4.0.2 confines file operations to pre-opened directory handles.
 - 2026-08-14: Committed and pushed the M3 control-plane/filesystem checkpoint as `96a378f`; `main` matched `origin/main` afterward and no GitHub-hosted automation was used.
+- 2026-08-14: Completed 27 `mcg-tools`, 8 policy, 7 storage, 3 runtime, and 7 API tests for the full M3 boundary. Focused tests use real temporary processes, repositories/worktrees, local HTTP servers, content-addressed artifacts, and SQLite lifecycle/restart behavior.
+- 2026-08-14: Fixed `scripts/verify.ps1` to check every native command's `$LASTEXITCODE`. The prior script could print Cargo failures but still return success; the repaired script immediately exposed a missing test import and a fixed-delay process-test race, both of which were corrected.
+- 2026-08-14: The repaired complete Windows verifier passed Rust format/clippy/workspace tests, documentation validation, frontend typecheck/unit/build, native Tauri debug build, and Playwright E2E for the implementation-complete M3 revision.
 
 ## Decisions
 
@@ -204,9 +208,17 @@ When sources conflict, use this order:
 - Decision: Version the complete primitive/approval/lease/artifact/audit contract first; evaluate resolved resource capabilities against a revalidated owner constitution; audit before invoking an executor; represent credentials as references resolved only into non-serializable executor values.
 - Files: `crates/mcg-domain/src/lib.rs`, `crates/mcg-policy/src/lib.rs`, `crates/mcg-tools/src/{contracts,broker,secrets,evidence}.rs`.
 - Commands/tests: `cargo test -p mcg-policy -p mcg-tools`; `cargo clippy -p mcg-policy -p mcg-tools --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`.
-- Result: Fourteen focused tests pass. Denied and approval-pending fixture requests produce audit records and zero executor calls; artifacts are SHA-256 addressed; secret debug/output is redacted; duplicate active leases are rejected.
 - Result: Fourteen focused tests pass. Denied and approval-pending fixture requests produce audit records and zero executor calls; artifacts are SHA-256 addressed; secret debug/output is redacted; duplicate active leases are rejected. A later same-day checkpoint integrated these controls into broker execution and completed the filesystem primitive family through capability handles.
 - Follow-up: Implement the remaining host executors, then persist approvals/audits and expose daemon API/CLI lifecycle operations.
+
+### 2026-08-14 - M3 Complete Execution And Evidence Plane
+
+- Context: M3 requires every supported host effect to use typed contracts, constitutional capability checks, durable approvals/evidence, and externally observable verification.
+- Decision: Keep host execution exhaustive behind `HostToolExecutor`; use exact executable/shell capability entries, project-confined filesystem/Git paths, credential references, bounded/redacted output, no automatic HTTP redirects, and atomic SQLite approval/audit/event transactions. Do not expose raw execution over transport until project orchestration can construct safe scoped capabilities.
+- Files: `crates/mcg-tools/`, `crates/mcg-policy/`, `crates/mcg-storage/`, `crates/mcg-runtime/`, `crates/mcg-api/`, `apps/mcg-cli/`, `docs/architecture/tool-policy-plane.md`, `scripts/verify.ps1`.
+- Commands/tests: Five repeated process lifecycle tests and `scripts/verify.ps1` passed on Windows; Ubuntu `scripts/verify.sh` remains required for milestone closure.
+- Result: All M3 primitive families and durable control surfaces are implemented. Windows qualification is green, including native desktop and E2E checks.
+- Follow-up: Qualify the identical revision on Ubuntu, then close M3 and begin M4 projects/context/memory.
 
 ## Known Issues
 
@@ -230,7 +242,7 @@ When sources conflict, use this order:
 - Include the full Apache-2.0 license text for adapted OpenAI Codex login code in release packages.
 - Define the simple/advanced UI information architecture and visual system through prototypes and real project workflows.
 - Add owner-controlled macOS build and real-device qualification when capacity becomes available.
-- Complete M3 host executors, durable approval/audit storage, daemon/API/CLI integration, worktree isolation, cross-platform qualification, and expanded adversarial bypass tests.
+- Complete Ubuntu qualification of M3, then begin M4 projects, context, and durable memory.
 
 ## Do Not Forget
 

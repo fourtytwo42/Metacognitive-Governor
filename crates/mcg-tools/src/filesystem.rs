@@ -133,6 +133,30 @@ impl FilesystemExecutor {
         verify_file(root, &relative, content.as_bytes(), "wrote file")
     }
 
+    pub(crate) fn write_download(
+        &self,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<VerificationEvidence, ToolError> {
+        let (root, relative) = self.resolve(path)?;
+        atomic_write(root, &relative, bytes)?;
+        let observed = root
+            .read(&relative)
+            .map_err(|error| ToolError::Execution(format!("verify download: {error}")))?;
+        let expected_sha = sha256(bytes);
+        let observed_sha = sha256(&observed);
+        if expected_sha != observed_sha {
+            return Err(ToolError::Execution(
+                "download verification hash mismatch after write".into(),
+            ));
+        }
+        Ok(VerificationEvidence {
+            method: "sha256.read_after_download".into(),
+            passed: true,
+            detail: observed_sha,
+        })
+    }
+
     fn list(
         &self,
         path: &str,

@@ -9,6 +9,7 @@ rust-version.workspace = true
 chrono.workspace = true
 mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
+mcg-tools = { path = "../mcg-tools" }
 rusqlite.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

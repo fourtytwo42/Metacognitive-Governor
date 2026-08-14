@@ -60,6 +60,8 @@ Domain crates do not depend on transports, SQLite, Tauri, or provider SDKs.
 
 The implemented M2 contracts and invariants are detailed in
 [`provider-fabric.md`](provider-fabric.md).
+The implemented M3 execution boundary and durable approval/evidence lifecycle are
+detailed in [`tool-policy-plane.md`](tool-policy-plane.md).
 Provider, tool, and storage implementations depend on domain contracts; runtime
 orchestrates them through traits. API clients never reach storage directly.
 

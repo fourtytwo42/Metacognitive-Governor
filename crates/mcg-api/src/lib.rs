@@ -10,9 +10,13 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
 };
-use mcg_domain::{ProjectId, RiskLevel, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId};
+use chrono::Utc;
+use mcg_domain::{
+    ApprovalId, ProjectId, RiskLevel, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId,
+};
 use mcg_events::EventEnvelope;
 use mcg_runtime::{AppRuntime, RuntimeError, RuntimeStatus};
+use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolAuditRecord};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -63,6 +67,28 @@ pub struct TaskEventsResponse {
     pub events: Vec<EventEnvelope>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalListResponse {
+    pub approvals: Vec<ApprovalRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolveApprovalRequest {
+    pub state: ApprovalState,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolAuditResponse {
+    pub records: Vec<ToolAuditRecord>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ApprovalListQuery {
+    state: Option<ApprovalState>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct EventStreamQuery {
     after: Option<u64>,
@@ -93,6 +119,14 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "conflict",
             message: message.into(),
         }
     }
@@ -131,6 +165,13 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             get(get_task).post(transition_task),
         )
         .route("/api/v1/tasks/{task_id}/events", get(task_events))
+        .route("/api/v1/tasks/{task_id}/tool-audit", get(task_tool_audit))
+        .route("/api/v1/approvals", get(list_approvals))
+        .route("/api/v1/approvals/{approval_id}", get(get_approval))
+        .route(
+            "/api/v1/approvals/{approval_id}/resolve",
+            post(resolve_approval),
+        )
         .route("/api/v1/events/stream", get(stream_events))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -293,6 +334,73 @@ async fn task_events(
     }))
 }
 
+async fn task_tool_audit(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ToolAuditResponse>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    if state.runtime.task(task_id)?.is_none() {
+        return Err(ApiError::not_found(format!("task {task_id} was not found")));
+    }
+    Ok(Json(ToolAuditResponse {
+        records: state.runtime.tool_audit(task_id)?,
+    }))
+}
+
+async fn list_approvals(
+    State(state): State<ApiState>,
+    Query(query): Query<ApprovalListQuery>,
+) -> Result<Json<ApprovalListResponse>, ApiError> {
+    Ok(Json(ApprovalListResponse {
+        approvals: state.runtime.approvals(query.state)?,
+    }))
+}
+
+async fn get_approval(
+    State(state): State<ApiState>,
+    Path(approval_id): Path<String>,
+) -> Result<Json<ApprovalRequest>, ApiError> {
+    let approval_id = parse_approval_id(&approval_id)?;
+    state
+        .runtime
+        .approval(approval_id)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("approval {approval_id} was not found")))
+}
+
+async fn resolve_approval(
+    State(state): State<ApiState>,
+    Path(approval_id): Path<String>,
+    Json(request): Json<ResolveApprovalRequest>,
+) -> Result<Json<ApprovalRequest>, ApiError> {
+    let approval_id = parse_approval_id(&approval_id)?;
+    if !matches!(
+        request.state,
+        ApprovalState::Approved | ApprovalState::Denied | ApprovalState::Cancelled
+    ) {
+        return Err(ApiError::bad_request(
+            "resolution state must be approved, denied, or cancelled",
+        ));
+    }
+    state
+        .runtime
+        .resolve_approval(&ApprovalResolution {
+            approval_id,
+            state: request.state,
+            resolved_by: "local_owner".into(),
+            reason: request.reason,
+            resolved_at: Utc::now(),
+        })
+        .map(Json)
+        .map_err(|error| {
+            if error.is_conflict() {
+                ApiError::conflict(error.to_string())
+            } else {
+                ApiError::from(error)
+            }
+        })
+}
+
 async fn stream_events(
     State(state): State<ApiState>,
     Query(query): Query<EventStreamQuery>,
@@ -343,11 +451,21 @@ fn parse_task_id(value: &str) -> Result<TaskId, ApiError> {
         .map_err(|_| ApiError::bad_request("task id must be a UUID"))
 }
 
+fn parse_approval_id(value: &str) -> Result<ApprovalId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("approval id must be a UUID"))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use mcg_config::AppConfig;
+    use mcg_domain::{ArtifactId, ToolExecutionId, ToolRequestId};
+    use mcg_tools::{
+        ApprovalRepository, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditSink, ToolOutcomeStatus,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -494,5 +612,124 @@ mod tests {
             .await
             .expect_err("public binding must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn approval_lifecycle_is_authenticated_durable_and_conflict_safe() {
+        let runtime = test_runtime();
+        let task = TaskEnvelope::new("approval fixture");
+        runtime.create_task(&task).expect("task");
+        let approval = ApprovalRequest {
+            schema_version: TOOL_SCHEMA_VERSION,
+            id: ApprovalId::new(),
+            tool_request_id: ToolRequestId::new(),
+            task_id: task.id,
+            action: "fs.delete".into(),
+            resource: "project/generated".into(),
+            reason: "destructive action".into(),
+            state: ApprovalState::Pending,
+            requested_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        runtime
+            .tool_control()
+            .create(approval.clone())
+            .await
+            .expect("create approval");
+        let app = router(runtime);
+        let list = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/approvals?state=pending"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("list");
+        assert_eq!(list.status(), StatusCode::OK);
+        let list_bytes = list.into_body().collect().await.expect("body").to_bytes();
+        let listed: ApprovalListResponse = serde_json::from_slice(&list_bytes).expect("json");
+        assert_eq!(listed.approvals, vec![approval.clone()]);
+
+        let body = serde_json::to_vec(&ResolveApprovalRequest {
+            state: ApprovalState::Approved,
+            reason: Some("owner approved".into()),
+        })
+        .expect("body");
+        let path = format!("/api/v1/approvals/{}/resolve", approval.id);
+        let resolved = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("resolve");
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let duplicate = app
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("duplicate");
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn task_tool_audit_endpoint_returns_immutable_broker_evidence() {
+        let runtime = test_runtime();
+        let task = TaskEnvelope::new("audit fixture");
+        runtime.create_task(&task).expect("task");
+        let record = ToolAuditRecord {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id: ToolExecutionId::new(),
+            request_id: ToolRequestId::new(),
+            task_id: task.id,
+            tool: "fs.read".into(),
+            resource: "project/file".into(),
+            request_fingerprint: "a".repeat(64),
+            phase: ToolAuditPhase::Completion,
+            decision: "execution completed".into(),
+            result: Some(ToolOutcomeStatus::Succeeded),
+            artifacts: vec![mcg_tools::ArtifactReference {
+                id: ArtifactId::new(),
+                sha256: "b".repeat(64),
+                media_type: "text/plain".into(),
+                size_bytes: 1,
+                relative_path: "bb/value".into(),
+            }],
+            verification: Vec::new(),
+            recorded_at: Utc::now(),
+        };
+        runtime
+            .tool_control()
+            .record(record.clone())
+            .await
+            .expect("audit");
+        let response = router(runtime)
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/tasks/{}/tool-audit",
+                    task.id
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let audit: ToolAuditResponse = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(audit.records, vec![record]);
     }
 }
