@@ -23,6 +23,8 @@ pub enum EventKind {
     ProviderConnectionRecorded,
     ProviderCatalogDiscovered,
     ProviderCredentialsRefreshed,
+    McpConnectionRecorded,
+    McpCatalogDiscovered,
     ToolRequested,
     ToolCompleted,
     ProjectDiscovered,
@@ -61,6 +63,8 @@ impl EventKind {
             Self::ProviderConnectionRecorded => "provider_connection_recorded",
             Self::ProviderCatalogDiscovered => "provider_catalog_discovered",
             Self::ProviderCredentialsRefreshed => "provider_credentials_refreshed",
+            Self::McpConnectionRecorded => "mcp_connection_recorded",
+            Self::McpCatalogDiscovered => "mcp_catalog_discovered",
             Self::ToolRequested => "tool_requested",
             Self::ToolCompleted => "tool_completed",
             Self::ProjectDiscovered => "project_discovered",
@@ -109,6 +113,8 @@ impl EventKind {
             "provider_credentials_refreshed" | "ProviderCredentialsRefreshed" => {
                 Ok(Self::ProviderCredentialsRefreshed)
             }
+            "mcp_connection_recorded" | "McpConnectionRecorded" => Ok(Self::McpConnectionRecorded),
+            "mcp_catalog_discovered" | "McpCatalogDiscovered" => Ok(Self::McpCatalogDiscovered),
             "tool_requested" | "ToolRequested" => Ok(Self::ToolRequested),
             "tool_completed" | "ToolCompleted" => Ok(Self::ToolCompleted),
             "project_discovered" | "ProjectDiscovered" => Ok(Self::ProjectDiscovered),

@@ -16,6 +16,7 @@ mcg-api = { path = "../../crates/mcg-api" }
 mcg-config = { path = "../../crates/mcg-config" }
 mcg-domain = { path = "../../crates/mcg-domain" }
 mcg-events = { path = "../../crates/mcg-events" }
+mcg-mcp = { path = "../../crates/mcg-mcp" }
 mcg-projects = { path = "../../crates/mcg-projects" }
 mcg-providers = { path = "../../crates/mcg-providers" }
 mcg-runtime = { path = "../../crates/mcg-runtime" }

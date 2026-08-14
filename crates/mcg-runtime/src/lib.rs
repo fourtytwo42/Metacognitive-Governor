@@ -25,6 +25,10 @@ use mcg_domain::{
     TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
+use mcg_mcp::{
+    McpAuthMode, McpConnection, McpCredential, McpCredentialStore, McpError, McpToolCatalog,
+    MemoryMcpCredentialStore, ModernHttpMcpClient, OsMcpCredentialStore,
+};
 use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
     ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
@@ -93,6 +97,8 @@ pub enum RuntimeError {
     AgentTurn(#[from] AgentTurnError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    #[error(transparent)]
+    Mcp(#[from] McpError),
     #[error("runtime storage lock was poisoned")]
     StorageLock,
     #[error("local authentication token is invalid")]
@@ -196,6 +202,13 @@ pub struct InterfaceAgentRun {
 pub struct ProviderMutation {
     pub connection: ProviderConnection,
     pub catalog: ProviderModelCatalog,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpMutation {
+    pub connection: McpConnection,
+    pub catalog: McpToolCatalog,
     pub events: Vec<EventEnvelope>,
 }
 
@@ -343,6 +356,7 @@ pub struct AppRuntime {
     recovered_tool_leases: u64,
     agent_recovery: AgentRecoveryReport,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
+    mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     oauth_state: OAuthRuntimeState,
 }
@@ -379,6 +393,7 @@ impl AppRuntime {
         let agent_recovery = store.recover_agent_work(Utc::now())?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(OsProviderCredentialStore);
+        let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
         Ok(Self::assemble(
             config,
             store,
@@ -387,6 +402,7 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             provider_credentials,
+            mcp_credentials,
             BrowserAuthorizationConfig::default(),
             DeviceAuthorizationConfig::default(),
         ))
@@ -425,6 +441,8 @@ impl AppRuntime {
         let auth = LocalAuth::from_token(token)?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(MemoryProviderCredentialStore::default());
+        let mcp_credentials: Arc<dyn McpCredentialStore> =
+            Arc::new(MemoryMcpCredentialStore::default());
         Ok(Self::assemble(
             config,
             store,
@@ -433,6 +451,7 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             provider_credentials,
+            mcp_credentials,
             browser_config,
             device_config,
         ))
@@ -447,6 +466,7 @@ impl AppRuntime {
         recovered_tool_leases: u64,
         agent_recovery: AgentRecoveryReport,
         provider_credentials: Arc<dyn ProviderCredentialStore>,
+        mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
         device_config: DeviceAuthorizationConfig,
     ) -> Self {
@@ -460,6 +480,7 @@ impl AppRuntime {
             recovered_tool_leases,
             agent_recovery,
             provider_credentials,
+            mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
         }
@@ -820,6 +841,98 @@ impl AppRuntime {
         connection_id: &str,
     ) -> Result<Option<ProviderModelCatalog>, RuntimeError> {
         Ok(self.store()?.provider_catalog(connection_id)?)
+    }
+
+    /// Lists persisted secret-free MCP client connections.
+    ///
+    /// # Errors
+    /// Returns an error when storage cannot be read.
+    pub fn mcp_connections(&self) -> Result<Vec<McpConnection>, RuntimeError> {
+        Ok(self.store()?.mcp_connections()?)
+    }
+
+    /// Loads the latest durable MCP tool discovery snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when storage cannot be read.
+    pub fn mcp_catalog(&self, connection_id: &str) -> Result<Option<McpToolCatalog>, RuntimeError> {
+        Ok(self.store()?.mcp_catalog(connection_id)?)
+    }
+
+    /// Creates a modern HTTP MCP connection, stores any bearer credential only
+    /// in the protected operating-system store, discovers tools, and persists
+    /// secret-free evidence atomically.
+    ///
+    /// # Errors
+    /// Returns duplicate, validation, credential-store, transport, negotiation,
+    /// remote-response, or persistence failures. Failed setup removes credentials.
+    pub async fn configure_mcp(
+        &self,
+        connection: McpConnection,
+        credential: Option<&McpCredential>,
+    ) -> Result<McpMutation, RuntimeError> {
+        if self.store()?.mcp_connection(&connection.id)?.is_some() {
+            return Err(StorageError::Conflict(format!(
+                "MCP connection {} already exists",
+                connection.id
+            ))
+            .into());
+        }
+        save_mcp_credential(self.mcp_credentials.as_ref(), &connection, credential)?;
+        let client_credential = load_mcp_credential(self.mcp_credentials.as_ref(), &connection)?;
+        let client = match ModernHttpMcpClient::new(connection.clone(), client_credential) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = self.mcp_credentials.delete(&connection.id);
+                return Err(error.into());
+            }
+        };
+        let catalog = match client.discover().await {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let _ = self.mcp_credentials.delete(&connection.id);
+                return Err(error.into());
+            }
+        };
+        let events = match self
+            .store()?
+            .record_mcp_configuration(&connection, &catalog, Utc::now())
+        {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = self.mcp_credentials.delete(&connection.id);
+                return Err(error.into());
+            }
+        };
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(McpMutation {
+            connection,
+            catalog,
+            events,
+        })
+    }
+
+    /// Rediscovers tools for one durable modern HTTP MCP connection.
+    ///
+    /// # Errors
+    /// Returns not-found, credential-store, transport, negotiation, response, or
+    /// persistence failures without replacing the previous durable catalog.
+    pub async fn discover_mcp(&self, connection_id: &str) -> Result<McpToolCatalog, RuntimeError> {
+        let connection = self
+            .store()?
+            .mcp_connection(connection_id)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(format!("MCP connection {connection_id} was not found"))
+            })?;
+        let credential = load_mcp_credential(self.mcp_credentials.as_ref(), &connection)?;
+        let catalog = ModernHttpMcpClient::new(connection, credential)?
+            .discover()
+            .await?;
+        let event = self.store()?.record_mcp_catalog(&catalog)?;
+        let _ = self.event_sender.send(event);
+        Ok(catalog)
     }
 
     #[must_use]
@@ -1795,6 +1908,38 @@ fn tool_definition(name: &str) -> Result<ToolDefinition, StorageError> {
 
 fn runtime_tool_error(error: ToolError) -> RuntimeError {
     AgentTurnError::Tool(error).into()
+}
+
+fn save_mcp_credential(
+    store: &dyn McpCredentialStore,
+    connection: &McpConnection,
+    credential: Option<&McpCredential>,
+) -> Result<(), McpError> {
+    match (connection.auth_mode, credential) {
+        (McpAuthMode::None, None) => Ok(()),
+        (McpAuthMode::BearerToken, Some(credential)) => store.save(&connection.id, credential),
+        _ => Err(McpError::Configuration(
+            "MCP credential shape does not match the explicit authentication mode".into(),
+        )),
+    }
+}
+
+fn load_mcp_credential(
+    store: &dyn McpCredentialStore,
+    connection: &McpConnection,
+) -> Result<Option<McpCredential>, McpError> {
+    match connection.auth_mode {
+        McpAuthMode::None => Ok(None),
+        McpAuthMode::BearerToken => store.load(&connection.id)?.map_or_else(
+            || {
+                Err(McpError::Authentication(format!(
+                    "MCP connection {} has no protected credential",
+                    connection.id
+                )))
+            },
+            |credential| Ok(Some(credential)),
+        ),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)] // `Result::map_err` adapter owns its source error.

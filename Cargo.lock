@@ -2573,6 +2573,7 @@ dependencies = [
  "mcg-config",
  "mcg-domain",
  "mcg-events",
+ "mcg-mcp",
  "mcg-projects",
  "mcg-providers",
  "mcg-runtime",
@@ -2601,6 +2602,7 @@ dependencies = [
  "mcg-config",
  "mcg-domain",
  "mcg-events",
+ "mcg-mcp",
  "mcg-projects",
  "mcg-providers",
  "mcg-runtime",
@@ -2673,6 +2675,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcg-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "keyring",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "mcg-policy"
 version = "0.1.0"
 dependencies = [
@@ -2727,6 +2746,7 @@ dependencies = [
  "mcg-config",
  "mcg-domain",
  "mcg-events",
+ "mcg-mcp",
  "mcg-policy",
  "mcg-projects",
  "mcg-providers",
@@ -2750,6 +2770,7 @@ dependencies = [
  "mcg-agents",
  "mcg-domain",
  "mcg-events",
+ "mcg-mcp",
  "mcg-projects",
  "mcg-providers",
  "mcg-tools",

@@ -5,7 +5,7 @@ use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApprovalListResponse, AssembleContextRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreateTaskRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, ManagedMemoryResponse,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, ManagedMemoryResponse, McpListResponse,
     MemoryClaimHistoryResponse, MemoryClaimListResponse, OrganizationListResponse,
     OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest, ProjectHistoryResponse,
     ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, StartOpenAiOAuthRequest,
@@ -17,14 +17,18 @@ use mcg_domain::{
     MemoryClaimId, OrganizationRevisionId, ProjectId, RunId, TaskEnvelope, TaskId, TaskState,
     WorkItemId,
 };
+use mcg_mcp::{
+    MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
+    McpTransport,
+};
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
     CONTRACT_VERSION, ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderKind,
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentRunView, AgentTurnCommit, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod,
-    ProjectMutation, ProviderMutation, RuntimeStatus,
+    AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
+    OpenAiOAuthMethod, ProjectMutation, ProviderMutation, RuntimeStatus,
 };
 use mcg_tools::{ApprovalRequest, ApprovalState};
 use serde::Serialize;
@@ -34,6 +38,20 @@ use zeroize::Zeroize;
 struct ProviderConfigurePayload {
     connection: ProviderConnection,
     credential: Option<String>,
+}
+
+#[derive(Serialize)]
+struct McpConfigurePayload {
+    connection: McpConnection,
+    credential: Option<String>,
+}
+
+impl Drop for McpConfigurePayload {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
 }
 
 impl Drop for ProviderConfigurePayload {
@@ -94,6 +112,70 @@ enum Command {
         #[command(subcommand)]
         command: ProviderCommand,
     },
+    /// Configure and discover Model Context Protocol servers.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Add a Streamable HTTP server and immediately discover its tools.
+    AddHttp {
+        id: String,
+        name: String,
+        url: String,
+        #[arg(long, value_enum, default_value_t = McpAuthArg::None)]
+        auth: McpAuthArg,
+        #[arg(long, value_enum, default_value_t = McpProtocolArg::Auto)]
+        protocol: McpProtocolArg,
+        #[arg(long)]
+        disabled: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List configured MCP servers and their latest tool catalogs.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one server's latest durable tool catalog.
+    Tools { id: String },
+    /// Refresh one server's live discovery snapshot.
+    Discover { id: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum McpAuthArg {
+    None,
+    BearerToken,
+}
+
+impl From<McpAuthArg> for McpAuthMode {
+    fn from(value: McpAuthArg) -> Self {
+        match value {
+            McpAuthArg::None => Self::None,
+            McpAuthArg::BearerToken => Self::BearerToken,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum McpProtocolArg {
+    Auto,
+    Modern20260728,
+    Legacy,
+}
+
+impl From<McpProtocolArg> for McpProtocolMode {
+    fn from(value: McpProtocolArg) -> Self {
+        match value {
+            McpProtocolArg::Auto => Self::Auto,
+            McpProtocolArg::Modern20260728 => Self::Modern20260728,
+            McpProtocolArg::Legacy => Self::Legacy,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -483,6 +565,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Run { command } => run_agent(&client, host, token.trim(), command).await?,
         Command::Provider { command } => {
             run_provider(&client, host, token.trim(), command).await?;
+        }
+        Command::Mcp { command } => {
+            run_mcp(&client, host, token.trim(), command).await?;
         }
     }
 
@@ -887,6 +972,129 @@ async fn run_provider(
         }
     }
     Ok(())
+}
+
+async fn run_mcp(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: McpCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        McpCommand::AddHttp {
+            id,
+            name,
+            url,
+            auth,
+            protocol,
+            disabled,
+            json,
+        } => {
+            let auth_mode: McpAuthMode = auth.into();
+            let credential = read_optional_standard_input_credential(
+                auth_mode == McpAuthMode::BearerToken,
+                "MCP bearer credential",
+            )?;
+            let payload = McpConfigurePayload {
+                connection: McpConnection {
+                    contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+                    id,
+                    display_name: name,
+                    transport: McpTransport::StreamableHttp { url },
+                    auth_mode,
+                    protocol_mode: protocol.into(),
+                    enabled: !disabled,
+                },
+                credential,
+            };
+            let response = client
+                .post(format!("{host}/api/v1/mcp/connections"))
+                .bearer_auth(token)
+                .json(&payload)
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let detail = response.text().await?;
+                return Err(format!("MCP setup failed ({status}): {detail}").into());
+            }
+            let mutation: McpMutation = response.json().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}: {} tool(s) discovered",
+                    mutation.connection.id,
+                    mutation.catalog.tools.len()
+                );
+            }
+        }
+        McpCommand::List { json } => {
+            let response: McpListResponse = client
+                .get(format!("{host}/api/v1/mcp/connections"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.connections.is_empty() {
+                println!("No MCP servers configured.");
+            } else {
+                for item in response.connections {
+                    println!(
+                        "{}  {}  {:?}  {} tool(s)",
+                        item.connection.id,
+                        item.connection.display_name,
+                        item.connection.auth_mode,
+                        item.catalog.map_or(0, |catalog| catalog.tools.len())
+                    );
+                }
+            }
+        }
+        McpCommand::Tools { id } => {
+            let catalog: McpToolCatalog = client
+                .get(format!("{host}/api/v1/mcp/connections/{id}/tools"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&catalog)?);
+        }
+        McpCommand::Discover { id } => {
+            let catalog: McpToolCatalog = client
+                .post(format!("{host}/api/v1/mcp/connections/{id}/discover"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}: {} tool(s)", catalog.connection_id, catalog.tools.len());
+        }
+    }
+    Ok(())
+}
+
+fn read_optional_standard_input_credential(
+    required: bool,
+    label: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !required {
+        return Ok(None);
+    }
+    let mut secret = String::new();
+    std::io::stdin().read_to_string(&mut secret)?;
+    let trimmed = secret.trim_end_matches(['\r', '\n']).to_owned();
+    secret.zeroize();
+    if trimmed.is_empty() {
+        return Err(format!("{label} must be supplied on standard input").into());
+    }
+    Ok(Some(trimmed))
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the explicit login command fields.

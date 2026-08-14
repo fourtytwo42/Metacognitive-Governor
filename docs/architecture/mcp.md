@@ -96,6 +96,39 @@ unknown project return a successful JSON-RPC envelope whose tool result has
 `isError: true`, allowing a model client to inspect and correct the call.
 Unexpected storage details are not reflected to the client.
 
+## MCP client foundation
+
+The `mcg-mcp` crate owns secret-free server connection contracts, redacting
+credentials, current stateless Streamable HTTP discovery/call transport, and
+normalized tool catalogs/results. Connection ids are stable and bounded. Public
+HTTP endpoints are rejected unless they use HTTPS; unencrypted HTTP is limited
+to `localhost` or literal loopback addresses. URLs cannot embed credentials or
+fragments. Bearer values live under a separate MCP service in the native OS
+credential store and never enter SQLite, events, API list responses, or CLI
+arguments.
+
+SQLite migration 9 persists connection metadata and the latest deterministic
+tool catalog. Configuration follows a discover-before-commit transaction shape:
+the protected credential is written, live `server/discover` and `tools/list`
+succeed, and then metadata, catalog, and both audit events commit atomically. Any
+client creation, negotiation, discovery, or persistence failure removes the
+newly written credential and leaves no configured connection. Rediscovery keeps
+the prior durable catalog unless a complete replacement succeeds.
+
+Authenticated management endpoints are:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET/POST /api/v1/mcp/connections` | List secret-free connections/catalogs or configure and live-discover one server. |
+| `GET /api/v1/mcp/connections/{id}/tools` | Read the latest durable tool catalog. |
+| `POST /api/v1/mcp/connections/{id}/discover` | Refresh live discovery and atomically replace the catalog. |
+
+The CLI exposes the same foundation through `mcg mcp add-http`, `list`, `tools`,
+and `discover`. The transport client can call a remote tool, but runtime agent
+work cannot yet reach that method: namespaced exposure, lease validation, and
+policy-broker execution must be present first so model output cannot create
+authority by naming an external tool.
+
 ## Qualification and remaining scope
 
 The API contract fixture proves authentication, pre-auth Origin rejection,
@@ -106,13 +139,13 @@ structured status results. A file-backed storage fixture proves atomic reservati
 immutable request-key conflict handling, restart replay, and zero duplicate events.
 Unit fixtures cover loopback-Origin classification and encoded `Mcp-Name` handling.
 
-This is the MCP server foundation, not the completed MCP feature family. Remaining
+This is the MCP server plus HTTP client foundation, not the completed MCP feature family. Remaining
 M6 work includes:
 
-- MCP client configuration, protected credentials, modern/legacy negotiation,
-  tool discovery, namespace isolation, and policy-broker execution by agents;
+- stdio transport and legacy protocol negotiation/interoperability;
+- remote tool namespace isolation and policy-broker execution by agents;
 - expanded MCP run decomposition, independent evaluation, approval-resume,
   completion, and cancellation contracts;
 - request-scoped SSE progress and opt-in subscription streams where useful;
 - interoperability fixtures against representative third-party MCP SDKs and
-  both-platform user-facing configuration/UAT.
+  desktop simple/advanced configuration and both-platform UAT.

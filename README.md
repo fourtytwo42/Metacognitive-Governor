@@ -104,7 +104,16 @@ at `POST /mcp`. The server exposes deterministic status, project, context,
 memory, run-query, and idempotent governed agent-run tools under strict MCP
 2026-07-28 metadata, header, and loopback-Origin validation. See
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
-the remaining MCP client, interoperability, and expanded run-control work.
+the remaining interoperability and expanded run-control work.
+
+MCG can also connect to current stateless Streamable HTTP MCP servers. Use
+`mcg mcp add-http ID NAME URL`; select `--auth bearer-token` and pipe the secret
+on standard input when needed. `mcg mcp list`, `tools`, and `discover` inspect
+the secret-free durable catalog. Public endpoints require HTTPS, credentials are
+stored only in the operating-system credential store, and configuration is not
+committed unless live discovery succeeds. Stdio transport, legacy negotiation,
+agent tool namespaces/policy execution, and the desktop management panel remain
+the next MCP client integration slice.
 
 Start the browser-hosted desktop frontend during UI development:
 

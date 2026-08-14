@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod agents;
+mod mcp;
 mod providers;
 
 pub use agents::{AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, InterfaceRunReceipt};
@@ -329,6 +330,21 @@ BEFORE DELETE ON interface_run_requests BEGIN
 END;
 ";
 
+const MIGRATION_9: &str = r"
+CREATE TABLE IF NOT EXISTS mcp_connections (
+    connection_id TEXT PRIMARY KEY,
+    connection_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mcp_tool_catalogs (
+    connection_id TEXT PRIMARY KEY,
+    catalog_json TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY(connection_id) REFERENCES mcp_connections(connection_id)
+);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -419,6 +435,7 @@ impl SqliteEventStore {
             (6_i64, MIGRATION_6),
             (7_i64, MIGRATION_7),
             (8_i64, MIGRATION_8),
+            (9_i64, MIGRATION_9),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

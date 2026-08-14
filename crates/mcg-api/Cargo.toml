@@ -12,6 +12,7 @@ chrono.workspace = true
 mcg-agents = { path = "../mcg-agents" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
+mcg-mcp = { path = "../mcg-mcp" }
 mcg-projects = { path = "../mcg-projects" }
 mcg-providers = { path = "../mcg-providers" }
 mcg-runtime = { path = "../mcg-runtime" }

@@ -31,6 +31,7 @@ use mcg_domain::{
     TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
+use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
 use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
 };
@@ -39,7 +40,7 @@ use mcg_providers::{
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, MemoryClaimMutation,
+    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, McpMutation, MemoryClaimMutation,
     OAuthLoginStart, OpenAiOAuthMethod, ProjectMutation, ProviderMutation, RuntimeError,
     RuntimeStatus,
 };
@@ -273,6 +274,32 @@ pub struct ProviderListResponse {
     pub providers: Vec<ProviderListItem>,
 }
 
+#[derive(Deserialize)]
+pub struct ConfigureMcpRequest {
+    pub connection: McpConnection,
+    #[serde(default)]
+    pub credential: Option<String>,
+}
+
+impl Drop for ConfigureMcpRequest {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpListItem {
+    pub connection: McpConnection,
+    pub catalog: Option<McpToolCatalog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpListResponse {
+    pub connections: Vec<McpListItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartOpenAiOAuthRequest {
     pub connection_id: String,
@@ -454,6 +481,18 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/providers/{connection_id}/models/{model_id}/probe",
             post(probe_provider_model),
+        )
+        .route(
+            "/api/v1/mcp/connections",
+            get(list_mcp_connections).post(configure_mcp_connection),
+        )
+        .route(
+            "/api/v1/mcp/connections/{connection_id}/tools",
+            get(get_mcp_tools),
+        )
+        .route(
+            "/api/v1/mcp/connections/{connection_id}/discover",
+            post(discover_mcp_connection),
         )
         .route("/api/v1/oauth/openai/start", post(start_openai_oauth))
         .route(
@@ -1041,6 +1080,70 @@ async fn discover_provider(
         .map_err(map_runtime_error)
 }
 
+async fn configure_mcp_connection(
+    State(state): State<ApiState>,
+    Json(mut request): Json<ConfigureMcpRequest>,
+) -> Result<(StatusCode, Json<McpMutation>), ApiError> {
+    let credential = request
+        .credential
+        .take()
+        .map(McpCredential::new)
+        .transpose()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mutation = state
+        .runtime
+        .configure_mcp(request.connection.clone(), credential.as_ref())
+        .await
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(mutation)))
+}
+
+async fn list_mcp_connections(
+    State(state): State<ApiState>,
+) -> Result<Json<McpListResponse>, ApiError> {
+    let connections = state
+        .runtime
+        .mcp_connections()
+        .map_err(map_runtime_error)?
+        .into_iter()
+        .map(|connection| {
+            let catalog = state
+                .runtime
+                .mcp_catalog(&connection.id)
+                .map_err(map_runtime_error)?;
+            Ok(McpListItem {
+                connection,
+                catalog,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Json(McpListResponse { connections }))
+}
+
+async fn get_mcp_tools(
+    State(state): State<ApiState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<McpToolCatalog>, ApiError> {
+    state
+        .runtime
+        .mcp_catalog(&connection_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("MCP catalog {connection_id} was not found")))
+}
+
+async fn discover_mcp_connection(
+    State(state): State<ApiState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<McpToolCatalog>, ApiError> {
+    state
+        .runtime
+        .discover_mcp(&connection_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 async fn refresh_openai_oauth(
     State(state): State<ApiState>,
     Path(connection_id): Path<String>,
@@ -1427,6 +1530,17 @@ fn map_runtime_error(error: RuntimeError) -> ApiError {
             _ => ApiError::bad_gateway(error.to_string()),
         };
     }
+    if let RuntimeError::Mcp(mcp) = &error {
+        return match mcp {
+            McpError::Configuration(_) | McpError::InvalidResponse(_) => {
+                ApiError::bad_request(error.to_string())
+            }
+            McpError::Authentication(_) => ApiError::unprocessable(error.to_string()),
+            McpError::Transport(_) | McpError::Remote { .. } | McpError::Negotiation(_) => {
+                ApiError::bad_gateway(error.to_string())
+            }
+        };
+    }
     if error.is_not_found() {
         ApiError::not_found(error.to_string())
     } else if error.is_invalid_request() {
@@ -1445,6 +1559,10 @@ mod tests {
     use mcg_agents::{ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::AppConfig;
     use mcg_domain::{ArtifactId, EvaluationId, ToolExecutionId, ToolRequestId};
+    use mcg_mcp::{
+        MCP_CONNECTION_CONTRACT_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpProtocolMode,
+        McpTransport,
+    };
     use mcg_providers::{
         BrowserAuthorizationConfig, CHATGPT_CODEX_BASE_URL, CONTRACT_VERSION,
         DeviceAuthorizationConfig, ProviderKind,
@@ -3878,5 +3996,119 @@ form.addEventListener('submit', (event) => {
         let encoded = String::from_utf8(body.to_vec()).expect("UTF-8");
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("token"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercises authenticated configure, discovery, persistence, and listing.
+    async fn mcp_client_configuration_is_authenticated_discovered_and_secret_free() {
+        async fn mcp_fixture(
+            headers: HeaderMap,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let method = body["method"].as_str().expect("method");
+            assert_eq!(
+                headers
+                    .get("mcp-protocol-version")
+                    .and_then(|value| value.to_str().ok()),
+                Some(MCP_PROTOCOL_VERSION)
+            );
+            let result = match method {
+                "server/discover" => serde_json::json!({
+                    "resultType": "complete",
+                    "supportedVersions": [MCP_PROTOCOL_VERSION],
+                    "capabilities": {"tools": {}},
+                    "ttlMs": 300_000,
+                    "serverInfo": {"name": "api-fixture", "version": "1"}
+                }),
+                "tools/list" => serde_json::json!({
+                    "resultType": "complete",
+                    "tools": [{
+                        "name": "fixture_read",
+                        "description": "Read fixture data",
+                        "inputSchema": {"type": "object", "additionalProperties": false}
+                    }],
+                    "serverInfo": {"name": "api-fixture", "version": "1"}
+                }),
+                _ => unreachable!(),
+            };
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": body["id"].clone(),
+                "result": result
+            }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/mcp", post(mcp_fixture)))
+                .await
+                .expect("serve fixture");
+        });
+        let runtime = test_runtime();
+        let app = router(runtime.clone());
+        let connection = McpConnection {
+            contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+            id: "fixture_mcp".into(),
+            display_name: "Fixture MCP".into(),
+            transport: McpTransport::StreamableHttp {
+                url: format!("http://{address}/mcp"),
+            },
+            auth_mode: McpAuthMode::None,
+            protocol_mode: McpProtocolMode::Auto,
+            enabled: true,
+        };
+        let configured = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/mcp/connections"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"connection": connection}).to_string(),
+                    ))
+                    .expect("configure request"),
+            )
+            .await
+            .expect("configure response");
+        assert_eq!(configured.status(), StatusCode::CREATED);
+        assert_eq!(runtime.mcp_connections().expect("connections").len(), 1);
+        assert_eq!(
+            runtime
+                .mcp_catalog("fixture_mcp")
+                .expect("catalog")
+                .expect("present")
+                .tools[0]
+                .name,
+            "fixture_read"
+        );
+
+        let rediscovered = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(
+                    "/api/v1/mcp/connections/fixture_mcp/discover",
+                ))
+                .body(Body::empty())
+                .expect("discover request"),
+            )
+            .await
+            .expect("discover response");
+        assert_eq!(rediscovered.status(), StatusCode::OK);
+
+        let listed = app
+            .oneshot(
+                authorized(Request::get("/api/v1/mcp/connections"))
+                    .body(Body::empty())
+                    .expect("list request"),
+            )
+            .await
+            .expect("list response");
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = listed.into_body().collect().await.expect("body").to_bytes();
+        let list: McpListResponse = serde_json::from_slice(&body).expect("list");
+        assert_eq!(list.connections.len(), 1);
+        let encoded = String::from_utf8(body.to_vec()).expect("UTF-8");
+        assert!(!encoded.contains("credential"));
+        assert!(!encoded.contains("authorization"));
     }
 }
