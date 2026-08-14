@@ -1,28 +1,30 @@
 use std::{io::Read, path::PathBuf, str::FromStr};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
-    ApprovalListResponse, AssembleContextRequest, AttachBrowserSessionRequest,
-    CorrectMemoryClaimRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse,
-    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    NavigateBrowserSessionRequest, OrganizationListResponse, OrganizationMutationResponse,
-    PlanAgentRunRequest, PlanWorkRequest, PlatformSessionHistoryResponse,
-    PlatformSessionListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
-    ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    WakeScheduleRequest,
+    ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
+    AttachBrowserSessionRequest, CorrectMemoryClaimRequest, CreateMemoryClaimRequest,
+    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
+    CreateTaskRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
+    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
+    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
+    TransitionTaskRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
-    MemoryClaimId, NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot,
-    PlatformSession, PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId,
-    ScheduleState, ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope,
-    TaskId, TaskState, WorkItemId,
+    ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId,
+    NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope, TaskId,
+    TaskState, WorkItemId,
 };
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
@@ -35,10 +37,12 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, PlatformBrowserMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
+    OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
 };
 use mcg_tools::{
-    ApprovalRequest, ApprovalState, PersistentBrowserMode, PersistentBrowserObservation,
+    ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
+    PersistentBrowserObservation,
 };
 use serde::Serialize;
 use zeroize::Zeroize;
@@ -175,6 +179,15 @@ enum PlatformCommand {
         project_id: Option<String>,
         #[arg(long)]
         task_id: Option<String>,
+        /// Grant only screen capture, without pointer or keyboard control.
+        #[arg(long)]
+        screen_only: bool,
+        /// Bind a specific platform display identity instead of the primary display.
+        #[arg(long)]
+        display_id: Option<u32>,
+        /// Bind a display-relative region formatted as x,y,width,height.
+        #[arg(long)]
+        region: Option<String>,
         #[arg(long, default_value_t = 3_600)]
         lifetime_seconds: u32,
         #[arg(long)]
@@ -204,6 +217,41 @@ enum PlatformCommand {
     },
     /// Blank owner-visible content and return browser control to MCG.
     Reclaim {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bind the reserved computer session to its immutable display region.
+    AttachComputer {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture the active computer region. PNG bytes are written only when requested.
+    CaptureComputer {
+        id: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a typed JSON action request after revalidating its frame digest.
+    ActComputer {
+        id: String,
+        request: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop MCG observation/input while the local owner uses the computer.
+    HandoffComputer {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Return computer authority to MCG; a new capture is required before input.
+    ReclaimComputer {
         id: String,
         #[arg(long)]
         json: bool,
@@ -908,6 +956,8 @@ async fn run_platform(
                 project_id,
                 task_id,
                 origins,
+                Vec::new(),
+                None,
                 lifetime_seconds,
                 json,
             )
@@ -918,6 +968,9 @@ async fn run_platform(
             session_id,
             project_id,
             task_id,
+            screen_only,
+            display_id,
+            region,
             lifetime_seconds,
             json,
         } => {
@@ -931,6 +984,19 @@ async fn run_platform(
                 project_id,
                 task_id,
                 Vec::new(),
+                if screen_only {
+                    vec![ComputerUseCapability::ScreenRead]
+                } else {
+                    vec![
+                        ComputerUseCapability::ScreenRead,
+                        ComputerUseCapability::Mouse,
+                        ComputerUseCapability::Keyboard,
+                    ]
+                },
+                Some(ComputerUseTarget {
+                    display_id,
+                    region: region.as_deref().map(parse_computer_region).transpose()?,
+                }),
                 lifetime_seconds,
                 json,
             )
@@ -1004,6 +1070,113 @@ async fn run_platform(
                 .await?;
             print_browser_mutation(&mutation, json)?;
         }
+        PlatformCommand::AttachComputer { id, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let mutation: PlatformComputerMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/computer/attach"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_computer_mutation(&mutation, json)?;
+        }
+        PlatformCommand::CaptureComputer { id, output, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let frame: ComputerUseFrame = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/computer/capture"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            write_computer_frame(&frame, output.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&frame)?);
+            } else {
+                println!(
+                    "{}: {}x{} frame {}",
+                    id,
+                    frame.observation.region.width,
+                    frame.observation.region.height,
+                    frame.sha256
+                );
+            }
+        }
+        PlatformCommand::ActComputer {
+            id,
+            request,
+            output,
+            json,
+        } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let request: ApplyComputerActionsRequest =
+                serde_json::from_slice(&std::fs::read(request)?)?;
+            let result: PlatformComputerActionMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/computer/actions"
+                ))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if let Some(execution) = &result.result {
+                write_computer_frame(&execution.frame, output.as_deref())?;
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "{}: executed {} actions; frame {}",
+                    id,
+                    result.batch.action_count,
+                    result
+                        .result
+                        .as_ref()
+                        .map_or("replayed without a new frame", |value| value
+                            .frame
+                            .sha256
+                            .as_str())
+                );
+            }
+        }
+        PlatformCommand::HandoffComputer { id, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let mutation: PlatformComputerMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/computer/handoff"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_computer_mutation(&mutation, json)?;
+        }
+        PlatformCommand::ReclaimComputer { id, json } => {
+            let id = PlatformSessionId::from_str(&id)?;
+            let mutation: PlatformComputerMutation = client
+                .post(format!(
+                    "{host}/api/v1/platform/sessions/{id}/computer/reclaim"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_computer_mutation(&mutation, json)?;
+        }
         PlatformCommand::History { id } => {
             let id = PlatformSessionId::from_str(&id)?;
             let response: PlatformSessionHistoryResponse = client
@@ -1048,6 +1221,36 @@ fn print_browser_mutation(
     Ok(())
 }
 
+fn print_computer_mutation(
+    mutation: &PlatformComputerMutation,
+    json: bool,
+) -> Result<(), serde_json::Error> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(mutation)?);
+    } else {
+        println!(
+            "{}: {:?} (display {}, {}x{})",
+            mutation.session.id,
+            mutation.session.state,
+            mutation.computer.display_id,
+            mutation.computer.region.width,
+            mutation.computer.region.height
+        );
+    }
+    Ok(())
+}
+
+fn write_computer_frame(
+    frame: &ComputerUseFrame,
+    output: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(output) = output {
+        let bytes = STANDARD.decode(&frame.png_base64)?;
+        std::fs::write(output, bytes)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn request_platform_session_cli(
     client: &reqwest::Client,
@@ -1059,6 +1262,8 @@ async fn request_platform_session_cli(
     project_id: Option<String>,
     task_id: Option<String>,
     allowed_origins: Vec<String>,
+    computer_capabilities: Vec<ComputerUseCapability>,
+    computer_target: Option<ComputerUseTarget>,
     lifetime_seconds: u32,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1078,6 +1283,8 @@ async fn request_platform_session_cli(
             task_id: task_id.map(|value| TaskId::from_str(&value)).transpose()?,
             display_name,
             allowed_origins,
+            computer_capabilities,
+            computer_target,
             lifetime_seconds,
         })
         .send()
@@ -1091,6 +1298,19 @@ async fn request_platform_session_cli(
         println!("{}: requested (waiting for executor)", session.id);
     }
     Ok(())
+}
+
+fn parse_computer_region(value: &str) -> Result<ComputerUseRegion, Box<dyn std::error::Error>> {
+    let values = value.split(',').map(str::trim).collect::<Vec<_>>();
+    if values.len() != 4 {
+        return Err("computer region must use x,y,width,height".into());
+    }
+    Ok(ComputerUseRegion {
+        x: values[0].parse()?,
+        y: values[1].parse()?,
+        width: values[2].parse()?,
+        height: values[3].parse()?,
+    })
 }
 
 async fn run_schedule(

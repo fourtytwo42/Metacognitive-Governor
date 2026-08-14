@@ -252,6 +252,9 @@ export interface PlatformCapabilitySnapshot {
 }
 
 export type PlatformSessionKind = "browser" | "computer_use";
+export type ComputerUseCapability = "screen_read" | "mouse" | "keyboard" | "clipboard" | "window_list" | "process_inspect";
+export interface ComputerUseRegion { x: number; y: number; width: number; height: number; }
+export interface ComputerUseTarget { display_id?: number; region?: ComputerUseRegion; }
 export type PlatformSessionState = "requested" | "active" | "handed_off" | "interrupted" | "closed" | "failed";
 export interface PlatformSession {
   schema_version: number;
@@ -264,6 +267,8 @@ export interface PlatformSession {
   task_id?: string;
   display_name: string;
   allowed_origins: string[];
+  computer_capabilities: ComputerUseCapability[];
+  computer_target?: ComputerUseTarget;
   created_at: string;
   updated_at: string;
   expires_at: string;
@@ -288,6 +293,8 @@ export interface CreatePlatformSessionRequest {
   task_id?: string;
   display_name: string;
   allowed_origins: string[];
+  computer_capabilities?: ComputerUseCapability[];
+  computer_target?: ComputerUseTarget;
   lifetime_seconds: number;
 }
 
@@ -306,6 +313,49 @@ export interface PlatformBrowserMutation {
   session: PlatformSession;
   browser: PersistentBrowserObservation;
 }
+export interface ComputerUseObservation {
+  session_id: string;
+  display_id: number;
+  region: ComputerUseRegion;
+  capabilities: ComputerUseCapability[];
+  handed_off: boolean;
+}
+export interface ComputerUseFrame {
+  observation: ComputerUseObservation;
+  sha256: string;
+  media_type: string;
+  png_base64: string;
+  captured_at: string;
+}
+export type ComputerUseAction =
+  | { type: "move"; x: number; y: number }
+  | { type: "click"; x: number; y: number; button: "left" | "middle" | "right" }
+  | { type: "scroll"; x: number; y: number; delta_x: number; delta_y: number }
+  | { type: "type_text"; text: string }
+  | { type: "key"; key: "enter" | "tab" | "escape" | "backspace" | "delete" | "space" | "home" | "end" | "page_up" | "page_down" | "arrow_up" | "arrow_down" | "arrow_left" | "arrow_right" };
+export interface ApplyComputerActionsRequest { batch_id: string; expected_frame_sha256: string; actions: ComputerUseAction[]; }
+export interface ComputerUseBatchResult {
+  prior_frame_sha256: string;
+  actions_executed: number;
+  frame: ComputerUseFrame;
+}
+export interface ComputerActionBatch {
+  id: string;
+  session_id: string;
+  request_hash: string;
+  state: "executing" | "succeeded" | "rejected" | "uncertain";
+  action_count: number;
+  result_frame_sha256?: string;
+  detail: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface PlatformComputerActionMutation {
+  batch: ComputerActionBatch;
+  replayed: boolean;
+  result?: ComputerUseBatchResult;
+}
+export interface PlatformComputerMutation { session: PlatformSession; computer: ComputerUseObservation; }
 
 export interface TaskEventsResponse {
   events: Array<{
@@ -475,6 +525,26 @@ export function handoffBrowserSession(sessionId: string): Promise<PlatformBrowse
 
 export function reclaimBrowserSession(sessionId: string): Promise<PlatformBrowserMutation> {
   return invoke("reclaim_browser_session", { sessionId });
+}
+
+export function attachComputerSession(sessionId: string): Promise<PlatformComputerMutation> {
+  return invoke("attach_computer_session", { sessionId });
+}
+
+export function captureComputerSession(sessionId: string): Promise<ComputerUseFrame> {
+  return invoke("capture_computer_session", { sessionId });
+}
+
+export function applyComputerActions(sessionId: string, request: ApplyComputerActionsRequest): Promise<PlatformComputerActionMutation> {
+  return invoke("apply_computer_actions", { sessionId, request });
+}
+
+export function handoffComputerSession(sessionId: string): Promise<PlatformComputerMutation> {
+  return invoke("handoff_computer_session", { sessionId });
+}
+
+export function reclaimComputerSession(sessionId: string): Promise<PlatformComputerMutation> {
+  return invoke("reclaim_computer_session", { sessionId });
 }
 
 export function createSchedule(request: CreateScheduleRequest): Promise<ScheduleDefinition> {

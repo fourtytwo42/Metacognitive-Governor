@@ -513,6 +513,25 @@ BEFORE DELETE ON platform_session_events BEGIN
 END;
 ";
 
+const MIGRATION_16: &str = r"
+CREATE TABLE IF NOT EXISTS computer_action_batches (
+    batch_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    state TEXT NOT NULL,
+    batch_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES platform_sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS computer_action_batches_session
+    ON computer_action_batches(session_id, created_at, batch_id);
+CREATE TRIGGER IF NOT EXISTS computer_action_batches_no_delete
+BEFORE DELETE ON computer_action_batches BEGIN
+    SELECT RAISE(FAIL, 'computer action batch history is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -614,6 +633,7 @@ impl SqliteEventStore {
             (13_i64, MIGRATION_13),
             (14_i64, MIGRATION_14),
             (15_i64, MIGRATION_15),
+            (16_i64, MIGRATION_16),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

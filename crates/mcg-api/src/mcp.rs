@@ -517,6 +517,25 @@ fn tool_definitions() -> Vec<Value> {
                     "task_id": {"type": "string", "format": "uuid"},
                     "display_name": {"type": "string", "minLength": 1, "maxLength": 256},
                     "allowed_origins": {"type": "array", "items": {"type": "string", "format": "uri", "maxLength": 2048}, "uniqueItems": true, "maxItems": 32},
+                    "computer_capabilities": {"type": "array", "items": {"type": "string", "enum": ["screen_read", "mouse", "keyboard", "clipboard", "window_list", "process_inspect"]}, "uniqueItems": true, "maxItems": 6},
+                    "computer_target": {
+                        "type": "object",
+                        "properties": {
+                            "display_id": {"type": "integer", "minimum": 0},
+                            "region": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "integer", "minimum": 0},
+                                    "y": {"type": "integer", "minimum": 0},
+                                    "width": {"type": "integer", "minimum": 1},
+                                    "height": {"type": "integer", "minimum": 1}
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "additionalProperties": false
+                    },
                     "lifetime_seconds": {"type": "integer", "minimum": 1, "maximum": 86400}
                 },
                 "required": ["session_id", "kind", "display_name", "lifetime_seconds"],
@@ -601,6 +620,41 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["session_id"],
                 "additionalProperties": false
             },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_computer_attach",
+            "title": "Attach an MCG Computer Session",
+            "description": "Bind the reserved immutable display region and capability grant before MCG control becomes active.",
+            "inputSchema": session_id_schema(),
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_computer_capture",
+            "title": "Capture an MCG Computer Frame",
+            "description": "Capture the active MCG-owned display region. The image digest must be supplied unchanged to any later input batch.",
+            "inputSchema": session_id_schema(),
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_computer_actions",
+            "title": "Apply MCG Computer Actions",
+            "description": "Apply a bounded typed input batch only while the live pixels still match the observed frame digest. Keyboard input requires an earlier in-region click in the same batch.",
+            "inputSchema": computer_actions_schema(),
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true}
+        }),
+        json!({
+            "name": "mcg_computer_handoff",
+            "title": "Hand Computer Control to Local Owner",
+            "description": "Stop all MCG observation and input while the local owner controls the bound desktop.",
+            "inputSchema": session_id_schema(),
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_computer_reclaim",
+            "title": "Return Computer Control to MCG",
+            "description": "Return authority to MCG without reading owner activity. A fresh capture is required before any new input.",
+            "inputSchema": session_id_schema(),
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
         }),
         json!({
@@ -732,6 +786,42 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
+fn session_id_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"session_id": {"type": "string", "format": "uuid"}},
+        "required": ["session_id"],
+        "additionalProperties": false
+    })
+}
+
+fn computer_actions_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "session_id": {"type": "string", "format": "uuid"},
+            "batch_id": {"type": "string", "format": "uuid"},
+            "expected_frame_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "actions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"type": {"const": "move"}, "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}}, "required": ["type", "x", "y"], "additionalProperties": false},
+                        {"type": "object", "properties": {"type": {"const": "click"}, "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}, "button": {"type": "string", "enum": ["left", "middle", "right"]}}, "required": ["type", "x", "y", "button"], "additionalProperties": false},
+                        {"type": "object", "properties": {"type": {"const": "scroll"}, "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}, "delta_x": {"type": "integer", "minimum": -100, "maximum": 100}, "delta_y": {"type": "integer", "minimum": -100, "maximum": 100}}, "required": ["type", "x", "y", "delta_x", "delta_y"], "additionalProperties": false},
+                        {"type": "object", "properties": {"type": {"const": "type_text"}, "text": {"type": "string", "maxLength": 4096}}, "required": ["type", "text"], "additionalProperties": false},
+                        {"type": "object", "properties": {"type": {"const": "key"}, "key": {"type": "string", "enum": ["enter", "tab", "escape", "backspace", "delete", "space", "home", "end", "page_up", "page_down", "arrow_up", "arrow_down", "arrow_left", "arrow_right"]}}, "required": ["type", "key"], "additionalProperties": false}
+                    ]
+                }
+            }
+        },
+        "required": ["session_id", "batch_id", "expected_frame_sha256", "actions"],
+        "additionalProperties": false
+    })
+}
+
 async fn call_tool(
     state: &ApiState,
     params: &serde_json::Map<String, Value>,
@@ -774,6 +864,11 @@ async fn call_tool(
         "mcg_browser_navigate" => browser_navigate(state, &arguments).await,
         "mcg_browser_handoff" => browser_handoff(state, &arguments).await,
         "mcg_browser_reclaim" => browser_reclaim(state, &arguments).await,
+        "mcg_computer_attach" => computer_attach(state, &arguments).await,
+        "mcg_computer_capture" => computer_capture(state, &arguments).await,
+        "mcg_computer_actions" => computer_actions(state, &arguments).await,
+        "mcg_computer_handoff" => computer_handoff(state, &arguments).await,
+        "mcg_computer_reclaim" => computer_reclaim(state, &arguments).await,
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -828,6 +923,8 @@ fn platform_request(
             task_id: request.task_id,
             display_name: request.display_name,
             allowed_origins: request.allowed_origins,
+            computer_capabilities: request.computer_capabilities,
+            computer_target: request.computer_target,
             lifetime_seconds: request.lifetime_seconds,
         },
         Utc::now(),
@@ -993,6 +1090,196 @@ fn browser_result<T: serde::Serialize>(
     }
 }
 
+async fn computer_attach(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Some(request) = computer_session_arguments(arguments) else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Computer session_id is invalid",
+        ));
+    };
+    computer_result(
+        state
+            .runtime
+            .attach_computer_session(request.session_id, Utc::now())
+            .await,
+        "attach",
+    )
+}
+
+async fn computer_capture(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Some(request) = computer_session_arguments(arguments) else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Computer session_id is invalid",
+        ));
+    };
+    match state
+        .runtime
+        .capture_computer_session(request.session_id)
+        .await
+    {
+        Ok(frame) => {
+            let structured = json!({"frame": frame_metadata(&frame)});
+            computer_frame_success(&frame, &structured)
+        }
+        Err(error) => Ok(computer_error(&error, "capture")),
+    }
+}
+
+async fn computer_actions(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<ComputerActionsArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Computer action arguments do not match the advertised schema",
+        ));
+    };
+    match state
+        .runtime
+        .apply_computer_actions(
+            request.batch_id,
+            request.session_id,
+            &request.expected_frame_sha256,
+            &request.actions,
+        )
+        .await
+    {
+        Ok(mutation) => match &mutation.result {
+            Some(result) => {
+                let structured = json!({
+                    "batch": mutation.batch,
+                    "replayed": mutation.replayed,
+                    "prior_frame_sha256": result.prior_frame_sha256,
+                    "actions_executed": result.actions_executed,
+                    "frame": frame_metadata(&result.frame)
+                });
+                computer_frame_success(&result.frame, &structured)
+            }
+            None => tool_success(Ok(json!({
+                "batch": mutation.batch,
+                "replayed": mutation.replayed,
+                "result": null
+            }))),
+        },
+        Err(error) => Ok(computer_error(&error, "apply actions to")),
+    }
+}
+
+async fn computer_handoff(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Some(request) = computer_session_arguments(arguments) else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Computer session_id is invalid",
+        ));
+    };
+    computer_result(
+        state
+            .runtime
+            .handoff_computer_session(request.session_id, Utc::now())
+            .await,
+        "hand off",
+    )
+}
+
+async fn computer_reclaim(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Some(request) = computer_session_arguments(arguments) else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Computer session_id is invalid",
+        ));
+    };
+    computer_result(
+        state
+            .runtime
+            .reclaim_computer_session(request.session_id, Utc::now())
+            .await,
+        "reclaim",
+    )
+}
+
+fn computer_session_arguments(
+    arguments: &serde_json::Map<String, Value>,
+) -> Option<BrowserSessionArguments> {
+    serde_json::from_value(Value::Object(arguments.clone())).ok()
+}
+
+fn computer_result<T: serde::Serialize>(
+    result: Result<T, mcg_runtime::RuntimeError>,
+    operation: &str,
+) -> Result<Value, RpcFailure> {
+    match result {
+        Ok(value) => tool_success(serde_json::to_value(value)),
+        Err(error) => Ok(computer_error(&error, operation)),
+    }
+}
+
+fn computer_error(error: &mcg_runtime::RuntimeError, operation: &str) -> Value {
+    if error.is_not_found() {
+        tool_error(
+            "session_not_found",
+            "The requested computer session is not known to MCG",
+        )
+    } else if error.is_invalid_request() {
+        tool_error(
+            "invalid_state",
+            &format!("MCG could not {operation} the computer in its current authority state"),
+        )
+    } else {
+        tool_error(
+            "runtime_error",
+            &format!("MCG could not {operation} the computer"),
+        )
+    }
+}
+
+fn frame_metadata(frame: &mcg_tools::ComputerUseFrame) -> Value {
+    json!({
+        "observation": frame.observation,
+        "sha256": frame.sha256,
+        "media_type": frame.media_type,
+        "captured_at": frame.captured_at,
+    })
+}
+
+fn computer_frame_success(
+    frame: &mcg_tools::ComputerUseFrame,
+    structured_content: &Value,
+) -> Result<Value, RpcFailure> {
+    let text = serde_json::to_string_pretty(&structured_content).map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INTERNAL_ERROR,
+            "MCG could not serialize the computer result",
+        )
+    })?;
+    Ok(with_server_info(json!({
+        "resultType": "complete",
+        "content": [
+            {"type": "text", "text": text},
+            {"type": "image", "data": frame.png_base64, "mimeType": frame.media_type}
+        ],
+        "structuredContent": structured_content,
+        "isError": false,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlatformRequestArguments {
@@ -1005,6 +1292,10 @@ struct PlatformRequestArguments {
     display_name: String,
     #[serde(default)]
     allowed_origins: Vec<String>,
+    #[serde(default)]
+    computer_capabilities: Vec<mcg_domain::ComputerUseCapability>,
+    #[serde(default)]
+    computer_target: Option<mcg_domain::ComputerUseTarget>,
     lifetime_seconds: u32,
 }
 
@@ -1027,6 +1318,15 @@ struct BrowserAttachArguments {
 struct BrowserNavigateArguments {
     session_id: PlatformSessionId,
     url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComputerActionsArguments {
+    session_id: PlatformSessionId,
+    batch_id: mcg_domain::ComputerActionBatchId,
+    expected_frame_sha256: String,
+    actions: Vec<mcg_tools::ComputerUseAction>,
 }
 
 #[derive(Debug, Deserialize)]

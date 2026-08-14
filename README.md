@@ -109,7 +109,13 @@ session UUID makes uncertain request retries idempotent across REST, CLI,
 desktop, and MCP. New records remain `requested` until a concrete executor is
 attached; daemon restart changes any live authority to `interrupted` rather than
 silently resuming control. `list`, `history`, and `close` retain the complete
-lifecycle. Persistent browser execution and owner handoff are the next M8 layer.
+lifecycle. The persistent browser and bounded computer executor now share that
+custody model. Computer actions are confined to an immutable display region and
+explicit screen/mouse/keyboard grants, require a freshly matching screenshot
+digest, and use caller-owned durable batch IDs. A daemon crash converts a claimed
+but unfinished batch to `uncertain` and never automatically repeats host input.
+The qualified Linux path currently requires an X11 owner-session `DISPLAY`;
+headless Linux and unqualified Wayland sessions report the capability unavailable.
 
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can
@@ -118,6 +124,9 @@ only legal start/cancel controls and load ordered event history plus governed to
 audit from SQLite rather than reconstructing progress in browser state. Simple mode
 summarizes objective outcome, checks, tool runs, and artifacts; advanced mode shows
 the full event timeline, verification methods, resources, and immutable hashes.
+Developer and qualification instances can isolate a second loopback daemon with
+`MCG_BIND_ADDRESS` and compile a matching desktop with `MCG_DAEMON_URL`; production
+defaults remain `127.0.0.1:7777`, and the API still rejects non-loopback binding.
 “Open folder” uses a native
 Windows/Linux picker, discovers the repository through the daemon, and attaches
 the resulting durable project identity to the task; previously discovered folders

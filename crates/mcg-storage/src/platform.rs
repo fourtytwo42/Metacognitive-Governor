@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, Utc};
 use mcg_domain::{
-    PLATFORM_SCHEMA_VERSION, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent,
-    PlatformSessionEventId, PlatformSessionId, PlatformSessionOwner, PlatformSessionState,
+    ComputerActionBatch, ComputerActionBatchId, ComputerActionBatchState, PLATFORM_SCHEMA_VERSION,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionEventId,
+    PlatformSessionId, PlatformSessionKind, PlatformSessionOwner, PlatformSessionState,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -14,6 +15,160 @@ use crate::{SqliteEventStore, StorageError};
 const MAX_SESSION_LIFETIME: Duration = Duration::hours(24);
 
 impl SqliteEventStore {
+    /// Claims a caller-owned computer input batch before any host input occurs.
+    /// Exact identity replay returns the existing disposition without re-execution.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, authority, conflicting replay, or storage failure.
+    pub fn claim_computer_action_batch(
+        &mut self,
+        batch: &ComputerActionBatch,
+    ) -> Result<(ComputerActionBatch, bool), StorageError> {
+        validate_computer_action_batch(batch)?;
+        if let Some(existing) = self.computer_action_batch(batch.id)? {
+            if existing.request_hash == batch.request_hash {
+                return Ok((existing, false));
+            }
+            return Err(StorageError::Conflict(format!(
+                "computer action batch {} already exists with a different request",
+                batch.id
+            )));
+        }
+        let session = self
+            .platform_session(batch.session_id)?
+            .ok_or(StorageError::PlatformSessionNotFound(batch.session_id))?;
+        if session.kind != PlatformSessionKind::ComputerUse
+            || session.state != PlatformSessionState::Active
+            || session.owner != PlatformSessionOwner::Mcg
+        {
+            return Err(StorageError::InvalidData(
+                "computer action batches require an active MCG-owned computer session".into(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO computer_action_batches(
+                batch_id, session_id, request_hash, state, batch_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                batch.id.to_string(),
+                batch.session_id.to_string(),
+                batch.request_hash,
+                enum_json(&batch.state)?,
+                serde_json::to_string(batch)?,
+                batch.created_at.to_rfc3339(),
+                batch.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok((batch.clone(), true))
+    }
+
+    /// Loads one durable input-batch disposition.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot be read or stored JSON is invalid.
+    pub fn computer_action_batch(
+        &self,
+        batch_id: ComputerActionBatchId,
+    ) -> Result<Option<ComputerActionBatch>, StorageError> {
+        self.read_optional_json(
+            "SELECT batch_json FROM computer_action_batches WHERE batch_id = ?1",
+            &batch_id.to_string(),
+        )
+    }
+
+    /// Commits the terminal disposition of a previously claimed batch.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid transition, unknown batch, or storage failure.
+    pub fn finish_computer_action_batch(
+        &mut self,
+        batch_id: ComputerActionBatchId,
+        state: ComputerActionBatchState,
+        result_frame_sha256: Option<String>,
+        detail: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ComputerActionBatch, StorageError> {
+        if state == ComputerActionBatchState::Executing
+            || detail.trim().is_empty()
+            || detail.len() > 512
+        {
+            return Err(StorageError::InvalidData(
+                "invalid terminal computer action batch disposition".into(),
+            ));
+        }
+        let mut batch = self
+            .computer_action_batch(batch_id)?
+            .ok_or_else(|| StorageError::InvalidData("computer action batch not found".into()))?;
+        if batch.state != ComputerActionBatchState::Executing {
+            if batch.state == state {
+                return Ok(batch);
+            }
+            return Err(StorageError::Conflict(
+                "computer action batch already has a terminal disposition".into(),
+            ));
+        }
+        if now < batch.updated_at {
+            return Err(StorageError::InvalidData(
+                "computer action batch completion precedes its claim".into(),
+            ));
+        }
+        validate_optional_digest(result_frame_sha256.as_deref())?;
+        batch.state = state;
+        batch.result_frame_sha256 = result_frame_sha256;
+        detail.trim().clone_into(&mut batch.detail);
+        batch.updated_at = now;
+        self.connection.execute(
+            "UPDATE computer_action_batches SET state = ?1, batch_json = ?2, updated_at = ?3
+             WHERE batch_id = ?4 AND state = 'executing'",
+            params![
+                enum_json(&batch.state)?,
+                serde_json::to_string(&batch)?,
+                batch.updated_at.to_rfc3339(),
+                batch.id.to_string(),
+            ],
+        )?;
+        Ok(batch)
+    }
+
+    /// Converts crash-interrupted batches to an explicit non-replayable state.
+    ///
+    /// # Errors
+    /// Returns an error when durable batches cannot be decoded or atomically updated.
+    pub fn recover_computer_action_batches(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT batch_json FROM computer_action_batches WHERE state = 'executing'")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut batches = rows
+            .map(|row| {
+                serde_json::from_str::<ComputerActionBatch>(&row?).map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let transaction = self.connection.transaction()?;
+        for batch in &mut batches {
+            batch.state = ComputerActionBatchState::Uncertain;
+            batch.detail = "daemon restart interrupted a claimed computer input batch".into();
+            batch.updated_at = now.max(batch.updated_at);
+            transaction.execute(
+                "UPDATE computer_action_batches SET state = 'uncertain', batch_json = ?1, updated_at = ?2
+                 WHERE batch_id = ?3 AND state = 'executing'",
+                params![
+                    serde_json::to_string(batch)?,
+                    batch.updated_at.to_rfc3339(),
+                    batch.id.to_string(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        u64::try_from(batches.len()).map_err(|_| {
+            StorageError::InvalidData("computer action recovery count overflow".into())
+        })
+    }
+
     /// Records a privacy-safe immutable snapshot, deduplicating identical observations.
     ///
     /// # Errors
@@ -325,6 +480,40 @@ fn validate_snapshot(snapshot: &PlatformCapabilitySnapshot) -> Result<(), Storag
     Ok(())
 }
 
+fn validate_computer_action_batch(batch: &ComputerActionBatch) -> Result<(), StorageError> {
+    if batch.schema_version != PLATFORM_SCHEMA_VERSION
+        || batch.state != ComputerActionBatchState::Executing
+        || batch.action_count == 0
+        || batch.action_count > 32
+        || batch.result_frame_sha256.is_some()
+        || !batch.detail.is_empty()
+        || batch.created_at != batch.updated_at
+    {
+        return Err(StorageError::InvalidData(
+            "invalid new computer action batch".into(),
+        ));
+    }
+    validate_digest(&batch.request_hash)
+}
+
+fn validate_digest(digest: &str) -> Result<(), StorageError> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "computer action digest must be lowercase SHA-256".into(),
+        ))
+    }
+}
+
+fn validate_optional_digest(digest: Option<&str>) -> Result<(), StorageError> {
+    digest.map_or(Ok(()), validate_digest)
+}
+
 fn validate_new_session(session: &PlatformSession) -> Result<(), StorageError> {
     let valid_hash = session.definition_hash.len() == 64
         && session
@@ -356,6 +545,36 @@ fn validate_new_session(session: &PlatformSession) -> Result<(), StorageError> {
                 "platform session origins must be unique".into(),
             ));
         }
+    }
+    let unique_capabilities = session
+        .computer_capabilities
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if unique_capabilities.len() != session.computer_capabilities.len() {
+        return Err(StorageError::InvalidData(
+            "computer-use capabilities must be unique".into(),
+        ));
+    }
+    match session.kind {
+        PlatformSessionKind::Browser
+            if !session.computer_capabilities.is_empty() || session.computer_target.is_some() =>
+        {
+            return Err(StorageError::InvalidData(
+                "browser sessions cannot contain computer-use grants".into(),
+            ));
+        }
+        PlatformSessionKind::ComputerUse
+            if !session.allowed_origins.is_empty()
+                || session.computer_capabilities.is_empty()
+                || session.computer_target.is_none() =>
+        {
+            return Err(StorageError::InvalidData(
+                "computer-use sessions require capabilities and a target, without browser origins"
+                    .into(),
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -502,8 +721,9 @@ fn enum_json<T: serde::Serialize>(value: &T) -> Result<String, StorageError> {
 mod tests {
     use super::*;
     use mcg_domain::{
-        PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
-        PlatformCapabilitySnapshotId, PlatformSessionKind,
+        ComputerUseCapability, ComputerUseTarget, PlatformCapability,
+        PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshotId,
+        PlatformSessionKind,
     };
 
     fn session(now: DateTime<Utc>) -> PlatformSession {
@@ -518,6 +738,8 @@ mod tests {
             task_id: None,
             display_name: "Research session".into(),
             allowed_origins: vec!["https://example.com".into()],
+            computer_capabilities: Vec::new(),
+            computer_target: None,
             created_at: now,
             updated_at: now,
             expires_at: now + Duration::hours(1),
@@ -686,5 +908,88 @@ mod tests {
             history[1].reason,
             "bounded platform session lifetime expired"
         );
+    }
+
+    #[test]
+    fn computer_action_batches_are_idempotent_and_restart_uncertain() {
+        let now = Utc::now();
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = temporary.path().join("computer-restart.sqlite3");
+        let mut store = SqliteEventStore::open(&database).expect("store");
+        let mut computer = session(now);
+        computer.kind = PlatformSessionKind::ComputerUse;
+        computer.allowed_origins.clear();
+        computer.computer_capabilities = vec![ComputerUseCapability::ScreenRead];
+        computer.computer_target = Some(ComputerUseTarget::default());
+        store
+            .create_platform_session(&computer, "request computer")
+            .expect("create");
+        store
+            .transition_platform_session(
+                computer.id,
+                PlatformSessionState::Active,
+                "attach computer",
+                now,
+            )
+            .expect("activate");
+        let batch = ComputerActionBatch {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: ComputerActionBatchId::new(),
+            session_id: computer.id,
+            request_hash: "c".repeat(64),
+            state: ComputerActionBatchState::Executing,
+            action_count: 1,
+            result_frame_sha256: None,
+            detail: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        assert!(store.claim_computer_action_batch(&batch).expect("claim").1);
+        assert!(!store.claim_computer_action_batch(&batch).expect("replay").1);
+        let mut completed = batch.clone();
+        completed.id = ComputerActionBatchId::new();
+        completed.request_hash = "e".repeat(64);
+        store
+            .claim_computer_action_batch(&completed)
+            .expect("claim completed fixture");
+        let completed_request = completed.clone();
+        let completed = store
+            .finish_computer_action_batch(
+                completed.id,
+                ComputerActionBatchState::Succeeded,
+                Some("f".repeat(64)),
+                "completed",
+                now + Duration::milliseconds(500),
+            )
+            .expect("finish");
+        assert_eq!(completed.state, ComputerActionBatchState::Succeeded);
+        assert_eq!(
+            store
+                .claim_computer_action_batch(&completed_request)
+                .expect("completed replay")
+                .0
+                .state,
+            ComputerActionBatchState::Succeeded
+        );
+        drop(store);
+        let mut store = SqliteEventStore::open(&database).expect("reopen after crash");
+        assert_eq!(
+            store
+                .recover_computer_action_batches(now + Duration::seconds(1))
+                .expect("recover"),
+            1
+        );
+        let recovered = store
+            .computer_action_batch(batch.id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(recovered.state, ComputerActionBatchState::Uncertain);
+        assert!(!store.claim_computer_action_batch(&batch).expect("replay").1);
+        let mut conflict = batch;
+        conflict.request_hash = "d".repeat(64);
+        assert!(matches!(
+            store.claim_computer_action_batch(&conflict),
+            Err(StorageError::Conflict(_))
+        ));
     }
 }

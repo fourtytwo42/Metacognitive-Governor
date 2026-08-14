@@ -273,10 +273,7 @@ impl PersistentBrowserManager {
                 "browser navigation is outside the session origin grant".into(),
             ));
         }
-        live.page
-            .goto(target.as_str())
-            .await
-            .map_err(|error| ToolError::Execution(format!("navigate browser page: {error}")))?;
+        navigate_and_wait(&live.page, target.as_str(), "navigate browser page").await?;
         let observation = observe(session_id, live).await?;
         let final_url = Url::parse(&observation.safe_url)
             .map_err(|_| ToolError::Execution("browser returned an invalid final URL".into()))?;
@@ -284,9 +281,12 @@ impl PersistentBrowserManager {
             .allowed_origins
             .contains(&final_url.origin().ascii_serialization())
         {
-            live.page.goto("about:blank").await.map_err(|error| {
-                ToolError::Execution(format!("clear disallowed browser redirect: {error}"))
-            })?;
+            navigate_and_wait(
+                &live.page,
+                "about:blank",
+                "clear disallowed browser redirect",
+            )
+            .await?;
             return Err(ToolError::Execution(
                 "cross-origin browser redirect was blocked".into(),
             ));
@@ -337,9 +337,7 @@ impl PersistentBrowserManager {
                 "browser session is not handed to its local owner".into(),
             ));
         }
-        live.page.goto("about:blank").await.map_err(|error| {
-            ToolError::Execution(format!("blank browser before reclaim: {error}"))
-        })?;
+        navigate_and_wait(&live.page, "about:blank", "blank browser before reclaim").await?;
         live.handed_off = false;
         observe(session_id, live).await
     }
@@ -416,9 +414,11 @@ async fn spawn_request_interceptor(
                 .await
                 .map(|_| ())
             };
-            if result.is_err() {
-                break;
-            }
+            // A request can become stale between the paused event and its CDP
+            // disposition (notably the initial about:blank document). It is
+            // already paused and therefore fails closed; keep the interceptor
+            // alive so one stale request cannot strand all later navigation.
+            let _ = result;
         }
     });
     Ok((intercept_task, denied_requests))
@@ -467,6 +467,42 @@ async fn observe(
         handed_off: live.handed_off,
         denied_requests: live.denied_requests.load(Ordering::SeqCst),
     })
+}
+
+async fn navigate_and_wait(page: &Page, url: &str, operation: &str) -> Result<(), ToolError> {
+    page.goto(url)
+        .await
+        .map_err(|error| ToolError::Execution(format!("{operation}: {error}")))?;
+    // `goto` acknowledges the CDP navigation command before the replacement
+    // document is consistently observable on every supported Chromium build.
+    // Poll the document itself instead of relying on a lifecycle event that is
+    // not delivered reliably while Fetch interception is active.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    for _ in 0..100 {
+        let state = page
+            .evaluate("({url: location.href, ready: document.readyState})")
+            .await
+            .ok()
+            .and_then(|evaluation| evaluation.into_value::<NavigationState>().ok());
+        if state.is_some_and(|state| {
+            matches!(state.ready.as_str(), "interactive" | "complete")
+                && if url == "about:blank" {
+                    state.url == "about:blank"
+                } else {
+                    state.url.starts_with("http://") || state.url.starts_with("https://")
+                }
+        }) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Err(ToolError::TimedOut)
+}
+
+#[derive(Deserialize)]
+struct NavigationState {
+    url: String,
+    ready: String,
 }
 
 fn canonical_origins(origins: &[String]) -> Result<BTreeSet<String>, ToolError> {

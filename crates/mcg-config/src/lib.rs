@@ -59,7 +59,8 @@ fn default_data_directory() -> PathBuf {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            bind_address: "127.0.0.1:7777".to_owned(),
+            bind_address: std::env::var("MCG_BIND_ADDRESS")
+                .unwrap_or_else(|_| "127.0.0.1:7777".to_owned()),
             autonomy: AutonomyPreset::Autonomous,
             advanced_mode: false,
             data_directory: default_data_directory(),

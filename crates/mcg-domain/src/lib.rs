@@ -71,6 +71,7 @@ domain_id!(SchedulerNotificationId);
 domain_id!(PlatformCapabilitySnapshotId);
 domain_id!(PlatformSessionId);
 domain_id!(PlatformSessionEventId);
+domain_id!(ComputerActionBatchId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.
@@ -235,6 +236,58 @@ pub enum PlatformSessionOwner {
     LocalOwner,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerUseCapability {
+    ScreenRead,
+    Mouse,
+    Keyboard,
+    Clipboard,
+    WindowList,
+    ProcessInspect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerUseRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerUseTarget {
+    /// Platform display identity. `None` resolves to the primary display at attach time.
+    #[serde(default)]
+    pub display_id: Option<u32>,
+    /// Display-relative bounds. `None` binds the complete selected display.
+    #[serde(default)]
+    pub region: Option<ComputerUseRegion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerActionBatchState {
+    Executing,
+    Succeeded,
+    Rejected,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerActionBatch {
+    pub schema_version: u16,
+    pub id: ComputerActionBatchId,
+    pub session_id: PlatformSessionId,
+    pub request_hash: String,
+    pub state: ComputerActionBatchState,
+    pub action_count: u16,
+    pub result_frame_sha256: Option<String>,
+    pub detail: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformSession {
     pub schema_version: u16,
@@ -247,6 +300,10 @@ pub struct PlatformSession {
     pub task_id: Option<TaskId>,
     pub display_name: String,
     pub allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub computer_capabilities: Vec<ComputerUseCapability>,
+    #[serde(default)]
+    pub computer_target: Option<ComputerUseTarget>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,

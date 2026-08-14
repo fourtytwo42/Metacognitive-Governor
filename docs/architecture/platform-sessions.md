@@ -1,6 +1,6 @@
 # Platform Capabilities And Sessions
 
-- Status: M8 durable authority and persistent browser executor implemented.
+- Status: M8 durable authority, persistent browser, and bounded computer executor implemented.
 - Contract version: `PLATFORM_SCHEMA_VERSION = 1`.
 - Date: 2026-08-14.
 
@@ -34,8 +34,10 @@ never promoted merely because a future feature is planned.
 ## Durable session identity
 
 Browser and computer-use reservations have a caller-owned UUID and a
-server-generated SHA-256 hash of the exact definition. The definition binds kind,
+server-generated SHA-256 hash of the exact definition. Browser definitions bind
 optional project/task scope, display name, allowed origins, and bounded lifetime.
+Computer definitions instead bind the display/region target and explicit
+capabilities; browser hashes remain byte-compatible with the original contract.
 An exact retry returns the existing record. Reusing the UUID for different input
 is a conflict.
 
@@ -96,11 +98,40 @@ while in control. Closing or expiring a session terminates Chromium and removes
 its isolated profile. On daemon startup, stale profile directories are removed
 after live durable records have been interrupted.
 
+## Computer-use executor
+
+Computer attachment resolves either the primary display or one explicit display
+identifier and permanently confines the session to that display-relative region.
+Every grant includes `screen_read`; `mouse` and `keyboard` are separate. Clipboard,
+window enumeration, and process inspection are advertised as unavailable until an
+equally bounded implementation exists. Input supports typed move, click, scroll,
+text, and allowlisted-key actions only. Keyboard input requires an earlier click
+inside the region in the same batch, and every coordinate is revalidated.
+
+Capture returns a bounded PNG and SHA-256 digest. Immediately before input, the
+executor captures again under the same manager lock and requires an exact digest
+match. Changed pixels reject the batch without input. Handoff blocks capture and
+input; reclaim returns authority without automatically reading the owner's screen.
+
+Each input request has a caller-owned batch UUID. Migration 16 durably claims the
+request hash before host input and records `executing`, `succeeded`, `rejected`, or
+`uncertain`. Exact successful retries are observation-only; changed UUID reuse is a
+conflict. A crash after claim can leave the side effect unknowable, so startup
+converts `executing` to `uncertain` and never automatically replays it. Request
+hashes and durable records contain action structure but never typed text or pixels.
+
+Windows uses the native capture/input backends. The initially qualified Linux path
+is an owner-session X11 display with `DISPLAY` available to the daemon; a headless
+daemon truthfully reports computer use unavailable, and Wayland input remains
+unqualified. This limitation must be visible in packaging and release notes until
+native Wayland support passes the same safety and UAT gates.
+
 ## Storage and interfaces
 
 SQLite migration 15 adds immutable capability snapshots, current session
-projections, and immutable ordered session events. Creation, transition, and
-restart recovery are atomic.
+projections, and immutable ordered session events. Migration 16 adds the durable,
+non-deletable computer input ledger. Creation, transition, and restart recovery are
+atomic.
 
 The same contract is exposed through:
 
@@ -109,13 +140,14 @@ The same contract is exposed through:
 - native Tauri commands and the Computer & Browser desktop dashboard; and
 - MCP tools `mcg_platform_capabilities`, `mcg_platform_sessions`,
   `mcg_platform_request`, `mcg_platform_close`, `mcg_browser_attach`,
-  `mcg_browser_navigate`, `mcg_browser_handoff`, and `mcg_browser_reclaim`.
+  `mcg_browser_navigate`, `mcg_browser_handoff`, `mcg_browser_reclaim`, and the
+  `mcg_computer_attach/capture/actions/handoff/reclaim` family.
 
 The OpenAI-compatible provider endpoints intentionally remain provider APIs and
 do not duplicate host-control management semantics.
 
 ## Next dependency
 
-Computer use, Sites, and typed SSH reuse this authority contract rather than
-inventing separate lifecycle rules. Visible browser handoff and restart behavior
-must also pass native Windows and Linux UAT before M8 is complete.
+Sites and typed SSH reuse this authority contract rather than inventing separate
+lifecycle rules. Computer control still requires full native Windows/Linux UAT and
+policy-broker integration before its M8 exit evidence is complete.

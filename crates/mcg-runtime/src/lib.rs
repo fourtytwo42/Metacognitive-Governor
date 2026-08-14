@@ -24,14 +24,16 @@ use mcg_agents::{
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
-    AgentInstanceId, AgentLeaseId, ApprovalId, LeaseId, MemoryClaimId, NotificationSeverity,
-    PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
-    PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
-    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
-    PlatformSessionOwner, PlatformSessionState, ProjectId, RunId, ScheduleDefinition, ScheduleId,
-    ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope, TaskId,
-    TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
+    ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, LeaseId, MemoryClaimId,
+    NotificationSeverity, PLATFORM_SCHEMA_VERSION, PlatformCapability,
+    PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
+    PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, ProjectId, RunId,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -59,14 +61,16 @@ use mcg_storage::{
 pub use mcg_storage::{AgentTurnCommit, ScheduleClaim, ScheduleWakeMutation};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
-    BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ExecutionLease,
-    ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor, HttpExecutor,
-    InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor, PersistentBrowserManager,
-    PersistentBrowserMode, PersistentBrowserObservation, ProcessExecutor, ProcessOptions,
-    ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument, ResearchExecutor,
-    SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError,
-    ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
-    VerificationEvidence, browser_runtime_available,
+    BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ComputerUseAction,
+    ComputerUseBatchResult, ComputerUseFrame, ComputerUseManager, ComputerUseObservation,
+    ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor,
+    HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
+    PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation, ProcessExecutor,
+    ProcessOptions, ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument,
+    ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink,
+    ToolBroker, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest,
+    ToolRequestKind, VerificationEvidence, browser_runtime_available,
+    computer_use_runtime_available,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -90,6 +94,7 @@ pub struct RuntimeStatus {
     pub recovered_schedule_occurrences: u64,
     pub recovered_platform_sessions: u64,
     pub expired_platform_sessions: u64,
+    pub recovered_computer_action_batches: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +106,10 @@ pub struct PlatformSessionRequest {
     pub display_name: String,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub computer_capabilities: Vec<ComputerUseCapability>,
+    #[serde(default)]
+    pub computer_target: Option<ComputerUseTarget>,
     pub lifetime_seconds: u32,
 }
 
@@ -114,6 +123,19 @@ pub struct PlatformSessionCreateResult {
 pub struct PlatformBrowserMutation {
     pub session: PlatformSession,
     pub browser: PersistentBrowserObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformComputerMutation {
+    pub session: PlatformSession,
+    pub computer: ComputerUseObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformComputerActionMutation {
+    pub batch: ComputerActionBatch,
+    pub replayed: bool,
+    pub result: Option<ComputerUseBatchResult>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -510,8 +532,10 @@ pub struct AppRuntime {
     recovered_schedule_occurrences: u64,
     recovered_platform_sessions: u64,
     expired_platform_sessions: u64,
+    recovered_computer_action_batches: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
     browser_sessions: Arc<PersistentBrowserManager>,
+    computer_sessions: Arc<ComputerUseManager>,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
@@ -552,6 +576,8 @@ impl AppRuntime {
         let startup_now = Utc::now();
         let expired_platform_sessions = store.expire_platform_sessions(startup_now)?;
         let recovered_platform_sessions = store.recover_platform_sessions(startup_now)?;
+        let recovered_computer_action_batches =
+            store.recover_computer_action_batches(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -559,6 +585,7 @@ impl AppRuntime {
             config.browser_executable.clone(),
             config.data_directory.join("browser-sessions"),
         )?);
+        let computer_sessions = Arc::new(ComputerUseManager::new());
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(OsProviderCredentialStore);
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
@@ -572,8 +599,10 @@ impl AppRuntime {
             recovered_schedule_occurrences,
             recovered_platform_sessions,
             expired_platform_sessions,
+            recovered_computer_action_batches,
             platform_capabilities,
             browser_sessions,
+            computer_sessions,
             provider_credentials,
             mcp_credentials,
             BrowserAuthorizationConfig::default(),
@@ -615,6 +644,8 @@ impl AppRuntime {
         let startup_now = Utc::now();
         let expired_platform_sessions = store.expire_platform_sessions(startup_now)?;
         let recovered_platform_sessions = store.recover_platform_sessions(startup_now)?;
+        let recovered_computer_action_batches =
+            store.recover_computer_action_batches(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -622,6 +653,7 @@ impl AppRuntime {
             config.browser_executable.clone(),
             std::env::temp_dir().join(format!("mcg-browser-sessions-{}", Uuid::new_v4())),
         )?);
+        let computer_sessions = Arc::new(ComputerUseManager::new());
         let auth = LocalAuth::from_token(token)?;
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(MemoryProviderCredentialStore::default());
@@ -637,8 +669,10 @@ impl AppRuntime {
             recovered_schedule_occurrences,
             recovered_platform_sessions,
             expired_platform_sessions,
+            recovered_computer_action_batches,
             platform_capabilities,
             browser_sessions,
+            computer_sessions,
             provider_credentials,
             mcp_credentials,
             browser_config,
@@ -657,8 +691,10 @@ impl AppRuntime {
         recovered_schedule_occurrences: u64,
         recovered_platform_sessions: u64,
         expired_platform_sessions: u64,
+        recovered_computer_action_batches: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
         browser_sessions: Arc<PersistentBrowserManager>,
+        computer_sessions: Arc<ComputerUseManager>,
         provider_credentials: Arc<dyn ProviderCredentialStore>,
         mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
@@ -676,8 +712,10 @@ impl AppRuntime {
             recovered_schedule_occurrences,
             recovered_platform_sessions,
             expired_platform_sessions,
+            recovered_computer_action_batches,
             platform_capabilities,
             browser_sessions,
+            computer_sessions,
             provider_credentials,
             mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
@@ -715,6 +753,7 @@ impl AppRuntime {
             recovered_schedule_occurrences: self.recovered_schedule_occurrences,
             recovered_platform_sessions: self.recovered_platform_sessions,
             expired_platform_sessions: self.expired_platform_sessions,
+            recovered_computer_action_batches: self.recovered_computer_action_batches,
         }
     }
 
@@ -733,15 +772,32 @@ impl AppRuntime {
         request: &PlatformSessionRequest,
         now: DateTime<Utc>,
     ) -> Result<PlatformSessionCreateResult, RuntimeError> {
-        let definition = serde_json::to_vec(&(
-            PLATFORM_SCHEMA_VERSION,
-            request.kind,
-            request.project_id,
-            request.task_id,
-            request.display_name.trim(),
-            &request.allowed_origins,
-            request.lifetime_seconds,
-        ))
+        // Preserve the original browser definition byte-for-byte so a caller
+        // retrying an identifier across an upgrade still receives the durable
+        // reservation it created. Computer sessions use a distinct versioned
+        // definition because their target and authority grants are immutable.
+        let definition = match request.kind {
+            PlatformSessionKind::Browser => serde_json::to_vec(&(
+                PLATFORM_SCHEMA_VERSION,
+                request.kind,
+                request.project_id,
+                request.task_id,
+                request.display_name.trim(),
+                &request.allowed_origins,
+                request.lifetime_seconds,
+            )),
+            PlatformSessionKind::ComputerUse => serde_json::to_vec(&(
+                PLATFORM_SCHEMA_VERSION,
+                "computer_use_v1",
+                request.kind,
+                request.project_id,
+                request.task_id,
+                request.display_name.trim(),
+                &request.computer_capabilities,
+                &request.computer_target,
+                request.lifetime_seconds,
+            )),
+        }
         .map_err(StorageError::from)?;
         let session = PlatformSession {
             schema_version: PLATFORM_SCHEMA_VERSION,
@@ -754,6 +810,8 @@ impl AppRuntime {
             task_id: request.task_id,
             display_name: request.display_name.trim().to_owned(),
             allowed_origins: request.allowed_origins.clone(),
+            computer_capabilities: request.computer_capabilities.clone(),
+            computer_target: request.computer_target.clone(),
             created_at: now,
             updated_at: now,
             expires_at: now + Duration::seconds(i64::from(request.lifetime_seconds)),
@@ -926,6 +984,226 @@ impl AppRuntime {
         }
     }
 
+    /// Binds the requested display region and then commits computer authority.
+    ///
+    /// # Errors
+    /// Returns an error for invalid authority, an unavailable target, or storage failure.
+    pub async fn attach_computer_session(
+        &self,
+        session_id: PlatformSessionId,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformComputerMutation, RuntimeError> {
+        self.settle_expired_platform_sessions(now).await?;
+        let requested = self.load_platform_session(session_id)?;
+        require_computer_authority(
+            &requested,
+            PlatformSessionState::Requested,
+            PlatformSessionOwner::Mcg,
+        )?;
+        let target = requested
+            .computer_target
+            .as_ref()
+            .ok_or_else(|| ToolError::Invalid("computer session has no immutable target".into()))?;
+        let computer = self
+            .computer_sessions
+            .attach(session_id, target, &requested.computer_capabilities)
+            .await?;
+        let transition = self.store()?.transition_platform_session(
+            session_id,
+            PlatformSessionState::Active,
+            "computer display executor attached",
+            now,
+        );
+        match transition {
+            Ok((session, _)) => Ok(PlatformComputerMutation { session, computer }),
+            Err(error) => {
+                let _ = self.computer_sessions.close_if_attached(session_id).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Captures the bound display region while MCG owns authority.
+    ///
+    /// # Errors
+    /// Returns an error when authority, capture, or storage settlement fails.
+    pub async fn capture_computer_session(
+        &self,
+        session_id: PlatformSessionId,
+    ) -> Result<ComputerUseFrame, RuntimeError> {
+        self.settle_expired_platform_sessions(Utc::now()).await?;
+        let session = self.load_platform_session(session_id)?;
+        require_computer_authority(
+            &session,
+            PlatformSessionState::Active,
+            PlatformSessionOwner::Mcg,
+        )?;
+        Ok(self.computer_sessions.capture(session_id).await?)
+    }
+
+    /// Applies a bounded typed batch only if the currently captured pixels still
+    /// match the caller's observation digest.
+    ///
+    /// # Errors
+    /// Returns an error for invalid authority, replay conflict, rejected input, or storage failure.
+    pub async fn apply_computer_actions(
+        &self,
+        batch_id: ComputerActionBatchId,
+        session_id: PlatformSessionId,
+        expected_frame_sha256: &str,
+        actions: &[ComputerUseAction],
+    ) -> Result<PlatformComputerActionMutation, RuntimeError> {
+        let now = Utc::now();
+        self.settle_expired_platform_sessions(now).await?;
+        self.load_platform_session(session_id)?;
+        let action_count = u16::try_from(actions.len())
+            .map_err(|_| ToolError::Invalid("too many computer actions".into()))?;
+        let request_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(session_id, expected_frame_sha256, actions))
+                    .map_err(StorageError::from)?,
+            )
+        );
+        let claimed = ComputerActionBatch {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: batch_id,
+            session_id,
+            request_hash,
+            state: ComputerActionBatchState::Executing,
+            action_count,
+            result_frame_sha256: None,
+            detail: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let (batch, created) = self.store()?.claim_computer_action_batch(&claimed)?;
+        if !created {
+            return match batch.state {
+                ComputerActionBatchState::Succeeded => Ok(PlatformComputerActionMutation {
+                    batch,
+                    replayed: true,
+                    result: None,
+                }),
+                ComputerActionBatchState::Executing => Err(ToolError::Denied(
+                    "computer input batch is already executing".into(),
+                )
+                .into()),
+                ComputerActionBatchState::Rejected | ComputerActionBatchState::Uncertain => {
+                    Err(ToolError::Denied(format!(
+                        "computer input batch will not be replayed: {}",
+                        batch.detail
+                    ))
+                    .into())
+                }
+            };
+        }
+        let result = self
+            .computer_sessions
+            .apply(session_id, expected_frame_sha256, actions)
+            .await;
+        match result {
+            Ok(result) => {
+                let batch = self.store()?.finish_computer_action_batch(
+                    batch_id,
+                    ComputerActionBatchState::Succeeded,
+                    Some(result.frame.sha256.clone()),
+                    "computer input batch completed",
+                    Utc::now(),
+                )?;
+                Ok(PlatformComputerActionMutation {
+                    batch,
+                    replayed: false,
+                    result: Some(result),
+                })
+            }
+            Err(error) => {
+                let (state, detail) = match &error {
+                    ToolError::Invalid(_) | ToolError::Denied(_) | ToolError::Unavailable(_) => (
+                        ComputerActionBatchState::Rejected,
+                        "computer input batch was rejected before host input",
+                    ),
+                    _ => (
+                        ComputerActionBatchState::Uncertain,
+                        "computer input outcome is uncertain and will not be replayed",
+                    ),
+                };
+                self.store()?.finish_computer_action_batch(
+                    batch_id,
+                    state,
+                    None,
+                    detail,
+                    Utc::now(),
+                )?;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Hands attached computer authority to the local owner.
+    ///
+    /// # Errors
+    /// Returns an error when authority cannot be handed off or durably transitioned.
+    pub async fn handoff_computer_session(
+        &self,
+        session_id: PlatformSessionId,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformComputerMutation, RuntimeError> {
+        self.settle_expired_platform_sessions(now).await?;
+        let session = self.load_platform_session(session_id)?;
+        require_computer_authority(
+            &session,
+            PlatformSessionState::Active,
+            PlatformSessionOwner::Mcg,
+        )?;
+        let computer = self.computer_sessions.handoff(session_id).await?;
+        let transition = self.store()?.transition_platform_session(
+            session_id,
+            PlatformSessionState::HandedOff,
+            "computer control handed to local owner",
+            now,
+        );
+        match transition {
+            Ok((session, _)) => Ok(PlatformComputerMutation { session, computer }),
+            Err(error) => {
+                let _ = self.computer_sessions.reclaim(session_id).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Reclaims computer authority without reading the screen.
+    ///
+    /// # Errors
+    /// Returns an error when authority cannot be reclaimed or durably transitioned.
+    pub async fn reclaim_computer_session(
+        &self,
+        session_id: PlatformSessionId,
+        now: DateTime<Utc>,
+    ) -> Result<PlatformComputerMutation, RuntimeError> {
+        self.settle_expired_platform_sessions(now).await?;
+        let session = self.load_platform_session(session_id)?;
+        require_computer_authority(
+            &session,
+            PlatformSessionState::HandedOff,
+            PlatformSessionOwner::LocalOwner,
+        )?;
+        let computer = self.computer_sessions.reclaim(session_id).await?;
+        let transition = self.store()?.transition_platform_session(
+            session_id,
+            PlatformSessionState::Active,
+            "local owner returned computer control; a fresh frame is required",
+            now,
+        );
+        match transition {
+            Ok((session, _)) => Ok(PlatformComputerMutation { session, computer }),
+            Err(error) => {
+                let _ = self.computer_sessions.handoff(session_id).await;
+                Err(error.into())
+            }
+        }
+    }
+
     /// Relinquishes a requested or attached session without inventing executor state.
     ///
     /// # Errors
@@ -938,6 +1216,11 @@ impl AppRuntime {
     ) -> Result<PlatformSession, RuntimeError> {
         self.settle_expired_platform_sessions(now).await?;
         let current = self.load_platform_session(session_id)?;
+        if current.kind == PlatformSessionKind::ComputerUse {
+            // The manager lock waits for an already-authorized input batch to
+            // finish, then prevents any later input before durable closure.
+            self.computer_sessions.close_if_attached(session_id).await?;
+        }
         let (session, _) = self.store()?.transition_platform_session(
             session_id,
             PlatformSessionState::Closed,
@@ -957,6 +1240,7 @@ impl AppRuntime {
         let expired = self.store()?.expire_platform_session_ids(now)?;
         for session_id in expired {
             self.browser_sessions.close_if_attached(session_id).await?;
+            self.computer_sessions.close_if_attached(session_id).await?;
         }
         Ok(())
     }
@@ -3618,6 +3902,26 @@ fn require_browser_authority(
     Ok(())
 }
 
+fn require_computer_authority(
+    session: &PlatformSession,
+    expected_state: PlatformSessionState,
+    expected_owner: PlatformSessionOwner,
+) -> Result<(), RuntimeError> {
+    if session.kind != PlatformSessionKind::ComputerUse {
+        return Err(
+            ToolError::Invalid("platform session is not a computer-use session".into()).into(),
+        );
+    }
+    if session.state != expected_state || session.owner != expected_owner {
+        return Err(ToolError::Invalid(format!(
+            "computer authority requires {expected_state:?}/{expected_owner:?}, found {:?}/{:?}",
+            session.state, session.owner
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct DurableToolControl {
     store: Arc<Mutex<SqliteEventStore>>,
@@ -4363,6 +4667,7 @@ fn detect_platform_capabilities(
     observed_at: DateTime<Utc>,
 ) -> PlatformCapabilitySnapshot {
     let browser_available = browser_runtime_available(config.browser_executable.as_deref());
+    let computer_available = computer_use_runtime_available();
     let desktop_supported = matches!(std::env::consts::OS, "windows" | "linux");
     PlatformCapabilitySnapshot {
         schema_version: PLATFORM_SCHEMA_VERSION,
@@ -4385,8 +4690,21 @@ fn detect_platform_capabilities(
             },
             PlatformCapability {
                 kind: PlatformCapabilityKind::ComputerUse,
-                availability: PlatformCapabilityAvailability::Unavailable,
-                detail: "product computer-use executor is not attached".into(),
+                availability: if computer_available {
+                    PlatformCapabilityAvailability::Available
+                } else if desktop_supported {
+                    PlatformCapabilityAvailability::Unavailable
+                } else {
+                    PlatformCapabilityAvailability::Unsupported
+                },
+                detail: if computer_available {
+                    "screen capture and bounded pointer/keyboard control verified".into()
+                } else if std::env::consts::OS == "linux" {
+                    "no supported X11 display is attached; Wayland control is not yet qualified"
+                        .into()
+                } else {
+                    "computer-use capture/input is unavailable on this host".into()
+                },
             },
             PlatformCapability {
                 kind: PlatformCapabilityKind::NativeDesktop,
@@ -4527,6 +4845,47 @@ mod tests {
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
     }
 
+    #[test]
+    fn browser_session_definition_remains_retry_compatible() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime should open");
+        let now = Utc::now();
+        let request = PlatformSessionRequest {
+            id: PlatformSessionId::new(),
+            kind: PlatformSessionKind::Browser,
+            project_id: None,
+            task_id: None,
+            display_name: "  compatible browser  ".into(),
+            allowed_origins: vec!["https://example.com".into()],
+            computer_capabilities: Vec::new(),
+            computer_target: None,
+            lifetime_seconds: 300,
+        };
+        let legacy_definition = serde_json::to_vec(&(
+            PLATFORM_SCHEMA_VERSION,
+            request.kind,
+            request.project_id,
+            request.task_id,
+            request.display_name.trim(),
+            &request.allowed_origins,
+            request.lifetime_seconds,
+        ))
+        .expect("legacy definition");
+        let expected = format!("{:x}", Sha256::digest(legacy_definition));
+
+        let created = runtime
+            .request_platform_session(&request, now)
+            .expect("request");
+        assert_eq!(created.session.definition_hash, expected);
+        assert!(created.created);
+        assert!(
+            !runtime
+                .request_platform_session(&request, now)
+                .expect("exact retry")
+                .created
+        );
+    }
+
     #[tokio::test]
     async fn persistent_browser_authority_and_history_follow_real_executor_outcomes() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4553,6 +4912,8 @@ mod tests {
                     task_id: None,
                     display_name: "real browser fixture".into(),
                     allowed_origins: vec![origin.clone()],
+                    computer_capabilities: Vec::new(),
+                    computer_target: None,
                     lifetime_seconds: 300,
                 },
                 now,

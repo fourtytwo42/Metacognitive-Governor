@@ -2,12 +2,15 @@ import { useEffect, useState } from "react";
 
 import {
   approveRequest,
+  applyComputerActions,
   attachBrowserSession,
+  attachComputerSession,
   cancelOpenAiOAuth,
   closePlatformSession,
   completeOpenAiOAuth,
   configureMcpConnection,
   configureProvider,
+  captureComputerSession,
   createSchedule,
   createTask,
   denyRequest,
@@ -15,6 +18,7 @@ import {
   discoverMcpConnection,
   discoverProvider,
   handoffBrowserSession,
+  handoffComputerSession,
   listMcpConnections,
   listProviders,
   listApprovals,
@@ -45,6 +49,7 @@ import {
   type PlatformSession,
   type PlatformSessionHistoryResponse,
   type PlatformSessionKind,
+  type ComputerUseFrame,
   type PersistentBrowserObservation,
   pickProjectDirectory,
   type ProjectModel,
@@ -57,6 +62,7 @@ import {
   resumeTask,
   requestPlatformSession,
   reclaimBrowserSession,
+  reclaimComputerSession,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
@@ -259,6 +265,12 @@ export function App() {
   const [platformOrigins, setPlatformOrigins] = useState("");
   const [platformBrowserUrls, setPlatformBrowserUrls] = useState<Record<string, string>>({});
   const [platformBrowsers, setPlatformBrowsers] = useState<Record<string, PersistentBrowserObservation | undefined>>({});
+  const [platformComputerFrames, setPlatformComputerFrames] = useState<Record<string, ComputerUseFrame | undefined>>({});
+  const [platformComputerCoordinates, setPlatformComputerCoordinates] = useState<Record<string, { x: string; y: string }>>({});
+  const [platformComputerText, setPlatformComputerText] = useState<Record<string, string>>({});
+  const [platformComputerBatchIds, setPlatformComputerBatchIds] = useState<Record<string, string | undefined>>({});
+  const [platformComputerScreenOnly, setPlatformComputerScreenOnly] = useState(false);
+  const [platformComputerRegion, setPlatformComputerRegion] = useState({ x: "", y: "", width: "", height: "" });
   const [platformBusy, setPlatformBusy] = useState(false);
   const [platformError, setPlatformError] = useState<string | null>(null);
 
@@ -853,6 +865,28 @@ export function App() {
       setPlatformError("Name the session so it is easy to recognize.");
       return;
     }
+    const regionValues = Object.values(platformComputerRegion);
+    const regionRequested = platformKind === "computer_use" && regionValues.some((value) => value.trim() !== "");
+    const parsedRegion = regionValues.map((value) => Number(value));
+    if (regionRequested && (
+      regionValues.some((value) => value.trim() === "")
+      || parsedRegion.some((value) => !Number.isSafeInteger(value))
+      || parsedRegion[0] < 0
+      || parsedRegion[1] < 0
+      || parsedRegion[2] <= 0
+      || parsedRegion[3] <= 0
+    )) {
+      setPlatformError("Enter all four region values as whole numbers; X and Y may be zero, and width and height must be positive.");
+      return;
+    }
+    const computerTarget = regionRequested ? {
+      region: {
+        x: parsedRegion[0],
+        y: parsedRegion[1],
+        width: parsedRegion[2],
+        height: parsedRegion[3]
+      }
+    } : {};
     setPlatformBusy(true);
     setPlatformError(null);
     try {
@@ -864,11 +898,16 @@ export function App() {
         allowed_origins: platformKind === "browser"
           ? platformOrigins.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
           : [],
+        computer_capabilities: platformKind === "computer_use"
+          ? (platformComputerScreenOnly ? ["screen_read"] : ["screen_read", "mouse", "keyboard"])
+          : [],
+        computer_target: platformKind === "computer_use" ? computerTarget : undefined,
         lifetime_seconds: 3600
       });
       replacePlatformSession(session);
       setPlatformName("");
       setPlatformOrigins("");
+      setPlatformComputerRegion({ x: "", y: "", width: "", height: "" });
       setPlatformSessionId(freshPlatformSessionId());
     } catch (error) {
       setPlatformError(errorMessage(error));
@@ -942,6 +981,102 @@ export function App() {
       const result = await reclaimBrowserSession(sessionId);
       replacePlatformSession(result.session);
       setPlatformBrowsers((current) => ({ ...current, [sessionId]: result.browser }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function attachPlatformComputer(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const result = await attachComputerSession(sessionId);
+      replacePlatformSession(result.session);
+      const frame = await captureComputerSession(sessionId);
+      setPlatformComputerFrames((current) => ({ ...current, [sessionId]: frame }));
+      setPlatformComputerBatchIds((current) => ({ ...current, [sessionId]: undefined }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function capturePlatformComputer(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const frame = await captureComputerSession(sessionId);
+      setPlatformComputerFrames((current) => ({ ...current, [sessionId]: frame }));
+      setPlatformComputerBatchIds((current) => ({ ...current, [sessionId]: undefined }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function actOnPlatformComputer(sessionId: string, includeText: boolean) {
+    const frame = platformComputerFrames[sessionId];
+    const coordinates = platformComputerCoordinates[sessionId] ?? { x: "0", y: "0" };
+    const x = Number(coordinates.x);
+    const y = Number(coordinates.y);
+    if (!frame || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0) {
+      setPlatformError("Capture a current frame and enter whole-number coordinates inside it.");
+      return;
+    }
+    const text = platformComputerText[sessionId] ?? "";
+    if (includeText && !text) {
+      setPlatformError("Enter text to type after the in-region click.");
+      return;
+    }
+    setPlatformBusy(true);
+    setPlatformError(null);
+    const batchId = platformComputerBatchIds[sessionId] ?? freshPlatformSessionId();
+    setPlatformComputerBatchIds((current) => ({ ...current, [sessionId]: batchId }));
+    try {
+      const mutation = await applyComputerActions(sessionId, {
+        batch_id: batchId,
+        expected_frame_sha256: frame.sha256,
+        actions: [
+          { type: "click", x, y, button: "left" },
+          ...(includeText ? [{ type: "type_text" as const, text }] : [])
+        ]
+      });
+      const nextFrame = mutation.result?.frame ?? await captureComputerSession(sessionId);
+      setPlatformComputerFrames((current) => ({ ...current, [sessionId]: nextFrame }));
+      setPlatformComputerBatchIds((current) => ({ ...current, [sessionId]: undefined }));
+      if (includeText) setPlatformComputerText((current) => ({ ...current, [sessionId]: "" }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function handoffPlatformComputer(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const result = await handoffComputerSession(sessionId);
+      replacePlatformSession(result.session);
+      setPlatformComputerFrames((current) => ({ ...current, [sessionId]: undefined }));
+    } catch (error) {
+      setPlatformError(errorMessage(error));
+    } finally {
+      setPlatformBusy(false);
+    }
+  }
+
+  async function reclaimPlatformComputer(sessionId: string) {
+    setPlatformBusy(true);
+    setPlatformError(null);
+    try {
+      const result = await reclaimComputerSession(sessionId);
+      replacePlatformSession(result.session);
+      setPlatformComputerFrames((current) => ({ ...current, [sessionId]: undefined }));
     } catch (error) {
       setPlatformError(errorMessage(error));
     } finally {
@@ -1149,7 +1284,7 @@ export function App() {
                 <p className="eyebrow">ADVANCED</p>
                 <h2>Runtime status</h2>
                 <dl>
-                  <div><dt>Daemon API</dt><dd>127.0.0.1:7777</dd></div>
+                  <div><dt>Daemon API</dt><dd>Authenticated local loopback</dd></div>
                   <div><dt>Autonomy</dt><dd>Autonomous</dd></div>
                   <div><dt>Organization</dt><dd>Foundation</dd></div>
                   <div><dt>Provider</dt><dd>{providerStatus}</dd></div>
@@ -1201,6 +1336,29 @@ export function App() {
                 Allowed sites {advanced ? "(one origin per line)" : "(required before starting)"}
                 <textarea value={platformOrigins} onChange={(event) => setPlatformOrigins(event.target.value)} placeholder="https://example.com" />
               </label>}
+              {platformKind === "computer_use" && advanced && <label className="checkbox-row">
+                <input type="checkbox" checked={platformComputerScreenOnly} onChange={(event) => setPlatformComputerScreenOnly(event.target.checked)} />
+                Screen capture only (do not grant pointer or keyboard input)
+              </label>}
+              {platformKind === "computer_use" && advanced && <fieldset className="computer-region-fields">
+                <legend>Target region (optional)</legend>
+                <div className="computer-region-grid">
+                  {(["x", "y", "width", "height"] as const).map((field) => <label key={field}>
+                    {field[0].toUpperCase() + field.slice(1)}
+                    <input
+                      inputMode="numeric"
+                      aria-label={`Target region ${field}`}
+                      value={platformComputerRegion[field]}
+                      onChange={(event) => setPlatformComputerRegion((current) => ({ ...current, [field]: event.target.value }))}
+                      placeholder={field === "x" || field === "y" ? "0" : "Entire display"}
+                    />
+                  </label>)}
+                </div>
+                <small>Leave every field blank for the entire primary display. A smaller, static region is recommended before granting input because its pixels must remain unchanged between observation and action.</small>
+              </fieldset>}
+              {platformKind === "computer_use" && <p className="muted">
+                {platformComputerScreenOnly ? "MCG can see the primary display but cannot interact." : "MCG can see and use the primary display. Every input batch must match the latest captured pixels."}
+              </p>}
               <p className="muted">Reservation is local and restart-safe. It will not be labeled active until MCG has attached a verified executor.</p>
               <button className="primary" type="button" disabled={platformBusy} onClick={reservePlatformSession}>
                 {platformBusy ? "Saving..." : "Reserve session"}
@@ -1219,10 +1377,20 @@ export function App() {
                     {platformBrowsers[session.id]!.title ? `${platformBrowsers[session.id]!.title} · ` : ""}
                     {platformBrowsers[session.id]!.safe_url}
                   </small>}
+                  {session.kind === "computer_use" && platformComputerFrames[session.id] && <figure className="computer-frame">
+                    <img
+                      src={`data:${platformComputerFrames[session.id]!.media_type};base64,${platformComputerFrames[session.id]!.png_base64}`}
+                      alt={`Current governed computer frame for ${session.display_name}`}
+                    />
+                    <figcaption>
+                      Current {platformComputerFrames[session.id]!.observation.region.width}×{platformComputerFrames[session.id]!.observation.region.height} frame · {platformComputerFrames[session.id]!.sha256.slice(0, 12)}
+                    </figcaption>
+                  </figure>}
                   {advanced && <>
                     <code>{session.id}</code>
                     <small>Owner: {session.owner.replaceAll("_", " ")} · recovery count {session.recovery_count} · expires {new Date(session.expires_at).toLocaleString()}</small>
                     {session.allowed_origins.map((origin) => <code key={origin}>{origin}</code>)}
+                    {session.computer_capabilities.map((capability) => <code key={capability}>{capability.replaceAll("_", ".")}</code>)}
                   </>}
                   {platformHistory[session.id] && <ol className="occurrence-list">
                     {platformHistory[session.id]!.events.map((event) => <li key={event.id}>
@@ -1250,6 +1418,47 @@ export function App() {
                   {session.kind === "browser" && session.state === "handed_off" && <>
                     <small>Returning control blanks the current page before MCG can read it.</small>
                     <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformBrowser(session.id)}>Return control to MCG</button>
+                  </>}
+                  {session.kind === "computer_use" && session.state === "requested" && <button className="primary" type="button" disabled={platformBusy} onClick={() => attachPlatformComputer(session.id)}>Start computer session</button>}
+                  {session.kind === "computer_use" && session.state === "active" && <>
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => capturePlatformComputer(session.id)}>Refresh screen</button>
+                    {advanced && session.computer_capabilities.includes("mouse") && <>
+                      <div className="computer-coordinate-row">
+                        <label>
+                          X
+                          <input
+                            inputMode="numeric"
+                            aria-label={`X coordinate for ${session.display_name}`}
+                            value={platformComputerCoordinates[session.id]?.x ?? "0"}
+                            onChange={(event) => setPlatformComputerCoordinates((current) => ({ ...current, [session.id]: { x: event.target.value, y: current[session.id]?.y ?? "0" } }))}
+                          />
+                        </label>
+                        <label>
+                          Y
+                          <input
+                            inputMode="numeric"
+                            aria-label={`Y coordinate for ${session.display_name}`}
+                            value={platformComputerCoordinates[session.id]?.y ?? "0"}
+                            onChange={(event) => setPlatformComputerCoordinates((current) => ({ ...current, [session.id]: { x: current[session.id]?.x ?? "0", y: event.target.value } }))}
+                          />
+                        </label>
+                      </div>
+                      <button className="secondary" type="button" disabled={platformBusy || !platformComputerFrames[session.id]} onClick={() => actOnPlatformComputer(session.id, false)}>Click point</button>
+                      {session.computer_capabilities.includes("keyboard") && <>
+                        <input
+                          aria-label={`Text for ${session.display_name}`}
+                          value={platformComputerText[session.id] ?? ""}
+                          onChange={(event) => setPlatformComputerText((current) => ({ ...current, [session.id]: event.target.value }))}
+                          placeholder="Text to type after click"
+                        />
+                        <button className="secondary" type="button" disabled={platformBusy || !platformComputerFrames[session.id]} onClick={() => actOnPlatformComputer(session.id, true)}>Click and type</button>
+                      </>}
+                    </>}
+                    <button className="secondary" type="button" disabled={platformBusy} onClick={() => handoffPlatformComputer(session.id)}>Hand control to me</button>
+                  </>}
+                  {session.kind === "computer_use" && session.state === "handed_off" && <>
+                    <small>MCG cannot see or control this display while it is yours. Returning control does not capture your activity.</small>
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformComputer(session.id)}>Return computer control to MCG</button>
                   </>}
                   <button className="secondary" type="button" disabled={platformBusy} onClick={() => togglePlatformHistory(session.id)}>{platformHistory[session.id] ? "Hide history" : "History"}</button>
                   {!(["closed", "failed"] as string[]).includes(session.state) && <button className="link-button" type="button" disabled={platformBusy} onClick={() => closePlatform(session.id)}>Close</button>}

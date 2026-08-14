@@ -2,6 +2,7 @@
 
 mod broker;
 mod browser;
+mod computer_use;
 mod contracts;
 mod evidence;
 mod filesystem;
@@ -17,6 +18,7 @@ mod system;
 
 pub use broker::*;
 pub use browser::*;
+pub use computer_use::*;
 pub use contracts::*;
 pub use evidence::*;
 pub use filesystem::*;

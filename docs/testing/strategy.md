@@ -10,6 +10,7 @@ therefore part of the safety architecture, not a release cleanup activity.
 | Rust unit/property | State machines, policies, budgets, parsers, redaction, routing. | Built-in tests, `proptest` where valuable. | Every change. |
 | Migration/storage | Forward migrations, transactions, event/projection agreement, recovery. | Temporary SQLite databases. | Every change. |
 | Scheduler | Atomic occurrence/task claims, non-overlap, restart reclaim, cron/event/watch/heartbeat wake behavior, cursor and notification persistence, exact-definition creation replay/conflict across REST/MCP/desktop, budget/approval safe pause, and idempotent dispatch. | Explicit clocks, temporary SQLite databases, daemon reopen, real temporary files, fake providers/tools, component and browser UI flows. | Every scheduler change. |
+| Computer control | Display/region confinement, frame-digest freshness, explicit input grants, handoff privacy, cross-interface authority, and at-most-once crash disposition. | Real safe capture, deterministic validation, file-backed SQLite reopen, REST/MCP contracts, desktop component flows, and native UAT. | Every computer-use change. |
 | Contract | Provider, tool, API, event, MCP, and OpenAI compatibility. | Deterministic fake servers and golden schemas. | Every change. |
 | Integration | Multiple crates with real filesystem/process/SQLite boundaries. | Temporary directories and controlled child processes. | Every change. |
 | UI component | Normal/advanced modes, approvals, progress, errors, accessibility. | Vitest, Testing Library, axe. | Every UI change. |
@@ -51,6 +52,7 @@ Property and scenario tests enforce that:
 8. shadow executions cannot mutate real task state;
 9. event history and current projections agree;
 10. configuration experiments can always revert to their parent revision.
+11. an uncertain computer-input outcome is never automatically replayed.
 
 ## Website/application reference scenarios
 

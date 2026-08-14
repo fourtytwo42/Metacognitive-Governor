@@ -7,15 +7,18 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 cap-std.workspace = true
 chrono.workspace = true
 chromiumoxide.workspace = true
+enigo.workspace = true
 mcg-config = { path = "../mcg-config" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-policy = { path = "../mcg-policy" }
 futures-util.workspace = true
 image.workspace = true
 reqwest.workspace = true
+screenshots.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

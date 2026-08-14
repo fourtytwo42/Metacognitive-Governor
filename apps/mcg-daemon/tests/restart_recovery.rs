@@ -177,6 +177,8 @@ async fn live_platform_authority_is_interrupted_with_history_after_daemon_restar
             task_id: None,
             display_name: "restart browser reservation".into(),
             allowed_origins: vec!["https://example.com".into()],
+            computer_capabilities: Vec::new(),
+            computer_target: None,
             lifetime_seconds: 3_600,
         })
         .send()

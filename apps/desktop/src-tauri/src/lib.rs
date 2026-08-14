@@ -1,12 +1,12 @@
 use mcg_api::{
-    ApprovalListResponse, AttachBrowserSessionRequest, ClosePlatformSessionRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateTaskRequest, DiscoverProjectRequest,
-    LaunchTaskRequest, LaunchTaskResponse, McpListResponse, NavigateBrowserSessionRequest,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectListResponse,
-    ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionTaskRequest, WakeScheduleRequest,
+    ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
+    ClosePlatformSessionRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
+    CreateTaskRequest, DiscoverProjectRequest, LaunchTaskRequest, LaunchTaskResponse,
+    McpListResponse, NavigateBrowserSessionRequest, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SetScheduleStateRequest, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -17,16 +17,19 @@ use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_providers::{ProviderConnection, ProviderModelCatalog};
 use mcg_runtime::{
-    McpMutation, OAuthLoginStart, PlatformBrowserMutation, ProjectMutation, ProviderMutation,
-    ScheduleWakeMutation,
+    McpMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
 };
-use mcg_tools::{ApprovalRequest, PersistentBrowserObservation};
+use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-const LOCAL_DAEMON: &str = "http://127.0.0.1:7777";
+const LOCAL_DAEMON: &str = match option_env!("MCG_DAEMON_URL") {
+    Some(url) => url,
+    None => "http://127.0.0.1:7777",
+};
 
 #[derive(Deserialize, Serialize)]
 struct ConfigureMcpCommand {
@@ -62,6 +65,7 @@ const fn runtime_label() -> &'static str {
 }
 
 fn daemon_token() -> Result<String, String> {
+    validate_local_daemon(LOCAL_DAEMON)?;
     let path = AppConfig::default().auth_token_path();
     std::fs::read_to_string(&path)
         .map(|token| token.trim().to_owned())
@@ -71,6 +75,32 @@ fn daemon_token() -> Result<String, String> {
                 path.display()
             )
         })
+}
+
+fn validate_local_daemon(endpoint: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("Invalid local MCG service endpoint: {error}"))?;
+    let loopback = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| address.is_loopback());
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !loopback
+        || url.port().is_none()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("The MCG desktop service endpoint must be an explicit HTTP loopback address and port without credentials, paths, query strings, or fragments".into());
+    }
+    Ok(())
 }
 
 async fn response_error(response: reqwest::Response, action: &str) -> String {
@@ -443,6 +473,96 @@ async fn reclaim_browser_session(session_id: String) -> Result<PlatformBrowserMu
         "Browser session reclaim",
     )
     .await
+}
+
+#[tauri::command]
+async fn attach_computer_session(session_id: String) -> Result<PlatformComputerMutation, String> {
+    platform_computer_post::<PlatformComputerMutation, ()>(
+        &session_id,
+        "attach",
+        None,
+        "Computer session attach",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn capture_computer_session(session_id: String) -> Result<ComputerUseFrame, String> {
+    platform_computer_post::<ComputerUseFrame, ()>(
+        &session_id,
+        "capture",
+        None,
+        "Computer session capture",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn apply_computer_actions(
+    session_id: String,
+    request: ApplyComputerActionsRequest,
+) -> Result<PlatformComputerActionMutation, String> {
+    platform_computer_post(
+        &session_id,
+        "actions",
+        Some(&request),
+        "Computer session actions",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn handoff_computer_session(session_id: String) -> Result<PlatformComputerMutation, String> {
+    platform_computer_post::<PlatformComputerMutation, ()>(
+        &session_id,
+        "handoff",
+        None,
+        "Computer session handoff",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reclaim_computer_session(session_id: String) -> Result<PlatformComputerMutation, String> {
+    platform_computer_post::<PlatformComputerMutation, ()>(
+        &session_id,
+        "reclaim",
+        None,
+        "Computer session reclaim",
+    )
+    .await
+}
+
+async fn platform_computer_post<T, B>(
+    session_id: &str,
+    operation: &str,
+    body: Option<&B>,
+    label: &str,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let client = reqwest::Client::new();
+    let request = client
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/platform/sessions/{session_id}/computer/{operation}"
+        ))
+        .bearer_auth(daemon_token()?);
+    let response = match body {
+        Some(body) => request.json(body),
+        None => request,
+    }
+    .send()
+    .await
+    .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
 }
 
 async fn platform_browser_post<T, B>(
@@ -869,6 +989,11 @@ pub fn run() {
             navigate_browser_session,
             handoff_browser_session,
             reclaim_browser_session,
+            attach_computer_session,
+            capture_computer_session,
+            apply_computer_actions,
+            handoff_computer_session,
+            reclaim_computer_session,
             create_schedule,
             set_schedule_state,
             schedule_history,
@@ -896,7 +1021,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_external_url;
+    use super::{validate_external_url, validate_local_daemon};
 
     #[test]
     fn external_launcher_allows_only_official_openai_https() {
@@ -904,5 +1029,15 @@ mod tests {
         assert!(validate_external_url("http://auth.openai.com/authorize").is_err());
         assert!(validate_external_url("https://auth.openai.com.evil.example/authorize").is_err());
         assert!(validate_external_url("file:///C:/secret").is_err());
+    }
+
+    #[test]
+    fn daemon_endpoint_allows_only_explicit_http_loopback() {
+        assert!(validate_local_daemon("http://127.0.0.1:7777").is_ok());
+        assert!(validate_local_daemon("http://[::1]:7788").is_ok());
+        assert!(validate_local_daemon("https://127.0.0.1:7777").is_err());
+        assert!(validate_local_daemon("http://example.com:7777").is_err());
+        assert!(validate_local_daemon("http://127.0.0.1:7777/api").is_err());
+        assert!(validate_local_daemon("http://user:secret@127.0.0.1:7777").is_err());
     }
 }

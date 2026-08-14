@@ -27,12 +27,12 @@ use mcg_agents::{
     RoleKind, SuccessCondition, TaskComplexity,
 };
 use mcg_domain::{
-    ApprovalId, MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, TaskBudget, TaskEnvelope, TaskId, TaskState,
-    ThreadId, WorkItemId,
+    ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, MemoryClaimId,
+    NotificationSeverity, OrganizationId, OrganizationRevisionId, PlatformCapabilitySnapshot,
+    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, ProjectId,
+    RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -46,12 +46,13 @@ use mcg_providers::{
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, ConsumerEvaluationProgress,
     McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
-    PlatformSessionRequest, ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus,
-    ScheduleWakeMutation,
+    PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
+    ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
 };
 use mcg_tools::{
-    ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument,
-    PersistentBrowserMode, PersistentBrowserObservation, ToolAuditRecord, ToolError,
+    ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
+    ComputerUseFrame, PersistentBrowserMode, PersistentBrowserObservation, ToolAuditRecord,
+    ToolError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -358,6 +359,10 @@ pub struct CreatePlatformSessionRequest {
     pub display_name: String,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub computer_capabilities: Vec<ComputerUseCapability>,
+    #[serde(default)]
+    pub computer_target: Option<ComputerUseTarget>,
     pub lifetime_seconds: u32,
 }
 
@@ -384,6 +389,13 @@ pub struct AttachBrowserSessionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NavigateBrowserSessionRequest {
     pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyComputerActionsRequest {
+    pub batch_id: ComputerActionBatchId,
+    pub expected_frame_sha256: String,
+    pub actions: Vec<ComputerUseAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,6 +676,26 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/platform/sessions/{session_id}/browser/reclaim",
             post(reclaim_browser_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/computer/attach",
+            post(attach_computer_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/computer/capture",
+            post(capture_computer_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/computer/actions",
+            post(apply_computer_actions),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/computer/handoff",
+            post(handoff_computer_session),
+        )
+        .route(
+            "/api/v1/platform/sessions/{session_id}/computer/reclaim",
+            post(reclaim_computer_session),
         )
         .route(
             "/api/v1/schedules",
@@ -1008,6 +1040,8 @@ async fn create_platform_session(
                 task_id: request.task_id,
                 display_name: request.display_name,
                 allowed_origins: request.allowed_origins,
+                computer_capabilities: request.computer_capabilities,
+                computer_target: request.computer_target,
                 lifetime_seconds: request.lifetime_seconds,
             },
             Utc::now(),
@@ -1131,6 +1165,82 @@ async fn reclaim_browser_session(
         state
             .runtime
             .reclaim_browser_session(session_id, Utc::now())
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn attach_computer_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformComputerMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .attach_computer_session(session_id, Utc::now())
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn capture_computer_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ComputerUseFrame>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .capture_computer_session(session_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn apply_computer_actions(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ApplyComputerActionsRequest>,
+) -> Result<Json<PlatformComputerActionMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .apply_computer_actions(
+                request.batch_id,
+                session_id,
+                &request.expected_frame_sha256,
+                &request.actions,
+            )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn handoff_computer_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformComputerMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .handoff_computer_session(session_id, Utc::now())
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn reclaim_computer_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlatformComputerMutation>, ApiError> {
+    let session_id = parse_platform_session_id(&session_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .reclaim_computer_session(session_id, Utc::now())
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -4153,6 +4263,11 @@ form.addEventListener('submit', (event) => {
                 "mcg_browser_navigate",
                 "mcg_browser_handoff",
                 "mcg_browser_reclaim",
+                "mcg_computer_attach",
+                "mcg_computer_capture",
+                "mcg_computer_actions",
+                "mcg_computer_handoff",
+                "mcg_computer_reclaim",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
                 "mcg_run_agent",
@@ -4580,6 +4695,8 @@ form.addEventListener('submit', (event) => {
                     task_id: None,
                     display_name: "interface fixture".into(),
                     allowed_origins: vec![origin.clone()],
+                    computer_capabilities: Vec::new(),
+                    computer_target: None,
                     lifetime_seconds: 300,
                 })
                 .expect("create body"),
@@ -4612,7 +4729,8 @@ form.addEventListener('submit', (event) => {
         .await;
         assert_eq!(
             navigated.pointer("/result/structuredContent/title"),
-            Some(&serde_json::json!("Interface fixture"))
+            Some(&serde_json::json!("Interface fixture")),
+            "unexpected navigation result: {navigated}"
         );
         assert_eq!(
             navigated.pointer("/result/structuredContent/safe_url"),
@@ -4628,6 +4746,128 @@ form.addEventListener('submit', (event) => {
         let closed = response_json(app.oneshot(close).await.expect("close")).await;
         assert_eq!(closed.pointer("/state"), Some(&serde_json::json!("closed")));
         server.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Proves the complete REST/MCP authority lifecycle.
+    async fn authenticated_rest_and_mcp_computer_controls_share_digest_bound_authority() {
+        if !mcg_tools::computer_use_runtime_available() {
+            return;
+        }
+        let app = router(test_runtime());
+        let session_id = PlatformSessionId::new();
+        let create = authorized(Request::post("/api/v1/platform/sessions"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&CreatePlatformSessionRequest {
+                    session_id,
+                    kind: PlatformSessionKind::ComputerUse,
+                    project_id: None,
+                    task_id: None,
+                    display_name: "computer interface fixture".into(),
+                    allowed_origins: Vec::new(),
+                    computer_capabilities: vec![
+                        mcg_domain::ComputerUseCapability::ScreenRead,
+                        mcg_domain::ComputerUseCapability::Mouse,
+                    ],
+                    computer_target: Some(mcg_domain::ComputerUseTarget::default()),
+                    lifetime_seconds: 300,
+                })
+                .expect("create body"),
+            ))
+            .expect("create request");
+        assert_eq!(
+            app.clone().oneshot(create).await.expect("create").status(),
+            StatusCode::CREATED
+        );
+        let attach = authorized(Request::post(format!(
+            "/api/v1/platform/sessions/{session_id}/computer/attach"
+        )))
+        .body(Body::empty())
+        .expect("attach request");
+        let attached = response_json(app.clone().oneshot(attach).await.expect("attach")).await;
+        assert_eq!(
+            attached.pointer("/session/state"),
+            Some(&serde_json::json!("active"))
+        );
+        let captured = mcp_tool_response(
+            app.clone(),
+            207,
+            "mcg_computer_capture",
+            serde_json::json!({"session_id": session_id}),
+        )
+        .await;
+        assert_eq!(
+            captured.pointer("/result/content/1/type"),
+            Some(&serde_json::json!("image"))
+        );
+        let digest = captured
+            .pointer("/result/structuredContent/frame/sha256")
+            .and_then(serde_json::Value::as_str)
+            .expect("frame digest");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            captured
+                .pointer("/result/structuredContent/frame/png_base64")
+                .is_none()
+        );
+        let stale = mcp_tool_response(
+            app.clone(),
+            208,
+            "mcg_computer_actions",
+            serde_json::json!({
+                "session_id": session_id,
+                "batch_id": mcg_domain::ComputerActionBatchId::new(),
+                "expected_frame_sha256": "0".repeat(64),
+                "actions": [{"type": "move", "x": 0, "y": 0}]
+            }),
+        )
+        .await;
+        assert_eq!(
+            stale.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        let handed_off = mcp_tool_response(
+            app.clone(),
+            209,
+            "mcg_computer_handoff",
+            serde_json::json!({"session_id": session_id}),
+        )
+        .await;
+        assert_eq!(
+            handed_off.pointer("/result/structuredContent/session/state"),
+            Some(&serde_json::json!("handed_off"))
+        );
+        let denied_capture = mcp_tool_response(
+            app.clone(),
+            210,
+            "mcg_computer_capture",
+            serde_json::json!({"session_id": session_id}),
+        )
+        .await;
+        assert_eq!(
+            denied_capture.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        let reclaimed = mcp_tool_response(
+            app.clone(),
+            211,
+            "mcg_computer_reclaim",
+            serde_json::json!({"session_id": session_id}),
+        )
+        .await;
+        assert_eq!(
+            reclaimed.pointer("/result/structuredContent/session/state"),
+            Some(&serde_json::json!("active"))
+        );
+        let close = authorized(Request::post(format!(
+            "/api/v1/platform/sessions/{session_id}/close"
+        )))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"reason":"computer fixture complete"}"#))
+        .expect("close request");
+        let closed = response_json(app.oneshot(close).await.expect("close")).await;
+        assert_eq!(closed.pointer("/state"), Some(&serde_json::json!("closed")));
     }
 
     #[tokio::test]

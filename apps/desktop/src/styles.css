@@ -187,6 +187,15 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 .connection-card p { margin: 0; color: #8e9daf; font-size: .82rem; }
 .connection-card code { display: inline-block; margin-top: 7px; color: #65dccc; font-size: .74rem; }
 .empty-state { margin: 0; padding: 24px; border: 1px dashed #29384b; color: #8190a2; text-align: center; }
+.computer-frame { margin: .8rem 0; }
+.computer-frame img { display: block; width: min(100%, 720px); max-height: 420px; object-fit: contain; object-position: left top; border: 1px solid #29384b; border-radius: 10px; background: #111; }
+.computer-frame figcaption { margin-top: .35rem; color: #8190a2; font-size: .78rem; }
+.computer-coordinate-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+.computer-region-fields { display: grid; gap: .55rem; margin: 0; padding: .8rem; border: 1px solid #29384b; }
+.computer-region-fields legend { padding: 0 .35rem; color: #a8b6c6; font-size: .82rem; }
+.computer-region-fields small { color: #8190a2; line-height: 1.45; }
+.computer-region-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
+.computer-region-grid label { display: grid; gap: .35rem; color: #a8b6c6; font-size: .78rem; }
 
 @media (max-width: 850px) {
   .app-shell { grid-template-columns: 1fr; }
@@ -199,6 +208,7 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
   .task-actions { justify-content: flex-start; }
   .evidence-overview { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
   .evidence-details { grid-template-columns: 1fr; }
+  .computer-region-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .artifact-evidence { grid-column: auto; }
   .artifact-evidence li { grid-template-columns: 1fr; }
 }

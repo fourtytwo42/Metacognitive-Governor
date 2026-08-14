@@ -41,7 +41,12 @@ const client = vi.hoisted(() => ({
   attachBrowserSession: vi.fn(),
   navigateBrowserSession: vi.fn(),
   handoffBrowserSession: vi.fn(),
-  reclaimBrowserSession: vi.fn()
+  reclaimBrowserSession: vi.fn(),
+  attachComputerSession: vi.fn(),
+  captureComputerSession: vi.fn(),
+  applyComputerActions: vi.fn(),
+  handoffComputerSession: vi.fn(),
+  reclaimComputerSession: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -84,7 +89,12 @@ vi.mock("./desktop-client", () => ({
   attachBrowserSession: client.attachBrowserSession,
   navigateBrowserSession: client.navigateBrowserSession,
   handoffBrowserSession: client.handoffBrowserSession,
-  reclaimBrowserSession: client.reclaimBrowserSession
+  reclaimBrowserSession: client.reclaimBrowserSession,
+  attachComputerSession: client.attachComputerSession,
+  captureComputerSession: client.captureComputerSession,
+  applyComputerActions: client.applyComputerActions,
+  handoffComputerSession: client.handoffComputerSession,
+  reclaimComputerSession: client.reclaimComputerSession
 }));
 
 import { App } from "./App";
@@ -130,6 +140,11 @@ beforeEach(() => {
   client.navigateBrowserSession.mockReset();
   client.handoffBrowserSession.mockReset();
   client.reclaimBrowserSession.mockReset();
+  client.attachComputerSession.mockReset();
+  client.captureComputerSession.mockReset();
+  client.applyComputerActions.mockReset();
+  client.handoffComputerSession.mockReset();
+  client.reclaimComputerSession.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -286,6 +301,116 @@ test("private browser starts, navigates, and displays only the safe URL", async 
     "https://example.com/result?token=secret"
   );
   expect(within(panel).queryByText(/token=secret/)).not.toBeInTheDocument();
+});
+
+test("advanced computer reservation validates and submits a stable target region", async () => {
+  const requested = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000075",
+    definition_hash: "9".repeat(64),
+    kind: "computer_use",
+    state: "requested",
+    owner: "mcg",
+    display_name: "Stable desktop region",
+    allowed_origins: [],
+    computer_capabilities: ["screen_read", "mouse", "keyboard"],
+    computer_target: { region: { x: 20, y: 30, width: 320, height: 240 } },
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z",
+    expires_at: "2026-08-14T01:00:00Z",
+    recovery_count: 0
+  };
+  client.requestPlatformSession.mockResolvedValue(requested);
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
+  fireEvent.change(within(panel).getByLabelText("Session type"), { target: { value: "computer_use" } });
+  fireEvent.change(within(panel).getByLabelText("Name"), { target: { value: requested.display_name } });
+  fireEvent.change(within(panel).getByLabelText("Target region x"), { target: { value: "20" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
+  expect(await within(panel).findByRole("alert")).toHaveTextContent("Enter all four region values");
+  expect(client.requestPlatformSession).not.toHaveBeenCalled();
+  fireEvent.change(within(panel).getByLabelText("Target region y"), { target: { value: "30" } });
+  fireEvent.change(within(panel).getByLabelText("Target region width"), { target: { value: "320" } });
+  fireEvent.change(within(panel).getByLabelText("Target region height"), { target: { value: "240" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
+  await waitFor(() => expect(client.requestPlatformSession).toHaveBeenCalledWith(expect.objectContaining({
+    kind: "computer_use",
+    computer_target: { region: { x: 20, y: 30, width: 320, height: 240 } }
+  })));
+});
+
+test("advanced computer session captures a digest-bound frame and submits typed input", async () => {
+  const requested = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000073",
+    definition_hash: "c".repeat(64),
+    kind: "computer_use",
+    state: "requested",
+    owner: "mcg",
+    display_name: "Desktop fixture",
+    allowed_origins: [],
+    computer_capabilities: ["screen_read", "mouse", "keyboard"],
+    computer_target: {},
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z",
+    expires_at: "2026-08-14T01:00:00Z",
+    recovery_count: 0
+  };
+  const active = { ...requested, state: "active" };
+  const frame = {
+    observation: {
+      session_id: requested.id,
+      display_id: 1,
+      region: { x: 0, y: 0, width: 800, height: 600 },
+      capabilities: requested.computer_capabilities,
+      handed_off: false
+    },
+    sha256: "d".repeat(64),
+    media_type: "image/png",
+    png_base64: "iVBORw0KGgo=",
+    captured_at: "2026-08-14T00:00:00Z"
+  };
+  client.listPlatformSessions.mockResolvedValue({ sessions: [requested] });
+  client.attachComputerSession.mockResolvedValue({ session: active, computer: frame.observation });
+  client.captureComputerSession.mockResolvedValue(frame);
+  client.applyComputerActions.mockResolvedValue({
+    batch: {
+      id: "00000000-0000-4000-8000-000000000074",
+      session_id: requested.id,
+      request_hash: "f".repeat(64),
+      state: "succeeded",
+      action_count: 2,
+      result_frame_sha256: "e".repeat(64),
+      detail: "computer input batch completed",
+      created_at: "2026-08-14T00:00:00Z",
+      updated_at: "2026-08-14T00:00:01Z"
+    },
+    replayed: false,
+    result: {
+      prior_frame_sha256: frame.sha256,
+      actions_executed: 2,
+      frame: { ...frame, sha256: "e".repeat(64) }
+    }
+  });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
+  await within(panel).findByRole("heading", { name: requested.display_name });
+  fireEvent.click(within(panel).getByRole("button", { name: "Start computer session" }));
+  expect(await within(panel).findByAltText(`Current governed computer frame for ${requested.display_name}`)).toBeInTheDocument();
+  fireEvent.change(within(panel).getByLabelText(`X coordinate for ${requested.display_name}`), { target: { value: "25" } });
+  fireEvent.change(within(panel).getByLabelText(`Y coordinate for ${requested.display_name}`), { target: { value: "40" } });
+  fireEvent.change(within(panel).getByLabelText(`Text for ${requested.display_name}`), { target: { value: "hello" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Click and type" }));
+  await waitFor(() => expect(client.applyComputerActions).toHaveBeenCalledWith(requested.id, {
+    batch_id: expect.any(String),
+    expected_frame_sha256: frame.sha256,
+    actions: [
+      { type: "click", x: 25, y: 40, button: "left" },
+      { type: "type_text", text: "hello" }
+    ]
+  }));
 });
 
 test("scheduler retries reuse one identity and rotate it only after success", async () => {
