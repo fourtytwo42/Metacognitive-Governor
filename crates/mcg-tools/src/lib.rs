@@ -1,6 +1,7 @@
 //! Typed tool contracts are the only route from agents to real-world effects.
 
 mod broker;
+mod browser;
 mod contracts;
 mod evidence;
 mod filesystem;
@@ -13,6 +14,7 @@ mod secrets;
 mod system;
 
 pub use broker::*;
+pub use browser::*;
 pub use contracts::*;
 pub use evidence::*;
 pub use filesystem::*;

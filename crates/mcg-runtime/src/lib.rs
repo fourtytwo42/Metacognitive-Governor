@@ -51,11 +51,12 @@ use mcg_storage::{
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
-    ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor,
-    HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
-    ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver, SystemExecutor,
-    TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor,
-    ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
+    BrowserExecutor, ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor,
+    HostExecutor, HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor,
+    OutputRedactor, ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver,
+    SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError,
+    ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
+    VerificationEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1571,6 +1572,10 @@ impl AppRuntime {
                 HttpExecutor::new(credentials, filesystem, &artifacts)
                     .map_err(runtime_tool_error)?,
             ),
+            browser: Arc::new(
+                BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
             system: Arc::new(SystemExecutor),
             git: Arc::new(
                 GitExecutor::new(process, [root.clone()], &artifacts)
@@ -1598,7 +1603,9 @@ impl AppRuntime {
             }
         }
         for condition in &conditions {
-            if let SuccessCondition::HttpResponds { url, .. } = condition {
+            if let SuccessCondition::HttpResponds { url, .. }
+            | SuccessCondition::PageRenders { url } = condition
+            {
                 let origin = objective_network_origin(url)?;
                 if !capabilities
                     .allowed_network_origins
@@ -1654,6 +1661,12 @@ impl AppRuntime {
                     headers: Vec::new(),
                     body: None,
                     max_response_bytes: 1_048_576,
+                }
+            } else if let SuccessCondition::PageRenders { url } = condition {
+                ToolRequestKind::BrowserRender {
+                    url: url.clone(),
+                    viewport_width: 1_280,
+                    viewport_height: 720,
                 }
             } else {
                 checkpoint.unsupported = checkpoint.unsupported.saturating_add(1);
@@ -1740,6 +1753,23 @@ impl AppRuntime {
                     });
                     None
                 }
+                Err(ToolError::Unavailable(detail)) => {
+                    checkpoint.executed = checkpoint.executed.saturating_add(1);
+                    checkpoint.unsupported = checkpoint.unsupported.saturating_add(1);
+                    let detail = format!("objective evaluator is unavailable: {detail}");
+                    checkpoint.results.push(ConditionResult {
+                        condition: condition.clone(),
+                        passed: false,
+                        detail: detail.clone(),
+                    });
+                    checkpoint.evidence.push(EvaluationEvidence {
+                        method: objective_evidence_method(condition).into(),
+                        artifact_sha256: None,
+                        event_sequence: None,
+                        detail: format!("{label}: {detail}"),
+                    });
+                    None
+                }
                 Err(error) => return Err(runtime_tool_error(error)),
             };
             if let Some(outcome) = outcome {
@@ -1759,10 +1789,12 @@ impl AppRuntime {
                 });
                 checkpoint.evidence.push(EvaluationEvidence {
                     method: objective_evidence_method(condition).into(),
-                    artifact_sha256: outcome
-                        .artifacts
-                        .first()
-                        .map(|artifact| artifact.sha256.clone()),
+                    artifact_sha256: if matches!(condition, SuccessCondition::PageRenders { .. }) {
+                        outcome.artifacts.last()
+                    } else {
+                        outcome.artifacts.first()
+                    }
+                    .map(|artifact| artifact.sha256.clone()),
                     event_sequence: None,
                     detail: format!("{label}: {detail}"),
                 });
@@ -2190,6 +2222,10 @@ impl AppRuntime {
                 HttpExecutor::new(credentials, filesystem, &artifacts)
                     .map_err(runtime_tool_error)?,
             ),
+            browser: Arc::new(
+                BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
             system: Arc::new(SystemExecutor),
             git: Arc::new(
                 GitExecutor::new(process, [root.clone()], &artifacts)
@@ -2351,6 +2387,10 @@ impl AppRuntime {
             process: process.clone(),
             http: Arc::new(
                 HttpExecutor::new(credentials, filesystem, &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            browser: Arc::new(
+                BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
                     .map_err(runtime_tool_error)?,
             ),
             system: Arc::new(SystemExecutor),
@@ -2907,6 +2947,8 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
     objective_command(condition).map(str::to_owned).or_else(|| {
         if let SuccessCondition::HttpResponds { url, status } = condition {
             Some(format!("HTTP GET {url} returns {status}"))
+        } else if let SuccessCondition::PageRenders { url } = condition {
+            Some(format!("Page renders at {url}"))
         } else {
             None
         }
@@ -2929,10 +2971,10 @@ fn objective_network_origin(value: &str) -> Result<String, RuntimeError> {
 }
 
 fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
-    if matches!(condition, SuccessCondition::HttpResponds { .. }) {
-        "governed_http_status"
-    } else {
-        "governed_process_exit"
+    match condition {
+        SuccessCondition::HttpResponds { .. } => "governed_http_status",
+        SuccessCondition::PageRenders { .. } => "governed_browser_render",
+        _ => "governed_process_exit",
     }
 }
 
@@ -2962,6 +3004,20 @@ fn objective_condition_outcome_detail(
             observed_http_status(outcome)
                 .map_or_else(|| "unknown".into(), |value| value.to_string())
         );
+    }
+    if matches!(condition, SuccessCondition::PageRenders { .. }) {
+        let verification = outcome
+            .verification
+            .iter()
+            .map(|evidence| {
+                format!(
+                    "{}={}:{}",
+                    evidence.method, evidence.passed, evidence.detail
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return format!("{}; {verification}", outcome.summary);
     }
     objective_outcome_detail(outcome)
 }

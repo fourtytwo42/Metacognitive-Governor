@@ -1309,6 +1309,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::Test { .. }
             | SuccessCondition::StaticAnalysis { .. }
             | SuccessCondition::HttpResponds { .. }
+            | SuccessCondition::PageRenders { .. }
     )
 }
 
@@ -1372,6 +1373,20 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
         return SuccessCondition::HttpResponds {
             url: url.to_owned(),
             status,
+        };
+    }
+    let parts = trimmed.split_ascii_whitespace().collect::<Vec<_>>();
+    if let [page, renders, url] = parts.as_slice()
+        && page.eq_ignore_ascii_case("page")
+        && renders.eq_ignore_ascii_case("renders")
+        && url::Url::parse(url).is_ok_and(|value| {
+            matches!(value.scheme(), "http" | "https")
+                && value.username().is_empty()
+                && value.password().is_none()
+        })
+    {
+        return SuccessCondition::PageRenders {
+            url: (*url).to_owned(),
         };
     }
     SuccessCondition::Custom {
@@ -2059,7 +2074,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, response::Html};
     use http_body_util::BodyExt;
     use mcg_agents::{AgentState, ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::{AppConfig, AutonomyPreset};
@@ -2097,12 +2112,21 @@ mod tests {
                 status: 404,
             }
         );
+        assert_eq!(
+            parse_consumer_success_condition("PAGE RENDERS https://example.test/app"),
+            SuccessCondition::PageRenders {
+                url: "https://example.test/app".into(),
+            }
+        );
         for unsafe_or_ambiguous in [
             "HTTP 99 https://example.test",
             "HTTP 200 https://user:secret@example.test",
             "HTTP 200 file:///tmp/result",
             "HTTP 200 https://example.test extra",
             "Visit https://example.test and expect 200",
+            "PAGE RENDERS https://user:secret@example.test",
+            "PAGE RENDERS file:///tmp/page.html",
+            "PAGE RENDERS https://example.test extra",
         ] {
             assert!(matches!(
                 parse_consumer_success_condition(unsafe_or_ambiguous),
@@ -2640,10 +2664,19 @@ form.addEventListener('submit', (event) => {
     }
 
     async fn objective_http_fixture() -> String {
-        let app = Router::new().route(
-            "/expected-missing",
-            get(|| async { (StatusCode::NOT_FOUND, "expected fixture status") }),
-        );
+        let app = Router::new()
+            .route(
+                "/expected-missing",
+                get(|| async { (StatusCode::NOT_FOUND, "expected fixture status") }),
+            )
+            .route(
+                "/render",
+                get(|| async {
+                    Html(
+                        "<!doctype html><html><head><title>Before</title></head><body><main id='app'></main><script>document.title='MCG Render Fixture'; document.querySelector('#app').textContent='Rendered by JavaScript';</script></body></html>",
+                    )
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("HTTP objective fixture listener");
@@ -4209,6 +4242,112 @@ form.addEventListener('submit', (event) => {
                 .is_none()
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Public launch must compose provider, browser, evidence, and settlement.
+    async fn consumer_page_render_uses_real_browser_and_screenshot_evidence() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("README.md"),
+            "# Browser objective fixture\n",
+        )
+        .expect("readme");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "browser_objective_fixture".into(),
+                    display_name: "Browser Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let target = format!("{}/render", objective_http_fixture().await);
+        let mut task = TaskEnvelope::new("Render the JavaScript application");
+        task.project_id = Some(project.project_id);
+        task.success_conditions = vec![format!("PAGE RENDERS {target}")];
+        runtime.create_task(&task).expect("task");
+        let response = router(runtime.clone())
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}/launch", task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&LaunchTaskRequest {
+                            target_path: None,
+                            context_token_budget: 2_048,
+                            requested_tools: Vec::new(),
+                            estimated_output_tokens: 512,
+                            max_model_calls: 4,
+                        })
+                        .expect("launch body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("render response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: LaunchTaskResponse = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("render body")
+                .to_bytes(),
+        )
+        .expect("render response body");
+        assert_eq!(response.task.state, TaskState::Completed);
+        assert_eq!(response.run.run.state, AgentRunState::Completed);
+        let report = response.run.evaluations.first().expect("render report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert_eq!(
+            report.conditions[0].condition,
+            SuccessCondition::PageRenders {
+                url: target.clone(),
+            }
+        );
+        assert!(report.conditions[0].passed);
+        assert!(
+            report.conditions[0]
+                .detail
+                .contains("title=MCG Render Fixture")
+        );
+        assert!(
+            report.conditions[0]
+                .detail
+                .contains("browser.ready_state=true:complete")
+        );
+        assert_eq!(report.evidence[0].method, "governed_browser_render");
+        assert!(report.evidence[0].artifact_sha256.is_some());
+        let audit = runtime.tool_audit(task.id).expect("browser audit");
+        assert!(audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "browser.render"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+                && record.artifacts.len() == 2
+        }));
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

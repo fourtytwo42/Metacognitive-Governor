@@ -18,6 +18,8 @@ pub struct AppConfig {
     pub autonomy: AutonomyPreset,
     pub advanced_mode: bool,
     pub data_directory: PathBuf,
+    #[serde(default)]
+    pub browser_executable: Option<PathBuf>,
 }
 
 impl AppConfig {
@@ -61,6 +63,7 @@ impl Default for AppConfig {
             autonomy: AutonomyPreset::Autonomous,
             advanced_mode: false,
             data_directory: default_data_directory(),
+            browser_executable: std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
         }
     }
 }

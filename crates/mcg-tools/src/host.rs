@@ -9,6 +9,7 @@ pub struct HostExecutor {
     pub filesystem: Arc<dyn ToolExecutor>,
     pub process: Arc<dyn ToolExecutor>,
     pub http: Arc<dyn ToolExecutor>,
+    pub browser: Arc<dyn ToolExecutor>,
     pub system: Arc<dyn ToolExecutor>,
     pub git: Arc<dyn ToolExecutor>,
     pub memory: Arc<dyn ToolExecutor>,
@@ -40,6 +41,7 @@ impl ToolExecutor for HostExecutor {
             ToolRequestKind::HttpRequest { .. } | ToolRequestKind::HttpDownload { .. } => {
                 &self.http
             }
+            ToolRequestKind::BrowserRender { .. } => &self.browser,
             ToolRequestKind::SystemInfo
             | ToolRequestKind::SystemEnv { .. }
             | ToolRequestKind::SystemProcesses => &self.system,

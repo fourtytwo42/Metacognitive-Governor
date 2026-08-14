@@ -9,6 +9,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 cap-std.workspace = true
 chrono.workspace = true
+chromiumoxide.workspace = true
 mcg-config = { path = "../mcg-config" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-policy = { path = "../mcg-policy" }

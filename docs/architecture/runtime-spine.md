@@ -99,7 +99,7 @@ redacted exit evidence. SQLite records that report and changes the task/run to
 completed or failed in one transaction; an inconclusive report blocks the task
 while leaving the run retryable. Start replay observes terminal evidence and never
 reissues model or objective work. Guided mode durably checkpoints evaluation and
-requests one approval for the exact discovered command batch against the immutable
+requests one approval for the exact supported objective batch against the immutable
 project snapshot. Denial blocks the task and bounded retry creates a fresh approval
 identity; approval delegates only that batch, and resume after daemon restart
 continues from the stored condition index without another provider turn or repeated
@@ -113,8 +113,18 @@ through the same policy, lease, audit, redaction, redirect, and artifact plane a
 agent HTTP tools. Same-origin redirects remain bounded and cross-origin redirects
 fail closed. Evaluation compares the `http.status` verification value rather than
 generic 2xx success, so an expected 404 can pass while a reachable status mismatch,
-timeout, or connection failure settles as failed objective evidence. `PageRenders`
-remains unsupported until an actual governed browser engine supplies render evidence.
+timeout, or connection failure settles as failed objective evidence.
+
+`PAGE RENDERS URL` becomes a typed `PageRenders` condition backed by an actual
+ephemeral Chromium CDP session, not an HTTP-body heuristic. The browser uses a fresh
+profile, bounded viewport/time, no automatic download, and pre-send interception.
+Only credential-free GET/HEAD requests to the exact condition origin plus non-network
+`data:`/`blob:` resources continue; cross-origin requests and mutating methods are
+blocked. Runtime verifies ready state and body layout after JavaScript, captures
+post-render HTML and a viewport PNG as content-addressed artifacts, and records the
+screenshot hash in evaluation evidence. Missing local browser runtime is inconclusive
+and blocks for setup/retry; a browser that launches but cannot render the page fails
+the objective.
 
 ## Verification evidence
 
@@ -138,6 +148,9 @@ terminal settlement.
 The HTTP fixture proves an expected non-2xx response passes with a captured artifact,
 a status mismatch fails, and an unreachable origin records failed tool audit plus a
 terminal failed report instead of escaping as an API error.
+The browser fixtures use real Chromium to prove JavaScript hydration, DOM/title
+mutation, HTML/PNG capture, policy/audit integration, and pre-send blocking of a
+cross-origin subresource plus same-origin POST.
 
 All builds and tests run on owner-controlled Windows and Ubuntu machines. GitHub is
 source hosting only; GitHub Actions is disabled for this repository.

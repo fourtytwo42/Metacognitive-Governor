@@ -143,6 +143,11 @@ pub enum ToolRequestKind {
         max_bytes: u64,
         expected_sha256: Option<String>,
     },
+    BrowserRender {
+        url: String,
+        viewport_width: u32,
+        viewport_height: u32,
+    },
     SystemInfo,
     SystemEnv {
         names: Vec<String>,
@@ -223,6 +228,7 @@ impl ToolRequestKind {
             Self::ShellExec { .. } => "shell.exec".into(),
             Self::HttpRequest { .. } => "http.request".into(),
             Self::HttpDownload { .. } => "http.download".into(),
+            Self::BrowserRender { .. } => "browser.render".into(),
             Self::SystemInfo => "system.info".into(),
             Self::SystemEnv { .. } => "system.env".into(),
             Self::SystemProcesses => "system.processes".into(),
@@ -457,6 +463,8 @@ pub enum ToolError {
     TimedOut,
     #[error("tool execution failed: {0}")]
     Execution(String),
+    #[error("tool is unavailable: {0}")]
+    Unavailable(String),
     #[error("tool lease is not active: {0}")]
     Lease(String),
 }

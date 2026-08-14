@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Durable guided objective-batch approval and governed HTTP-status evidence are cross-platform qualified; rendered-page evidence is next.
-- Last meaningful change: Added exact `HTTP STATUS URL` consumer parsing and origin-confined, artifact-captured, restart-checkpointed HTTP evaluation with exact non-2xx comparison and failed transport settlement.
-- Next step: Add an actual governed rendered-page evaluator before artifact/file and custom conditions. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
+- Current task: Guided objective approval and HTTP evidence are cross-platform qualified; real Chromium rendered-page evidence is Windows-focused green and awaits full exact-commit qualification.
+- Last meaningful change: Added typed `browser.render`, exact `PAGE RENDERS URL` parsing, an ephemeral CDP renderer with pre-send origin/method interception, post-JavaScript DOM checks, and HTML/PNG evidence.
+- Next step: Complete all Windows gates and exact-commit Ubuntu qualification for browser rendering, then add artifact/file and custom-condition evaluators. Persist full provider mid-turn checkpoints before external MCP approval resume or eliminating the repeated inference. Preserve the visible OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -25,6 +25,7 @@ Durable project context lives here. Update this file whenever information should
 - Consumer plans whose conditions are entirely discovered build/test/static-analysis commands now execute those checks through the governed broker after independent Evaluator completion. Validated reports and completed/failed task/run projections commit atomically; terminal Start replay is observation-only.
 - Guided command evaluation stores its run/project/condition progress in SQLite and requests one approval for the immutable discovered batch. Denial blocks for bounded retry with a new request identity; approved work resumes across daemon restart without another provider turn or repeated completed check.
 - Advanced consumer condition lines accept exact `HTTP STATUS URL` syntax. Runtime grants only the parsed credential-free origin, performs a body-bounded governed GET, captures response bytes as an artifact, and compares observed status exactly; status mismatch, timeout, and connection failure become failed evaluation evidence.
+- Advanced consumer condition lines accept exact `PAGE RENDERS URL` syntax. Runtime launches a fresh local Chromium CDP session, permits only exact-origin GET/HEAD plus in-page data/blob resources, checks DOM readiness/layout after JavaScript, and captures rendered HTML plus a PNG. Missing browser runtime blocks as inconclusive; render failure is objective failure.
 
 ## User Preferences
 
@@ -513,6 +514,15 @@ When sources conflict, use this order:
 - Commands/tests: Strict focused Rust clippy/tests including 27 API tests and all four consumer scenarios; HTTP parser safety cases; public HTTP pass/mismatch/unreachable fixture; nine Vitest flows; frontend typecheck/build; documentation and diff checks; exact commit `aa16d03` complete Ubuntu `./scripts/verify.sh`.
 - Result: Expected 404 evidence passes with a content-addressed response artifact, 404 when 200 is expected fails, and connection refusal produces an audited failed execution plus atomic failed task/run evaluation rather than an API error. Exact Windows-focused and complete Ubuntu native/Tauri/Playwright qualification are green. Page rendering remains deliberately unsupported until backed by a real browser engine.
 - Follow-up: Implement governed rendered-page evidence.
+
+### 2026-08-14 - Real Browser Render Evidence
+
+- Context: `PageRenders` required evidence from a JavaScript-capable browser across daemon, CLI, and desktop flows; treating fetched HTML as rendering would be false evidence, while unrestricted page scripts could silently broaden network authority or mutate services.
+- Decision: Add typed `browser.render` backed by ephemeral Chromium over CDP. Parse only exact `PAGE RENDERS URL`; require credential-free HTTP(S); use a fresh profile and bounded 1280x720 viewport; intercept every request before send; allow only GET/HEAD to the condition origin plus data/blob resources; and block cross-origin and mutating requests. Verify post-JavaScript ready state/body layout, then content-address rendered HTML and a viewport PNG. Use configured `MCG_BROWSER_EXECUTABLE` or local system detection with no runtime download. Browser unavailability is inconclusive/blocking; launched-browser render failure fails the condition.
+- Files: `crates/mcg-{config,tools,runtime,api}/`, workspace manifests/lock, owner verification scripts, `README.md`, runtime/testing documentation.
+- Commands/tests: Strict full-workspace Windows clippy; all Rust tests except live-locked daemon/desktop executables, including 30 tool and 28 API tests; real Chromium tool fixture; public consumer render launch fixture; nine Vitest flows; frontend typecheck/build; docs/diff checks.
+- Result: Windows-focused gates prove JavaScript changes the DOM/title, two render artifacts are audited, screenshot hash reaches the independent report, a cross-origin image plus same-origin POST are blocked before network send, and a missing configured browser is reported as unavailable rather than false objective failure.
+- Follow-up: Full Windows gates, exact-commit Ubuntu real-browser/native qualification, then artifact/file and custom condition evaluators.
 
 ## Known Issues
 

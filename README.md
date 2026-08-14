@@ -110,17 +110,23 @@ runs those checks through the governed tool broker after the independent Evaluat
 turn. Passing evidence atomically completes the task/run; a nonzero exit atomically
 fails them. Task History exposes the durable objective result and check counts,
 with per-condition details in advanced mode. Guided mode requests one explicit
-approval for the exact discovered command batch and immutable project snapshot.
+approval for the exact supported objective batch and immutable project snapshot.
 That checkpoint survives daemon restart; denial blocks for a bounded retry with a
 fresh request identity, while approval resumes the batch without repeating model
-turns or completed checks. Natural-language, browser, and other condition
-types remain nonterminal until their objective evaluators are implemented; model
+turns or completed checks. Natural-language and other condition types remain
+nonterminal until their objective evaluators are implemented; model
 text alone is never promoted to proof. Advanced success-condition lines can use
 `HTTP STATUS URL` (for example, `HTTP 200 http://127.0.0.1:3000/health`). MCG
 performs one governed, body-bounded GET to that exact credential-free URL, captures
 the response artifact, and compares the observed status exactly, including expected
 non-2xx responses. Browser rendering remains a distinct evaluator rather than being
-approximated by an HTTP fetch.
+approximated by an HTTP fetch. Use `PAGE RENDERS URL` for a real ephemeral Chromium
+render at 1280x720. MCG permits only credential-free GET/HEAD traffic to the exact
+condition origin, blocks cross-origin requests and state-changing methods before
+send, evaluates DOM readiness/layout after JavaScript, and captures rendered HTML
+plus a viewport PNG. Verification uses a configured `MCG_BROWSER_EXECUTABLE` or an
+installed Chrome/Chromium discovered locally; it never downloads a browser at task
+execution time.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

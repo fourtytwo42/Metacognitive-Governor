@@ -422,6 +422,12 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ),
             write_path(destination),
         ],
+        ToolRequestKind::BrowserRender { url, .. } => vec![make(
+            ActionClass::ProjectRead,
+            CapabilityEffect::Read,
+            ResourceKind::NetworkOrigin,
+            network_origin(url)?,
+        )],
         ToolRequestKind::SystemInfo | ToolRequestKind::SystemProcesses => vec![make(
             ActionClass::ProjectRead,
             CapabilityEffect::Read,
@@ -590,9 +596,9 @@ fn primary_resource(request: &ToolRequest) -> String {
         ToolRequestKind::FsMove { from, to } | ToolRequestKind::FsCopy { from, to } => {
             format!("{from} -> {to}")
         }
-        ToolRequestKind::HttpRequest { url, .. } | ToolRequestKind::HttpDownload { url, .. } => {
-            sanitized_url_resource(url)
-        }
+        ToolRequestKind::HttpRequest { url, .. }
+        | ToolRequestKind::HttpDownload { url, .. }
+        | ToolRequestKind::BrowserRender { url, .. } => sanitized_url_resource(url),
         ToolRequestKind::McpCall {
             connection_id,
             tool_name,

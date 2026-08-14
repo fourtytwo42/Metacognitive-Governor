@@ -7,14 +7,19 @@ function Assert-NativeSuccess {
     }
 }
 
+npm ci
+Assert-NativeSuccess "npm ci"
+npx playwright install chromium
+Assert-NativeSuccess "Playwright browser install"
+$browserPath = node -e "console.log(require('playwright').chromium.executablePath())"
+Assert-NativeSuccess "Playwright browser path"
+$env:MCG_BROWSER_EXECUTABLE = $browserPath.Trim()
 cargo fmt --all -- --check
 Assert-NativeSuccess "cargo fmt"
 cargo clippy --workspace --all-targets -- -D warnings
 Assert-NativeSuccess "cargo clippy"
 cargo test --workspace
 Assert-NativeSuccess "cargo test"
-npm ci
-Assert-NativeSuccess "npm ci"
 npm run check:docs
 Assert-NativeSuccess "documentation check"
 npm run check
@@ -25,7 +30,5 @@ npm run build
 Assert-NativeSuccess "frontend build"
 npm run tauri --workspace @mcg/desktop -- build --debug
 Assert-NativeSuccess "Tauri build"
-npx playwright install chromium
-Assert-NativeSuccess "Playwright browser install"
 npm run test:e2e
 Assert-NativeSuccess "Playwright end-to-end tests"
