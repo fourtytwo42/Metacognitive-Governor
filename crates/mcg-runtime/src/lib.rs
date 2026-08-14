@@ -17,7 +17,8 @@ use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
     AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnEngine, AgentTurnError,
     AgentTurnRequest, AgentTurnResult, AgentUsageRecord, ConfidenceEstimate, EvaluationReport,
-    LeaseBudget, OrganizationGenome, OrganizationalMetrics, RoleKind, WorkPlan,
+    ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics, RoleKind,
+    WorkPlan,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -50,8 +51,9 @@ use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
     ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor,
     HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
-    ProcessExecutor, RejectingCredentialResolver, SystemExecutor, ToolAuditRecord, ToolAuditSink,
-    ToolBroker, ToolError,
+    ProcessExecutor, RejectingCredentialResolver, SystemExecutor, TOOL_SCHEMA_VERSION,
+    ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
+    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -230,6 +232,102 @@ pub struct PreparedAgentTurn {
     pub request: AgentTurnRequest,
     pub events: Vec<EventEnvelope>,
     pub project_root: std::path::PathBuf,
+}
+
+#[derive(Clone)]
+struct RuntimeMcpExecutor {
+    store: Arc<Mutex<SqliteEventStore>>,
+    credentials: Arc<dyn McpCredentialStore>,
+}
+
+#[async_trait]
+impl ToolExecutor for RuntimeMcpExecutor {
+    async fn execute(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+    ) -> Result<ToolOutcome, ToolError> {
+        let ToolRequestKind::McpCall {
+            connection_id,
+            tool_name,
+            arguments,
+            read_only,
+            destructive,
+            open_world,
+        } = &request.kind
+        else {
+            return Err(ToolError::Invalid(
+                "external MCP executor received a non-MCP request".into(),
+            ));
+        };
+        let (connection, descriptor) = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| ToolError::Execution("runtime storage lock was poisoned".into()))?;
+            let connection = store
+                .mcp_connection(connection_id)
+                .map_err(|error| ToolError::Execution(error.to_string()))?
+                .ok_or_else(|| ToolError::Invalid("MCP connection was not found".into()))?;
+            let catalog = store
+                .mcp_catalog(connection_id)
+                .map_err(|error| ToolError::Execution(error.to_string()))?
+                .ok_or_else(|| ToolError::Invalid("MCP tool catalog was not found".into()))?;
+            let descriptor = catalog
+                .tools
+                .into_iter()
+                .find(|tool| tool.name == *tool_name)
+                .ok_or_else(|| ToolError::Invalid("MCP tool was not discovered".into()))?;
+            (connection, descriptor)
+        };
+        if !connection.enabled {
+            return Err(ToolError::Denied("MCP connection is disabled".into()));
+        }
+        let classification = mcp_tool_classification(&descriptor.annotations);
+        if classification != (*read_only, *destructive, *open_world) {
+            return Err(ToolError::Denied(
+                "MCP tool classification changed after authority was issued".into(),
+            ));
+        }
+        let credential = load_mcp_credential(self.credentials.as_ref(), &connection)
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let client = ModernHttpMcpClient::new(connection, credential)
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let started_at = Utc::now();
+        let result = client
+            .call_tool(tool_name, arguments.clone())
+            .await
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let finished_at = Utc::now();
+        let stdout = serde_json::to_string(&result)
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        Ok(ToolOutcome {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id,
+            request_id: request.id,
+            status: if result.is_error {
+                ToolOutcomeStatus::Failed
+            } else {
+                ToolOutcomeStatus::Succeeded
+            },
+            summary: if result.is_error {
+                format!("MCP tool {tool_name} returned an error result")
+            } else {
+                format!("MCP tool {tool_name} completed")
+            },
+            exit_code: None,
+            stdout: Some(stdout),
+            stderr: None,
+            artifacts: Vec::new(),
+            verification: vec![VerificationEvidence {
+                method: "mcp.tool_result".into(),
+                passed: !result.is_error,
+                detail: format!("connection={connection_id}; tool={tool_name}"),
+            }],
+            started_at,
+            finished_at,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -1346,7 +1444,7 @@ impl AppRuntime {
         let context_json = serde_json::to_vec(&context)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let context_fingerprint = format!("sha256:{:x}", Sha256::digest(context_json));
-        let tools = resolve_role_tools(role.kind, &spec.requested_tools)?;
+        let (tools, external_tools) = self.resolve_agent_tools(role.kind, &spec.requested_tools)?;
         let routes = self.provider_route_candidates().await;
         if routes.is_empty() {
             return Err(ProviderError::Configuration(
@@ -1411,12 +1509,107 @@ impl AppRuntime {
                 route_candidates: routes,
                 routing_policy: RoutingPolicy::default(),
                 tools,
+                external_tools,
                 estimated_output_tokens: spec.estimated_output_tokens,
                 max_model_calls: spec.max_model_calls,
             },
             events,
             project_root: std::path::PathBuf::from(project.root),
         })
+    }
+
+    fn resolve_agent_tools(
+        &self,
+        role: RoleKind,
+        requested: &[String],
+    ) -> Result<(Vec<ToolDefinition>, Vec<ExternalToolBinding>), RuntimeError> {
+        if requested.is_empty() {
+            return Ok((resolve_role_tools(role)?, Vec::new()));
+        }
+        let allowed = role_tool_names(role);
+        let external_allowed = !matches!(role, RoleKind::Executive | RoleKind::Conversation);
+        let mut definitions = Vec::with_capacity(requested.len());
+        let mut bindings = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for requested_name in requested {
+            if !seen.insert(requested_name) {
+                return Err(StorageError::InvalidData(format!(
+                    "tool {requested_name} was requested more than once"
+                ))
+                .into());
+            }
+            if let Some((connection_id, remote_name)) = parse_mcp_tool_request(requested_name) {
+                if !external_allowed {
+                    return Err(StorageError::InvalidData(
+                        "the selected role cannot receive external MCP tools".into(),
+                    )
+                    .into());
+                }
+                let connection = self
+                    .store()?
+                    .mcp_connection(connection_id)?
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(format!(
+                            "MCP connection {connection_id} was not found"
+                        ))
+                    })?;
+                if !connection.enabled {
+                    return Err(StorageError::InvalidData(format!(
+                        "MCP connection {connection_id} is disabled"
+                    ))
+                    .into());
+                }
+                let catalog = self.store()?.mcp_catalog(connection_id)?.ok_or_else(|| {
+                    StorageError::InvalidData(format!(
+                        "MCP connection {connection_id} has no discovered catalog"
+                    ))
+                })?;
+                let descriptor = catalog
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == remote_name)
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(format!(
+                            "MCP tool {requested_name} was not discovered"
+                        ))
+                    })?;
+                let exposed_name = exposed_mcp_tool_name(connection_id, remote_name);
+                if definitions
+                    .iter()
+                    .any(|tool: &ToolDefinition| tool.name == exposed_name)
+                {
+                    return Err(StorageError::InvalidData(
+                        "MCP tool exposure produced a duplicate identity".into(),
+                    )
+                    .into());
+                }
+                let (read_only, destructive, open_world) =
+                    mcp_tool_classification(&descriptor.annotations);
+                definitions.push(ToolDefinition {
+                    name: exposed_name.clone(),
+                    description: descriptor.description.clone(),
+                    parameters: descriptor.input_schema.clone(),
+                    strict: Some(true),
+                });
+                bindings.push(ExternalToolBinding {
+                    exposed_name,
+                    connection_id: connection_id.into(),
+                    remote_name: remote_name.into(),
+                    read_only,
+                    destructive,
+                    open_world,
+                });
+            } else {
+                if !allowed.contains(&requested_name.as_str()) {
+                    return Err(StorageError::InvalidData(format!(
+                        "tool {requested_name} is not grantable to the selected role"
+                    ))
+                    .into());
+                }
+                definitions.push(tool_definition(requested_name)?);
+            }
+        }
+        Ok((definitions, bindings))
     }
 
     /// Builds a project-confined host execution plane, atomically dispatches the
@@ -1467,7 +1660,20 @@ impl AppRuntime {
                     .map_err(runtime_tool_error)?,
             ),
             memory: Arc::new(MemoryExecutor::new(InMemoryMemoryRepository::default())),
+            external: Arc::new(RuntimeMcpExecutor {
+                store: self.store.clone(),
+                credentials: self.mcp_credentials.clone(),
+            }),
         };
+        let prepared = self.prepare_agent_turn(spec).await?;
+        let mut capabilities = CapabilityPolicy::project(&root);
+        capabilities.allowed_network_origins.extend(
+            prepared
+                .request
+                .external_tools
+                .iter()
+                .map(|binding| format!("mcp://{}/{}", binding.connection_id, binding.remote_name)),
+        );
         let control = self.tool_control();
         let broker = ToolBroker::new(
             host,
@@ -1476,12 +1682,11 @@ impl AppRuntime {
             BrokerControls {
                 preset: self.config.autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
-                capabilities: CapabilityPolicy::project(&root),
+                capabilities,
                 leases: Arc::new(control),
                 redactor: OutputRedactor::default(),
             },
         );
-        let prepared = self.prepare_agent_turn(spec).await?;
         let confidence = ConfidenceEstimate::new(5_000, 0)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         self.execute_agent_turn(
@@ -1742,11 +1947,8 @@ impl ExecutionLeaseRepository for DurableToolControl {
     }
 }
 
-fn resolve_role_tools(
-    role: RoleKind,
-    requested: &[String],
-) -> Result<Vec<ToolDefinition>, StorageError> {
-    let allowed: &[&str] = match role {
+fn role_tool_names(role: RoleKind) -> &'static [&'static str] {
+    match role {
         RoleKind::Coder => &[
             "fs.read",
             "fs.list",
@@ -1769,27 +1971,61 @@ fn resolve_role_tools(
         RoleKind::ToolWorker => &["fs.read", "fs.list", "process.exec", "system.info"],
         RoleKind::TemporarySpecialist => &["fs.read", "fs.list"],
         RoleKind::Executive | RoleKind::Conversation => &[],
-    };
-    let selected = if requested.is_empty() {
-        allowed.iter().map(|name| (*name).to_owned()).collect()
-    } else {
-        let mut selected = Vec::with_capacity(requested.len());
-        for name in requested {
-            if !allowed.contains(&name.as_str()) {
-                return Err(StorageError::InvalidData(format!(
-                    "tool {name} is not grantable to the selected role"
-                )));
-            }
-            if selected.contains(name) {
-                return Err(StorageError::InvalidData(format!(
-                    "tool {name} was requested more than once"
-                )));
-            }
-            selected.push(name.clone());
+    }
+}
+
+fn resolve_role_tools(role: RoleKind) -> Result<Vec<ToolDefinition>, StorageError> {
+    role_tool_names(role)
+        .iter()
+        .map(|name| tool_definition(name))
+        .collect()
+}
+
+fn parse_mcp_tool_request(value: &str) -> Option<(&str, &str)> {
+    let mut parts = value.splitn(3, "::");
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("mcp"), Some(connection_id), Some(tool_name))
+            if !connection_id.is_empty() && !tool_name.is_empty() =>
+        {
+            Some((connection_id, tool_name))
         }
-        selected
+        _ => None,
+    }
+}
+
+fn exposed_mcp_tool_name(connection_id: &str, remote_name: &str) -> String {
+    let slug = |value: &str, max: usize| {
+        value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .take(max)
+            .collect::<String>()
     };
-    selected.iter().map(|name| tool_definition(name)).collect()
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{connection_id}\0{remote_name}"))
+    );
+    format!(
+        "mcp_{}_{}_{}",
+        slug(connection_id, 16),
+        slug(remote_name, 20),
+        &digest[..16]
+    )
+}
+
+fn mcp_tool_classification(annotations: &serde_json::Value) -> (bool, bool, bool) {
+    let value = |name: &str, default| {
+        annotations
+            .get(name)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(default)
+    };
+    let read_only = value("readOnlyHint", false);
+    let destructive = annotations
+        .get("destructiveHint")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(!read_only);
+    (read_only, destructive, value("openWorldHint", true))
 }
 
 #[allow(clippy::too_many_lines)] // One exhaustive schema registry is easier to audit than scattered schemas.
@@ -1992,6 +2228,7 @@ mod tests {
     };
 
     use super::*;
+    use axum::{Json, Router, routing::post};
     use mcg_agents::{
         AGENT_RUN_SCHEMA_VERSION, AgentTurnRequest, ExecutivePlanner, LeaseBudget, PlannedWork,
         PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
@@ -2027,6 +2264,105 @@ mod tests {
         runtime.create_task(&task).expect("task should persist");
 
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Covers discovery, namespace binding, and live governed execution.
+    async fn discovered_mcp_tool_is_namespaced_and_executes_through_runtime_boundary() {
+        async fn fixture(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let result = match body["method"].as_str().expect("method") {
+                "server/discover" => serde_json::json!({
+                    "supportedVersions": [mcg_mcp::MCP_PROTOCOL_VERSION],
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "runtime-fixture"}
+                }),
+                "tools/list" => serde_json::json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Read fixture data",
+                        "inputSchema": {"type": "object"},
+                        "annotations": {
+                            "readOnlyHint": true,
+                            "destructiveHint": false,
+                            "openWorldHint": false
+                        }
+                    }],
+                    "serverInfo": {"name": "runtime-fixture"}
+                }),
+                "tools/call" => serde_json::json!({
+                    "isError": false,
+                    "content": [{"type": "text", "text": "fixture result"}],
+                    "structuredContent": {"value": 42},
+                    "serverInfo": {"name": "runtime-fixture"}
+                }),
+                _ => unreachable!(),
+            };
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": body["id"].clone(),
+                "result": result
+            }))
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/mcp", post(fixture)))
+                .await
+                .expect("serve");
+        });
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        runtime
+            .configure_mcp(
+                McpConnection {
+                    contract_version: mcg_mcp::MCP_CONNECTION_CONTRACT_VERSION,
+                    id: "fixture".into(),
+                    display_name: "Fixture".into(),
+                    transport: mcg_mcp::McpTransport::StreamableHttp {
+                        url: format!("http://{address}/mcp"),
+                    },
+                    auth_mode: McpAuthMode::None,
+                    protocol_mode: mcg_mcp::McpProtocolMode::Auto,
+                    enabled: true,
+                },
+                None,
+            )
+            .await
+            .expect("configure MCP");
+        let (definitions, bindings) = runtime
+            .resolve_agent_tools(RoleKind::Researcher, &["mcp::fixture::lookup".into()])
+            .expect("resolve tools");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(bindings.len(), 1);
+        assert!(definitions[0].name.starts_with("mcp_fixture_lookup_"));
+        let request = ToolRequest {
+            schema_version: TOOL_SCHEMA_VERSION,
+            id: ToolRequestId::new(),
+            task_id: TaskId::new(),
+            namespace: mcg_tools::ToolNamespace::ExternalMcp,
+            summary: "Read fixture data".into(),
+            timeout_seconds: 30,
+            kind: ToolRequestKind::McpCall {
+                connection_id: bindings[0].connection_id.clone(),
+                tool_name: bindings[0].remote_name.clone(),
+                arguments: serde_json::json!({"query": "fixture"}),
+                read_only: bindings[0].read_only,
+                destructive: bindings[0].destructive,
+                open_world: bindings[0].open_world,
+            },
+            created_at: Utc::now(),
+        };
+        let outcome = RuntimeMcpExecutor {
+            store: runtime.store.clone(),
+            credentials: runtime.mcp_credentials.clone(),
+        }
+        .execute(ToolExecutionId::new(), &request)
+        .await
+        .expect("execute MCP");
+        assert_eq!(outcome.status, ToolOutcomeStatus::Succeeded);
+        assert!(outcome.stdout.expect("stdout").contains("fixture result"));
     }
 
     struct CountingExecutor(Arc<AtomicUsize>);
@@ -2341,6 +2677,7 @@ mod tests {
                 parameters: serde_json::json!({"type":"object"}),
                 strict: Some(true),
             }],
+            external_tools: Vec::new(),
             estimated_output_tokens: 200,
             max_model_calls: 4,
         };

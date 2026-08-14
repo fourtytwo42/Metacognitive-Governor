@@ -12,6 +12,7 @@ pub struct HostExecutor {
     pub system: Arc<dyn ToolExecutor>,
     pub git: Arc<dyn ToolExecutor>,
     pub memory: Arc<dyn ToolExecutor>,
+    pub external: Arc<dyn ToolExecutor>,
 }
 
 #[async_trait]
@@ -52,6 +53,7 @@ impl ToolExecutor for HostExecutor {
             ToolRequestKind::MemorySearch { .. }
             | ToolRequestKind::MemoryRead { .. }
             | ToolRequestKind::MemoryWrite { .. } => &self.memory,
+            ToolRequestKind::McpCall { .. } => &self.external,
         };
         executor.execute(execution_id, request).await
     }

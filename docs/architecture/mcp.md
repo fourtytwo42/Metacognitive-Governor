@@ -124,10 +124,28 @@ Authenticated management endpoints are:
 | `POST /api/v1/mcp/connections/{id}/discover` | Refresh live discovery and atomically replace the catalog. |
 
 The CLI exposes the same foundation through `mcg mcp add-http`, `list`, `tools`,
-and `discover`. The transport client can call a remote tool, but runtime agent
-work cannot yet reach that method: namespaced exposure, lease validation, and
-policy-broker execution must be present first so model output cannot create
-authority by naming an external tool.
+and `discover`.
+
+## Agent namespace and policy execution
+
+An agent dispatch explicitly requests a discovered remote identity as
+`mcp::CONNECTION_ID::REMOTE_TOOL_NAME`. Empty/default role tool selection never
+adds MCP tools. The runtime resolves that canonical identity only against an
+enabled durable connection and current catalog, then creates a bounded
+provider-safe exposed alias plus an internal `ExternalToolBinding`. The model
+sees the alias and JSON Schema but cannot supply or replace the connection id,
+remote name, or annotation-derived policy classification.
+
+The agent lease contains the exact exposed alias. A model call must match both
+the exposed definitions and active lease permissions. The typed request enters
+the existing `ToolBroker` as namespace `external_mcp`, where it receives the
+same policy decision, approval persistence, execution lease, immutable audit,
+redaction, timeout, and result-identity checks as host tools. Read-only,
+non-destructive, closed-world tools can run under explicitly issued capability;
+destructive or open-world tools require owner approval. Immediately before a
+network call, the executor reloads the enabled connection/catalog and rejects a
+changed or missing tool classification, preventing stale authority after
+rediscovery.
 
 ## Qualification and remaining scope
 
@@ -143,7 +161,6 @@ This is the MCP server plus HTTP client foundation, not the completed MCP featur
 M6 work includes:
 
 - stdio transport and legacy protocol negotiation/interoperability;
-- remote tool namespace isolation and policy-broker execution by agents;
 - expanded MCP run decomposition, independent evaluation, approval-resume,
   completion, and cancellation contracts;
 - request-scoped SSE progress and opt-in subscription streams where useful;

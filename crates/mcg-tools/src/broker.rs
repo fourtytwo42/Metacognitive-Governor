@@ -158,7 +158,7 @@ where
                                 id: approval_id,
                                 tool_request_id: request.id,
                                 task_id: request.task_id,
-                                action: request.kind.stable_name().into(),
+                                action: request.kind.stable_name(),
                                 resource: resource.clone(),
                                 reason: reason.clone(),
                                 state: ApprovalState::Pending,
@@ -215,7 +215,7 @@ where
                         execution_id,
                         request_id: request.id,
                         task_id: request.task_id,
-                        tool: request.kind.stable_name().into(),
+                        tool: request.kind.stable_name(),
                         resource,
                         request_fingerprint: fingerprint,
                         phase: ToolAuditPhase::Completion,
@@ -252,7 +252,7 @@ where
                 execution_id: outcome.execution_id,
                 request_id: request.id,
                 task_id: request.task_id,
-                tool: request.kind.stable_name().into(),
+                tool: request.kind.stable_name(),
                 resource,
                 request_fingerprint: fingerprint,
                 phase: ToolAuditPhase::Completion,
@@ -281,7 +281,7 @@ where
                 execution_id,
                 request_id: request.id,
                 task_id: request.task_id,
-                tool: request.kind.stable_name().into(),
+                tool: request.kind.stable_name(),
                 resource: resource.into(),
                 request_fingerprint: fingerprint.into(),
                 phase: ToolAuditPhase::Decision,
@@ -523,6 +523,34 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ResourceKind::Memory,
             key.clone(),
         )],
+        ToolRequestKind::McpCall {
+            connection_id,
+            tool_name,
+            read_only,
+            destructive,
+            open_world,
+            ..
+        } => {
+            let resource = format!("mcp://{connection_id}/{tool_name}");
+            vec![make(
+                if *destructive {
+                    ActionClass::DestructiveDelete
+                } else if *read_only && !*open_world {
+                    ActionClass::ProjectRead
+                } else {
+                    ActionClass::ExternalPublication
+                },
+                if *destructive {
+                    CapabilityEffect::Delete
+                } else if *read_only && !*open_world {
+                    CapabilityEffect::Read
+                } else {
+                    CapabilityEffect::Publish
+                },
+                ResourceKind::NetworkOrigin,
+                resource,
+            )]
+        }
     };
     Ok(requests)
 }
@@ -565,6 +593,11 @@ fn primary_resource(request: &ToolRequest) -> String {
         ToolRequestKind::HttpRequest { url, .. } | ToolRequestKind::HttpDownload { url, .. } => {
             sanitized_url_resource(url)
         }
+        ToolRequestKind::McpCall {
+            connection_id,
+            tool_name,
+            ..
+        } => format!("mcp://{connection_id}/{tool_name}"),
         ToolRequestKind::GitStatus { repository }
         | ToolRequestKind::GitDiff { repository, .. }
         | ToolRequestKind::GitCommit { repository, .. }
@@ -572,7 +605,7 @@ fn primary_resource(request: &ToolRequest) -> String {
         | ToolRequestKind::GitWorktreeCreate { repository, .. }
         | ToolRequestKind::GitWorktreeRemove { repository, .. }
         | ToolRequestKind::GitApplyPatch { repository, .. } => repository.clone(),
-        _ => request.kind.stable_name().into(),
+        _ => request.kind.stable_name(),
     }
 }
 
@@ -740,6 +773,60 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
         assert_eq!(audit.records().len(), 1);
         assert_eq!(audit.records()[0].result, Some(ToolOutcomeStatus::Denied));
+    }
+
+    #[tokio::test]
+    async fn external_mcp_classification_controls_policy_before_execution() {
+        let root = tempdir().expect("tempdir");
+        let count = Arc::new(AtomicUsize::new(0));
+        let approvals = InMemoryApprovalRepository::default();
+        let mut capabilities = CapabilityPolicy::project(root.path());
+        capabilities
+            .allowed_network_origins
+            .push("mcp://fixture/read".into());
+        capabilities
+            .allowed_network_origins
+            .push("mcp://fixture/publish".into());
+        let broker = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            approvals,
+            InMemoryAuditSink::default(),
+            BrokerControls {
+                preset: AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let read = request(
+            TaskId::new(),
+            ToolRequestKind::McpCall {
+                connection_id: "fixture".into(),
+                tool_name: "read".into(),
+                arguments: serde_json::json!({}),
+                read_only: true,
+                destructive: false,
+                open_world: false,
+            },
+        );
+        broker.execute(&read).await.expect("bounded read allowed");
+        let publish = request(
+            TaskId::new(),
+            ToolRequestKind::McpCall {
+                connection_id: "fixture".into(),
+                tool_name: "publish".into(),
+                arguments: serde_json::json!({}),
+                read_only: false,
+                destructive: false,
+                open_world: true,
+            },
+        );
+        assert!(matches!(
+            broker.execute(&publish).await,
+            Err(ToolError::ApprovalRequired { .. })
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -492,7 +492,12 @@ fn tool_definitions() -> Vec<Value> {
                     "target_path": {"type": "string"},
                     "requested_tools": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["fs.read", "fs.list", "fs.write", "fs.patch", "fs.mkdir", "process.exec", "git.status", "git.diff", "git.apply_patch", "system.info"]},
+                        "items": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["fs.read", "fs.list", "fs.write", "fs.patch", "fs.mkdir", "process.exec", "git.status", "git.diff", "git.apply_patch", "system.info"]},
+                                {"type": "string", "pattern": "^mcp::[A-Za-z0-9_-]{1,128}::.+$", "maxLength": 512}
+                            ]
+                        },
                         "uniqueItems": true,
                         "maxItems": 16
                     },
@@ -966,7 +971,7 @@ fn validate_run_agent_arguments(request: &RunAgentArguments) -> Result<(), RpcFa
         || request
             .requested_tools
             .iter()
-            .any(|tool| !allowed.contains(&tool.as_str()))
+            .any(|tool| !allowed.contains(&tool.as_str()) && !valid_mcp_tool_reference(tool))
         || request
             .requested_tools
             .iter()
@@ -981,6 +986,21 @@ fn validate_run_agent_arguments(request: &RunAgentArguments) -> Result<(), RpcFa
         ));
     }
     Ok(())
+}
+
+fn valid_mcp_tool_reference(value: &str) -> bool {
+    let mut parts = value.splitn(3, "::");
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some("mcp"), Some(connection_id), Some(tool_name))
+            if !connection_id.is_empty()
+                && connection_id.len() <= 128
+                && connection_id.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
+                && !tool_name.trim().is_empty()
+                && value.len() <= 512
+    )
 }
 
 fn query_project(

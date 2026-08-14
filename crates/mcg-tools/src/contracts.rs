@@ -15,6 +15,7 @@ pub enum ToolNamespace {
     Caller,
     Host,
     Mcg,
+    ExternalMcp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,41 +193,54 @@ pub enum ToolRequestKind {
         key: String,
         value: Value,
     },
+    McpCall {
+        connection_id: String,
+        tool_name: String,
+        arguments: Value,
+        read_only: bool,
+        destructive: bool,
+        open_world: bool,
+    },
 }
 
 impl ToolRequestKind {
     #[must_use]
-    pub const fn stable_name(&self) -> &'static str {
+    pub fn stable_name(&self) -> String {
         match self {
-            Self::FsRead { .. } => "fs.read",
-            Self::FsWrite { .. } => "fs.write",
-            Self::FsPatch { .. } => "fs.patch",
-            Self::FsList { .. } => "fs.list",
-            Self::FsMkdir { .. } => "fs.mkdir",
-            Self::FsMove { .. } => "fs.move",
-            Self::FsCopy { .. } => "fs.copy",
-            Self::FsDelete { .. } => "fs.delete",
-            Self::ProcessExec { .. } => "process.exec",
-            Self::ProcessSpawn { .. } => "process.spawn",
-            Self::ProcessStatus { .. } => "process.status",
-            Self::ProcessStdin { .. } => "process.stdin",
-            Self::ProcessKill { .. } => "process.kill",
-            Self::ShellExec { .. } => "shell.exec",
-            Self::HttpRequest { .. } => "http.request",
-            Self::HttpDownload { .. } => "http.download",
-            Self::SystemInfo => "system.info",
-            Self::SystemEnv { .. } => "system.env",
-            Self::SystemProcesses => "system.processes",
-            Self::GitStatus { .. } => "git.status",
-            Self::GitDiff { .. } => "git.diff",
-            Self::GitCommit { .. } => "git.commit",
-            Self::GitCheckout { .. } => "git.checkout",
-            Self::GitWorktreeCreate { .. } => "git.worktree_create",
-            Self::GitWorktreeRemove { .. } => "git.worktree_remove",
-            Self::GitApplyPatch { .. } => "git.apply_patch",
-            Self::MemorySearch { .. } => "memory.search",
-            Self::MemoryRead { .. } => "memory.read",
-            Self::MemoryWrite { .. } => "memory.write",
+            Self::FsRead { .. } => "fs.read".into(),
+            Self::FsWrite { .. } => "fs.write".into(),
+            Self::FsPatch { .. } => "fs.patch".into(),
+            Self::FsList { .. } => "fs.list".into(),
+            Self::FsMkdir { .. } => "fs.mkdir".into(),
+            Self::FsMove { .. } => "fs.move".into(),
+            Self::FsCopy { .. } => "fs.copy".into(),
+            Self::FsDelete { .. } => "fs.delete".into(),
+            Self::ProcessExec { .. } => "process.exec".into(),
+            Self::ProcessSpawn { .. } => "process.spawn".into(),
+            Self::ProcessStatus { .. } => "process.status".into(),
+            Self::ProcessStdin { .. } => "process.stdin".into(),
+            Self::ProcessKill { .. } => "process.kill".into(),
+            Self::ShellExec { .. } => "shell.exec".into(),
+            Self::HttpRequest { .. } => "http.request".into(),
+            Self::HttpDownload { .. } => "http.download".into(),
+            Self::SystemInfo => "system.info".into(),
+            Self::SystemEnv { .. } => "system.env".into(),
+            Self::SystemProcesses => "system.processes".into(),
+            Self::GitStatus { .. } => "git.status".into(),
+            Self::GitDiff { .. } => "git.diff".into(),
+            Self::GitCommit { .. } => "git.commit".into(),
+            Self::GitCheckout { .. } => "git.checkout".into(),
+            Self::GitWorktreeCreate { .. } => "git.worktree_create".into(),
+            Self::GitWorktreeRemove { .. } => "git.worktree_remove".into(),
+            Self::GitApplyPatch { .. } => "git.apply_patch".into(),
+            Self::MemorySearch { .. } => "memory.search".into(),
+            Self::MemoryRead { .. } => "memory.read".into(),
+            Self::MemoryWrite { .. } => "memory.write".into(),
+            Self::McpCall {
+                connection_id,
+                tool_name,
+                ..
+            } => format!("mcp::{connection_id}::{tool_name}"),
         }
     }
 
@@ -238,6 +252,10 @@ impl ToolRequestKind {
                 | Self::ProcessKill { .. }
                 | Self::GitCheckout { .. }
                 | Self::GitWorktreeRemove { .. }
+                | Self::McpCall {
+                    destructive: true,
+                    ..
+                }
         )
     }
 

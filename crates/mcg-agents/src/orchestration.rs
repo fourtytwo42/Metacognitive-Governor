@@ -54,8 +54,20 @@ pub struct AgentTurnRequest {
     pub route_candidates: Vec<RouteCandidate>,
     pub routing_policy: RoutingPolicy,
     pub tools: Vec<ToolDefinition>,
+    #[serde(default)]
+    pub external_tools: Vec<ExternalToolBinding>,
     pub estimated_output_tokens: u64,
     pub max_model_calls: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalToolBinding {
+    pub exposed_name: String,
+    pub connection_id: String,
+    pub remote_name: String,
+    pub read_only: bool,
+    pub destructive: bool,
+    pub open_world: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,12 +264,17 @@ impl AgentTurnEngine {
                         "model requested unleased or unexposed tool {name}"
                     )));
                 }
+                let binding = request
+                    .external_tools
+                    .iter()
+                    .find(|binding| binding.exposed_name == name);
                 let tool_request = decode_tool_request(
                     request.instance.task_id,
                     request.lease.goal.as_str(),
                     &name,
                     &arguments,
                     &request.lease,
+                    binding,
                 )?;
                 let outcome = tools.execute(&tool_request).await?;
                 if outcome.request_id != tool_request.id {
@@ -335,6 +352,20 @@ fn validate_turn(request: &AgentTurnRequest) -> Result<(), AgentTurnError> {
                 || candidate.target.model_id.trim().is_empty()
                 || candidate.target.model_id != candidate.model.id
         })
+        || request.external_tools.iter().any(|binding| {
+            binding.exposed_name.trim().is_empty()
+                || binding.connection_id.trim().is_empty()
+                || binding.remote_name.trim().is_empty()
+                || !tool_names.contains(binding.exposed_name.as_str())
+                || (binding.destructive && binding.read_only)
+        })
+        || request
+            .external_tools
+            .iter()
+            .map(|binding| binding.exposed_name.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != request.external_tools.len()
     {
         return Err(AgentTurnError::Invalid(
             "turn has duplicate or malformed tool, permission, role, or route metadata".into(),
@@ -449,9 +480,43 @@ fn decode_tool_request(
     name: &str,
     arguments: &str,
     lease: &AgentLease,
+    external: Option<&ExternalToolBinding>,
 ) -> Result<ToolRequest, AgentTurnError> {
     let mut object = serde_json::from_str::<Map<String, Value>>(arguments)
         .map_err(|error| AgentTurnError::Invalid(format!("invalid {name} arguments: {error}")))?;
+    if let Some(binding) = external {
+        if object.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "tool"
+                    | "connection_id"
+                    | "tool_name"
+                    | "arguments"
+                    | "read_only"
+                    | "destructive"
+                    | "open_world"
+            )
+        }) {
+            return Err(AgentTurnError::Invalid(format!(
+                "{name} arguments cannot override the external tool binding"
+            )));
+        }
+        let mut request = ToolRequest::new(
+            task_id,
+            summary,
+            ToolRequestKind::McpCall {
+                connection_id: binding.connection_id.clone(),
+                tool_name: binding.remote_name.clone(),
+                arguments: Value::Object(object),
+                read_only: binding.read_only,
+                destructive: binding.destructive,
+                open_world: binding.open_world,
+            },
+        );
+        request.namespace = mcg_tools::ToolNamespace::ExternalMcp;
+        request.timeout_seconds = bounded_tool_timeout(lease)?;
+        return Ok(request);
+    }
     if object.contains_key("tool") {
         return Err(AgentTurnError::Invalid(format!(
             "{name} arguments cannot override the typed tool discriminator"
@@ -460,6 +525,13 @@ fn decode_tool_request(
     object.insert("tool".into(), Value::String(name.replace('.', "_")));
     let kind: ToolRequestKind = serde_json::from_value(Value::Object(object))
         .map_err(|error| AgentTurnError::Invalid(format!("invalid {name} arguments: {error}")))?;
+    let timeout_seconds = bounded_tool_timeout(lease)?;
+    let mut request = ToolRequest::new(task_id, summary, kind);
+    request.timeout_seconds = timeout_seconds;
+    Ok(request)
+}
+
+fn bounded_tool_timeout(lease: &AgentLease) -> Result<u64, AgentTurnError> {
     if lease.expires_at <= Utc::now() {
         return Err(AgentTurnError::Invalid(
             "agent lease expired before tool execution".into(),
@@ -475,9 +547,7 @@ fn decode_tool_request(
     let timeout_seconds = remaining_budget
         .map_or(remaining, |limit| limit.min(remaining))
         .min(3600);
-    let mut request = ToolRequest::new(task_id, summary, kind);
-    request.timeout_seconds = timeout_seconds;
-    Ok(request)
+    Ok(timeout_seconds)
 }
 
 #[cfg(test)]
@@ -673,6 +743,7 @@ mod tests {
             route_candidates: vec![candidate("primary")],
             routing_policy: RoutingPolicy::default(),
             tools,
+            external_tools: Vec::new(),
             estimated_output_tokens: 200,
             max_model_calls: 4,
         }
@@ -745,6 +816,70 @@ mod tests {
         assert!(matches!(
             tools.requests.lock().expect("tools lock")[0].kind,
             ToolRequestKind::FsRead { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn external_binding_is_internal_authority_not_model_arguments() {
+        let exposed = "mcp_fixture_lookup_deadbeef";
+        let models = FakeModels {
+            responses: Mutex::new(VecDeque::from([
+                Ok(response(
+                    "response-1",
+                    vec![OutputItem::ToolCall {
+                        id: "call-mcp".into(),
+                        name: exposed.into(),
+                        arguments: r#"{"query":"fixture"}"#.into(),
+                    }],
+                )),
+                Ok(response(
+                    "response-2",
+                    vec![OutputItem::Message {
+                        role: MessageRole::Assistant,
+                        content: vec![ContentPart::Text {
+                            text: "External lookup completed".into(),
+                        }],
+                    }],
+                )),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let tools = FakeTools::default();
+        let mut request = turn(
+            vec![exposed.into()],
+            vec![ToolDefinition {
+                name: exposed.into(),
+                description: Some("Fixture external lookup".into()),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(true),
+            }],
+        );
+        request.external_tools.push(ExternalToolBinding {
+            exposed_name: exposed.into(),
+            connection_id: "fixture".into(),
+            remote_name: "lookup".into(),
+            read_only: true,
+            destructive: false,
+            open_world: false,
+        });
+        AgentTurnEngine
+            .execute(request, &models, &tools)
+            .await
+            .expect("external turn");
+        let requests = tools.requests.lock().expect("requests");
+        assert_eq!(requests[0].namespace, mcg_tools::ToolNamespace::ExternalMcp);
+        assert!(matches!(
+            &requests[0].kind,
+            ToolRequestKind::McpCall {
+                connection_id,
+                tool_name,
+                arguments,
+                read_only: true,
+                destructive: false,
+                open_world: false,
+            } if connection_id == "fixture"
+                && tool_name == "lookup"
+                && arguments == &serde_json::json!({"query": "fixture"})
         ));
     }
 
