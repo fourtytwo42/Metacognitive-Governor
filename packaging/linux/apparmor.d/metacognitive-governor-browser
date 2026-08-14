@@ -1,0 +1,8 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+profile metacognitive-governor-browser /opt/metacognitive-governor/browser/chrome flags=(unconfined) {
+  userns,
+
+  include if exists <local/metacognitive-governor-browser>
+}

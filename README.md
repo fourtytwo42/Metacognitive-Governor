@@ -126,7 +126,9 @@ condition origin, blocks cross-origin requests and state-changing methods before
 send, evaluates DOM readiness/layout after JavaScript, and captures rendered HTML
 plus a viewport PNG. Verification uses a configured `MCG_BROWSER_EXECUTABLE` or an
 installed Chrome/Chromium discovered locally; it never downloads a browser at task
-execution time.
+execution time. Linux packages install the managed browser at
+`/opt/metacognitive-governor/browser/chrome` with a path-specific AppArmor profile;
+MCG never disables Chromium's sandbox or Ubuntu's global user-namespace restriction.
 
 Configure an anonymous local/OpenAI-compatible endpoint with `mcg provider add`.
 Connect an OpenAI subscription through the native Providers panel or with

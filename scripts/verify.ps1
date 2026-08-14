@@ -11,7 +11,7 @@ npm ci
 Assert-NativeSuccess "npm ci"
 npx playwright install chromium
 Assert-NativeSuccess "Playwright browser install"
-$browserPath = node -e "console.log(require('playwright').chromium.executablePath())"
+$browserPath = node scripts/browser-executable.mjs
 Assert-NativeSuccess "Playwright browser path"
 $env:MCG_BROWSER_EXECUTABLE = $browserPath.Trim()
 cargo fmt --all -- --check

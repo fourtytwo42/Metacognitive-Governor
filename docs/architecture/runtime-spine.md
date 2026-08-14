@@ -125,6 +125,10 @@ post-render HTML and a viewport PNG as content-addressed artifacts, and records 
 screenshot hash in evaluation evidence. Missing local browser runtime is inconclusive
 and blocks for setup/retry; a browser that launches but cannot render the page fails
 the objective.
+On Ubuntu with restricted unprivileged user namespaces, the Linux package places its
+browser at a root-owned stable path and installs the repository's path-specific
+AppArmor profile granting `userns` to that executable. Development and release gates
+use the same layout. `--no-sandbox` and global AppArmor/sysctl weakening are forbidden.
 
 ## Verification evidence
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 npm ci
 npx playwright install chromium
-export MCG_BROWSER_EXECUTABLE="$(node -e "console.log(require('playwright').chromium.executablePath())")"
+export MCG_BROWSER_EXECUTABLE="$(node scripts/browser-executable.mjs)"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
