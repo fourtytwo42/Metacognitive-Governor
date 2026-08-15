@@ -6,7 +6,7 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Complete M9 measured metacognitive improvement after establishing its durable supervision/experiment foundation.
-- Last meaningful change: The full M9 experiment lifecycle now shares one runtime/storage boundary across authenticated REST, CLI, MCP, Tauri, resumable events, and the desktop Improvement workspace. The simple UI summarizes protected baselines and evidence; advanced mode exposes versioned JSON actions and legal compare-and-set transitions. A real REST/MCP scenario proves exact replay through atomic promotion.
+- Last meaningful change: Exact commit `90845d2` has the full M9 experiment lifecycle across authenticated REST, CLI, MCP, Tauri, resumable events, and the desktop Improvement workspace. Windows local qualification is green; a cold-build timing race in the scheduler restart test was corrected to compare against the completed restart clock.
 - Next step: Add automatic fast/medium/slow observation production and candidate/shadow/benchmark orchestration over real runs, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
 - Blockers: None documented.
 
@@ -142,6 +142,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-15: Exact source commit `90845d27101581b0cefc092e3294a8afd216f479` passed the complete Windows gate in equivalent preserved-daemon lanes: strict workspace formatting/Clippy; every Rust unit/integration/doc test including 45 API, 31 storage, 10 runtime, 8 CLI, three daemon restart, live GPU45/browser/computer/SSH fixtures; docs; frontend typecheck, 21 Vitest flows, production build, native Tauri debug build, and two Playwright flows. The normal verifier could not replace the owner daemon locked on port 7777, so Rust ran in an isolated target and native Tauri/Playwright then ran against the shared cache without touching either live daemon. The isolated cold build exposed a pre-existing test-clock race (`fixture start + 1s` could precede slow startup recovery); the test now reclaims at `completed restart + 1s`. After the full Rust suite passed, only the exact disposable 22.5 GiB target was cleaned, and the remaining native/E2E gates passed. No GitHub-hosted compute ran.
 
 - 2026-08-14: M9 every-interface checkpoint passed 45 API tests, 31 storage tests, 10 runtime tests, 8 CLI tests, and 21 desktop Vitest flows; focused strict Clippy for all changed Rust packages, formatting, frontend typecheck/production build, documentation validation, and diff hygiene are green. The integrated authenticated REST/MCP fixture records and exactly replays a candidate and observation, runs a shadow experiment, records paired evidence, promotes atomically, and proves the active organization head changes only at the measured decision. Exact full Windows/Ubuntu qualification and automated supervision/orchestration remain pending.
 
