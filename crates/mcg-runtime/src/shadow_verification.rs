@@ -1,4 +1,4 @@
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use std::{
     fs::{self, OpenOptions},
     path::PathBuf,
@@ -7,16 +7,16 @@ use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use mcg_agents::SuccessCondition;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use mcg_domain::{TaskId, ToolExecutionId};
 use mcg_tools::{ArtifactReference, ArtifactStore};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use mcg_tools::{
     ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver, ToolError,
-    ToolExecutor, ToolRequest, ToolRequestKind,
+    ToolExecutor, ToolOutcome, ToolRequest, ToolRequestKind,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use uuid::Uuid;
 
 pub(crate) const SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION: u16 = 1;
@@ -24,11 +24,11 @@ pub(crate) const SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION: u16 = 1;
 const BWRAP_PROOF: &[u8] = b"mcg-shadow-bwrap-v1\n";
 #[cfg(any(target_os = "linux", test))]
 const BWRAP_TIMEOUT_SECONDS: u64 = 600;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BWRAP_MAX_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BWRAP_MAX_SOURCE_FILES: u64 = 50_000;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BWRAP_MAX_SOURCE_DEPTH: usize = 32;
 #[cfg(any(target_os = "linux", test))]
 const BWRAP_TMPFS_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -40,10 +40,18 @@ const BWRAP_MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const BWRAP_MAX_PROCESSES: u32 = 256;
 #[cfg(any(target_os = "linux", test))]
 const BWRAP_MAX_OPEN_FILES: u32 = 1024;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BWRAP_MAX_ARGUMENTS: usize = 128;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BWRAP_MAX_COMMAND_BYTES: usize = 32 * 1024;
+#[cfg(any(target_os = "windows", test))]
+const WSB_START_TIMEOUT_SECONDS: u64 = 180;
+#[cfg(any(target_os = "windows", test))]
+const WSB_COMMAND_TIMEOUT_SECONDS: u64 = 600;
+#[cfg(any(target_os = "windows", test))]
+const WSB_STOP_TIMEOUT_SECONDS: u64 = 60;
+#[cfg(any(target_os = "windows", test))]
+const WSB_SETUP_FAILURE_EXIT_CODE: i32 = 125;
 
 /// Credential-free, bounded command result interpreted by the trusted runtime.
 /// Output bodies belong in separate bounded artifacts; this record binds the
@@ -98,6 +106,14 @@ pub(crate) fn default_shadow_command_verifier() -> Arc<dyn ShadowCommandVerifier
     #[cfg(target_os = "linux")]
     if let Some(executable) = trusted_bubblewrap_executable() {
         return Arc::new(LinuxBubblewrapVerifier { executable });
+    }
+    #[cfg(target_os = "windows")]
+    if let Some((executable, runner)) = trusted_windows_sandbox_components() {
+        return Arc::new(WindowsSandboxVerifier {
+            executable,
+            runner,
+            lifecycle: tokio::sync::Mutex::new(()),
+        });
     }
     Arc::new(UnavailableShadowCommandVerifier)
 }
@@ -214,7 +230,370 @@ impl LinuxBubblewrapVerifier {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+struct WindowsSandboxVerifier {
+    executable: PathBuf,
+    runner: PathBuf,
+    lifecycle: tokio::sync::Mutex<()>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[async_trait]
+impl ShadowCommandVerifier for WindowsSandboxVerifier {
+    async fn verify(
+        &self,
+        workspace_root: &Path,
+        condition: &SuccessCondition,
+        artifacts: &ArtifactStore,
+    ) -> ShadowCommandVerification {
+        let _lifecycle = self.lifecycle.lock().await;
+        match self
+            .verify_inner(workspace_root, condition, artifacts)
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => ShadowCommandVerification::Unavailable,
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsSandboxVerifier {
+    async fn verify_inner(
+        &self,
+        workspace_root: &Path,
+        condition: &SuccessCondition,
+        artifacts: &ArtifactStore,
+    ) -> Result<ShadowCommandVerification, ToolError> {
+        let workspace_root = workspace_root
+            .canonicalize()
+            .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
+        verify_workspace_bounds(&workspace_root)?;
+        let command = condition_command(condition)
+            .ok_or_else(|| ToolError::Invalid("shadow verifier requires a command".into()))?;
+        let (executable, command_arguments) = split_command(command)?;
+        let executable = windows_command_name(executable);
+        let harness = WindowsSandboxHarness::create(
+            &workspace_root,
+            &self.runner,
+            &executable,
+            &command_arguments,
+        )?;
+        let configuration = windows_sandbox_configuration(&workspace_root, &harness.path)?;
+        let process = ProcessExecutor::new(
+            [harness.path.clone()],
+            Arc::new(RejectingCredentialResolver),
+        )?;
+
+        let (exit_code, timed_out) = self
+            .execute_session(&process, &harness.path, &configuration)
+            .await?;
+        let transcript = ShadowCommandTranscript {
+            schema_version: SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION,
+            condition: condition.clone(),
+            exit_code,
+            timed_out,
+            stdout: None,
+            stderr: None,
+        };
+        let bytes = serde_json::to_vec(&transcript)
+            .map_err(|error| ToolError::Execution(format!("serialize transcript: {error}")))?;
+        let transcript =
+            artifacts.capture(&bytes, "application/vnd.mcg.shadow-command+json;version=1")?;
+        Ok(ShadowCommandVerification::Completed { transcript })
+    }
+
+    async fn execute_session(
+        &self,
+        process: &ProcessExecutor,
+        harness_root: &Path,
+        configuration: &str,
+    ) -> Result<(Option<i32>, bool), ToolError> {
+        let session_id = Uuid::new_v4().to_string();
+        let start = windows_sandbox_start_arguments(&session_id, configuration);
+        let started = run_windows_sandbox_cli(
+            process,
+            &self.executable,
+            harness_root,
+            start,
+            WSB_START_TIMEOUT_SECONDS,
+            "start Windows Sandbox shadow session",
+        )
+        .await;
+        if let Err(error) = started
+            .and_then(|outcome| require_success(&outcome, "start Windows Sandbox shadow session"))
+        {
+            stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
+            return Err(error);
+        }
+
+        let probe = windows_sandbox_exec_arguments(&session_id, "--probe");
+        let preflight = run_windows_sandbox_cli(
+            process,
+            &self.executable,
+            harness_root,
+            probe.clone(),
+            WSB_START_TIMEOUT_SECONDS,
+            "probe Windows Sandbox shadow session",
+        )
+        .await;
+        if preflight.as_ref().ok().and_then(|value| value.exit_code) != Some(0) {
+            stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
+            return Err(ToolError::Unavailable(
+                "Windows Sandbox runner preflight failed".into(),
+            ));
+        }
+
+        let command = run_windows_sandbox_cli(
+            process,
+            &self.executable,
+            harness_root,
+            windows_sandbox_exec_arguments(&session_id, r"C:\mcg-harness\request.json"),
+            WSB_COMMAND_TIMEOUT_SECONDS,
+            "execute Windows Sandbox shadow command",
+        )
+        .await;
+        let disposition = match command {
+            Err(ToolError::TimedOut) => Ok((None, true)),
+            Err(error) => Err(error),
+            Ok(outcome) => {
+                let postflight = run_windows_sandbox_cli(
+                    process,
+                    &self.executable,
+                    harness_root,
+                    probe,
+                    WSB_START_TIMEOUT_SECONDS,
+                    "postflight Windows Sandbox shadow session",
+                )
+                .await?;
+                if postflight.exit_code == Some(0) {
+                    match outcome.exit_code {
+                        Some(0) => Ok((Some(0), false)),
+                        Some(1) => Ok((Some(1), false)),
+                        Some(WSB_SETUP_FAILURE_EXIT_CODE) => Err(ToolError::Unavailable(
+                            "Windows Sandbox runner rejected its setup".into(),
+                        )),
+                        _ => Err(ToolError::Unavailable(
+                            "Windows Sandbox returned an unrecognized command disposition".into(),
+                        )),
+                    }
+                } else {
+                    Err(ToolError::Unavailable(
+                        "Windows Sandbox runner postflight failed".into(),
+                    ))
+                }
+            }
+        };
+        stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
+        disposition
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Serialize)]
+struct WindowsRunnerRequest<'a> {
+    schema_version: u16,
+    source_root: &'a str,
+    workspace_root: &'a str,
+    executable: &'a str,
+    argv: &'a [String],
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct WindowsSandboxHarness {
+    path: PathBuf,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsSandboxHarness {
+    fn create(
+        workspace_root: &Path,
+        runner: &Path,
+        executable: &str,
+        argv: &[String],
+    ) -> Result<Self, ToolError> {
+        let parent = workspace_root
+            .parent()
+            .ok_or_else(|| ToolError::Invalid("shadow workspace has no parent".into()))?;
+        let path = parent.join(format!(".mcg-wsb-{}", Uuid::new_v4()));
+        fs::create_dir(&path)
+            .map_err(|error| ToolError::Execution(format!("create sandbox harness: {error}")))?;
+        let result = (|| {
+            fs::copy(runner, path.join("mcg-shadow-runner.exe")).map_err(|error| {
+                ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
+            })?;
+            let request = WindowsRunnerRequest {
+                schema_version: 1,
+                source_root: r"C:\mcg-source",
+                workspace_root: r"C:\mcg-workspace",
+                executable,
+                argv,
+            };
+            let bytes = serde_json::to_vec(&request).map_err(|error| {
+                ToolError::Execution(format!("serialize Windows Sandbox request: {error}"))
+            })?;
+            let request_path = path.join("request.json");
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            std::io::Write::write_all(
+                &mut options.open(&request_path).map_err(|error| {
+                    ToolError::Execution(format!("create Windows Sandbox request: {error}"))
+                })?,
+                &bytes,
+            )
+            .map_err(|error| {
+                ToolError::Execution(format!("write Windows Sandbox request: {error}"))
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&path);
+            return Err(error);
+        }
+        Ok(Self { path })
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Drop for WindowsSandboxHarness {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_configuration(source: &Path, harness: &Path) -> Result<String, ToolError> {
+    let source = xml_escape_path(source)?;
+    let harness = xml_escape_path(harness)?;
+    Ok(format!(
+        "<Configuration><vGPU>Disable</vGPU><Networking>Disable</Networking><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><ClipboardRedirection>Disable</ClipboardRedirection><ProtectedClient>Enable</ProtectedClient><MemoryInMB>8192</MemoryInMB><MappedFolders><MappedFolder><HostFolder>{source}</HostFolder><SandboxFolder>C:\\mcg-source</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder><MappedFolder><HostFolder>{harness}</HostFolder><SandboxFolder>C:\\mcg-harness</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder></MappedFolders></Configuration>"
+    ))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn xml_escape_path(path: &Path) -> Result<String, ToolError> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| ToolError::Invalid("Windows Sandbox path is not Unicode".into()))?;
+    if value.chars().any(char::is_control) {
+        return Err(ToolError::Invalid(
+            "Windows Sandbox path contains a control character".into(),
+        ));
+    }
+    Ok(value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_start_arguments(session_id: &str, configuration: &str) -> Vec<String> {
+    vec![
+        "start".into(),
+        "--raw".into(),
+        "--id".into(),
+        session_id.into(),
+        "--config".into(),
+        configuration.into(),
+    ]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_exec_arguments(session_id: &str, argument: &str) -> Vec<String> {
+    vec![
+        "exec".into(),
+        "--raw".into(),
+        "--id".into(),
+        session_id.into(),
+        "--command".into(),
+        r"C:\mcg-harness\mcg-shadow-runner.exe".into(),
+        "--run-as".into(),
+        "System".into(),
+        "--".into(),
+        argument.into(),
+    ]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_stop_arguments(session_id: &str) -> Vec<String> {
+    vec![
+        "stop".into(),
+        "--raw".into(),
+        "--id".into(),
+        session_id.into(),
+    ]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_command_name(executable: &str) -> String {
+    match executable.to_ascii_lowercase().as_str() {
+        "npm" | "npx" | "pnpm" | "yarn" | "bun" => format!("{executable}.cmd"),
+        _ => executable.to_owned(),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+async fn run_windows_sandbox_cli(
+    process: &ProcessExecutor,
+    executable: &Path,
+    cwd: &Path,
+    argv: Vec<String>,
+    timeout_seconds: u64,
+    purpose: &str,
+) -> Result<ToolOutcome, ToolError> {
+    let options = ProcessOptions {
+        executable: executable.to_string_lossy().into_owned(),
+        argv,
+        cwd: cwd.to_string_lossy().into_owned(),
+        env: Vec::new(),
+        stdin: ProcessStream::Null,
+        stdin_data: None,
+        stdout: ProcessStream::Piped,
+        stderr: ProcessStream::Piped,
+    };
+    let mut request = ToolRequest::new(
+        TaskId::new(),
+        purpose,
+        ToolRequestKind::ProcessExec { options },
+    );
+    request.timeout_seconds = timeout_seconds;
+    process.execute(ToolExecutionId::new(), &request).await
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn require_success(outcome: &ToolOutcome, purpose: &str) -> Result<(), ToolError> {
+    if outcome.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(ToolError::Unavailable(format!(
+            "{purpose} failed with {:?}",
+            outcome.exit_code
+        )))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+async fn stop_windows_sandbox(
+    process: &ProcessExecutor,
+    executable: &Path,
+    cwd: &Path,
+    session_id: &str,
+) {
+    let _ = run_windows_sandbox_cli(
+        process,
+        executable,
+        cwd,
+        windows_sandbox_stop_arguments(session_id),
+        WSB_STOP_TIMEOUT_SECONDS,
+        "stop Windows Sandbox shadow session",
+    )
+    .await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn condition_command(condition: &SuccessCondition) -> Option<&str> {
     match condition {
         SuccessCondition::Build { command }
@@ -228,7 +607,7 @@ fn condition_command(condition: &SuccessCondition) -> Option<&str> {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn split_command(command: &str) -> Result<(&str, Vec<String>), ToolError> {
     if command.len() > BWRAP_MAX_COMMAND_BYTES || command.contains('\0') {
         return Err(ToolError::Invalid(
@@ -354,11 +733,11 @@ fn capture_optional_output(
         .transpose()
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn verify_workspace_bounds(root: &Path) -> Result<(), ToolError> {
     let metadata = fs::symlink_metadata(root)
         .map_err(|error| ToolError::Execution(format!("inspect shadow workspace: {error}")))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(ToolError::Denied(
             "shadow command workspace must be a real directory".into(),
         ));
@@ -378,7 +757,7 @@ fn verify_workspace_bounds(root: &Path) -> Result<(), ToolError> {
             let entry = entry.map_err(|error| ToolError::Execution(error.to_string()))?;
             let metadata = fs::symlink_metadata(entry.path())
                 .map_err(|error| ToolError::Execution(error.to_string()))?;
-            if metadata.file_type().is_symlink() {
+            if metadata_is_link_or_reparse(&metadata) {
                 return Err(ToolError::Denied(
                     "shadow command workspace cannot contain symbolic links".into(),
                 ));
@@ -401,6 +780,21 @@ fn verify_workspace_bounds(root: &Path) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -487,6 +881,42 @@ fn bubblewrap_version_is_supported(output: &str) -> bool {
             .and_then(|value| value.parse::<u32>().ok()),
     );
     matches!(parsed, (Some(major), Some(minor), Some(patch)) if (major, minor, patch) >= (0, 11, 2) && components.next().is_none())
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_sandbox_components() -> Option<(PathBuf, PathBuf)> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let windows = std::env::var_os("WINDIR").map(PathBuf::from)?;
+    let expected = windows.join("System32").join("wsb.exe");
+    let executable = expected.canonicalize().ok()?;
+    if !executable
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.to_string_lossy())
+    {
+        return None;
+    }
+    let executable_metadata = fs::symlink_metadata(&executable).ok()?;
+    if !executable_metadata.is_file()
+        || executable_metadata.file_type().is_symlink()
+        || executable_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return None;
+    }
+
+    let runner = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("mcg-shadow-runner.exe");
+    let runner_metadata = fs::symlink_metadata(&runner).ok()?;
+    if !runner_metadata.is_file()
+        || runner_metadata.file_type().is_symlink()
+        || runner_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return None;
+    }
+    Some((executable, runner))
 }
 
 #[cfg(test)]
@@ -595,6 +1025,94 @@ mod tests {
                 workspace.path(),
                 &SuccessCondition::Test {
                     command: "touch should-not-exist".into(),
+                },
+                &ArtifactStore::open(artifact_root.path()).expect("artifacts"),
+            )
+            .await;
+        assert_eq!(result, ShadowCommandVerification::Unavailable);
+        assert!(!workspace.path().join("should-not-exist").exists());
+        assert_eq!(
+            fs::read_dir(workspace.path())
+                .expect("workspace entries")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn windows_sandbox_profile_is_locked_down_read_only_and_xml_safe() {
+        let source = Path::new(r"C:\source & fixtures");
+        let harness = Path::new(r"C:\harness <private>");
+        let configuration =
+            windows_sandbox_configuration(source, harness).expect("Windows Sandbox profile");
+        for setting in [
+            "<vGPU>Disable</vGPU>",
+            "<Networking>Disable</Networking>",
+            "<AudioInput>Disable</AudioInput>",
+            "<VideoInput>Disable</VideoInput>",
+            "<PrinterRedirection>Disable</PrinterRedirection>",
+            "<ClipboardRedirection>Disable</ClipboardRedirection>",
+            "<ProtectedClient>Enable</ProtectedClient>",
+        ] {
+            assert!(configuration.contains(setting), "missing {setting}");
+        }
+        assert_eq!(configuration.matches("<MappedFolder>").count(), 2);
+        assert_eq!(
+            configuration.matches("<ReadOnly>true</ReadOnly>").count(),
+            2
+        );
+        assert!(configuration.contains(r"C:\source &amp; fixtures"));
+        assert!(configuration.contains(r"C:\harness &lt;private&gt;"));
+        assert!(!configuration.contains("<LogonCommand>"));
+    }
+
+    #[test]
+    fn windows_sandbox_cli_uses_system_context_and_never_writable_shares() {
+        let configuration =
+            windows_sandbox_configuration(Path::new(r"C:\source"), Path::new(r"C:\harness"))
+                .expect("profile");
+        let start = windows_sandbox_start_arguments("session", &configuration);
+        assert_eq!(
+            &start[..5],
+            ["start", "--raw", "--id", "session", "--config"]
+        );
+        assert!(
+            !start
+                .iter()
+                .any(|value| value == "share" || value == "--allow-write")
+        );
+
+        let exec = windows_sandbox_exec_arguments("session", r"C:\mcg-harness\request.json");
+        assert!(exec.windows(2).any(|pair| pair == ["--run-as", "System"]));
+        assert!(
+            exec.windows(2)
+                .any(|pair| pair == ["--command", r"C:\mcg-harness\mcg-shadow-runner.exe"])
+        );
+        assert_eq!(
+            exec.last().map(String::as_str),
+            Some(r"C:\mcg-harness\request.json")
+        );
+        assert_eq!(windows_command_name("npm"), "npm.cmd");
+        assert_eq!(windows_command_name("cargo"), "cargo");
+    }
+
+    #[tokio::test]
+    async fn missing_windows_sandbox_produces_no_completed_evidence() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let fixture_root = tempfile::tempdir().expect("fixture root");
+        let runner = fixture_root.path().join("mcg-shadow-runner.exe");
+        fs::write(&runner, b"not executed").expect("runner fixture");
+        let verifier = WindowsSandboxVerifier {
+            executable: fixture_root.path().join("missing-wsb.exe"),
+            runner,
+            lifecycle: tokio::sync::Mutex::new(()),
+        };
+        let result = verifier
+            .verify(
+                workspace.path(),
+                &SuccessCondition::Test {
+                    command: "cmd.exe /C echo escaped>should-not-exist".into(),
                 },
                 &ArtifactStore::open(artifact_root.path()).expect("artifacts"),
             )

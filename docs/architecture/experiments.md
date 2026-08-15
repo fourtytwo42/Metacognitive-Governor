@@ -84,10 +84,10 @@ Build, test, static-analysis, and exact `COMMAND SUCCEEDS` conditions now cross
 an explicit shadow-command-verifier boundary. A conforming backend must enforce
 filesystem, child-process, credential, and network isolation at the operating
 system boundary and return a bounded content-addressed transcript. The default
-backend is unavailable on Windows and on Linux hosts without a trusted
-root-owned, non-setuid/non-setgid, non-writable `/usr/bin/bwrap` plus
-`/usr/bin/prlimit`; bubblewrap must be version 0.11.2 or newer. Otherwise it
-launches no process and keeps those conditions
+backend is unavailable on unsupported Windows editions/builds and on Linux
+hosts without a trusted root-owned, non-setuid/non-setgid, non-writable
+`/usr/bin/bwrap` plus `/usr/bin/prlimit`; bubblewrap must be version 0.11.2 or
+newer. Otherwise it launches no process and keeps those conditions
 inconclusive. The Linux backend uses an empty mount namespace, unshares the
 network and every supported namespace, disables nested user namespaces, starts
 a new session, drops all capabilities, clears the environment, exposes only
@@ -101,7 +101,21 @@ insufficient. The trusted runtime reopens and hashes the versioned transcript,
 requires it to bind the exact condition, independently verifies optional output
 artifacts, and derives pass/fail from timeout and exit status rather than
 trusting a backend-supplied verdict. Linux adversarial host qualification and a
-matching Windows backend remain required before this slice is production-complete.
+matching Windows host qualification remain required before this slice is
+production-complete. The Windows backend requires the Windows Sandbox CLI
+available in current Windows 11 releases and the package-adjacent internal
+`mcg-shadow-runner.exe`. It starts one serialized, UUID-addressed hypervisor
+sandbox per condition with networking, vGPU, microphone, camera, printers, and
+clipboard disabled and Protected Client enabled. The retained source and the
+two-file harness are separate read-only mappings; the bounded runner copies the
+source to an unmapped disposable workspace, clears the command environment,
+executes a direct argument vector as `System`, and normalizes objective failure
+separately from setup failure. Preflight and postflight runner probes prevent a
+missing or lost sandbox session from masquerading as test failure. Wall timeout
+always triggers a best-effort session stop, and no writable host share or host
+process fallback exists. The Windows CLI cannot return child process I/O, so
+the transcript records only the independently interpreted exit/timeout
+disposition.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and

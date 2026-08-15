@@ -181,8 +181,16 @@ no network sharing, mounts the retained workspace read-only, executes in a
 bounded tmpfs, preserves argument-vector semantics, rejects unsafe workspaces,
 and creates no evidence when the sandbox executable is absent. On Linux, an
 installed trusted bubblewrap additionally runs a live ephemeral-write and
-`/etc/passwd` escape scenario. Windows remains unavailable until a backend passes
-equivalent host adversarial gates.
+`/etc/passwd` escape scenario. Cross-platform Windows tests prove the generated
+Windows Sandbox profile disables network/device/redirection surfaces, enables
+Protected Client, XML-escapes host paths, exposes exactly two read-only host
+mappings, runs the package-local helper as `System`, preserves a direct argument
+boundary, and produces no evidence or workspace effect when the CLI is absent.
+The helper separately proves bounded link/reparse-safe copying, exact internal
+paths, one-shot destination creation, environment clearing, and normalized
+command failure. Live Win11 qualification must still prove ephemeral writes,
+blocked network access, host-file protection, timeout/stop behavior, and
+setup-failure handling before the Windows backend is production-qualified.
 The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision promotes only the
 independently verified candidate while retaining one evaluation, benchmark, and

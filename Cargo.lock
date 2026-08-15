@@ -3192,6 +3192,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcg-shadow-runner"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mcg-storage"
 version = "0.1.0"
 dependencies = [
