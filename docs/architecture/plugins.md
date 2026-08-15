@@ -63,9 +63,15 @@ bound to its validated manifest, exact lowercase SHA-256, byte size, provenance,
 and signature state. A separate optimistic-revision head controls which revision
 is active and enabled. Reusing a revision identity with different content,
 invoking a disabled or stale revision, mutating history, or deleting catalog
-evidence fails closed. Runtime installation accepts unsigned local/registry
-imports but refuses a `verified` signature claim until a trusted cryptographic
-verifier exists; consumer routing remains disabled regardless.
+evidence fails closed. Unsigned installation is restricted to explicit local
+imports. Registry packages cross a separate `mcg-plugin-trust` boundary: a
+configured Ed25519 public key has authority only for exact canonical HTTPS
+registry identities, and the detached versioned proof signs a domain-separated
+binary payload containing signer identity, registry/package identity, complete
+manifest and requested capabilities, module SHA-256, and byte length. The trust
+store rejects duplicate signer identities or public keys, cross-registry replay,
+noncanonical proof/key encoding, and local or already-verified claims. Only the
+verifier can construct the sealed type accepted by durable verified installation.
 
 Invocation projections retain identities, task linkage, input/result hashes,
 bounded error codes, and timestamps rather than prompt or output content. Start
@@ -76,7 +82,9 @@ and it never retries that authority automatically.
 
 The runtime captures module bytes in the existing content-addressed artifact
 store, re-verifies an existing digest before catalog commit, and installs every
-new revision disabled. Only an explicit optimistic enable transition makes the
+new local or verified registry revision disabled. Signature verification occurs
+before artifact capture, while byte/digest verification occurs before catalog
+commit. Only an explicit optimistic enable transition makes the
 head invocable. It durably records `running` before calling the adjacent runner.
 Successful result JSON is captured and replayed by verified digest; guest failure
 stores only a bounded code. Missing/tampered modules fail deterministically,
@@ -94,8 +102,6 @@ not depend on generated sidecars, and no consumer interface routes plugin work y
 The execution kernel is only the first M10 boundary. Before plugins become a
 consumer feature, MCG still must add:
 
-- the trusted signature verifier and install policy for registry/community
-  packages; unsigned local imports must remain explicit and disabled by default;
 - explicit broker-issued capability adapters instead of ambient WASI grants;
 - REST, MCP, CLI, Tauri, and simple/advanced desktop management surfaces;
 - plugin-aware backup/restore, migration, additional adversarial package tests,

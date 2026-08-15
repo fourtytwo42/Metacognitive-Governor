@@ -4,6 +4,7 @@ use mcg_domain::{
     PluginInvocationState, PluginRevision, PluginRevisionId, PluginSignatureState,
 };
 use mcg_plugin_protocol::PluginClass;
+use mcg_plugin_trust::{PLUGIN_SIGNATURE_SCHEME, VerifiedPluginRevision};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{SqliteEventStore, StorageError};
@@ -14,13 +15,43 @@ pub struct PluginRecoveryReport {
 }
 
 impl SqliteEventStore {
+    /// Installs an explicitly local unsigned module as a disabled revision.
+    ///
+    /// # Errors
+    /// Rejects registry provenance, signature claims, invalid identity, and
+    /// storage conflicts. Enabling always requires a separate owner mutation.
+    pub fn install_unsigned_local_plugin_revision(
+        &mut self,
+        revision: &PluginRevision,
+    ) -> Result<PluginInstallation, StorageError> {
+        if revision.source != PluginInstallSource::LocalImport
+            || revision.signature.state != PluginSignatureState::Unsigned
+        {
+            return Err(StorageError::InvalidData(
+                "unsigned installation is restricted to explicit local imports".into(),
+            ));
+        }
+        self.install_plugin_revision(revision, false)
+    }
+
+    /// Installs one cryptographically sealed registry revision as disabled.
+    ///
+    /// # Errors
+    /// Returns catalog validation, conflict, serialization, or `SQLite` failures.
+    pub fn install_verified_plugin_revision(
+        &mut self,
+        verified: &VerifiedPluginRevision,
+    ) -> Result<PluginInstallation, StorageError> {
+        self.install_plugin_revision(verified.revision(), false)
+    }
+
     /// Installs one immutable sandboxed plugin revision and atomically advances
     /// its mutable installation head.
     ///
     /// # Errors
     /// Returns validation, conflict, serialization, or `SQLite` failures without
     /// committing a partial revision/head pair.
-    pub fn install_plugin_revision(
+    fn install_plugin_revision(
         &mut self,
         revision: &PluginRevision,
         enabled: bool,
@@ -376,14 +407,35 @@ fn validate_plugin_revision(revision: &PluginRevision) -> Result<(), StorageErro
                 "unsigned plugin cannot claim signature metadata".into(),
             ));
         }
-        PluginSignatureState::Unsigned => {}
-        PluginSignatureState::Verified => {
+        PluginSignatureState::Verified
+            if !matches!(revision.source, PluginInstallSource::Registry { .. })
+                || revision.signature.scheme.as_deref() != Some(PLUGIN_SIGNATURE_SCHEME)
+                || !revision
+                    .signature
+                    .signer
+                    .as_deref()
+                    .is_some_and(valid_plugin_identifier)
+                || !revision
+                    .signature
+                    .signature_sha256
+                    .as_deref()
+                    .is_some_and(valid_digest) =>
+        {
             return Err(StorageError::InvalidData(
-                "verified plugin signatures require the future trusted verifier boundary".into(),
+                "verified plugin signature evidence is invalid".into(),
             ));
         }
+        PluginSignatureState::Unsigned | PluginSignatureState::Verified => {}
     }
     Ok(())
+}
+
+fn valid_plugin_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
 }
 
 fn validate_running_invocation(invocation: &PluginInvocationRecord) -> Result<(), StorageError> {

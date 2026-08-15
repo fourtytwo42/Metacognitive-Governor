@@ -280,6 +280,14 @@ tampering, and deduplication over changed bytes. Packaging contracts require the
 runner adjacent to the service in NSIS, `.deb`, and AppImage payloads while the
 daemon dependency tree remains free of Wasmtime/WASI.
 
+`mcg-plugin-trust` tests use fixed Ed25519 keys to prove that the versioned,
+domain-separated package payload binds signer, canonical HTTPS registry, package,
+manifest/capabilities, module digest, and length. They reject tampering,
+cross-registry replay, malformed or cross-labeled trust roots, noncanonical
+encodings, and verified claims on local imports. Runtime integration additionally
+proves an invalid proof leaves both the artifact store and catalog untouched,
+while a valid registry package is persisted as verified but disabled.
+
 ## Coverage and release policy
 
 Coverage is a diagnostic, not a substitute for outcomes. Critical policy, state

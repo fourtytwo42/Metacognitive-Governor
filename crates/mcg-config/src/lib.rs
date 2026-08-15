@@ -15,6 +15,15 @@ pub enum AutonomyPreset {
     Autonomous,
 }
 
+/// One owner-configured public key allowed to authenticate packages from exact
+/// registry identities. Public keys are configuration, never credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedPluginSignerConfig {
+    pub id: String,
+    pub public_key_base64: String,
+    pub registries: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     pub bind_address: String,
@@ -25,6 +34,8 @@ pub struct AppConfig {
     pub browser_executable: Option<PathBuf>,
     #[serde(default = "default_shadow_experiments")]
     pub shadow_experiments: bool,
+    #[serde(default)]
+    pub trusted_plugin_signers: Vec<TrustedPluginSignerConfig>,
 }
 
 /// Owner-controlled behavior that may be changed safely while the daemon runs.
@@ -126,6 +137,7 @@ impl Default for AppConfig {
             data_directory: default_data_directory(),
             browser_executable: std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
             shadow_experiments: shadow_experiments_from_environment(),
+            trusted_plugin_signers: Vec::new(),
         }
     }
 }

@@ -17,6 +17,7 @@ mcg-mcp = { path = "../mcg-mcp" }
 mcg-policy = { path = "../mcg-policy" }
 mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
 mcg-plugin-runner = { path = "../../apps/mcg-plugin-runner", default-features = false }
+mcg-plugin-trust = { path = "../mcg-plugin-trust" }
 mcg-projects = { path = "../mcg-projects" }
 mcg-providers = { path = "../mcg-providers" }
 mcg-storage = { path = "../mcg-storage" }
@@ -32,6 +33,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+ed25519-dalek.workspace = true
 tempfile.workspace = true
 
 [lints]

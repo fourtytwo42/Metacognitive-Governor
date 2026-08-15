@@ -14,6 +14,7 @@ mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
 mcg-mcp = { path = "../mcg-mcp" }
 mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
+mcg-plugin-trust = { path = "../mcg-plugin-trust" }
 mcg-projects = { path = "../mcg-projects" }
 mcg-providers = { path = "../mcg-providers" }
 mcg-tools = { path = "../mcg-tools" }

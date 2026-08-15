@@ -62,6 +62,9 @@ use mcg_plugin_runner::{
     PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest, PluginRunnerResponse,
     PluginRunnerState,
 };
+use mcg_plugin_trust::{
+    PluginSignatureProof, PluginTrustError, PluginTrustStore, TrustedPluginSigner,
+};
 use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
     ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
@@ -363,6 +366,8 @@ pub enum RuntimeError {
     Mcp(#[from] McpError),
     #[error(transparent)]
     Tool(#[from] ToolError),
+    #[error(transparent)]
+    PluginTrust(#[from] PluginTrustError),
     #[error("runtime storage lock was poisoned")]
     StorageLock,
     #[error("local authentication token is invalid")]
@@ -405,6 +410,7 @@ impl RuntimeError {
                 )
                 | Self::AgentTurn(AgentTurnError::Invalid(_))
                 | Self::Tool(ToolError::Invalid(_))
+                | Self::PluginTrust(_)
         )
     }
 
@@ -836,6 +842,7 @@ pub struct AppRuntime {
     oauth_state: OAuthRuntimeState,
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
     plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
+    plugin_trust: Arc<PluginTrustStore>,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -893,7 +900,7 @@ impl AppRuntime {
         let provider_credentials: Arc<dyn ProviderCredentialStore> =
             Arc::new(OsProviderCredentialStore);
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
-        Ok(Self::assemble(
+        Self::assemble(
             config,
             Some(data_lock),
             settings,
@@ -917,7 +924,7 @@ impl AppRuntime {
             mcp_credentials,
             BrowserAuthorizationConfig::default(),
             DeviceAuthorizationConfig::default(),
-        ))
+        )
     }
 
     /// Creates an isolated runtime for tests and embedded deterministic fixtures.
@@ -976,7 +983,7 @@ impl AppRuntime {
             Arc::new(MemoryProviderCredentialStore::default());
         let mcp_credentials: Arc<dyn McpCredentialStore> =
             Arc::new(MemoryMcpCredentialStore::default());
-        Ok(Self::assemble(
+        Self::assemble(
             config,
             None,
             settings,
@@ -1000,7 +1007,7 @@ impl AppRuntime {
             mcp_credentials,
             browser_config,
             device_config,
-        ))
+        )
     }
 
     #[allow(clippy::too_many_arguments)] // Centralizes all recovered state and injected secure boundaries.
@@ -1028,9 +1035,17 @@ impl AppRuntime {
         mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
         device_config: DeviceAuthorizationConfig,
-    ) -> Self {
+    ) -> Result<Self, RuntimeError> {
+        let plugin_trust =
+            PluginTrustStore::new(config.trusted_plugin_signers.iter().map(|signer| {
+                TrustedPluginSigner {
+                    id: signer.id.clone(),
+                    public_key_base64: signer.public_key_base64.clone(),
+                    registries: signer.registries.clone(),
+                }
+            }))?;
         let (event_sender, _) = broadcast::channel(256);
-        Self {
+        Ok(Self {
             config,
             data_lock,
             settings: Arc::new(RwLock::new(settings)),
@@ -1057,7 +1072,8 @@ impl AppRuntime {
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
             shadow_command_verifier: default_shadow_command_verifier(),
             plugin_runner: package_plugin_runner(),
-        }
+            plugin_trust: Arc::new(plugin_trust),
+        })
     }
 
     fn store(&self) -> Result<MutexGuard<'_, SqliteEventStore>, RuntimeError> {
@@ -1113,6 +1129,46 @@ impl AppRuntime {
         revision: &PluginRevision,
         module: &[u8],
     ) -> Result<PluginInstallation, RuntimeError> {
+        if revision.source != mcg_domain::PluginInstallSource::LocalImport
+            || revision.signature.state != mcg_domain::PluginSignatureState::Unsigned
+        {
+            return Err(StorageError::InvalidData(
+                "this install path accepts only explicit unsigned local imports".into(),
+            )
+            .into());
+        }
+        self.capture_plugin_module(revision, module)?;
+        self.store()?
+            .install_unsigned_local_plugin_revision(revision)
+            .map_err(Into::into)
+    }
+
+    /// Verifies, captures, and registers one signed registry package. The
+    /// revision remains disabled until a separate explicit enable mutation.
+    ///
+    /// # Errors
+    /// Rejects untrusted signers/registries, malformed or mismatched proofs,
+    /// changed module bytes, artifact failures, and durable catalog conflicts.
+    pub fn install_verified_sandboxed_plugin(
+        &self,
+        revision: &PluginRevision,
+        module: &[u8],
+        proof: &PluginSignatureProof,
+    ) -> Result<PluginInstallation, RuntimeError> {
+        let verified = self
+            .plugin_trust
+            .verify_registry_revision(revision, proof)?;
+        self.capture_plugin_module(verified.revision(), module)?;
+        self.store()?
+            .install_verified_plugin_revision(&verified)
+            .map_err(Into::into)
+    }
+
+    fn capture_plugin_module(
+        &self,
+        revision: &PluginRevision,
+        module: &[u8],
+    ) -> Result<(), RuntimeError> {
         let module_size = u64::try_from(module.len())
             .map_err(|_| StorageError::InvalidData("plugin module is too large".into()))?;
         let module_sha256 = format!("{:x}", Sha256::digest(module));
@@ -1133,9 +1189,7 @@ impl AppRuntime {
             )
             .into());
         }
-        self.store()?
-            .install_plugin_revision(revision, false)
-            .map_err(Into::into)
+        Ok(())
     }
 
     /// Lists stable plugin installation heads without module or invocation content.
@@ -9652,11 +9706,16 @@ mod tests {
         response::Html,
         routing::{get, post},
     };
+    use ed25519_dalek::{Signer as _, SigningKey};
     use mcg_agents::{
         AGENT_RUN_SCHEMA_VERSION, AgentTurnRequest, ExecutivePlanner, LeaseBudget, PlannedWork,
         PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
     };
+    use mcg_config::TrustedPluginSignerConfig;
     use mcg_domain::{AgentInstanceId, AgentLeaseId, EvaluationId, RunId, TaskBudget};
+    use mcg_plugin_trust::{
+        PLUGIN_SIGNATURE_SCHEME, PLUGIN_TRUST_SCHEMA_VERSION, plugin_signing_payload,
+    };
     use mcg_policy::{CapabilityPolicy, OwnerConstitution};
     use mcg_projects::{ContextAssembly, ContextCategory, ContextItem};
     use mcg_providers::{
@@ -9821,9 +9880,17 @@ mod tests {
         {
             let runtime = AppRuntime::open(config.clone()).expect("runtime");
             let mut store = runtime.store().expect("store");
-            store
-                .install_plugin_revision(&revision, true)
+            let installation = store
+                .install_unsigned_local_plugin_revision(&revision)
                 .expect("install plugin");
+            store
+                .set_plugin_enabled(
+                    &revision.manifest.id,
+                    installation.revision,
+                    true,
+                    installed_at,
+                )
+                .expect("enable plugin");
             store
                 .begin_plugin_invocation(&invocation)
                 .expect("begin invocation");
@@ -9843,6 +9910,82 @@ mod tests {
             mcg_domain::PluginInvocationState::Uncertain
         );
         assert_eq!(recovered.error_code.as_deref(), Some("runner_interrupted"));
+    }
+
+    #[test]
+    fn signed_registry_install_requires_exact_configured_trust() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let module = br#"(module (func (export "_start")))"#;
+        let signing_key = SigningKey::from_bytes(&[23; 32]);
+        let mut config = AppConfig::default().with_data_directory(directory.path());
+        config.trusted_plugin_signers = vec![TrustedPluginSignerConfig {
+            id: "publisher.example".into(),
+            public_key_base64: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            registries: vec!["https://plugins.example/".into()],
+        }];
+        let revision = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.signed-runtime".into(),
+                display_name: "Signed runtime fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::Registry {
+                registry: "https://plugins.example/".into(),
+                package: "example.signed-runtime".into(),
+            },
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let payload =
+            plugin_signing_payload(&revision, "publisher.example").expect("signing payload");
+        let mut proof = PluginSignatureProof {
+            schema_version: PLUGIN_TRUST_SCHEMA_VERSION,
+            scheme: PLUGIN_SIGNATURE_SCHEME.into(),
+            signer: "publisher.example".into(),
+            signature_base64: STANDARD
+                .encode(SigningKey::from_bytes(&[29; 32]).sign(&payload).to_bytes()),
+        };
+        let runtime = AppRuntime::open(config).expect("runtime");
+        assert!(matches!(
+            runtime.install_verified_sandboxed_plugin(&revision, module, &proof),
+            Err(RuntimeError::PluginTrust(
+                PluginTrustError::VerificationFailed
+            ))
+        ));
+        assert!(runtime.plugin_installations().expect("catalog").is_empty());
+        assert!(!directory.path().join("artifacts").exists());
+
+        proof.signature_base64 = STANDARD.encode(signing_key.sign(&payload).to_bytes());
+        let installed = runtime
+            .install_verified_sandboxed_plugin(&revision, module, &proof)
+            .expect("verified install");
+        assert!(!installed.enabled);
+        let stored = runtime
+            .store()
+            .expect("store")
+            .plugin_revision(revision.id)
+            .expect("revision lookup")
+            .expect("stored revision");
+        assert_eq!(
+            stored.signature.state,
+            mcg_domain::PluginSignatureState::Verified
+        );
+        assert_eq!(
+            stored.signature.signer.as_deref(),
+            Some("publisher.example")
+        );
     }
 
     #[tokio::test]

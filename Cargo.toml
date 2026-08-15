@@ -14,6 +14,7 @@ members = [
     "crates/mcg-mcp",
     "crates/mcg-policy",
     "crates/mcg-plugin-protocol",
+    "crates/mcg-plugin-trust",
     "crates/mcg-plugins",
     "crates/mcg-projects",
     "crates/mcg-providers",
@@ -34,6 +35,7 @@ default-members = [
     "crates/mcg-mcp",
     "crates/mcg-policy",
     "crates/mcg-plugin-protocol",
+    "crates/mcg-plugin-trust",
     "crates/mcg-plugins",
     "crates/mcg-projects",
     "crates/mcg-providers",
@@ -58,6 +60,7 @@ chromiumoxide = "0.9.1"
 clap = { version = "4.6.6", features = ["derive"] }
 enigo = "0.6.1"
 eventsource-stream = "0.2.3"
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["fast", "zeroize"] }
 futures-core = "0.3.32"
 futures-util = "0.3.32"
 fs2 = "0.4.3"
