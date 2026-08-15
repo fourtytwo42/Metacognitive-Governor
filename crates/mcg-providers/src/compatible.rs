@@ -17,6 +17,8 @@ use crate::{
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const MAX_SSE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_CLOUD_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_COMPATIBLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct OpenAiCompatibleProviderBuilder {
     connection: ProviderConnection,
@@ -72,11 +74,16 @@ impl OpenAiCompatibleProviderBuilder {
 
     #[must_use]
     pub fn new(connection: ProviderConnection) -> Self {
+        let timeout = if connection.kind == ProviderKind::OpenAiCompatible {
+            DEFAULT_COMPATIBLE_TIMEOUT
+        } else {
+            DEFAULT_CLOUD_TIMEOUT
+        };
         Self {
             connection,
             credential: None,
             retry_policy: RetryPolicy::default(),
-            timeout: Duration::from_secs(120),
+            timeout,
             headers: HashMap::new(),
             openrouter_routing: None,
         }
@@ -188,6 +195,7 @@ impl OpenAiCompatibleProviderBuilder {
             headers: Arc::new(self.headers),
             base_url,
             client,
+            timeout: self.timeout,
             openrouter_routing: self.openrouter_routing,
         })
     }
@@ -200,6 +208,7 @@ pub struct OpenAiCompatibleProvider {
     headers: Arc<HashMap<header::HeaderName, header::HeaderValue>>,
     base_url: Url,
     client: Client,
+    timeout: Duration,
     openrouter_routing: Option<OpenRouterRouting>,
 }
 
@@ -300,13 +309,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .unwrap_or_default()
             .to_owned();
         let value: Value = if content_type.starts_with("text/event-stream") {
-            completed_response_from_sse_response(response).await?
+            completed_response_from_sse_response(response, self.timeout).await?
         } else {
             let bytes = response
                 .bytes()
                 .await
                 .map_err(|error| ProviderError::Request {
-                    message: error.to_string(),
+                    message: response_body_error(&error, self.timeout),
                     retriable: false,
                 })?;
             serde_json::from_slice(&bytes)
@@ -725,7 +734,10 @@ fn parse_stream_event(event_name: &str, data: &str) -> Result<ModelStreamEvent, 
     }
 }
 
-async fn completed_response_from_sse_response(response: Response) -> Result<Value, ProviderError> {
+async fn completed_response_from_sse_response(
+    response: Response,
+    timeout: Duration,
+) -> Result<Value, ProviderError> {
     let mut decoder = SseCompletionDecoder::default();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -740,7 +752,7 @@ async fn completed_response_from_sse_response(response: Response) -> Result<Valu
                     return Ok(response);
                 }
                 return Err(ProviderError::Request {
-                    message: error.to_string(),
+                    message: response_body_error(&error, timeout),
                     retriable: false,
                 });
             }
@@ -750,6 +762,17 @@ async fn completed_response_from_sse_response(response: Response) -> Result<Valu
         return Ok(response);
     }
     Err(decoder.missing_terminal_error())
+}
+
+fn response_body_error(error: &reqwest::Error, timeout: Duration) -> String {
+    if error.is_timeout() {
+        format!(
+            "provider response exceeded the configured {} second timeout",
+            timeout.as_secs()
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 #[derive(Default)]
@@ -1082,6 +1105,23 @@ mod tests {
             max_output_tokens: None,
             metadata: Value::Null,
         }
+    }
+
+    #[test]
+    fn compatible_default_allows_slow_local_inference_and_remains_overridable() {
+        let local =
+            OpenAiCompatibleProviderBuilder::new(connection("http://127.0.0.1:1234/v1".into()));
+        assert_eq!(local.timeout, DEFAULT_COMPATIBLE_TIMEOUT);
+
+        let overridden =
+            OpenAiCompatibleProviderBuilder::new(connection("http://127.0.0.1:1234/v1".into()))
+                .timeout(Duration::from_secs(45));
+        assert_eq!(overridden.timeout, Duration::from_secs(45));
+
+        let mut cloud_connection = connection("https://openrouter.ai/api/v1".into());
+        cloud_connection.kind = ProviderKind::OpenRouter;
+        let cloud = OpenAiCompatibleProviderBuilder::new(cloud_connection);
+        assert_eq!(cloud.timeout, DEFAULT_CLOUD_TIMEOUT);
     }
 
     #[test]

@@ -55,6 +55,11 @@ key. On `401`, request a key from the owner; do not guess, scrape, or create one
   no reasoning events and a valid terminal completion. MCG records this behavior
   only through the explicit model probe and sends the control only to positively
   qualified tool-using routes.
+- Local/OpenAI-compatible inference defaults to a five-minute response timeout
+  because useful consumer tool turns on owner hardware can exceed the two-minute
+  cloud default. Builder callers may still set a narrower explicit timeout, and
+  timeout failures report the configured duration rather than a generic body
+  decode error.
 - The console also advertises management APIs for model control, benchmarks,
   transcription, speech, image/video/music generation, research, telemetry, and
   backup operations. Those are separate tool integrations and often require a
