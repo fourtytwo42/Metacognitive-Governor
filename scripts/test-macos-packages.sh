@@ -23,6 +23,7 @@ for command in codesign curl ditto hdiutil lsof node open pgrep plutil screencap
 done
 
 uat_root="$(mktemp -d "${TMPDIR:-/tmp}/mcg-macos-package-uat-XXXXXX")"
+uat_root="$(cd "$uat_root" && pwd -P)"
 mount_point="$uat_root/dmg"
 install_root="$uat_root/Applications"
 uat_home="$uat_root/home"
