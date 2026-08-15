@@ -11,7 +11,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Sidecar preparation failed with exit code $LASTEXITCODE."
     }
-    npm run tauri --workspace @mcg/desktop -- build --config apps/desktop/src-tauri/tauri.release.conf.json --bundles nsis
+    npm run tauri --workspace @mcg/desktop -- build --config src-tauri/tauri.release.conf.json --bundles nsis
     if ($LASTEXITCODE -ne 0) {
         throw "Windows installer build failed with exit code $LASTEXITCODE."
     }
