@@ -1,6 +1,34 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type OpenAiOAuthMethod = "browser" | "device_code";
+export type AutonomyPreset = "guided" | "balanced" | "autonomous";
+
+export interface UserSettings {
+  schema_version: number;
+  revision: number;
+  advanced_mode: boolean;
+  autonomy: AutonomyPreset;
+  shadow_experiments: boolean;
+  updated_at: string;
+}
+
+export interface UpdateUserSettingsRequest {
+  expected_revision: number;
+  advanced_mode: boolean;
+  autonomy: AutonomyPreset;
+  shadow_experiments: boolean;
+  reason: string;
+}
+
+export interface UserSettingsHistoryResponse {
+  revisions: UserSettingsRevision[];
+}
+
+export interface UserSettingsRevision {
+  settings: UserSettings;
+  reason: string;
+  changed_at: string;
+}
 
 export interface OAuthLoginStart {
   session_id: string;
@@ -585,6 +613,18 @@ export function openExternalUrl(url: string): Promise<void> {
 
 export function listProviders(): Promise<ProviderListResponse> {
   return invoke("list_providers");
+}
+
+export function getUserSettings(): Promise<UserSettings> {
+  return invoke("get_user_settings");
+}
+
+export function updateUserSettings(request: UpdateUserSettingsRequest): Promise<UserSettings> {
+  return invoke("update_user_settings", { request });
+}
+
+export function loadUserSettingsHistory(): Promise<UserSettingsHistoryResponse> {
+  return invoke("user_settings_history");
 }
 
 export function providerProxyUsage(): Promise<ProxyUsageSummary> {

@@ -27,6 +27,7 @@ use mcg_agents::{
     ExperimentState, OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
     RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
 };
+use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, ExperimentId,
     MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
@@ -121,6 +122,20 @@ pub struct TaskMutationResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskListResponse {
     pub tasks: Vec<TaskEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateUserSettingsRequest {
+    pub expected_revision: u64,
+    pub advanced_mode: bool,
+    pub autonomy: AutonomyPreset,
+    pub shadow_experiments: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserSettingsHistoryResponse {
+    pub revisions: Vec<UserSettingsRevision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -903,6 +918,11 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             get(list_supervision_observations).post(record_supervision_observation),
         )
         .route(
+            "/api/v1/settings",
+            get(get_user_settings).put(update_user_settings),
+        )
+        .route("/api/v1/settings/history", get(user_settings_history))
+        .route(
             "/api/v1/organizations/{organization_id}/experiments",
             get(list_experiments),
         )
@@ -1381,6 +1401,39 @@ async fn health() -> Json<HealthResponse> {
 
 async fn status(State(state): State<ApiState>) -> Json<RuntimeStatus> {
     Json(state.runtime.status())
+}
+
+async fn get_user_settings(State(state): State<ApiState>) -> Json<UserSettings> {
+    Json(state.runtime.user_settings())
+}
+
+async fn update_user_settings(
+    State(state): State<ApiState>,
+    Json(request): Json<UpdateUserSettingsRequest>,
+) -> Result<Json<UserSettings>, ApiError> {
+    state
+        .runtime
+        .update_user_settings(
+            request.expected_revision,
+            request.advanced_mode,
+            request.autonomy,
+            request.shadow_experiments,
+            &request.reason,
+            Utc::now(),
+        )
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn user_settings_history(
+    State(state): State<ApiState>,
+) -> Result<Json<UserSettingsHistoryResponse>, ApiError> {
+    Ok(Json(UserSettingsHistoryResponse {
+        revisions: state
+            .runtime
+            .user_settings_history()
+            .map_err(map_runtime_error)?,
+    }))
 }
 
 async fn platform_capabilities(State(state): State<ApiState>) -> Json<PlatformCapabilitySnapshot> {
@@ -5097,6 +5150,103 @@ form.addEventListener('submit', (event) => {
 
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(status.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn owner_settings_are_authenticated_revisioned_and_live() {
+        let app = router(test_runtime());
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/settings")
+                    .body(Body::empty())
+                    .expect("settings request"),
+            )
+            .await
+            .expect("unauthorized settings");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let initial = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/settings"))
+                    .body(Body::empty())
+                    .expect("settings request"),
+            )
+            .await
+            .expect("settings response");
+        assert_eq!(initial.status(), StatusCode::OK);
+        let initial: UserSettings =
+            serde_json::from_value(response_json(initial).await).expect("initial settings");
+
+        let update = UpdateUserSettingsRequest {
+            expected_revision: initial.revision,
+            advanced_mode: true,
+            autonomy: AutonomyPreset::Guided,
+            shadow_experiments: false,
+            reason: "owner selected safer interactive controls".into(),
+        };
+        let updated = app
+            .clone()
+            .oneshot(
+                authorized(Request::put("/api/v1/settings"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&update).expect("update JSON"),
+                    ))
+                    .expect("update request"),
+            )
+            .await
+            .expect("update response");
+        assert_eq!(updated.status(), StatusCode::OK);
+        let updated: UserSettings =
+            serde_json::from_value(response_json(updated).await).expect("updated settings");
+        assert_eq!(updated.revision, initial.revision + 1);
+        assert!(updated.advanced_mode);
+        assert_eq!(updated.autonomy, AutonomyPreset::Guided);
+        assert!(!updated.shadow_experiments);
+
+        let stale = app
+            .clone()
+            .oneshot(
+                authorized(Request::put("/api/v1/settings"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&update).expect("stale JSON")))
+                    .expect("stale request"),
+            )
+            .await
+            .expect("stale response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let status = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/system/status"))
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("status response");
+        let status: RuntimeStatus =
+            serde_json::from_value(response_json(status).await).expect("runtime status");
+        assert!(status.advanced_mode);
+        assert_eq!(status.autonomy, AutonomyPreset::Guided);
+        assert!(!status.shadow_experiments);
+
+        let history = app
+            .oneshot(
+                authorized(Request::get("/api/v1/settings/history"))
+                    .body(Body::empty())
+                    .expect("history request"),
+            )
+            .await
+            .expect("history response");
+        let history: UserSettingsHistoryResponse =
+            serde_json::from_value(response_json(history).await).expect("settings history");
+        assert_eq!(history.revisions.len(), 2);
+        assert_eq!(history.revisions[0].settings, initial);
+        assert_eq!(history.revisions[1].settings, updated);
+        assert_eq!(history.revisions[1].reason, update.reason);
     }
 
     #[tokio::test]

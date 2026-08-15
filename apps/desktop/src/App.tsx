@@ -48,6 +48,8 @@ import {
   loadSiteHealth,
   loadSshOperations,
   getSiteMonitor,
+  getUserSettings,
+  loadUserSettingsHistory,
   navigateBrowserSession,
   type McpAuthMode,
   type ExperimentDefinition,
@@ -103,9 +105,12 @@ import {
   type ApprovalRequest,
   type TaskEventsResponse,
   type ToolAuditResponse,
+  type UserSettings,
+  type UserSettingsRevision,
   transitionTask,
   transitionExperiment,
   updateSite,
+  updateUserSettings,
   acknowledgeSchedulerNotification,
   decideExperiment,
   wakeSchedule
@@ -247,6 +252,10 @@ function TaskEvidence({
 
 export function App() {
   const [advanced, setAdvanced] = useState(false);
+  const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
+  const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [oauthMethod, setOauthMethod] = useState<OpenAiOAuthMethod>("browser");
   const [login, setLogin] = useState<OAuthLoginStart | null>(null);
   const [providerStatus, setProviderStatus] = useState("Not connected");
@@ -363,6 +372,23 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    getUserSettings()
+      .then((settings) => {
+        if (active) {
+          setUserSettings(settings);
+          setAdvanced(settings.advanced_mode);
+        }
+      })
+      .catch((error) => {
+        if (active) setSettingsError(errorMessage(error));
+      });
+    loadUserSettingsHistory()
+      .then((response) => {
+        if (active) setSettingsHistory(response.revisions);
+      })
+      .catch((error) => {
+        if (active) setSettingsError(errorMessage(error));
+      });
     listMcpConnections()
       .then((response) => {
         if (active) setMcpConnections(response.connections);
@@ -462,6 +488,47 @@ export function App() {
       active = false;
     };
   }, []);
+
+  async function saveUserSettings(next: UserSettings, reason: string) {
+    if (!userSettings) return;
+    setSettingsBusy(true);
+    setSettingsError(null);
+    try {
+      const saved = await updateUserSettings({
+        expected_revision: userSettings.revision,
+        advanced_mode: next.advanced_mode,
+        autonomy: next.autonomy,
+        shadow_experiments: next.shadow_experiments,
+        reason
+      });
+      setUserSettings(saved);
+      setAdvanced(saved.advanced_mode);
+      setSettingsHistory((current) => [...current, { settings: saved, reason, changed_at: saved.updated_at }]);
+    } catch (error) {
+      setSettingsError(errorMessage(error));
+      const current = await getUserSettings().catch(() => null);
+      if (current) {
+        setUserSettings(current);
+        setAdvanced(current.advanced_mode);
+      }
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function toggleAdvancedMode() {
+    if (!userSettings || settingsBusy) return;
+    const nextAdvanced = !advanced;
+    if (!nextAdvanced && scheduleKind !== "interval") {
+      setScheduleKind("interval");
+      setScheduleDetail("3600");
+      setScheduleSecondary("30");
+    }
+    await saveUserSettings(
+      { ...userSettings, advanced_mode: nextAdvanced },
+      nextAdvanced ? "Enabled advanced interface" : "Enabled simple interface"
+    );
+  }
 
   async function startLogin() {
     setBusy(true);
@@ -1479,19 +1546,14 @@ export function App() {
           <a className="nav-item" href="#platform">Computer & browser</a>
           <a className="nav-item" href="#providers">Providers</a>
           <a className="nav-item" href="#mcp">Tools</a>
+          <a className="nav-item" href="#settings">Settings</a>
         </nav>
         <button
           className="mode-button"
           type="button"
           aria-pressed={advanced}
-          onClick={() => {
-            if (advanced && scheduleKind !== "interval") {
-              setScheduleKind("interval");
-              setScheduleDetail("3600");
-              setScheduleSecondary("30");
-            }
-            setAdvanced((value) => !value);
-          }}
+          disabled={!userSettings || settingsBusy}
+          onClick={toggleAdvancedMode}
         >
           {advanced ? "Simple mode" : "Advanced mode"}
         </button>
@@ -2446,6 +2508,64 @@ export function App() {
               )}
             </div>
           </div>
+        </section>
+
+        <section className="panel" id="settings" aria-labelledby="settings-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">OWNER CONTROLS</p>
+              <h2 id="settings-heading">Settings</h2>
+              <p className="muted">Choose how independently MCG may act. Changes are durable and apply to new authority decisions.</p>
+            </div>
+            {userSettings && <span className="count-badge">Revision {userSettings.revision}</span>}
+          </div>
+          {userSettings ? <div className="provider-setup" aria-label="Owner settings">
+            <label>
+              Autonomy
+              <select
+                value={userSettings.autonomy}
+                disabled={settingsBusy}
+                onChange={(event) => setUserSettings({ ...userSettings, autonomy: event.target.value as UserSettings["autonomy"] })}
+              >
+                <option value="guided">Guided</option>
+                <option value="balanced">Balanced</option>
+                <option value="autonomous">Autonomous</option>
+              </select>
+            </label>
+            <p className="form-note">
+              {userSettings.autonomy === "guided" && "Ask before consequential local actions."}
+              {userSettings.autonomy === "balanced" && "Act independently for low-risk work and ask for higher-risk actions."}
+              {userSettings.autonomy === "autonomous" && "Act independently within the owner constitution and capability limits."}
+            </p>
+            {advanced && <label className="check-row">
+              <input
+                type="checkbox"
+                checked={userSettings.shadow_experiments}
+                disabled={settingsBusy}
+                onChange={(event) => setUserSettings({ ...userSettings, shadow_experiments: event.target.checked })}
+              />
+              Run opt-in shadow model experiments
+            </label>}
+            <button
+              className="primary"
+              type="button"
+              disabled={settingsBusy}
+              onClick={() => saveUserSettings(userSettings, "Updated owner settings from desktop")}
+            >
+              {settingsBusy ? "Saving…" : "Save settings"}
+            </button>
+            {settingsError && <p className="error-message" role="alert">{settingsError}</p>}
+            {advanced && <div>
+              <h3>Revision history</h3>
+              <ul className="history-list" aria-label="Settings revision history">
+                {settingsHistory.slice().reverse().slice(0, 12).map((revision) => <li key={revision.settings.revision}>
+                  <strong>Revision {revision.settings.revision}</strong>
+                  <span>{revision.settings.autonomy} · {revision.settings.advanced_mode ? "advanced" : "simple"} · shadow {revision.settings.shadow_experiments ? "on" : "off"}</span>
+                  <small>{revision.reason}</small>
+                </li>)}
+              </ul>
+            </div>}
+          </div> : <p className="empty-state">Loading durable settings…</p>}
         </section>
       </main>
     </div>

@@ -16,9 +16,10 @@ use mcg_api::{
     SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
     StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
     TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionExperimentRequest,
-    TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest, WakeScheduleRequest,
+    TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest,
 };
-use mcg_config::AppConfig;
+use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
     PlatformCapabilitySnapshot, PlatformSession, ScheduleDefinition, SchedulerNotification, Site,
     SiteMonitor, SshHost, TaskEnvelope,
@@ -220,6 +221,58 @@ async fn list_providers() -> Result<ProviderListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Provider list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn get_user_settings() -> Result<UserSettings, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/settings"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Settings could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Settings loading").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Settings response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn update_user_settings(request: UpdateUserSettingsRequest) -> Result<UserSettings, String> {
+    let response = reqwest::Client::new()
+        .put(format!("{LOCAL_DAEMON}/api/v1/settings"))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Settings could not be updated: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Settings update").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Settings update response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn user_settings_history() -> Result<UserSettingsHistoryResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/settings/history"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Settings history could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Settings history").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Settings history response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -1466,6 +1519,9 @@ pub fn run() {
             cancel_openai_oauth,
             refresh_openai_oauth,
             list_providers,
+            get_user_settings,
+            update_user_settings,
+            user_settings_history,
             provider_proxy_usage,
             provider_proxy_conversations,
             configure_provider,

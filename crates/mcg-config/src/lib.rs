@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub const USER_SETTINGS_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +25,45 @@ pub struct AppConfig {
     pub browser_executable: Option<PathBuf>,
     #[serde(default = "default_shadow_experiments")]
     pub shadow_experiments: bool,
+}
+
+/// Owner-controlled behavior that may be changed safely while the daemon runs.
+/// Network binding, data paths, and executable trust roots remain startup-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserSettings {
+    pub schema_version: u16,
+    pub revision: u64,
+    pub advanced_mode: bool,
+    pub autonomy: AutonomyPreset,
+    pub shadow_experiments: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One immutable owner-settings audit revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserSettingsRevision {
+    pub settings: UserSettings,
+    pub reason: String,
+    pub changed_at: DateTime<Utc>,
+}
+
+impl UserSettings {
+    #[must_use]
+    pub fn initial(config: &AppConfig, now: DateTime<Utc>) -> Self {
+        Self {
+            schema_version: USER_SETTINGS_SCHEMA_VERSION,
+            revision: 1,
+            advanced_mode: config.advanced_mode,
+            autonomy: config.autonomy,
+            shadow_experiments: config.shadow_experiments,
+            updated_at: now,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.schema_version == USER_SETTINGS_SCHEMA_VERSION && self.revision > 0
+    }
 }
 
 impl AppConfig {

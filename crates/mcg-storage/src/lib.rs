@@ -22,6 +22,7 @@ mod mcp;
 mod platform;
 mod providers;
 mod scheduler;
+mod settings;
 mod shadow_workspaces;
 mod sites;
 mod ssh;
@@ -870,6 +871,34 @@ BEFORE DELETE ON provider_proxy_calls BEGIN
 END;
 ";
 
+const MIGRATION_25: &str = r"
+CREATE TABLE IF NOT EXISTS user_settings (
+    owner_key TEXT PRIMARY KEY CHECK(owner_key = 'local-owner'),
+    revision INTEGER NOT NULL,
+    settings_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS user_settings_no_delete
+BEFORE DELETE ON user_settings BEGIN
+    SELECT RAISE(FAIL, 'user settings cannot be deleted');
+END;
+
+CREATE TABLE IF NOT EXISTS user_settings_revisions (
+    revision INTEGER PRIMARY KEY,
+    settings_json TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    changed_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS user_settings_revisions_no_update
+BEFORE UPDATE ON user_settings_revisions BEGIN
+    SELECT RAISE(FAIL, 'user settings history is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS user_settings_revisions_no_delete
+BEFORE DELETE ON user_settings_revisions BEGIN
+    SELECT RAISE(FAIL, 'user settings history is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -984,6 +1013,7 @@ impl SqliteEventStore {
             (22_i64, MIGRATION_22),
             (23_i64, MIGRATION_23),
             (24_i64, MIGRATION_24),
+            (25_i64, MIGRATION_25),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

@@ -10,7 +10,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
     time::Instant,
 };
 
@@ -29,7 +29,7 @@ use mcg_agents::{
     ShadowExecutionReceipt, ShadowWorkspace, ShadowWorkspaceState, SuccessCondition,
     SupervisionAnalyzer, SupervisionObservation, SupervisionSignal, TaskComplexity, WorkPlan,
 };
-use mcg_config::{AppConfig, AutonomyPreset};
+use mcg_config::{AppConfig, AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
     ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, EvaluationId,
@@ -109,6 +109,7 @@ pub struct RuntimeStatus {
     pub version: String,
     pub state: RuntimeState,
     pub advanced_mode: bool,
+    pub autonomy: AutonomyPreset,
     pub shadow_experiments: bool,
     pub recovered_events: u64,
     pub recovered_tasks: u64,
@@ -697,6 +698,7 @@ impl LocalAuth {
 
 pub struct AppRuntime {
     config: AppConfig,
+    settings: Arc<RwLock<UserSettings>>,
     store: Arc<Mutex<SqliteEventStore>>,
     event_sender: broadcast::Sender<EventEnvelope>,
     auth: LocalAuth,
@@ -762,6 +764,7 @@ impl AppRuntime {
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
+        let settings = store.initialize_user_settings(&config, startup_now)?;
         let browser_sessions = Arc::new(PersistentBrowserManager::new(
             config.browser_executable.clone(),
             config.data_directory.join("browser-sessions"),
@@ -772,6 +775,7 @@ impl AppRuntime {
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
         Ok(Self::assemble(
             config,
+            settings,
             store,
             auth,
             recovery,
@@ -836,6 +840,7 @@ impl AppRuntime {
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
+        let settings = store.initialize_user_settings(&config, startup_now)?;
         let browser_sessions = Arc::new(PersistentBrowserManager::new(
             config.browser_executable.clone(),
             std::env::temp_dir().join(format!("mcg-browser-sessions-{}", Uuid::new_v4())),
@@ -848,6 +853,7 @@ impl AppRuntime {
             Arc::new(MemoryMcpCredentialStore::default());
         Ok(Self::assemble(
             config,
+            settings,
             store,
             auth,
             recovery,
@@ -873,6 +879,7 @@ impl AppRuntime {
     #[allow(clippy::too_many_arguments)] // Centralizes all recovered state and injected secure boundaries.
     fn assemble(
         config: AppConfig,
+        settings: UserSettings,
         store: SqliteEventStore,
         auth: LocalAuth,
         recovery: RecoveryReport,
@@ -896,6 +903,7 @@ impl AppRuntime {
         let (event_sender, _) = broadcast::channel(256);
         Self {
             config,
+            settings: Arc::new(RwLock::new(settings)),
             store: Arc::new(Mutex::new(store)),
             event_sender,
             auth,
@@ -936,12 +944,14 @@ impl AppRuntime {
 
     #[must_use]
     pub fn status(&self) -> RuntimeStatus {
+        let settings = self.user_settings();
         RuntimeStatus {
             service: "mcg-daemon".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             state: RuntimeState::Ready,
-            advanced_mode: self.config.advanced_mode,
-            shadow_experiments: self.config.shadow_experiments,
+            advanced_mode: settings.advanced_mode,
+            autonomy: settings.autonomy,
+            shadow_experiments: settings.shadow_experiments,
             recovered_events: self.recovery.events_replayed,
             recovered_tasks: self.recovery.tasks_rebuilt,
             recovered_tool_leases: self.recovered_tool_leases,
@@ -956,6 +966,50 @@ impl AppRuntime {
             recovered_ssh_operations: self.recovered_ssh_operations,
             recovered_shadow_workspaces: self.recovered_shadow_workspaces,
         }
+    }
+
+    #[must_use]
+    pub fn user_settings(&self) -> UserSettings {
+        self.settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Atomically changes owner-controlled live behavior with revision protection.
+    ///
+    /// # Errors
+    /// Returns stale-revision, validation, serialization, or storage failures.
+    pub fn update_user_settings(
+        &self,
+        expected_revision: u64,
+        advanced_mode: bool,
+        autonomy: AutonomyPreset,
+        shadow_experiments: bool,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<UserSettings, RuntimeError> {
+        let settings = self.store()?.update_user_settings(
+            expected_revision,
+            advanced_mode,
+            autonomy,
+            shadow_experiments,
+            reason,
+            now,
+        )?;
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings.clone();
+        Ok(settings)
+    }
+
+    /// Lists immutable owner-settings revisions.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn user_settings_history(&self) -> Result<Vec<UserSettingsRevision>, RuntimeError> {
+        Ok(self.store()?.user_settings_history()?)
     }
 
     #[must_use]
@@ -1309,7 +1363,7 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: self.user_settings().autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),
@@ -2257,7 +2311,7 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: self.user_settings().autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),
@@ -2542,7 +2596,7 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: self.user_settings().autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),
@@ -2845,7 +2899,7 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: self.user_settings().autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),
@@ -3703,7 +3757,7 @@ impl AppRuntime {
         &self,
         limit: usize,
     ) -> Result<Vec<AutomaticExperimentOutcome>, RuntimeError> {
-        if !self.config.shadow_experiments {
+        if !self.user_settings().shadow_experiments {
             return Ok(Vec::new());
         }
         let observation_ids = self.store()?.pending_candidate_observation_ids(limit)?;
@@ -3872,7 +3926,7 @@ impl AppRuntime {
         &self,
         limit: usize,
     ) -> Result<Vec<AutomaticShadowLaunch>, RuntimeError> {
-        if !self.config.shadow_experiments {
+        if !self.user_settings().shadow_experiments {
             return Ok(Vec::new());
         }
         let experiment_ids = self.store()?.executable_automatic_experiment_ids(limit)?;
@@ -4885,7 +4939,8 @@ impl AppRuntime {
                 .save_consumer_evaluation_checkpoint(&checkpoint)?;
             let _ = self.event_sender.send(event);
         }
-        if self.config.autonomy == AutonomyPreset::Guided
+        let autonomy = self.user_settings().autonomy;
+        if autonomy == AutonomyPreset::Guided
             && !checkpoint.batch_approved
             && conditions
                 .iter()
@@ -5015,12 +5070,11 @@ impl AppRuntime {
             }
         }
         let control = self.tool_control();
-        let broker_preset =
-            if self.config.autonomy == AutonomyPreset::Guided && checkpoint.batch_approved {
-                AutonomyPreset::Balanced
-            } else {
-                self.config.autonomy
-            };
+        let broker_preset = if autonomy == AutonomyPreset::Guided && checkpoint.batch_approved {
+            AutonomyPreset::Balanced
+        } else {
+            autonomy
+        };
         let broker = ToolBroker::new(
             host.clone(),
             control.clone(),
@@ -6109,7 +6163,7 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: self.user_settings().autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),
@@ -6299,7 +6353,7 @@ impl AppRuntime {
             control.clone(),
             control.clone(),
             BrokerControls {
-                preset: self.config.autonomy,
+                preset: self.user_settings().autonomy,
                 constitution: OwnerConstitution::secure_defaults(),
                 capabilities,
                 leases: Arc::new(control),

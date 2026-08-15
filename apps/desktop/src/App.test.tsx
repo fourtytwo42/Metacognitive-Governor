@@ -72,6 +72,9 @@ const client = vi.hoisted(() => ({
   ,recordShadowExecution: vi.fn()
   ,recordExperimentBenchmark: vi.fn()
   ,decideExperiment: vi.fn()
+  ,getSettings: vi.fn()
+  ,updateSettings: vi.fn()
+  ,settingsHistory: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -144,7 +147,10 @@ vi.mock("./desktop-client", () => ({
   transitionExperiment: client.transitionExperiment,
   recordShadowExecution: client.recordShadowExecution,
   recordExperimentBenchmark: client.recordExperimentBenchmark,
-  decideExperiment: client.decideExperiment
+  decideExperiment: client.decideExperiment,
+  getUserSettings: client.getSettings,
+  updateUserSettings: client.updateSettings,
+  loadUserSettingsHistory: client.settingsHistory
 }));
 
 import { App } from "./App";
@@ -220,6 +226,9 @@ beforeEach(() => {
   client.recordShadowExecution.mockReset();
   client.recordExperimentBenchmark.mockReset();
   client.decideExperiment.mockReset();
+  client.getSettings.mockReset();
+  client.updateSettings.mockReset();
+  client.settingsHistory.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.proxyUsage.mockResolvedValue({
@@ -259,6 +268,56 @@ beforeEach(() => {
     decisions: { decisions: [] }
   });
   client.getSiteMonitor.mockRejectedValue(new Error("Site has no monitor"));
+  const settings = {
+    schema_version: 1,
+    revision: 1,
+    advanced_mode: false,
+    autonomy: "autonomous" as const,
+    shadow_experiments: true,
+    updated_at: "2026-08-15T00:00:00Z"
+  };
+  client.getSettings.mockResolvedValue(settings);
+  client.settingsHistory.mockResolvedValue({
+    revisions: [{ settings, reason: "initial settings", changed_at: settings.updated_at }]
+  });
+  client.updateSettings.mockImplementation(async (request) => ({
+    schema_version: 1,
+    revision: request.expected_revision + 1,
+    advanced_mode: request.advanced_mode,
+    autonomy: request.autonomy,
+    shadow_experiments: request.shadow_experiments,
+    updated_at: "2026-08-15T00:01:00Z"
+  }));
+});
+
+async function enableAdvancedMode() {
+  const button = screen.getByRole("button", { name: "Advanced mode" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  await screen.findByRole("button", { name: "Simple mode" });
+}
+
+async function enableSimpleMode() {
+  const button = screen.getByRole("button", { name: "Simple mode" });
+  fireEvent.click(button);
+  await screen.findByRole("button", { name: "Advanced mode" });
+}
+
+test("owner settings persist autonomy with optimistic revision control", async () => {
+  render(<App />);
+  const panel = await screen.findByLabelText("Owner settings");
+  expect(within(panel).getByLabelText("Autonomy")).toHaveValue("autonomous");
+  fireEvent.change(within(panel).getByLabelText("Autonomy"), { target: { value: "guided" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(client.updateSettings).toHaveBeenCalledWith({
+    expected_revision: 1,
+    advanced_mode: false,
+    autonomy: "guided",
+    shadow_experiments: true,
+    reason: "Updated owner settings from desktop"
+  }));
+  expect(await screen.findByText("Revision 2")).toBeInTheDocument();
+  expect(within(panel).getByText("Ask before consequential local actions.")).toBeInTheDocument();
 });
 
 test("measured improvement stays simple by default and exposes controlled transitions in advanced mode", async () => {
@@ -294,7 +353,7 @@ test("measured improvement stays simple by default and exposes controlled transi
   await within(panel).findByText(experiment.hypothesis);
   expect(within(panel).getByText("1 shadow · 1/2 benchmarks · 0 decisions")).toBeTruthy();
   expect(within(panel).queryByLabelText("Measured improvement JSON")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   expect(within(panel).getByLabelText("Measured improvement JSON")).toBeTruthy();
   fireEvent.click(within(panel).getByRole("button", { name: "Move to ready" }));
   await waitFor(() => expect(client.transitionExperiment).toHaveBeenCalledWith(
@@ -465,10 +524,10 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
 
   fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
   const scheduler = screen.getByRole("region", { name: "Scheduler" });
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   fireEvent.change(within(scheduler).getByLabelText("Trigger"), { target: { value: "cron" } });
   expect(within(scheduler).getByLabelText("Five-field cron")).toHaveValue("0 2 * * *");
-  fireEvent.click(screen.getByRole("button", { name: "Simple mode" }));
+  await enableSimpleMode();
   expect(within(scheduler).getByLabelText("Repeat")).toHaveValue("3600");
   fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: schedule.name } });
   fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: schedule.goal } });
@@ -588,7 +647,7 @@ test("advanced computer reservation validates and submits a stable target region
   };
   client.requestPlatformSession.mockResolvedValue(requested);
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
   fireEvent.change(within(panel).getByLabelText("Session type"), { target: { value: "computer_use" } });
   fireEvent.change(within(panel).getByLabelText("Name"), { target: { value: requested.display_name } });
@@ -660,7 +719,7 @@ test("advanced computer session captures a digest-bound frame and submits typed 
     }
   });
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
   await within(panel).findByRole("heading", { name: requested.display_name });
   fireEvent.click(within(panel).getByRole("button", { name: "Start computer session" }));
@@ -731,11 +790,11 @@ test("scheduler retries reuse one identity and rotate it only after success", as
   expect(client.createSchedule.mock.calls[2][0].schedule_id).not.toBe(firstIdentity);
 });
 
-test("advanced mode reveals runtime details", () => {
+test("advanced mode reveals runtime details", async () => {
   render(<App />);
 
   expect(screen.queryByRole("heading", { name: "Runtime status" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   expect(screen.getByRole("heading", { name: "Runtime status" })).toBeInTheDocument();
 });
 
@@ -801,7 +860,7 @@ test("consumer provider setup discovers a local endpoint and advanced mode shows
   expect(screen.getByText("Endpoint-reported billing · 1 models")).toBeInTheDocument();
   expect(client.configureProvider).toHaveBeenCalledWith(expect.objectContaining(connection), undefined);
 
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   expect(screen.getByText("Local Model")).toBeInTheDocument();
   expect(screen.getByText("Cost unknown")).toBeInTheDocument();
 });
@@ -827,7 +886,7 @@ test("provider workspace shows durable privacy-preserving proxy usage", async ()
   expect(screen.getByText(/not prompts or generated text/)).toBeInTheDocument();
   expect(screen.queryByLabelText("Proxy conversations")).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   expect(screen.getByLabelText("Proxy conversations")).toHaveTextContent("Standalone conversation");
 });
 
@@ -894,7 +953,7 @@ test("advanced MCP setup passes stdio executable arguments without a credential"
   });
   render(<App />);
 
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   fireEvent.change(screen.getByLabelText("Transport"), { target: { value: "stdio" } });
   expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Authentication")).not.toBeInTheDocument();
@@ -1023,7 +1082,7 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
   expect(client.taskAudit).toHaveBeenCalledWith(pendingTask.id);
 
-  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  await enableAdvancedMode();
   expect(screen.getByText("task transitioned")).toBeInTheDocument();
   expect(screen.getByText("Governed tool activity")).toBeInTheDocument();
   expect(screen.getByText("browser.workflow")).toBeInTheDocument();

@@ -26,9 +26,10 @@ use mcg_api::{
     StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
     TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
     TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    UpdateSiteRequest, UpdateSshHostRequest, WakeScheduleRequest,
+    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest,
 };
-use mcg_config::AppConfig;
+use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId,
     NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
@@ -113,6 +114,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect or change restart-safe owner settings.
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
     /// Create and inspect durable tasks.
     Task {
         #[command(subcommand)]
@@ -173,6 +179,48 @@ enum Command {
         #[command(subcommand)]
         command: ExperimentCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsCommand {
+    /// Show current owner settings.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change one or more live settings with optimistic revision protection.
+    Set {
+        #[arg(long)]
+        advanced_mode: Option<bool>,
+        #[arg(long, value_enum)]
+        autonomy: Option<AutonomyArg>,
+        #[arg(long)]
+        shadow_experiments: Option<bool>,
+        #[arg(long, default_value = "updated from CLI")]
+        reason: String,
+    },
+    /// Show immutable settings revisions.
+    History {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AutonomyArg {
+    Guided,
+    Balanced,
+    Autonomous,
+}
+
+impl From<AutonomyArg> for AutonomyPreset {
+    fn from(value: AutonomyArg) -> Self {
+        match value {
+            AutonomyArg::Guided => Self::Guided,
+            AutonomyArg::Balanced => Self::Balanced,
+            AutonomyArg::Autonomous => Self::Autonomous,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1093,6 +1141,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Status { json } => run_status(&client, host, token.trim(), json).await?,
+        Command::Settings { command } => {
+            run_settings(&client, host, token.trim(), command).await?;
+        }
         Command::Task { command } => run_task(&client, host, token.trim(), command).await?,
         Command::Approval { command } => run_approval(&client, host, token.trim(), command).await?,
         Command::Project { command } => run_project(&client, host, token.trim(), command).await?,
@@ -2491,6 +2542,119 @@ async fn run_status(
         println!(
             "automatic shadow experiments: {}",
             if status.shadow_experiments {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+    Ok(())
+}
+
+async fn run_settings(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: SettingsCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        SettingsCommand::Show { json } => {
+            let settings = load_user_settings(client, host, token).await?;
+            print_user_settings(&settings, json)?;
+        }
+        SettingsCommand::Set {
+            advanced_mode,
+            autonomy,
+            shadow_experiments,
+            reason,
+        } => {
+            if advanced_mode.is_none() && autonomy.is_none() && shadow_experiments.is_none() {
+                return Err("settings set requires at least one changed field".into());
+            }
+            let current = load_user_settings(client, host, token).await?;
+            let updated: UserSettings = client
+                .put(format!("{host}/api/v1/settings"))
+                .bearer_auth(token)
+                .json(&UpdateUserSettingsRequest {
+                    expected_revision: current.revision,
+                    advanced_mode: advanced_mode.unwrap_or(current.advanced_mode),
+                    autonomy: autonomy.map_or(current.autonomy, Into::into),
+                    shadow_experiments: shadow_experiments.unwrap_or(current.shadow_experiments),
+                    reason,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_user_settings(&updated, false)?;
+        }
+        SettingsCommand::History { json } => {
+            let history: UserSettingsHistoryResponse = client
+                .get(format!("{host}/api/v1/settings/history"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+            } else {
+                for revision in history.revisions {
+                    let settings = revision.settings;
+                    println!(
+                        "revision {}  {:?}  {}  shadow={}  {}  {}",
+                        settings.revision,
+                        settings.autonomy,
+                        if settings.advanced_mode {
+                            "advanced"
+                        } else {
+                            "simple"
+                        },
+                        settings.shadow_experiments,
+                        revision.changed_at,
+                        revision.reason,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn load_user_settings(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> Result<UserSettings, Box<dyn std::error::Error>> {
+    Ok(client
+        .get(format!("{host}/api/v1/settings"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+fn print_user_settings(
+    settings: &UserSettings,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(settings)?);
+    } else {
+        println!(
+            "revision {}: {:?}, {} mode, shadow experiments {}",
+            settings.revision,
+            settings.autonomy,
+            if settings.advanced_mode {
+                "advanced"
+            } else {
+                "simple"
+            },
+            if settings.shadow_experiments {
                 "enabled"
             } else {
                 "disabled"
@@ -4073,6 +4237,43 @@ mod tests {
                     next: ExperimentStateArg::AwaitingDecision,
                     ..
                 }
+            }
+        ));
+    }
+
+    #[test]
+    fn settings_commands_expose_safe_live_owner_controls() {
+        let set = Cli::try_parse_from([
+            "mcg",
+            "settings",
+            "set",
+            "--advanced-mode",
+            "true",
+            "--autonomy",
+            "guided",
+            "--shadow-experiments",
+            "false",
+            "--reason",
+            "owner requested guided work",
+        ])
+        .expect("settings set command");
+        assert!(matches!(
+            set.command,
+            Command::Settings {
+                command: SettingsCommand::Set {
+                    advanced_mode: Some(true),
+                    autonomy: Some(AutonomyArg::Guided),
+                    shadow_experiments: Some(false),
+                    ..
+                }
+            }
+        ));
+        let history = Cli::try_parse_from(["mcg", "settings", "history", "--json"])
+            .expect("settings history command");
+        assert!(matches!(
+            history.command,
+            Command::Settings {
+                command: SettingsCommand::History { json: true }
             }
         ));
     }

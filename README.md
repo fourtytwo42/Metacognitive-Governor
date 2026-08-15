@@ -37,6 +37,7 @@ Implementation planning:
 - [M8 platform capabilities and sessions](docs/architecture/platform-sessions.md)
 - [M8 Sites, deployment, and monitoring](docs/architecture/sites.md)
 - [M8 typed SSH remote execution](docs/architecture/typed-ssh.md)
+- [Durable owner settings](docs/architecture/settings.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
@@ -70,6 +71,14 @@ Run the daemon and CLI in separate terminals:
 cargo run -p mcg-daemon
 cargo run -p mcg-cli -- status
 ```
+
+Owner-facing behavior is restart-safe and shared by every interface. Use the
+desktop Settings workspace or `mcg settings show|set|history` to select Guided,
+Balanced, or Autonomous operation, persist simple/advanced mode, and explicitly
+opt into shadow experiments. Updates require the current revision, retain an
+immutable reasoned history, and apply to new authority decisions; startup-only
+trust roots such as data paths, loopback binding, and executable locations are
+not mutable through this surface.
 
 The authenticated organization and run-control surface is available through the
 same daemon. Create a consumer-default organization, list it, plan work for an

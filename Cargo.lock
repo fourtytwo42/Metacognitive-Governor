@@ -3037,6 +3037,7 @@ dependencies = [
 name = "mcg-config"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
 ]
 
@@ -3207,6 +3208,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "mcg-agents",
+ "mcg-config",
  "mcg-domain",
  "mcg-events",
  "mcg-mcp",

@@ -1,5 +1,42 @@
 import { expect, test } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const initial = {
+      schema_version: 1,
+      revision: 1,
+      advanced_mode: false,
+      autonomy: "autonomous",
+      shadow_experiments: true,
+      updated_at: "2026-08-15T00:00:00Z"
+    };
+    let settings = initial;
+    const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {
+        invoke: async (command: string, args: { request?: typeof initial & { reason?: string } } = {}) => {
+          if (command === "get_user_settings") return settings;
+          if (command === "user_settings_history") return { revisions: [...history] };
+          if (command === "update_user_settings" && args.request) {
+            settings = {
+              schema_version: 1,
+              revision: settings.revision + 1,
+              advanced_mode: args.request.advanced_mode,
+              autonomy: args.request.autonomy,
+              shadow_experiments: args.request.shadow_experiments,
+              updated_at: "2026-08-15T00:01:00Z"
+            };
+            history.push({ settings, reason: args.request.reason ?? "updated", changed_at: settings.updated_at });
+            return settings;
+          }
+          throw new Error(`No browser fixture for ${command}`);
+        }
+      },
+      configurable: true
+    });
+  });
+});
+
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
   await page.goto("/");
 
@@ -10,6 +47,10 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
 
   await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
+  const settings = page.getByLabel("Owner settings");
+  await expect(settings.getByLabel("Autonomy")).toHaveValue("autonomous");
+  await expect(settings.getByLabel("Run opt-in shadow model experiments")).toBeChecked();
+  await expect(settings.getByLabel("Settings revision history")).toContainText("Enabled advanced interface");
   const sites = page.getByRole("region", { name: "Sites" });
   await expect(sites.getByRole("heading", { name: "Web properties" })).toBeVisible();
   await expect(sites.getByLabel("Deployment executable")).toBeVisible();
