@@ -7,18 +7,18 @@ use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
     AttachBrowserSessionRequest, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteRequest, CreateTaskRequest, DeploySiteRequest,
-    DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest,
-    LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
-    MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationListResponse,
-    OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateTaskRequest,
+    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
     ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
     ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
     SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
     StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
     ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest, WakeScheduleRequest,
+    TransitionTaskRequest, UpdateSiteRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -26,8 +26,8 @@ use mcg_domain::{
     NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
     PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId, ScheduleState,
     ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, TaskEnvelope, TaskId,
-    TaskState, WorkItemId,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState,
+    TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
@@ -42,7 +42,7 @@ use mcg_runtime::{
     AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
-    SiteDeploymentMutation, SiteHealthMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
@@ -192,6 +192,18 @@ enum SiteCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Enable or exactly replay durable interval monitoring for a Site.
+    Monitor {
+        id: String,
+        #[arg(long, default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long, default_value_t = 200)]
+        expected_status: u16,
+        #[arg(long)]
+        schedule_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Request or replay one approval-governed deployment.
     Deploy {
         id: String,
@@ -199,6 +211,24 @@ enum SiteCommand {
         deployment_id: Option<String>,
         #[arg(long)]
         task_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a complete revision-checked Site definition from JSON.
+    Update {
+        id: String,
+        request: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause or resume monitoring, or archive the Site while preserving history.
+    SetState {
+        id: String,
+        #[arg(value_enum)]
+        state: SiteStateArg,
+        reason: String,
+        #[arg(long)]
+        expected_revision: u32,
         #[arg(long)]
         json: bool,
     },
@@ -217,6 +247,23 @@ impl From<SiteEnvironmentArg> for SiteEnvironment {
             SiteEnvironmentArg::Development => Self::Development,
             SiteEnvironmentArg::Preview => Self::Preview,
             SiteEnvironmentArg::Production => Self::Production,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SiteStateArg {
+    Active,
+    MonitoringPaused,
+    Archived,
+}
+
+impl From<SiteStateArg> for SiteState {
+    fn from(value: SiteStateArg) -> Self {
+        match value {
+            SiteStateArg::Active => Self::Active,
+            SiteStateArg::MonitoringPaused => Self::MonitoringPaused,
+            SiteStateArg::Archived => Self::Archived,
         }
     }
 }
@@ -1034,13 +1081,29 @@ async fn run_site(
                 .error_for_status()?
                 .json()
                 .await?;
+            let monitor_response = client
+                .get(format!("{host}/api/v1/sites/{id}/monitor"))
+                .bearer_auth(token)
+                .send()
+                .await?;
+            let monitor = if monitor_response.status() == reqwest::StatusCode::NOT_FOUND {
+                None
+            } else {
+                Some(
+                    monitor_response
+                        .error_for_status()?
+                        .json::<SiteMonitor>()
+                        .await?,
+                )
+            };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "site": site,
                     "revisions": revisions.revisions,
                     "health_checks": health.checks,
-                    "deployments": deployments.deployments
+                    "deployments": deployments.deployments,
+                    "monitor": monitor
                 }))?
             );
         }
@@ -1127,6 +1190,44 @@ async fn run_site(
                 );
             }
         }
+        SiteCommand::Monitor {
+            id,
+            interval_seconds,
+            expected_status,
+            schedule_id,
+            json,
+        } => {
+            let id = SiteId::from_str(&id)?;
+            let schedule_id = schedule_id
+                .map(|value| ScheduleId::from_str(&value))
+                .transpose()?
+                .unwrap_or_else(ScheduleId::new);
+            let mutation: SiteMonitorMutation = client
+                .post(format!("{host}/api/v1/sites/{id}/monitor"))
+                .bearer_auth(token)
+                .json(&CreateSiteMonitorRequest {
+                    schedule_id,
+                    interval_seconds,
+                    expected_status,
+                    first_run_at: None,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}: every {} seconds, expecting HTTP {}{}",
+                    mutation.monitor.schedule_id,
+                    mutation.monitor.interval_seconds,
+                    mutation.monitor.expected_status,
+                    if mutation.replayed { " (replay)" } else { "" }
+                );
+            }
+        }
         SiteCommand::Deploy {
             id,
             deployment_id,
@@ -1161,6 +1262,77 @@ async fn run_site(
                 );
             }
         }
+        SiteCommand::Update { id, request, json } => {
+            let id = SiteId::from_str(&id)?;
+            let request: UpdateSiteRequest =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let mutation = update_site_cli(client, host, token, id, &request).await?;
+            print_site_mutation(&mutation, json)?;
+        }
+        SiteCommand::SetState {
+            id,
+            state,
+            reason,
+            expected_revision,
+            json,
+        } => {
+            let id = SiteId::from_str(&id)?;
+            let site: Site = client
+                .get(format!("{host}/api/v1/sites/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let request = UpdateSiteRequest {
+                expected_revision,
+                display_name: site.display_name,
+                environment: site.environment,
+                public_url: site.public_url,
+                health_url: site.health_url,
+                hosting_provider: site.hosting_provider,
+                deployment_command: site.deployment_command,
+                credential_reference: site.credential_reference,
+                state: state.into(),
+                reason,
+            };
+            let mutation = update_site_cli(client, host, token, id, &request).await?;
+            print_site_mutation(&mutation, json)?;
+        }
+    }
+    Ok(())
+}
+
+async fn update_site_cli(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    site_id: SiteId,
+    request: &UpdateSiteRequest,
+) -> Result<SiteMutation, Box<dyn std::error::Error>> {
+    Ok(client
+        .put(format!("{host}/api/v1/sites/{site_id}"))
+        .bearer_auth(token)
+        .json(request)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+fn print_site_mutation(mutation: &SiteMutation, json: bool) -> Result<(), serde_json::Error> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(mutation)?);
+    } else {
+        println!(
+            "{}: revision {} {:?}{}",
+            mutation.site.id,
+            mutation.site.revision,
+            mutation.site.state,
+            if mutation.replayed { " (replay)" } else { "" }
+        );
     }
     Ok(())
 }
@@ -3388,6 +3560,29 @@ mod tests {
             deploy.command,
             Command::Site {
                 command: SiteCommand::Deploy { json: true, .. }
+            }
+        ));
+        let monitor = Cli::try_parse_from([
+            "mcg",
+            "site",
+            "monitor",
+            site_id,
+            "--schedule-id",
+            "00000000-0000-4000-8000-000000000101",
+            "--interval-seconds",
+            "60",
+            "--expected-status",
+            "204",
+        ])
+        .expect("Site monitor command");
+        assert!(matches!(
+            monitor.command,
+            Command::Site {
+                command: SiteCommand::Monitor {
+                    interval_seconds: 60,
+                    expected_status: 204,
+                    ..
+                }
             }
         ));
     }

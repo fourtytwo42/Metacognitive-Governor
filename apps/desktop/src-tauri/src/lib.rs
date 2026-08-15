@@ -1,19 +1,20 @@
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
     CheckSiteHealthRequest, ClosePlatformSessionRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteRequest, CreateTaskRequest, DeploySiteRequest,
-    DiscoverProjectRequest, LaunchTaskRequest, LaunchTaskResponse, McpListResponse,
-    NavigateBrowserSessionRequest, PlatformSessionHistoryResponse, PlatformSessionListResponse,
-    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionTaskRequest, WakeScheduleRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateTaskRequest,
+    DeploySiteRequest, DiscoverProjectRequest, LaunchTaskRequest, LaunchTaskResponse,
+    McpListResponse, NavigateBrowserSessionRequest, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SetScheduleStateRequest, SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse,
+    SiteRevisionListResponse, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
+    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest, UpdateSiteRequest,
+    WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
     PlatformCapabilitySnapshot, PlatformSession, ScheduleDefinition, SchedulerNotification, Site,
-    TaskEnvelope,
+    SiteMonitor, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -21,7 +22,7 @@ use mcg_providers::{ProviderConnection, ProviderModelCatalog};
 use mcg_runtime::{
     McpMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -346,6 +347,11 @@ async fn register_site(request: CreateSiteRequest) -> Result<Site, String> {
 }
 
 #[tauri::command]
+async fn update_site(site_id: String, request: UpdateSiteRequest) -> Result<SiteMutation, String> {
+    site_put(&format!("/{site_id}"), &request, "Site update").await
+}
+
+#[tauri::command]
 async fn site_revisions(site_id: String) -> Result<SiteRevisionListResponse, String> {
     site_get(&format!("/{site_id}/revisions"), "Site revision loading").await
 }
@@ -361,6 +367,24 @@ async fn check_site_health(
     request: CheckSiteHealthRequest,
 ) -> Result<SiteHealthMutation, String> {
     site_post(&format!("/{site_id}/health"), &request, "Site health check").await
+}
+
+#[tauri::command]
+async fn get_site_monitor(site_id: String) -> Result<SiteMonitor, String> {
+    site_get(&format!("/{site_id}/monitor"), "Site monitor loading").await
+}
+
+#[tauri::command]
+async fn create_site_monitor(
+    site_id: String,
+    request: CreateSiteMonitorRequest,
+) -> Result<SiteMonitorMutation, String> {
+    site_post(
+        &format!("/{site_id}/monitor"),
+        &request,
+        "Site monitor configuration",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -411,6 +435,27 @@ where
 {
     let response = reqwest::Client::new()
         .post(format!("{LOCAL_DAEMON}/api/v1/sites{suffix}"))
+        .bearer_auth(daemon_token()?)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
+}
+
+async fn site_put<T, B>(suffix: &str, body: &B, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let response = reqwest::Client::new()
+        .put(format!("{LOCAL_DAEMON}/api/v1/sites{suffix}"))
         .bearer_auth(daemon_token()?)
         .json(body)
         .send()
@@ -1081,9 +1126,12 @@ pub fn run() {
             list_sites,
             get_site,
             register_site,
+            update_site,
             site_revisions,
             site_health_history,
             check_site_health,
+            get_site_monitor,
+            create_site_monitor,
             site_deployment_history,
             deploy_site,
             platform_capabilities,

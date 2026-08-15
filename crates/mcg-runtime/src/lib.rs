@@ -30,13 +30,13 @@ use mcg_domain::{
     NotificationSeverity, PLATFORM_SCHEMA_VERSION, PlatformCapability,
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, ProjectId, RunId,
+    PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, ProjectId, RiskLevel, RunId,
     SITE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
     SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
-    SiteId, SiteRevision, SiteRevisionId, SiteState, TaskEnvelope, TaskId, TaskState,
-    ToolExecutionId, ToolRequestId, WorkItemId,
+    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, TaskBudget, TaskEnvelope, TaskId,
+    TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -132,6 +132,20 @@ pub struct SiteRegistrationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteUpdateRequest {
+    pub expected_revision: u32,
+    pub display_name: String,
+    pub environment: SiteEnvironment,
+    pub public_url: String,
+    pub health_url: String,
+    pub hosting_provider: String,
+    pub deployment_command: Option<SiteDeploymentCommand>,
+    pub credential_reference: Option<String>,
+    pub state: SiteState,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteMutation {
     pub site: Site,
     pub replayed: bool,
@@ -148,6 +162,21 @@ pub struct SiteDeploymentMutation {
     pub deployment: SiteDeployment,
     pub replayed: bool,
     pub outcome: Option<ToolOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteMonitorRequest {
+    pub schedule_id: ScheduleId,
+    pub interval_seconds: u64,
+    pub expected_status: u16,
+    pub first_run_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SiteMonitorMutation {
+    pub monitor: SiteMonitor,
+    pub schedule: ScheduleDefinition,
+    pub replayed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1548,6 +1577,29 @@ impl AppRuntime {
         )?)
     }
 
+    /// Settles a typed Site-monitor occurrence without a generic per-run notification.
+    ///
+    /// # Errors
+    /// Returns an error for lost authority or invalid durable state.
+    pub fn finish_site_monitor_occurrence(
+        &self,
+        occurrence_id: ScheduleOccurrenceId,
+        lease_owner: &str,
+        state: ScheduleOccurrenceState,
+        detail: String,
+        check: Option<&SiteHealthCheck>,
+        now: DateTime<Utc>,
+    ) -> Result<ScheduleOccurrence, RuntimeError> {
+        Ok(self.store()?.finish_site_monitor_occurrence(
+            occurrence_id,
+            lease_owner,
+            state,
+            detail,
+            check,
+            now,
+        )?)
+    }
+
     /// Loads a task's ordered event history.
     ///
     /// # Errors
@@ -1696,6 +1748,102 @@ impl AppRuntime {
         Ok(self.store()?.site(site_id)?)
     }
 
+    /// Atomically advances one Site definition and records an immutable revision.
+    /// An exact retry after a lost response replays the already committed revision.
+    ///
+    /// # Errors
+    /// Returns an error for stale revisions, unsafe definitions, or archived Sites.
+    pub fn update_site(
+        &self,
+        site_id: SiteId,
+        request: &SiteUpdateRequest,
+    ) -> Result<SiteMutation, RuntimeError> {
+        let current = self
+            .site(site_id)?
+            .ok_or(StorageError::SiteNotFound(site_id))?;
+        if current.state == SiteState::Archived {
+            return Err(
+                StorageError::InvalidData("archived Sites cannot be changed".into()).into(),
+            );
+        }
+        if request.expected_revision == 0 || request.reason.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "Site updates require a positive expected revision and reason".into(),
+            )
+            .into());
+        }
+        let public_url = normalized_site_url(&request.public_url)?;
+        let health_url = normalized_site_url(&request.health_url)?;
+        let definition = SiteRegistrationRequest {
+            id: site_id,
+            project_id: current.project_id,
+            display_name: request.display_name.clone(),
+            environment: request.environment,
+            public_url: public_url.clone(),
+            health_url: health_url.clone(),
+            hosting_provider: request.hosting_provider.clone(),
+            deployment_command: request.deployment_command.clone(),
+            credential_reference: request.credential_reference.clone(),
+            state: request.state,
+        };
+        let definition_hash = site_definition_hash(&definition, &public_url, &health_url)?;
+        if current.revision == request.expected_revision.saturating_add(1)
+            && current.definition_hash == definition_hash
+        {
+            return Ok(SiteMutation {
+                site: current,
+                replayed: true,
+            });
+        }
+        if current.revision != request.expected_revision {
+            return Err(StorageError::Conflict(format!(
+                "site {site_id} changed from expected revision {}",
+                request.expected_revision
+            ))
+            .into());
+        }
+        let now = Utc::now();
+        let site = Site {
+            schema_version: SITE_SCHEMA_VERSION,
+            id: site_id,
+            definition_hash: definition_hash.clone(),
+            revision: current.revision.saturating_add(1),
+            project_id: current.project_id,
+            display_name: request.display_name.trim().into(),
+            environment: request.environment,
+            public_url,
+            health_url,
+            hosting_provider: request.hosting_provider.trim().into(),
+            deployment_command: request.deployment_command.clone(),
+            credential_reference: request
+                .credential_reference
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            state: request.state,
+            created_at: current.created_at,
+            updated_at: now,
+        };
+        let revision = SiteRevision {
+            schema_version: SITE_SCHEMA_VERSION,
+            id: SiteRevisionId::new(),
+            site_id,
+            revision: site.revision,
+            definition_hash,
+            site: site.clone(),
+            reason: request.reason.trim().into(),
+            created_at: now,
+        };
+        let site = self
+            .store()?
+            .update_site(request.expected_revision, &site, &revision)?;
+        Ok(SiteMutation {
+            site,
+            replayed: false,
+        })
+    }
+
     /// Loads immutable definition history for one Site.
     ///
     /// # Errors
@@ -1841,6 +1989,101 @@ impl AppRuntime {
         site_id: SiteId,
     ) -> Result<Vec<SiteHealthCheck>, RuntimeError> {
         Ok(self.store()?.site_health_checks(site_id)?)
+    }
+
+    /// Creates one durable scheduler-backed monitor for a Site.
+    ///
+    /// # Errors
+    /// Returns an error for an archived Site, invalid interval/status, or identity conflict.
+    pub fn create_site_monitor(
+        &self,
+        site_id: SiteId,
+        request: &SiteMonitorRequest,
+    ) -> Result<SiteMonitorMutation, RuntimeError> {
+        let site = self
+            .site(site_id)?
+            .ok_or(StorageError::SiteNotFound(site_id))?;
+        let now = Utc::now();
+        let definition_hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(site_id, request)).map_err(StorageError::from)?,)
+        );
+        let schedule = ScheduleDefinition {
+            schema_version: mcg_domain::SCHEDULE_SCHEMA_VERSION,
+            id: request.schedule_id,
+            definition_hash,
+            name: format!("Monitor {}", site.display_name),
+            project_id: site.project_id,
+            goal: format!("Monitor Site {} health without model inference", site.id),
+            constraints: vec!["Typed Site health executor only".into()],
+            success_conditions: vec![format!(
+                "HTTP {} {}",
+                request.expected_status, site.health_url
+            )],
+            risk: RiskLevel::Low,
+            budget: TaskBudget {
+                max_tokens: None,
+                max_cost_usd: None,
+                max_duration_seconds: Some(60),
+            },
+            trigger: ScheduleTrigger::Interval {
+                seconds: request.interval_seconds,
+            },
+            state: if site.state == SiteState::Active {
+                ScheduleState::Enabled
+            } else {
+                ScheduleState::Paused
+            },
+            next_run_at: Some(request.first_run_at.unwrap_or(now)),
+            target_path: None,
+            context_token_budget: 1,
+            requested_tools: vec!["http.request".into()],
+            estimated_output_tokens: 0,
+            max_model_calls: 1,
+            watch_fingerprint: None,
+            last_watch_at: None,
+            last_event_sequence: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let monitor = SiteMonitor {
+            schema_version: SITE_SCHEMA_VERSION,
+            site_id,
+            schedule_id: request.schedule_id,
+            interval_seconds: request.interval_seconds,
+            expected_status: request.expected_status,
+            last_state: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let (monitor, created) = self.store()?.create_site_monitor(&monitor, &schedule)?;
+        let schedule = self
+            .schedule(monitor.schedule_id)?
+            .ok_or(StorageError::ScheduleNotFound(monitor.schedule_id))?;
+        Ok(SiteMonitorMutation {
+            monitor,
+            schedule,
+            replayed: !created,
+        })
+    }
+
+    /// Loads the scheduler-backed monitor for one Site.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn site_monitor(&self, site_id: SiteId) -> Result<Option<SiteMonitor>, RuntimeError> {
+        Ok(self.store()?.site_monitor(site_id)?)
+    }
+
+    /// Loads the Site monitor owning one schedule.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn site_monitor_by_schedule(
+        &self,
+        schedule_id: ScheduleId,
+    ) -> Result<Option<SiteMonitor>, RuntimeError> {
+        Ok(self.store()?.site_monitor_by_schedule(schedule_id)?)
     }
 
     /// Executes one exact revision-bound Site deployment through publication policy.

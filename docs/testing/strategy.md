@@ -134,9 +134,11 @@ the mode switch remains visible and the page does not overflow at the narrow lay
 Sites fixtures cross REST and MCP on one durable identity, prove exact health and
 deployment replay, require publication approval before ledger claim, retain response
 and process-log artifacts, and exercise the simple/advanced native dashboard plus
-caller-owned CLI identities. Release qualification additionally requires restart-
-uncertain deployment and scheduler-backed health transition scenarios on Windows
-and Linux.
+caller-owned CLI identities. Monitor fixtures prove durable restart recovery,
+atomic occurrence/projection/notification settlement, coalesced repeated outages,
+recovery alerts, and transactional pause/archive schedule synchronization. Release
+qualification additionally requires restart-uncertain deployment and scheduler-
+backed health transition scenarios on Windows and Linux.
 
 ## Local verification lanes
 

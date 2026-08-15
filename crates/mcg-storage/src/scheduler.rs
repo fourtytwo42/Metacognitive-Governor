@@ -2,8 +2,8 @@ use chrono::{DateTime, Duration, Utc};
 use mcg_domain::{
     NotificationSeverity, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
     ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope, TaskId,
-    TaskState, WakeRequest, WakeRequestId,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, SiteHealthCheck,
+    SiteHealthState, SiteMonitor, TaskEnvelope, TaskId, TaskState, WakeRequest, WakeRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -366,7 +366,18 @@ impl SqliteEventStore {
     /// Returns an error for invalid definitions, duplicate identities, or database failures.
     pub fn create_schedule(&mut self, schedule: &ScheduleDefinition) -> Result<(), StorageError> {
         validate_schedule(schedule)?;
-        let inserted = self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        Self::insert_schedule_tx(&transaction, schedule)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn insert_schedule_tx(
+        transaction: &Transaction<'_>,
+        schedule: &ScheduleDefinition,
+    ) -> Result<(), StorageError> {
+        validate_schedule(schedule)?;
+        let inserted = transaction.execute(
             "INSERT OR IGNORE INTO schedules(schedule_id, state, next_run_at, schedule_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -678,6 +689,109 @@ impl SqliteEventStore {
         Ok(occurrence)
     }
 
+    /// Settles a typed Site-monitor occurrence and atomically records its health transition.
+    /// Unchanged health states do not emit another notification.
+    ///
+    /// # Errors
+    /// Returns an error for lost lease authority, a non-monitor schedule, or invalid state.
+    pub fn finish_site_monitor_occurrence(
+        &mut self,
+        occurrence_id: ScheduleOccurrenceId,
+        lease_owner: &str,
+        state: ScheduleOccurrenceState,
+        detail: String,
+        check: Option<&SiteHealthCheck>,
+        now: DateTime<Utc>,
+    ) -> Result<ScheduleOccurrence, StorageError> {
+        if !matches!(
+            state,
+            ScheduleOccurrenceState::Completed | ScheduleOccurrenceState::Failed
+        ) {
+            return Err(StorageError::InvalidData(
+                "Site monitor occurrence requires a terminal state".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let (occurrence_json, monitor_json) = transaction
+            .query_row(
+                "SELECT o.occurrence_json, m.monitor_json FROM schedule_occurrences o
+                 JOIN site_monitors m ON m.schedule_id = o.schedule_id
+                 WHERE o.occurrence_id = ?1",
+                [occurrence_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StorageError::InvalidData("Site monitor occurrence was not found".into())
+            })?;
+        let mut occurrence: ScheduleOccurrence = serde_json::from_str(&occurrence_json)?;
+        let mut monitor: SiteMonitor = serde_json::from_str(&monitor_json)?;
+        if !matches!(
+            occurrence.state,
+            ScheduleOccurrenceState::Running | ScheduleOccurrenceState::Recovering
+        ) || occurrence.lease_owner.as_deref() != Some(lease_owner)
+        {
+            return Err(StorageError::Conflict(
+                "Site monitor occurrence lease authority changed".into(),
+            ));
+        }
+        occurrence.state = state;
+        occurrence.detail = Some(detail);
+        occurrence.updated_at = now;
+        occurrence.completed_at = Some(now);
+        occurrence.lease_owner = None;
+        occurrence.lease_expires_at = None;
+        update_occurrence_tx(&transaction, &occurrence)?;
+        if let Some(check) = check {
+            if monitor.site_id != check.site_id {
+                return Err(StorageError::InvalidData(
+                    "Site monitor received health from a different Site".into(),
+                ));
+            }
+            let observed = if check.status_code == Some(monitor.expected_status) {
+                SiteHealthState::Healthy
+            } else if check.status_code.is_some() {
+                SiteHealthState::Degraded
+            } else {
+                SiteHealthState::Unavailable
+            };
+            let changed = monitor
+                .last_state
+                .is_some_and(|previous| previous != observed);
+            monitor.last_state = Some(observed);
+            monitor.updated_at = now;
+            transaction.execute(
+                "UPDATE site_monitors SET monitor_json = ?1, updated_at = ?2 WHERE site_id = ?3",
+                params![
+                    serde_json::to_string(&monitor)?,
+                    now.to_rfc3339(),
+                    monitor.site_id.to_string(),
+                ],
+            )?;
+            if changed {
+                let notification = SchedulerNotification {
+                    schema_version: SCHEDULE_SCHEMA_VERSION,
+                    id: SchedulerNotificationId::new(),
+                    schedule_id: occurrence.schedule_id,
+                    occurrence_id: Some(occurrence.id),
+                    severity: if observed == SiteHealthState::Healthy {
+                        NotificationSeverity::Info
+                    } else {
+                        NotificationSeverity::High
+                    },
+                    title: "Site health changed".into(),
+                    detail: format!("Site {} health changed to {observed:?}", monitor.site_id),
+                    read: false,
+                    created_at: now,
+                    read_at: None,
+                };
+                insert_notification(&transaction, &notification)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(occurrence)
+    }
+
     fn update_schedule(&mut self, schedule: &ScheduleDefinition) -> Result<(), StorageError> {
         validate_schedule(schedule)?;
         let transaction = self.connection.transaction()?;
@@ -951,7 +1065,7 @@ fn insert_occurrence(
     Ok(())
 }
 
-fn insert_notification(
+pub(crate) fn insert_notification(
     transaction: &Transaction<'_>,
     notification: &SchedulerNotification,
 ) -> Result<(), StorageError> {

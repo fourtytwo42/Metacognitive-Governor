@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    SITE_SCHEMA_VERSION, Site, SiteDeployment, SiteDeploymentId, SiteDeploymentState,
-    SiteHealthCheck, SiteHealthCheckId, SiteHealthState, SiteId, SiteRevision, SiteState,
+    SITE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleState, Site, SiteDeployment,
+    SiteDeploymentId, SiteDeploymentState, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
+    SiteId, SiteMonitor, SiteRevision, SiteState,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, Transaction, params};
 use url::Url;
 
 use crate::{SqliteEventStore, StorageError};
@@ -111,6 +112,7 @@ impl SqliteEventStore {
             ));
         }
         insert_revision(&transaction, revision)?;
+        sync_monitor_schedule_state(&transaction, site, site.updated_at)?;
         transaction.commit()?;
         Ok(site.clone())
     }
@@ -386,6 +388,134 @@ impl SqliteEventStore {
         rows.map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
             .collect()
     }
+
+    /// Atomically binds one Site to one durable interval schedule.
+    /// Exact retries replay the existing monitor definition.
+    ///
+    /// # Errors
+    /// Returns an error for archived Sites, changed identity, or invalid schedules.
+    pub fn create_site_monitor(
+        &mut self,
+        monitor: &SiteMonitor,
+        schedule: &ScheduleDefinition,
+    ) -> Result<(SiteMonitor, bool), StorageError> {
+        validate_monitor(monitor, schedule)?;
+        let site = self
+            .site(monitor.site_id)?
+            .ok_or(StorageError::SiteNotFound(monitor.site_id))?;
+        if site.state == SiteState::Archived {
+            return Err(StorageError::InvalidData(
+                "archived Sites cannot be monitored".into(),
+            ));
+        }
+        if let Some(existing) = self.site_monitor(monitor.site_id)? {
+            if existing.schedule_id == monitor.schedule_id
+                && existing.interval_seconds == monitor.interval_seconds
+                && existing.expected_status == monitor.expected_status
+            {
+                return Ok((existing, false));
+            }
+            return Err(StorageError::Conflict(
+                "Site monitor already exists with a different definition".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        Self::insert_schedule_tx(&transaction, schedule)?;
+        transaction.execute(
+            "INSERT INTO site_monitors(site_id, schedule_id, monitor_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                monitor.site_id.to_string(),
+                monitor.schedule_id.to_string(),
+                serde_json::to_string(monitor)?,
+                monitor.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((monitor.clone(), true))
+    }
+
+    /// Loads the monitor for one Site.
+    ///
+    /// # Errors
+    /// Returns an error when the durable monitor cannot be decoded or read.
+    pub fn site_monitor(&self, site_id: SiteId) -> Result<Option<SiteMonitor>, StorageError> {
+        self.read_optional_json(
+            "SELECT monitor_json FROM site_monitors WHERE site_id = ?1",
+            &site_id.to_string(),
+        )
+    }
+
+    /// Loads the Site monitor owning one scheduler definition.
+    ///
+    /// # Errors
+    /// Returns an error when the durable monitor cannot be decoded or read.
+    pub fn site_monitor_by_schedule(
+        &self,
+        schedule_id: ScheduleId,
+    ) -> Result<Option<SiteMonitor>, StorageError> {
+        self.read_optional_json(
+            "SELECT monitor_json FROM site_monitors WHERE schedule_id = ?1",
+            &schedule_id.to_string(),
+        )
+    }
+}
+
+fn validate_monitor(
+    monitor: &SiteMonitor,
+    schedule: &ScheduleDefinition,
+) -> Result<(), StorageError> {
+    if monitor.schema_version != SITE_SCHEMA_VERSION
+        || monitor.schedule_id != schedule.id
+        || monitor.interval_seconds < 5
+        || monitor.interval_seconds > 2_592_000
+        || !(100..=599).contains(&monitor.expected_status)
+        || monitor.created_at > monitor.updated_at
+        || !matches!(schedule.trigger, mcg_domain::ScheduleTrigger::Interval { seconds } if seconds == monitor.interval_seconds)
+    {
+        return Err(StorageError::InvalidData("invalid Site monitor".into()));
+    }
+    Ok(())
+}
+
+fn sync_monitor_schedule_state(
+    transaction: &Transaction<'_>,
+    site: &Site,
+    now: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let schedule_json = transaction
+        .query_row(
+            "SELECT s.schedule_json FROM schedules s
+             JOIN site_monitors m ON m.schedule_id = s.schedule_id WHERE m.site_id = ?1",
+            [site.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(schedule_json) = schedule_json else {
+        return Ok(());
+    };
+    let mut schedule: ScheduleDefinition = serde_json::from_str(&schedule_json)?;
+    schedule.state = match site.state {
+        SiteState::Active => ScheduleState::Enabled,
+        SiteState::MonitoringPaused => ScheduleState::Paused,
+        SiteState::Archived => ScheduleState::Completed,
+    };
+    if site.state == SiteState::Archived {
+        schedule.next_run_at = None;
+    }
+    schedule.updated_at = now;
+    transaction.execute(
+        "UPDATE schedules SET state = ?1, next_run_at = ?2, schedule_json = ?3, updated_at = ?4
+         WHERE schedule_id = ?5",
+        params![
+            enum_json(&schedule.state)?,
+            schedule.next_run_at.map(|value| value.to_rfc3339()),
+            serde_json::to_string(&schedule)?,
+            now.to_rfc3339(),
+            schedule.id.to_string(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn validate_site(site: &Site) -> Result<(), StorageError> {
@@ -554,7 +684,10 @@ fn enum_json<T: serde::Serialize>(value: &T) -> Result<String, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcg_domain::{ProjectId, SiteDeploymentCommand, SiteEnvironment, SiteRevisionId};
+    use mcg_domain::{
+        ProjectId, RiskLevel, SCHEDULE_SCHEMA_VERSION, ScheduleTrigger, SiteDeploymentCommand,
+        SiteEnvironment, SiteRevisionId, TaskBudget,
+    };
 
     fn insert_project(store: &SqliteEventStore, project_id: ProjectId, now: DateTime<Utc>) {
         store
@@ -608,6 +741,50 @@ mod tests {
         (site, revision)
     }
 
+    fn fixture_monitor(site: &Site, now: DateTime<Utc>) -> (SiteMonitor, ScheduleDefinition) {
+        let schedule_id = ScheduleId::new();
+        let monitor = SiteMonitor {
+            schema_version: SITE_SCHEMA_VERSION,
+            site_id: site.id,
+            schedule_id,
+            interval_seconds: 300,
+            expected_status: 200,
+            last_state: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let schedule = ScheduleDefinition {
+            schema_version: SCHEDULE_SCHEMA_VERSION,
+            id: schedule_id,
+            definition_hash: "f".repeat(64),
+            name: format!("Monitor {}", site.display_name),
+            project_id: site.project_id,
+            goal: format!("Monitor Site {}", site.id),
+            constraints: Vec::new(),
+            success_conditions: Vec::new(),
+            risk: RiskLevel::Low,
+            budget: TaskBudget {
+                max_tokens: None,
+                max_cost_usd: None,
+                max_duration_seconds: Some(60),
+            },
+            trigger: ScheduleTrigger::Interval { seconds: 300 },
+            state: ScheduleState::Enabled,
+            next_run_at: Some(now),
+            target_path: None,
+            context_token_budget: 1,
+            requested_tools: vec!["http.request".into()],
+            estimated_output_tokens: 0,
+            max_model_calls: 1,
+            watch_fingerprint: None,
+            last_watch_at: None,
+            last_event_sequence: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        (monitor, schedule)
+    }
+
     #[test]
     fn site_revisions_are_atomic_idempotent_and_immutable() {
         let now = Utc::now();
@@ -617,6 +794,13 @@ mod tests {
         let (site, revision) = fixture_site(project_id, now);
         assert!(store.create_site(&site, &revision).expect("create").1);
         assert!(!store.create_site(&site, &revision).expect("replay").1);
+        let (monitor, schedule) = fixture_monitor(&site, now);
+        assert!(
+            store
+                .create_site_monitor(&monitor, &schedule)
+                .expect("monitor")
+                .1
+        );
 
         let mut updated = site.clone();
         updated.revision = 2;
@@ -640,6 +824,38 @@ mod tests {
             updated
         );
         assert_eq!(store.site_revisions(site.id).expect("history").len(), 2);
+        assert_eq!(
+            store
+                .schedule(schedule.id)
+                .expect("schedule")
+                .expect("present")
+                .state,
+            ScheduleState::Paused
+        );
+        let mut archived = updated.clone();
+        archived.revision = 3;
+        archived.definition_hash = "c".repeat(64);
+        archived.state = SiteState::Archived;
+        archived.updated_at = now + chrono::Duration::seconds(2);
+        let archived_revision = SiteRevision {
+            schema_version: SITE_SCHEMA_VERSION,
+            id: SiteRevisionId::new(),
+            site_id: archived.id,
+            revision: 3,
+            definition_hash: archived.definition_hash.clone(),
+            site: archived.clone(),
+            reason: "archive".into(),
+            created_at: archived.updated_at,
+        };
+        store
+            .update_site(2, &archived, &archived_revision)
+            .expect("archive");
+        let archived_schedule = store
+            .schedule(schedule.id)
+            .expect("schedule")
+            .expect("present");
+        assert_eq!(archived_schedule.state, ScheduleState::Completed);
+        assert!(archived_schedule.next_run_at.is_none());
         assert!(
             store
                 .connection
@@ -680,10 +896,14 @@ mod tests {
             response_artifact_sha256: Some("e".repeat(64)),
             checked_at: now,
         };
+        let (monitor, schedule) = fixture_monitor(&site, now);
         {
             let mut store = SqliteEventStore::open(&database).expect("store");
             insert_project(&store, project_id, now);
             store.create_site(&site, &revision).expect("site");
+            store
+                .create_site_monitor(&monitor, &schedule)
+                .expect("monitor");
             assert!(store.claim_site_deployment(&deployment).expect("claim").1);
             assert!(store.record_site_health_check(&check).expect("health").1);
             assert!(
@@ -694,6 +914,11 @@ mod tests {
             );
         }
         let mut reopened = SqliteEventStore::open(&database).expect("reopen");
+        assert_eq!(
+            reopened.site_monitor(site.id).expect("monitor"),
+            Some(monitor)
+        );
+        assert!(reopened.schedule(schedule.id).expect("schedule").is_some());
         assert_eq!(
             reopened
                 .recover_site_deployments(now + chrono::Duration::seconds(1))

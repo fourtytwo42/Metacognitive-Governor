@@ -29,7 +29,9 @@ never contain credential values.
 
 Sites can be active, monitoring-paused, or archived. Archival preserves revisions,
 deployment attempts, health observations, logs, notifications, and related task
-evidence.
+evidence. Updating the Site projection and synchronizing its monitor schedule are
+one SQLite transaction: active enables admission, monitoring-paused pauses it, and
+archive completes the schedule with no next run.
 
 ## Deployment Authority
 
@@ -60,8 +62,11 @@ not copied into the site projection.
 Monitoring reuses the durable scheduler rather than adding a second timer system.
 One site monitor owns one interval schedule and creates idempotent health-check
 occurrences. State changes emit durable notifications; repeated identical failures
-are coalesced while history remains immutable. A daemon restart can repeat a safe
-read but cannot duplicate a deployment side effect.
+are coalesced while history remains immutable. The scheduler occurrence UUID is
+also the health-check UUID, so a crash-reclaimed safe read converges on the same
+observation. Occurrence settlement, monitor state, and a transition notification
+commit atomically. A daemon restart can repeat a safe read but cannot duplicate a
+deployment side effect.
 
 Logs are immutable bounded artifacts associated with deployment attempts or
 monitor observations. Provider-specific log collection must declare a typed,

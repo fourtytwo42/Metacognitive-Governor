@@ -447,6 +447,18 @@ pub struct SiteHealthCheck {
     pub checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteMonitor {
+    pub schema_version: u16,
+    pub site_id: SiteId,
+    pub schedule_id: ScheduleId,
+    pub interval_seconds: u64,
+    pub expected_status: u16,
+    pub last_state: Option<SiteHealthState>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleState {

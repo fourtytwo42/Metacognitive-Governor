@@ -52,7 +52,10 @@ const client = vi.hoisted(() => ({
   loadSiteHealth: vi.fn(),
   checkSiteHealth: vi.fn(),
   loadSiteDeployments: vi.fn(),
-  deploySite: vi.fn()
+  deploySite: vi.fn(),
+  updateSite: vi.fn(),
+  getSiteMonitor: vi.fn(),
+  createSiteMonitor: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -106,7 +109,10 @@ vi.mock("./desktop-client", () => ({
   loadSiteHealth: client.loadSiteHealth,
   checkSiteHealth: client.checkSiteHealth,
   loadSiteDeployments: client.loadSiteDeployments,
-  deploySite: client.deploySite
+  deploySite: client.deploySite,
+  updateSite: client.updateSite,
+  getSiteMonitor: client.getSiteMonitor,
+  createSiteMonitor: client.createSiteMonitor
 }));
 
 import { App } from "./App";
@@ -163,6 +169,9 @@ beforeEach(() => {
   client.checkSiteHealth.mockReset();
   client.loadSiteDeployments.mockReset();
   client.deploySite.mockReset();
+  client.updateSite.mockReset();
+  client.getSiteMonitor.mockReset();
+  client.createSiteMonitor.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -185,6 +194,7 @@ beforeEach(() => {
   });
   client.listPlatformSessions.mockResolvedValue({ sessions: [] });
   client.listSites.mockResolvedValue({ sites: [] });
+  client.getSiteMonitor.mockRejectedValue(new Error("Site has no monitor"));
 });
 
 test("simple Sites flow registers a selected project and records governed health", async () => {
@@ -227,6 +237,23 @@ test("simple Sites flow registers a selected project and records governed health
       checked_at: "2026-08-14T00:01:00Z"
     }
   });
+  client.updateSite.mockResolvedValue({
+    replayed: false,
+    site: { ...site, revision: 2, state: "monitoring_paused" }
+  });
+  client.createSiteMonitor.mockResolvedValue({
+    replayed: false,
+    monitor: {
+      schema_version: 1,
+      site_id: site.id,
+      schedule_id: "00000000-0000-4000-8000-000000000125",
+      interval_seconds: 300,
+      expected_status: 200,
+      created_at: "2026-08-14T00:00:00Z",
+      updated_at: "2026-08-14T00:00:00Z"
+    },
+    schedule: {}
+  });
   render(<App />);
   const panel = await screen.findByRole("region", { name: "Sites" });
   fireEvent.change(within(panel).getByLabelText("Site project"), { target: { value: project.project_id } });
@@ -243,6 +270,18 @@ test("simple Sites flow registers a selected project and records governed health
   fireEvent.click(await within(panel).findByRole("button", { name: "Check health" }));
   await waitFor(() => expect(client.checkSiteHealth).toHaveBeenCalledWith(site.id, expect.any(String)));
   expect(await within(panel).findByText("Health: healthy · HTTP 204")).toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Enable automatic monitoring" }));
+  await waitFor(() => expect(client.createSiteMonitor).toHaveBeenCalledWith(site.id, expect.objectContaining({
+    interval_seconds: 300,
+    expected_status: 200
+  })));
+  expect(await within(panel).findByText("Automatic checks: every 300 seconds")).toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Pause monitoring" }));
+  await waitFor(() => expect(client.updateSite).toHaveBeenCalledWith(site.id, expect.objectContaining({
+    expected_revision: 1,
+    state: "monitoring_paused"
+  })));
+  expect(await within(panel).findByRole("button", { name: "Resume monitoring" })).toBeVisible();
 });
 
 test("simple scheduler creates restart-safe recurring work for a selected project", async () => {

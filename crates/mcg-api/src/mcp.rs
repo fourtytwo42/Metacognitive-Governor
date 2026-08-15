@@ -20,7 +20,10 @@ use mcg_domain::{
     ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId,
     SiteId, SiteState, TaskBudget, TaskEnvelope, TaskId,
 };
-use mcg_runtime::{AgentDispatchSpec, PlatformSessionRequest, SiteRegistrationRequest};
+use mcg_runtime::{
+    AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
+    SiteUpdateRequest,
+};
 use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -717,6 +720,57 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
         }),
         json!({
+            "name": "mcg_sites_update",
+            "title": "Update an MCG Site",
+            "description": "Atomically advance one Site definition with immutable revision history. An exact retry after a lost response replays the committed revision; archive is terminal.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "site_id": {"type": "string", "format": "uuid"},
+                    "expected_revision": {"type": "integer", "minimum": 1},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "environment": {"type": "string", "enum": ["development", "preview", "production"]},
+                    "public_url": {"type": "string", "format": "uri", "maxLength": 2048},
+                    "health_url": {"type": "string", "format": "uri", "maxLength": 2048},
+                    "hosting_provider": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "deployment_command": {
+                        "type": "object",
+                        "properties": {
+                            "executable": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "arguments": {"type": "array", "items": {"type": "string", "maxLength": 4096}, "maxItems": 64},
+                            "working_directory": {"type": "string", "maxLength": 1024}
+                        },
+                        "required": ["executable", "working_directory"],
+                        "additionalProperties": false
+                    },
+                    "credential_reference": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+                    "state": {"type": "string", "enum": ["active", "monitoring_paused", "archived"]},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+                },
+                "required": ["site_id", "expected_revision", "display_name", "environment", "public_url", "health_url", "hosting_provider", "state", "reason"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_sites_monitor",
+            "title": "Configure MCG Site Monitoring",
+            "description": "Idempotently attach one durable interval monitor to a Site. The monitor survives restart, runs bounded health checks, and coalesces unchanged alerts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "site_id": {"type": "string", "format": "uuid"},
+                    "schedule_id": {"type": "string", "format": "uuid"},
+                    "interval_seconds": {"type": "integer", "minimum": 5, "maximum": 2_592_000},
+                    "expected_status": {"type": "integer", "minimum": 100, "maximum": 599, "default": 200},
+                    "first_run_at": {"type": "string", "format": "date-time"}
+                },
+                "required": ["site_id", "schedule_id", "interval_seconds"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+        }),
+        json!({
             "name": "mcg_sites_deploy",
             "title": "Deploy an MCG Site",
             "description": "Request one exact revision-bound deployment. External publication always requires owner approval before the deployment ledger is claimed or a process starts.",
@@ -946,6 +1000,8 @@ async fn call_tool(
         "mcg_computer_reclaim" => computer_reclaim(state, &arguments).await,
         "mcg_sites_list" => sites_list(state, &arguments),
         "mcg_sites_register" => sites_register(state, &arguments),
+        "mcg_sites_update" => sites_update(state, &arguments),
+        "mcg_sites_monitor" => sites_monitor(state, &arguments),
         "mcg_sites_health" => sites_health(state, &arguments).await,
         "mcg_sites_deploy" => sites_deploy(state, &arguments).await,
         "mcg_run_agent" => run_agent(state, &arguments).await,
@@ -1368,11 +1424,18 @@ fn sites_list(
                 "MCG could not read the Site health history",
             ));
         };
+        let Ok(monitor) = state.runtime.site_monitor(site_id) else {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the Site monitor",
+            ));
+        };
         return tool_success(Ok(json!({
             "site": site,
             "revisions": revisions,
             "deployments": deployments,
-            "health_checks": health_checks
+            "health_checks": health_checks,
+            "monitor": monitor
         })));
     }
     match state.runtime.sites() {
@@ -1410,6 +1473,64 @@ fn sites_register(
     }) {
         Ok(mutation) => tool_success(Ok(json!(mutation))),
         Err(error) => Ok(site_error(&error, "register")),
+    }
+}
+
+fn sites_update(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SitesUpdateArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Site update arguments do not match the advertised schema",
+        ));
+    };
+    match state.runtime.update_site(
+        request.site_id,
+        &SiteUpdateRequest {
+            expected_revision: request.expected_revision,
+            display_name: request.display_name,
+            environment: request.environment,
+            public_url: request.public_url,
+            health_url: request.health_url,
+            hosting_provider: request.hosting_provider,
+            deployment_command: request.deployment_command,
+            credential_reference: request.credential_reference,
+            state: request.state,
+            reason: request.reason,
+        },
+    ) {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(site_error(&error, "update")),
+    }
+}
+
+fn sites_monitor(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SitesMonitorArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Site monitor arguments do not match the advertised schema",
+        ));
+    };
+    match state.runtime.create_site_monitor(
+        request.site_id,
+        &SiteMonitorRequest {
+            schedule_id: request.schedule_id,
+            interval_seconds: request.interval_seconds,
+            expected_status: request.expected_status,
+            first_run_at: request.first_run_at,
+        },
+    ) {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(site_error(&error, "configure monitor")),
     }
 }
 
@@ -1607,6 +1728,40 @@ const fn default_site_state() -> SiteState {
 struct SitesHealthArguments {
     site_id: SiteId,
     check_id: SiteHealthCheckId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SitesUpdateArguments {
+    site_id: SiteId,
+    expected_revision: u32,
+    display_name: String,
+    environment: SiteEnvironment,
+    public_url: String,
+    health_url: String,
+    hosting_provider: String,
+    #[serde(default)]
+    deployment_command: Option<SiteDeploymentCommand>,
+    #[serde(default)]
+    credential_reference: Option<String>,
+    state: SiteState,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SitesMonitorArguments {
+    site_id: SiteId,
+    schedule_id: ScheduleId,
+    interval_seconds: u64,
+    #[serde(default = "default_expected_site_status")]
+    expected_status: u16,
+    #[serde(default)]
+    first_run_at: Option<DateTime<Utc>>,
+}
+
+const fn default_expected_site_status() -> u16 {
+    200
 }
 
 #[derive(Debug, Deserialize)]

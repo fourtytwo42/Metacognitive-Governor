@@ -33,8 +33,8 @@ use mcg_domain::{
     RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteRevision, SiteState,
-    TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor, SiteRevision,
+    SiteState, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -50,7 +50,8 @@ use mcg_runtime::{
     McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
     PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
     ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation, SiteRegistrationRequest,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMonitorRequest,
+    SiteMutation, SiteRegistrationRequest, SiteUpdateRequest,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
@@ -418,6 +419,22 @@ pub struct CreateSiteRequest {
     pub state: SiteState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSiteRequest {
+    pub expected_revision: u32,
+    pub display_name: String,
+    pub environment: SiteEnvironment,
+    pub public_url: String,
+    pub health_url: String,
+    pub hosting_provider: String,
+    #[serde(default)]
+    pub deployment_command: Option<SiteDeploymentCommand>,
+    #[serde(default)]
+    pub credential_reference: Option<String>,
+    pub state: SiteState,
+    pub reason: String,
+}
+
 const fn default_site_state() -> SiteState {
     SiteState::Active
 }
@@ -452,6 +469,20 @@ pub struct DeploySiteRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteDeploymentListResponse {
     pub deployments: Vec<SiteDeployment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSiteMonitorRequest {
+    pub schedule_id: ScheduleId,
+    pub interval_seconds: u64,
+    #[serde(default = "default_site_health_status")]
+    pub expected_status: u16,
+    #[serde(default)]
+    pub first_run_at: Option<chrono::DateTime<Utc>>,
+}
+
+const fn default_site_health_status() -> u16 {
+    200
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,7 +785,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             post(reclaim_computer_session),
         )
         .route("/api/v1/sites", get(list_sites).post(create_site))
-        .route("/api/v1/sites/{site_id}", get(get_site))
+        .route("/api/v1/sites/{site_id}", get(get_site).put(update_site))
         .route("/api/v1/sites/{site_id}/revisions", get(site_revisions))
         .route(
             "/api/v1/sites/{site_id}/health",
@@ -763,6 +794,10 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/sites/{site_id}/deployments",
             get(site_deployment_history).post(deploy_site),
+        )
+        .route(
+            "/api/v1/sites/{site_id}/monitor",
+            get(get_site_monitor).post(create_site_monitor),
         )
         .route(
             "/api/v1/schedules",
@@ -998,6 +1033,12 @@ pub async fn run_scheduler_tick_at(
     else {
         return Ok(None);
     };
+    if let Some(monitor) = runtime
+        .site_monitor_by_schedule(claim.schedule.id)
+        .map_err(|error| error.to_string())?
+    {
+        return run_site_monitor_claim(runtime, claim, monitor, &lease_owner).await;
+    }
     let request = LaunchTaskRequest {
         target_path: claim.schedule.target_path.clone(),
         context_token_budget: claim.schedule.context_token_budget,
@@ -1045,6 +1086,78 @@ pub async fn run_scheduler_tick_at(
     if let Some(error) = launch_error {
         return Err(error);
     }
+    Ok(Some(occurrence))
+}
+
+async fn run_site_monitor_claim(
+    runtime: Arc<AppRuntime>,
+    claim: mcg_runtime::ScheduleClaim,
+    monitor: mcg_domain::SiteMonitor,
+    lease_owner: &str,
+) -> Result<Option<ScheduleOccurrence>, String> {
+    let current = runtime
+        .task(claim.task.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Site monitor task was not found".to_owned())?;
+    if current.state == TaskState::Pending {
+        runtime
+            .transition_task(current.id, TaskState::Active)
+            .map_err(|error| error.to_string())?;
+    }
+    let check_id = claim
+        .occurrence
+        .id
+        .to_string()
+        .parse::<SiteHealthCheckId>()
+        .map_err(|_| "Site monitor occurrence identity was invalid".to_owned())?;
+    let checked = match runtime.check_site_health(monitor.site_id, check_id).await {
+        Ok(checked) => checked,
+        Err(error) => {
+            let task = runtime
+                .task(claim.task.id)
+                .map_err(|read_error| read_error.to_string())?
+                .ok_or_else(|| "Site monitor task disappeared".to_owned())?;
+            if task.state == TaskState::Active {
+                runtime
+                    .transition_task(task.id, TaskState::Failed)
+                    .map_err(|transition_error| transition_error.to_string())?;
+            }
+            runtime
+                .finish_site_monitor_occurrence(
+                    claim.occurrence.id,
+                    lease_owner,
+                    ScheduleOccurrenceState::Failed,
+                    "Site health check could not execute".into(),
+                    None,
+                    Utc::now(),
+                )
+                .map_err(|settle_error| settle_error.to_string())?;
+            return Err(error.to_string());
+        }
+    };
+    let task = runtime
+        .task(claim.task.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Site monitor task disappeared".to_owned())?;
+    if task.state == TaskState::Active {
+        runtime
+            .transition_task(task.id, TaskState::Completed)
+            .map_err(|error| error.to_string())?;
+    }
+    let detail = format!(
+        "Site health {:?}; observed status {:?}; expected {}",
+        checked.check.state, checked.check.status_code, monitor.expected_status
+    );
+    let occurrence = runtime
+        .finish_site_monitor_occurrence(
+            claim.occurrence.id,
+            lease_owner,
+            ScheduleOccurrenceState::Completed,
+            detail,
+            Some(&checked.check),
+            Utc::now(),
+        )
+        .map_err(|error| error.to_string())?;
     Ok(Some(occurrence))
 }
 
@@ -1361,6 +1474,34 @@ async fn get_site(
         .ok_or_else(|| ApiError::not_found(format!("site {site_id} was not found")))
 }
 
+async fn update_site(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+    Json(request): Json<UpdateSiteRequest>,
+) -> Result<Json<SiteMutation>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .update_site(
+                site_id,
+                &SiteUpdateRequest {
+                    expected_revision: request.expected_revision,
+                    display_name: request.display_name,
+                    environment: request.environment,
+                    public_url: request.public_url,
+                    health_url: request.health_url,
+                    hosting_provider: request.hosting_provider,
+                    deployment_command: request.deployment_command,
+                    credential_reference: request.credential_reference,
+                    state: request.state,
+                    reason: request.reason,
+                },
+            )
+            .map_err(map_runtime_error)?,
+    ))
+}
+
 async fn site_revisions(
     State(state): State<ApiState>,
     Path(site_id): Path<String>,
@@ -1428,6 +1569,41 @@ async fn site_deployment_history(
             .site_deployments(site_id)
             .map_err(map_runtime_error)?,
     }))
+}
+
+async fn create_site_monitor(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+    Json(request): Json<CreateSiteMonitorRequest>,
+) -> Result<Json<SiteMonitorMutation>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .create_site_monitor(
+                site_id,
+                &SiteMonitorRequest {
+                    schedule_id: request.schedule_id,
+                    interval_seconds: request.interval_seconds,
+                    expected_status: request.expected_status,
+                    first_run_at: request.first_run_at,
+                },
+            )
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn get_site_monitor(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+) -> Result<Json<SiteMonitor>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    state
+        .runtime
+        .site_monitor(site_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("Site {site_id} has no monitor")))
 }
 
 async fn create_schedule(
@@ -3287,7 +3463,7 @@ fn map_runtime_error(error: RuntimeError) -> ApiError {
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU16, AtomicUsize, Ordering},
     };
 
     use axum::{body::Body, http::Request, response::Html};
@@ -4461,6 +4637,8 @@ form.addEventListener('submit', (event) => {
                 "mcg_sites_list",
                 "mcg_sites_register",
                 "mcg_sites_health",
+                "mcg_sites_update",
+                "mcg_sites_monitor",
                 "mcg_sites_deploy",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
@@ -4947,6 +5125,8 @@ form.addEventListener('submit', (event) => {
     async fn authenticated_rest_and_mcp_sites_share_health_deployment_and_replay_state() {
         let calls = Arc::new(AtomicUsize::new(0));
         let fixture_calls = calls.clone();
+        let health_status = Arc::new(AtomicU16::new(204));
+        let fixture_status = health_status.clone();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("site fixture listener");
@@ -4955,9 +5135,10 @@ form.addEventListener('submit', (event) => {
             "/health",
             get(move || {
                 let calls = fixture_calls.clone();
+                let status = fixture_status.clone();
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::NO_CONTENT
+                    StatusCode::from_u16(status.load(Ordering::SeqCst)).expect("fixture status")
                 }
             }),
         );
@@ -5040,6 +5221,44 @@ form.addEventListener('submit', (event) => {
             Some(1)
         );
 
+        let update = serde_json::json!({
+            "expected_revision": 1,
+            "display_name": "Updated Interface Site",
+            "environment": "production",
+            "public_url": origin,
+            "health_url": format!("{origin}/health"),
+            "hosting_provider": "fixture",
+            "deployment_command": registration["deployment_command"].clone(),
+            "state": "active",
+            "reason": "verify immutable interface update"
+        });
+        let updated = response_json(
+            app.clone()
+                .oneshot(
+                    authorized(Request::put(format!("/api/v1/sites/{site_id}")))
+                        .header("content-type", "application/json")
+                        .body(Body::from(update.to_string()))
+                        .expect("update request"),
+                )
+                .await
+                .expect("update"),
+        )
+        .await;
+        assert_eq!(updated["site"]["revision"], 2);
+        assert_eq!(updated["replayed"], false);
+        let mut mcp_update = update.clone();
+        mcp_update["site_id"] = serde_json::json!(site_id);
+        let update_replay =
+            mcp_tool_response(app.clone(), 216, "mcg_sites_update", mcp_update).await;
+        assert_eq!(
+            update_replay.pointer("/result/structuredContent/site/revision"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            update_replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+
         let check_id = SiteHealthCheckId::new();
         let checked = mcp_tool_response(
             app.clone(),
@@ -5067,6 +5286,105 @@ form.addEventListener('submit', (event) => {
         .await;
         assert_eq!(health_replay["replayed"], true);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let schedule_id = ScheduleId::new();
+        let first_monitor_run = Utc::now() + chrono::Duration::seconds(1);
+        let monitor_request = serde_json::json!({
+            "schedule_id": schedule_id,
+            "interval_seconds": 5,
+            "expected_status": 204,
+            "first_run_at": first_monitor_run
+        });
+        let monitor = response_json(
+            app.clone()
+                .oneshot(
+                    authorized(Request::post(format!("/api/v1/sites/{site_id}/monitor")))
+                        .header("content-type", "application/json")
+                        .body(Body::from(monitor_request.to_string()))
+                        .expect("monitor request"),
+                )
+                .await
+                .expect("monitor"),
+        )
+        .await;
+        assert_eq!(monitor["monitor"]["schedule_id"], schedule_id.to_string());
+        assert_eq!(monitor["replayed"], false);
+        let monitor_replay = mcp_tool_response(
+            app.clone(),
+            217,
+            "mcg_sites_monitor",
+            serde_json::json!({
+                "site_id": site_id,
+                "schedule_id": schedule_id,
+                "interval_seconds": 5,
+                "expected_status": 204,
+                "first_run_at": first_monitor_run
+            }),
+        )
+        .await;
+        assert_eq!(
+            monitor_replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        let first_occurrence = run_scheduler_tick_at(runtime.clone(), first_monitor_run)
+            .await
+            .expect("healthy monitor tick")
+            .expect("healthy occurrence");
+        assert_eq!(first_occurrence.schedule_id, schedule_id);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            runtime
+                .scheduler_notifications(true)
+                .expect("baseline notifications")
+                .is_empty()
+        );
+        health_status.store(503, Ordering::SeqCst);
+        run_scheduler_tick_at(
+            runtime.clone(),
+            first_monitor_run + chrono::Duration::seconds(5),
+        )
+        .await
+        .expect("outage monitor tick")
+        .expect("outage occurrence");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            runtime
+                .scheduler_notifications(true)
+                .expect("outage notification")
+                .len(),
+            1
+        );
+        run_scheduler_tick_at(
+            runtime.clone(),
+            first_monitor_run + chrono::Duration::seconds(10),
+        )
+        .await
+        .expect("repeated outage tick")
+        .expect("repeated outage occurrence");
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            runtime
+                .scheduler_notifications(true)
+                .expect("coalesced outage notification")
+                .len(),
+            1
+        );
+        health_status.store(204, Ordering::SeqCst);
+        run_scheduler_tick_at(
+            runtime.clone(),
+            first_monitor_run + chrono::Duration::seconds(15),
+        )
+        .await
+        .expect("recovery monitor tick")
+        .expect("recovery occurrence");
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(
+            runtime
+                .scheduler_notifications(true)
+                .expect("recovery notification")
+                .len(),
+            2
+        );
 
         let deployment_id = SiteDeploymentId::new();
         let deploy_request = || {
@@ -5136,6 +5454,41 @@ form.addEventListener('submit', (event) => {
                 .expect("unchanged deployment marker"),
             "x"
         );
+        let archive = serde_json::json!({
+            "expected_revision": 2,
+            "display_name": "Updated Interface Site",
+            "environment": "production",
+            "public_url": origin,
+            "health_url": format!("{origin}/health"),
+            "hosting_provider": "fixture",
+            "deployment_command": registration["deployment_command"].clone(),
+            "state": "archived",
+            "reason": "fixture lifecycle complete"
+        });
+        let archived = response_json(
+            app.clone()
+                .oneshot(
+                    authorized(Request::put(format!("/api/v1/sites/{site_id}")))
+                        .header("content-type", "application/json")
+                        .body(Body::from(archive.to_string()))
+                        .expect("archive request"),
+                )
+                .await
+                .expect("archive"),
+        )
+        .await;
+        assert_eq!(archived["site"]["state"], "archived");
+        let forbidden_update = app
+            .clone()
+            .oneshot(
+                authorized(Request::put(format!("/api/v1/sites/{site_id}")))
+                    .header("content-type", "application/json")
+                    .body(Body::from(archive.to_string()))
+                    .expect("archived update request"),
+            )
+            .await
+            .expect("archived update");
+        assert_eq!(forbidden_update.status(), StatusCode::BAD_REQUEST);
         server.abort();
     }
 

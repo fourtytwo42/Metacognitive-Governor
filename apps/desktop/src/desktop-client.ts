@@ -259,6 +259,7 @@ export interface Site {
 export interface SiteRevision { id: string; site_id: string; revision: number; definition_hash: string; reason: string; created_at: string; }
 export interface SiteHealthCheck { id: string; site_id: string; state: "healthy" | "degraded" | "unavailable"; status_code?: number; latency_ms?: number; detail: string; response_artifact_sha256?: string; checked_at: string; }
 export interface SiteDeployment { id: string; site_id: string; site_revision: number; state: "executing" | "succeeded" | "failed" | "uncertain"; detail: string; log_artifact_sha256: string[]; requested_at: string; finished_at?: string; }
+export interface SiteMonitor { schema_version: number; site_id: string; schedule_id: string; interval_seconds: number; expected_status: number; last_state?: SiteHealthCheck["state"]; created_at: string; updated_at: string; }
 export interface CreateSiteRequest {
   site_id: string;
   project_id: string;
@@ -271,12 +272,19 @@ export interface CreateSiteRequest {
   credential_reference?: string;
   state: SiteState;
 }
+export interface UpdateSiteRequest extends Omit<CreateSiteRequest, "site_id" | "project_id"> {
+  expected_revision: number;
+  reason: string;
+}
 export interface SiteListResponse { sites: Site[]; }
 export interface SiteRevisionListResponse { revisions: SiteRevision[]; }
 export interface SiteHealthListResponse { checks: SiteHealthCheck[]; }
 export interface SiteDeploymentListResponse { deployments: SiteDeployment[]; }
 export interface SiteHealthMutation { check: SiteHealthCheck; replayed: boolean; }
 export interface SiteDeploymentMutation { deployment: SiteDeployment; replayed: boolean; }
+export interface SiteMutation { site: Site; replayed: boolean; }
+export interface SiteMonitorMutation { monitor: SiteMonitor; schedule: ScheduleDefinition; replayed: boolean; }
+export interface CreateSiteMonitorRequest { schedule_id: string; interval_seconds: number; expected_status: number; first_run_at?: string; }
 
 export type PlatformCapabilityKind = "browser_automation" | "computer_use" | "native_desktop" | "ssh_client" | "sites";
 export type PlatformCapabilityAvailability = "available" | "unavailable" | "unsupported";
@@ -535,9 +543,12 @@ export function listSchedules(): Promise<ScheduleListResponse> {
 
 export function listSites(): Promise<SiteListResponse> { return invoke("list_sites"); }
 export function registerSite(request: CreateSiteRequest): Promise<Site> { return invoke("register_site", { request }); }
+export function updateSite(siteId: string, request: UpdateSiteRequest): Promise<SiteMutation> { return invoke("update_site", { siteId, request }); }
 export function loadSiteRevisions(siteId: string): Promise<SiteRevisionListResponse> { return invoke("site_revisions", { siteId }); }
 export function loadSiteHealth(siteId: string): Promise<SiteHealthListResponse> { return invoke("site_health_history", { siteId }); }
 export function checkSiteHealth(siteId: string, checkId: string): Promise<SiteHealthMutation> { return invoke("check_site_health", { siteId, request: { check_id: checkId } }); }
+export function getSiteMonitor(siteId: string): Promise<SiteMonitor> { return invoke("get_site_monitor", { siteId }); }
+export function createSiteMonitor(siteId: string, request: CreateSiteMonitorRequest): Promise<SiteMonitorMutation> { return invoke("create_site_monitor", { siteId, request }); }
 export function loadSiteDeployments(siteId: string): Promise<SiteDeploymentListResponse> { return invoke("site_deployment_history", { siteId }); }
 export function deploySite(siteId: string, deploymentId: string): Promise<SiteDeploymentMutation> { return invoke("deploy_site", { siteId, request: { deployment_id: deploymentId } }); }
 

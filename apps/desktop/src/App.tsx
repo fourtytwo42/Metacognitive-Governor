@@ -8,6 +8,7 @@ import {
   cancelOpenAiOAuth,
   closePlatformSession,
   checkSiteHealth,
+  createSiteMonitor,
   completeOpenAiOAuth,
   configureMcpConnection,
   configureProvider,
@@ -38,6 +39,7 @@ import {
   loadPlatformSessionHistory,
   loadSiteDeployments,
   loadSiteHealth,
+  getSiteMonitor,
   navigateBrowserSession,
   type McpAuthMode,
   type McpListItem,
@@ -66,6 +68,7 @@ import {
   type Site,
   type SiteDeploymentListResponse,
   type SiteHealthListResponse,
+  type SiteMonitor,
   retryTask,
   resumeTask,
   requestPlatformSession,
@@ -79,6 +82,7 @@ import {
   type TaskEventsResponse,
   type ToolAuditResponse,
   transitionTask,
+  updateSite,
   acknowledgeSchedulerNotification,
   wakeSchedule
 } from "./desktop-client";
@@ -295,6 +299,8 @@ export function App() {
   const [siteHealth, setSiteHealth] = useState<Record<string, SiteHealthListResponse | undefined>>({});
   const [siteDeployments, setSiteDeployments] = useState<Record<string, SiteDeploymentListResponse | undefined>>({});
   const [siteDeploymentIds, setSiteDeploymentIds] = useState<Record<string, string | undefined>>({});
+  const [siteMonitors, setSiteMonitors] = useState<Record<string, SiteMonitor | undefined>>({});
+  const [siteMonitorIntervals, setSiteMonitorIntervals] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let active = true;
@@ -362,8 +368,13 @@ export function App() {
         if (active) setPlatformError(errorMessage(error));
       });
     listSites()
-      .then((response) => {
+      .then(async (response) => {
         if (active) setSites(response.sites);
+        const monitors = await Promise.all(response.sites.map(async (site) => {
+          const monitor = await getSiteMonitor(site.id).catch(() => undefined);
+          return [site.id, monitor] as const;
+        }));
+        if (active) setSiteMonitors(Object.fromEntries(monitors));
       })
       .catch((error) => {
         if (active) setSiteError(errorMessage(error));
@@ -1200,6 +1211,27 @@ export function App() {
     }
   }
 
+  async function enableSiteMonitoring(siteId: string) {
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      const intervalSeconds = positiveWholeNumber(
+        siteMonitorIntervals[siteId] ?? "300",
+        "Monitor interval"
+      );
+      const mutation = await createSiteMonitor(siteId, {
+        schedule_id: crypto.randomUUID(),
+        interval_seconds: intervalSeconds,
+        expected_status: 200
+      });
+      setSiteMonitors((current) => ({ ...current, [siteId]: mutation.monitor }));
+    } catch (error) {
+      setSiteError(errorMessage(error));
+    } finally {
+      setSiteBusy(false);
+    }
+  }
+
   async function runSiteDeployment(siteId: string) {
     const deploymentId = siteDeploymentIds[siteId] ?? crypto.randomUUID();
     setSiteDeploymentIds((current) => ({ ...current, [siteId]: deploymentId }));
@@ -1234,6 +1266,30 @@ export function App() {
     }
     setSiteBusy(false);
     await runSiteDeployment(siteId);
+  }
+
+  async function changeSiteState(site: Site, state: Site["state"]) {
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      const mutation = await updateSite(site.id, {
+        expected_revision: site.revision,
+        display_name: site.display_name,
+        environment: site.environment,
+        public_url: site.public_url,
+        health_url: site.health_url,
+        hosting_provider: site.hosting_provider,
+        deployment_command: site.deployment_command,
+        credential_reference: site.credential_reference,
+        state,
+        reason: state === "archived" ? "Archived by local owner" : "Monitoring state changed by local owner"
+      });
+      setSites((current) => current.map((item) => item.id === site.id ? mutation.site : item));
+    } catch (error) {
+      setSiteError(errorMessage(error));
+    } finally {
+      setSiteBusy(false);
+    }
   }
 
   return (
@@ -1471,6 +1527,7 @@ export function App() {
               {sites.length === 0 ? <p className="empty-state">No Sites registered yet.</p> : sites.map((site) => {
                 const health = siteHealth[site.id]?.checks[0];
                 const deployment = siteDeployments[site.id]?.deployments[0];
+                const monitor = siteMonitors[site.id];
                 const pendingDeployment = siteDeploymentIds[site.id]
                   ? approvals.find((approval) => approval.action === "sites.deploy")
                   : undefined;
@@ -1481,14 +1538,22 @@ export function App() {
                     <a href={site.public_url} target="_blank" rel="noreferrer">{site.public_url}</a>
                     <small>{site.environment} · {site.hosting_provider}</small>
                     {health && <small>Health: {health.state}{health.status_code ? ` · HTTP ${health.status_code}` : ""}</small>}
+                    {monitor && <small>Automatic checks: every {monitor.interval_seconds} seconds{monitor.last_state ? ` · ${monitor.last_state}` : ""}</small>}
                     {deployment && <small>Last deployment: {deployment.state} · revision {deployment.site_revision}</small>}
                     {advanced && <><code>{site.id}</code><code>revision {site.revision} · {site.definition_hash.slice(0, 12)}</code></>}
                   </div>
                   <div className="task-actions">
                     <button className="primary" type="button" disabled={siteBusy} onClick={() => runSiteHealth(site.id)}>Check health</button>
+                    {!monitor && <>
+                      {advanced && <label>Monitor interval (seconds)<input aria-label={`Monitor interval for ${site.display_name}`} value={siteMonitorIntervals[site.id] ?? "300"} onChange={(event) => setSiteMonitorIntervals((current) => ({ ...current, [site.id]: event.target.value }))} /></label>}
+                      <button className="secondary" type="button" disabled={siteBusy} onClick={() => enableSiteMonitoring(site.id)}>Enable automatic monitoring</button>
+                    </>}
                     {site.deployment_command && !pendingDeployment && <button className="secondary" type="button" disabled={siteBusy} onClick={() => runSiteDeployment(site.id)}>Deploy</button>}
                     {pendingDeployment && <button className="primary" type="button" disabled={siteBusy} onClick={() => approveSiteDeployment(site.id, pendingDeployment.id)}>Approve and deploy</button>}
                     <button className="secondary" type="button" disabled={siteBusy} onClick={() => inspectSite(site.id)}>History</button>
+                    {site.state === "active" && <button className="secondary" type="button" disabled={siteBusy} onClick={() => changeSiteState(site, "monitoring_paused")}>Pause monitoring</button>}
+                    {site.state === "monitoring_paused" && <button className="secondary" type="button" disabled={siteBusy} onClick={() => changeSiteState(site, "active")}>Resume monitoring</button>}
+                    {site.state !== "archived" && advanced && <button className="link-button" type="button" disabled={siteBusy} onClick={() => changeSiteState(site, "archived")}>Archive</button>}
                   </div>
                   {advanced && (siteHealth[site.id] || siteDeployments[site.id]) && <div className="evidence-details">
                     <span>{siteHealth[site.id]?.checks.length ?? 0} health checks</span>

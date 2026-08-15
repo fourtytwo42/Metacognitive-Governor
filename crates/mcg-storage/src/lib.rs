@@ -604,6 +604,17 @@ BEFORE DELETE ON site_health_checks BEGIN
 END;
 ";
 
+const MIGRATION_18: &str = r"
+CREATE TABLE IF NOT EXISTS site_monitors (
+    site_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL UNIQUE,
+    monitor_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(site_id) REFERENCES sites(site_id),
+    FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id)
+);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -709,6 +720,7 @@ impl SqliteEventStore {
             (15_i64, MIGRATION_15),
             (16_i64, MIGRATION_16),
             (17_i64, MIGRATION_17),
+            (18_i64, MIGRATION_18),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
