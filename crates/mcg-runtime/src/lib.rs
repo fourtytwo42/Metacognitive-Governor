@@ -5587,6 +5587,7 @@ impl AppRuntime {
                     max_model_calls: 4,
                 },
                 Some(shadow_authority.clone()),
+                false,
             )
             .await?;
         }
@@ -7111,7 +7112,8 @@ impl AppRuntime {
         &self,
         spec: &AgentDispatchSpec,
     ) -> Result<PreparedAgentTurn, RuntimeError> {
-        self.prepare_agent_turn_with_authority(spec, None).await
+        self.prepare_agent_turn_with_authority(spec, None, false)
+            .await
     }
 
     #[allow(clippy::too_many_lines)] // Keep complete normal/shadow authority derivation together.
@@ -7119,6 +7121,7 @@ impl AppRuntime {
         &self,
         spec: &AgentDispatchSpec,
         shadow_authority: Option<&ShadowExecutionAuthority>,
+        explicit_owner_retry: bool,
     ) -> Result<PreparedAgentTurn, RuntimeError> {
         if spec.context_token_budget < 64
             || spec.estimated_output_tokens == 0
@@ -7263,7 +7266,12 @@ impl AppRuntime {
             expires_at,
             heartbeat_at: now,
         };
-        let (running, events) = self.store()?.dispatch_agent_work(&instance, &lease, now)?;
+        let (running, events) = if explicit_owner_retry {
+            self.store()?
+                .dispatch_agent_work_for_explicit_retry(&instance, &lease, now)?
+        } else {
+            self.store()?.dispatch_agent_work(&instance, &lease, now)?
+        };
         for event in &events {
             let _ = self.event_sender.send(event.clone());
         }
@@ -7470,13 +7478,29 @@ impl AppRuntime {
         &self,
         spec: &AgentDispatchSpec,
     ) -> Result<AgentTurnCommit, RuntimeError> {
-        self.execute_agent_work_with_authority(spec, None).await
+        self.execute_agent_work_with_authority(spec, None, false)
+            .await
+    }
+
+    /// Executes a fresh attempt after an authenticated owner explicitly chose
+    /// Retry. Only the automatic retry-count ceiling is overridden.
+    ///
+    /// # Errors
+    ///
+    /// Returns the normal dispatch, provider, tool, and settlement failures.
+    pub async fn execute_agent_work_for_explicit_retry(
+        &self,
+        spec: &AgentDispatchSpec,
+    ) -> Result<AgentTurnCommit, RuntimeError> {
+        self.execute_agent_work_with_authority(spec, None, true)
+            .await
     }
 
     async fn execute_agent_work_with_authority(
         &self,
         spec: &AgentDispatchSpec,
         shadow_authority: Option<ShadowExecutionAuthority>,
+        explicit_owner_retry: bool,
     ) -> Result<AgentTurnCommit, RuntimeError> {
         let task_id = self.agent_run_view(spec.run_id)?.run.task_id;
         let task = self
@@ -7530,7 +7554,11 @@ impl AppRuntime {
             }),
         };
         let prepared = self
-            .prepare_agent_turn_with_authority(spec, shadow_authority.as_ref())
+            .prepare_agent_turn_with_authority(
+                spec,
+                shadow_authority.as_ref(),
+                explicit_owner_retry,
+            )
             .await?;
         let mut capabilities = CapabilityPolicy::project(&root);
         capabilities.allowed_network_origins.extend(

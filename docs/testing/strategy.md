@@ -122,6 +122,10 @@ Evaluator's responsibility and is never inferred from a substring match alone.
 - Assert the same 8,192-token consumer response default across REST, MCP, CLI,
   desktop launch/retry/resume, and schedules; live representative generation must
   complete file-tool JSON rather than relying on malformed-output repair.
+- Force malformed provider tool output through more than the automatic retry
+  allowance; authenticated Retry must retain the task/run identity and create one
+  fresh attempt, while non-owner dispatch remains bounded and all other authority
+  checks stay active.
 
 ## UI and E2E testing
 

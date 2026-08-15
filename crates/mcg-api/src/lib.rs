@@ -3003,6 +3003,7 @@ async fn launch_task(
         &organization,
         &launched.view,
         &request,
+        false,
     )
     .await
     .map(Json)
@@ -3067,9 +3068,17 @@ async fn retry_task(
             .transition_task(task_id, TaskState::Active)
             .map_err(map_runtime_error)?;
     }
-    advance_consumer_run(&state, task_id, project_id, &organization, &view, &request)
-        .await
-        .map(Json)
+    advance_consumer_run(
+        &state,
+        task_id,
+        project_id,
+        &organization,
+        &view,
+        &request,
+        true,
+    )
+    .await
+    .map(Json)
 }
 
 async fn resume_task(
@@ -3122,9 +3131,17 @@ async fn resume_task(
         .organization_revision(view.run.organization_revision_id)
         .map_err(map_runtime_error)?
         .ok_or_else(|| ApiError::internal("resumed run organization disappeared"))?;
-    advance_consumer_run(&state, task_id, project_id, &organization, &view, &request)
-        .await
-        .map(Json)
+    advance_consumer_run(
+        &state,
+        task_id,
+        project_id,
+        &organization,
+        &view,
+        &request,
+        false,
+    )
+    .await
+    .map(Json)
 }
 
 #[allow(clippy::too_many_lines)] // Agent advancement and immediate objective settlement form one public operation.
@@ -3135,6 +3152,7 @@ async fn advance_consumer_run(
     organization: &OrganizationGenome,
     view: &AgentRunView,
     request: &LaunchTaskRequest,
+    explicit_owner_retry: bool,
 ) -> Result<LaunchTaskResponse, ApiError> {
     let completed = view
         .leases
@@ -3160,19 +3178,24 @@ async fn advance_consumer_run(
         } else {
             Vec::new()
         };
-        let result = state
-            .runtime
-            .execute_agent_work(&AgentDispatchSpec {
-                run_id: view.run.id,
-                work_item_id: item.id,
-                project_id,
-                target_path: request.target_path.clone(),
-                context_token_budget: request.context_token_budget,
-                requested_tools,
-                estimated_output_tokens: request.estimated_output_tokens,
-                max_model_calls: request.max_model_calls,
-            })
-            .await;
+        let dispatch = AgentDispatchSpec {
+            run_id: view.run.id,
+            work_item_id: item.id,
+            project_id,
+            target_path: request.target_path.clone(),
+            context_token_budget: request.context_token_budget,
+            requested_tools,
+            estimated_output_tokens: request.estimated_output_tokens,
+            max_model_calls: request.max_model_calls,
+        };
+        let result = if explicit_owner_retry {
+            state
+                .runtime
+                .execute_agent_work_for_explicit_retry(&dispatch)
+                .await
+        } else {
+            state.runtime.execute_agent_work(&dispatch).await
+        };
         if let Err(error) = result {
             execution = if let RuntimeError::AgentTurn(AgentTurnError::Tool(
                 mcg_tools::ToolError::ApprovalRequired { .. },
@@ -4761,6 +4784,51 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("consumer task fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn malformed_tool_model_fixture() -> String {
+        async fn response() -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "model": "malformed-tool-model",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": uuid::Uuid::new_v4().to_string(),
+                    "name": "fs.write",
+                    "arguments": "{\"path\":\"unfinished.html\",\"content\":\"truncated"
+                }],
+                "usage": {"input_tokens": 32, "output_tokens": 16, "total_tokens": 48}
+            }))
+        }
+
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "malformed-tool-model",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32768,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route("/v1/responses", post(response));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("malformed tool fixture listener");
+        let address = listener.local_addr().expect("malformed fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("malformed tool fixture server");
         });
         format!("http://{address}/v1")
     }
@@ -8804,6 +8872,99 @@ form.addEventListener('submit', (event) => {
                 .state,
             AgentRunState::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_owner_retry_can_exceed_the_automatic_attempt_ceiling() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# Retry fixture\n")
+            .expect("project fixture");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "malformed_tool_fixture".into(),
+                    display_name: "Malformed Tool Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: malformed_tool_model_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let mut task = TaskEnvelope::new("Write a complete fixture file");
+        task.project_id = Some(project.project_id);
+        runtime.create_task(&task).expect("task");
+        let request = LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 2,
+        };
+        let body = serde_json::to_vec(&request).expect("request body");
+        let mut latest = None;
+        for attempt in 0..4 {
+            let action = if attempt == 0 { "launch" } else { "retry" };
+            let response = router(runtime.clone())
+                .oneshot(
+                    authorized(Request::post(format!("/api/v1/tasks/{}/{action}", task.id)))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.clone()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: LaunchTaskResponse = serde_json::from_slice(
+                &response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes(),
+            )
+            .expect("launch response");
+            assert_eq!(response.task.state, TaskState::Blocked);
+            assert!(matches!(
+                response.execution,
+                LaunchExecution::Blocked { .. }
+            ));
+            assert_eq!(response.run.leases.len(), attempt + 1);
+            latest = Some(response);
+        }
+        let latest = latest.expect("latest response");
+        runtime
+            .transition_task(task.id, TaskState::Active)
+            .expect("activate for non-owner dispatch probe");
+        let automatic = runtime
+            .execute_agent_work(&AgentDispatchSpec {
+                run_id: latest.run.run.id,
+                work_item_id: latest.run.plan.items[0].id,
+                project_id: project.project_id,
+                target_path: None,
+                context_token_budget: 2_048,
+                requested_tools: Vec::new(),
+                estimated_output_tokens: 512,
+                max_model_calls: 2,
+            })
+            .await
+            .expect_err("automatic dispatch remains bounded");
+        assert!(automatic.to_string().contains("retry limit is exhausted"));
     }
 
     #[tokio::test]

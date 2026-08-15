@@ -199,7 +199,10 @@ through configured providers and governed tools. Repeating Start never duplicate
 paid model work, and the UI reports approval, provider, and objective-evaluation
 waits without treating a model's completion message as proof.
 Blocked work exposes an explicit bounded Retry action in desktop and
-`mcg task retry`; ordinary Start replay remains observation-only. Cancelling a
+`mcg task retry`; ordinary Start replay remains observation-only. Automatic
+attempts stop at the work item's retry ceiling, while each authenticated owner
+Retry may create one fresh attempt without bypassing active/completed-authority,
+dependency, concurrency, capability, budget, or organization-total limits. Cancelling a
 launched task atomically cancels the run and terminates active agent authority.
 Guided local-tool requests appear on the task card. Approval resumes through the
 same durable run after revalidating context and authority; stable request identity

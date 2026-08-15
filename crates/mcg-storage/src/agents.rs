@@ -2005,12 +2005,39 @@ impl SqliteEventStore {
     ///
     /// Returns an error for stale run state, incomplete dependencies, duplicate
     /// work, excessive concurrency, inconsistent authority, or failed persistence.
-    #[allow(clippy::too_many_lines)] // Keep all authority validation and atomic writes visible together.
     pub fn dispatch_agent_work(
         &mut self,
         created: &AgentInstance,
         lease: &AgentLease,
         at: DateTime<Utc>,
+    ) -> Result<(AgentInstance, Vec<EventEnvelope>), StorageError> {
+        self.dispatch_agent_work_with_retry_policy(created, lease, at, false)
+    }
+
+    /// Dispatches fresh authority after an authenticated owner explicitly asks
+    /// to retry. This bypasses only the automatic-attempt ceiling; active or
+    /// completed authority, dependencies, concurrency, capabilities, and all
+    /// other lease invariants remain enforced.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same authority and persistence errors as ordinary dispatch.
+    pub fn dispatch_agent_work_for_explicit_retry(
+        &mut self,
+        created: &AgentInstance,
+        lease: &AgentLease,
+        at: DateTime<Utc>,
+    ) -> Result<(AgentInstance, Vec<EventEnvelope>), StorageError> {
+        self.dispatch_agent_work_with_retry_policy(created, lease, at, true)
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep all authority validation and atomic writes visible together.
+    fn dispatch_agent_work_with_retry_policy(
+        &mut self,
+        created: &AgentInstance,
+        lease: &AgentLease,
+        at: DateTime<Utc>,
+        explicit_owner_retry: bool,
     ) -> Result<(AgentInstance, Vec<EventEnvelope>), StorageError> {
         let run = self
             .agent_run(created.run_id)?
@@ -2077,7 +2104,7 @@ impl SqliteEventStore {
             params![created.run_id.to_string(), lease.work_item_id.to_string()],
             |row| row.get(0),
         )?;
-        if prior_attempts > i64::from(lease.max_retries) {
+        if !explicit_owner_retry && prior_attempts > i64::from(lease.max_retries) {
             return Err(StorageError::Conflict(
                 "work item retry limit is exhausted".into(),
             ));

@@ -3367,6 +3367,7 @@ async fn run_task(
                 estimated_output_tokens: request.estimated_output_tokens,
                 max_model_calls: request.max_model_calls,
             },
+            false,
         )
         .await
         .map_err(|error| RpcFailure::new(StatusCode::OK, None, INVALID_PARAMS, error.message))?
