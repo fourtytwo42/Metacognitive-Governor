@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{
     CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelDescriptor, ModelProvider,
-    ModelRequest, OutputItem, ProviderError, ToolChoice, ToolDefinition,
+    ModelRequest, OutputItem, ProviderError, ReasoningConfig, ToolChoice, ToolDefinition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +101,36 @@ pub async fn probe_model(
         ProbeSupport::Indeterminate => None,
     };
     observations.push(tool_observation);
+    let reasoning_control = provider
+        .create_response(reasoning_control_probe_request(model_id))
+        .await;
+    let reasoning_observation = match reasoning_control {
+        Ok(response)
+            if response.usage.reasoning_tokens == 0
+                && !response
+                    .output
+                    .iter()
+                    .any(|item| matches!(item, OutputItem::Reasoning { .. })) =>
+        {
+            ProbeObservation {
+                operation: "reasoning_control".into(),
+                support: ProbeSupport::Supported,
+                detail: "provider honored reasoning effort none".into(),
+            }
+        }
+        Ok(_) => ProbeObservation {
+            operation: "reasoning_control".into(),
+            support: ProbeSupport::Unsupported,
+            detail: "provider returned reasoning after reasoning effort none".into(),
+        },
+        Err(error) => observation("reasoning_control", &Err::<(), _>(error)),
+    };
+    model.capabilities.reasoning_control = match reasoning_observation.support {
+        ProbeSupport::Supported => Some(true),
+        ProbeSupport::Unsupported => Some(false),
+        ProbeSupport::Indeterminate => None,
+    };
+    observations.push(reasoning_observation);
     Ok(ModelProbeReport {
         provider_id: provider.connection().id.clone(),
         model,
@@ -186,6 +216,16 @@ fn tool_probe_request(model: &str) -> ModelRequest {
         top_p: None,
         max_output_tokens: Some(64),
         metadata: Value::Null,
+    }
+}
+
+fn reasoning_control_probe_request(model: &str) -> ModelRequest {
+    ModelRequest {
+        reasoning: Some(ReasoningConfig {
+            effort: Some("none".into()),
+            summary: None,
+        }),
+        ..probe_request(model)
     }
 }
 
@@ -280,6 +320,7 @@ mod tests {
         assert_eq!(report.model.capabilities.responses, Some(true));
         assert_eq!(report.model.capabilities.streaming, Some(true));
         assert_eq!(report.model.capabilities.tools, Some(true));
+        assert_eq!(report.model.capabilities.reasoning_control, Some(true));
         assert!(
             report
                 .observations

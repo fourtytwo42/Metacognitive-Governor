@@ -142,6 +142,9 @@ pub struct ModelCapabilities {
     pub structured_output: Option<bool>,
     pub vision: Option<bool>,
     pub reasoning: Option<bool>,
+    /// The provider honors per-request reasoning effort, including `none`.
+    #[serde(default)]
+    pub reasoning_control: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -500,5 +503,20 @@ mod tests {
         let credential = ProviderCredential::new("do-not-print").expect("credential");
         assert_eq!(format!("{credential:?}"), "ProviderCredential([REDACTED])");
         assert!(!format!("{credential:?}").contains("do-not-print"));
+    }
+
+    #[test]
+    fn older_capability_catalogs_default_reasoning_control_to_unknown() {
+        let capabilities: ModelCapabilities = serde_json::from_value(serde_json::json!({
+            "responses": true,
+            "chat_completions": null,
+            "streaming": true,
+            "tools": true,
+            "structured_output": null,
+            "vision": null,
+            "reasoning": null
+        }))
+        .expect("older catalog capabilities");
+        assert_eq!(capabilities.reasoning_control, None);
     }
 }

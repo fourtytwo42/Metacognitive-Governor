@@ -12860,8 +12860,9 @@ form.addEventListener('submit', (event) => {
                 .to_bytes(),
         )
         .expect("probe report");
-        assert_eq!(report.observations.len(), 3);
+        assert_eq!(report.observations.len(), 4);
         assert_eq!(report.model.capabilities.responses, Some(true));
+        assert_eq!(report.model.capabilities.reasoning_control, Some(true));
         assert_eq!(
             runtime
                 .provider_catalog("fixture_local")
@@ -12870,6 +12871,16 @@ form.addEventListener('submit', (event) => {
                 .models[0]
                 .capabilities
                 .responses,
+            Some(true)
+        );
+        assert_eq!(
+            runtime
+                .provider_catalog("fixture_local")
+                .expect("catalog")
+                .expect("durable catalog")
+                .models[0]
+                .capabilities
+                .reasoning_control,
             Some(true)
         );
 

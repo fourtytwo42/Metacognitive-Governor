@@ -548,6 +548,7 @@ fn parse_model(model: &Value, kind: ProviderKind) -> Result<ModelDescriptor, Pro
             reasoning: supported
                 .as_ref()
                 .map(|values| values.iter().any(|value| value.starts_with("reasoning"))),
+            reasoning_control: None,
         },
         price,
         metadata: model.clone(),

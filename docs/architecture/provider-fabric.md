@@ -76,11 +76,15 @@ adapted from OpenAI's Apache-2.0-licensed
 Discovery starts with the endpoint's model list. Provider-native metadata supplies
 context length, supported parameters, modalities, and provider-reported prices when
 available. Missing metadata remains unknown rather than becoming a false claim.
-The explicit conformance probe runs buffered and streaming Responses requests plus
-a harmless required function-call request, then records supported, unsupported,
-or indeterminate evidence. A successful response that ignores the required call
-remains indeterminate; tool authority is not granted from model prose or wishful
-inference. Structured-output reliability remains a separate later eval.
+The explicit conformance probe runs buffered and streaming Responses requests, a
+harmless required function-call request, and a per-request `reasoning.effort=none`
+control check, then records supported, unsupported, or indeterminate evidence. A
+successful response that ignores the required call remains indeterminate; tool
+authority is not granted from model prose or wishful inference. Tool-using agent
+turns disable internal reasoning only after the exact model has positively proven
+that control, preserving output budget for complete JSON tool arguments. Unknown
+or unsupported models receive no speculative reasoning parameter. Structured-
+output reliability remains a separate later eval.
 
 SQLite migration 7 stores only validated connection metadata and the latest
 discovered model catalog. Initial discovery must succeed before the connection,

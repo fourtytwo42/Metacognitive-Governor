@@ -5,9 +5,9 @@ use chrono::Utc;
 use mcg_projects::ContextAssembly;
 use mcg_providers::{
     CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelRequest, ModelResponse, OutputItem,
-    PlannedRoute, ProviderError, ProviderModelRef, RequiredCapability, RouteCandidate,
-    RoutingPolicy, RoutingRequirements, ToolChoice, ToolDefinition, Usage, actual_cost,
-    plan_routes, should_fallback,
+    PlannedRoute, ProviderError, ProviderModelRef, ReasoningConfig, RequiredCapability,
+    RouteCandidate, RoutingPolicy, RoutingRequirements, ToolChoice, ToolDefinition, Usage,
+    actual_cost, plan_routes, should_fallback,
 };
 use mcg_tools::{
     ApprovalRepository, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
@@ -304,6 +304,8 @@ impl AgentTurnEngine {
             let mut last_retriable = None;
             for route in &mut routes {
                 model_request.model = route.target.model_id.clone();
+                model_request.reasoning =
+                    reasoning_control_for_route(&request, &route, &candidates);
                 match call_model(models, &route, model_request.clone(), &candidates).await {
                     Ok((response, evidence)) => {
                         first_response = Some(response);
@@ -472,6 +474,22 @@ impl AgentTurnEngine {
             )?;
         }
     }
+}
+
+fn reasoning_control_for_route(
+    request: &AgentTurnRequest,
+    route: &PlannedRoute,
+    candidates: &[RouteCandidate],
+) -> Option<ReasoningConfig> {
+    (!request.tools.is_empty()
+        && candidates.iter().any(|candidate| {
+            candidate.target == route.target
+                && candidate.model.capabilities.reasoning_control == Some(true)
+        }))
+    .then(|| ReasoningConfig {
+        effort: Some("none".into()),
+        summary: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1043,6 +1061,31 @@ mod tests {
         assert_eq!(first, reordered);
     }
 
+    #[test]
+    fn reasoning_control_is_sent_only_after_positive_provider_evidence() {
+        let mut request = turn(vec!["fs.read".into()], vec![read_tool()]);
+        let route = PlannedRoute {
+            target: request.route_candidates[0].target.clone(),
+            estimated_cost: mcg_providers::CostEstimate {
+                amount_usd: None,
+                provenance: PriceProvenance::Unknown,
+            },
+        };
+        assert_eq!(
+            reasoning_control_for_route(&request, &route, &request.route_candidates),
+            None
+        );
+        request.route_candidates[0]
+            .model
+            .capabilities
+            .reasoning_control = Some(true);
+        assert_eq!(
+            reasoning_control_for_route(&request, &route, &request.route_candidates)
+                .and_then(|reasoning| reasoning.effort),
+            Some("none".into())
+        );
+    }
+
     #[tokio::test]
     async fn bounded_turn_routes_executes_typed_tool_and_returns_result_to_model() {
         let models = FakeModels {
@@ -1068,12 +1111,13 @@ mod tests {
             requests: Mutex::new(Vec::new()),
         };
         let tools = FakeTools::default();
+        let mut request = turn(vec!["fs.read".into()], vec![read_tool()]);
+        request.route_candidates[0]
+            .model
+            .capabilities
+            .reasoning_control = Some(true);
         let result = AgentTurnEngine
-            .execute(
-                turn(vec!["fs.read".into()], vec![read_tool()]),
-                &models,
-                &tools,
-            )
+            .execute(request, &models, &tools)
             .await
             .expect("turn succeeds");
         assert_eq!(result.model_calls.len(), 2);
@@ -1086,6 +1130,13 @@ mod tests {
         );
         let requests = models.requests.lock().expect("requests lock");
         assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|(_, request)| {
+            request
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.as_deref())
+                == Some("none")
+        }));
         assert!(matches!(
             requests[1].1.messages.last().and_then(|message| message.content.first()),
             Some(ContentPart::ToolResult { call_id, .. }) if call_id == "call-1"

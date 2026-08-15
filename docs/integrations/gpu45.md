@@ -1,7 +1,7 @@
 # GPU45 Development Provider
 
 - Status: Available on the owner's private LAN.
-- Last verified: 2026-08-14.
+- Last verified: 2026-08-15.
 - Purpose: Local model inference and optional media/tool capability testing during
   MCG development.
 
@@ -39,7 +39,7 @@ key. On `401`, request a key from the owner; do not guess, scrape, or create one
 
 - Appliance version `0.1.0`, commit `a37b01181962ca54bdb5d295bbe3e4cf295d1522`.
 - Health summary reported `ok`, with the inference proxy and backend ready.
-- `/v1/models` returned ten currently served aliases with explicit context-window
+- `/v1/models` returned twelve currently served aliases with explicit context-window
   metadata. Treat aliases and active models as dynamic and rediscover them rather
   than copying a model ID into source code.
 - The primary inference surface is the streaming OpenAI Responses API at
@@ -47,6 +47,12 @@ key. On `401`, request a key from the owner; do not guess, scrape, or create one
   request explicitly sends `stream: false`; MCG's compatible adapter therefore
   accepts a terminal `response.completed` SSE event for buffered calls as a
   documented conformance exception.
+- The current llama.cpp-compatible backend accepts
+  `reasoning: {"effort":"none"}` per request. An uncontrolled tool turn emitted
+  reasoning for minutes without reaching a tool call; the same control produced
+  no reasoning events and a valid terminal completion. MCG records this behavior
+  only through the explicit model probe and sends the control only to positively
+  qualified tool-using routes.
 - The console also advertises management APIs for model control, benchmarks,
   transcription, speech, image/video/music generation, research, telemetry, and
   backup operations. Those are separate tool integrations and often require a
