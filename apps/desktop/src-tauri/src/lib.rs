@@ -43,10 +43,16 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+mod service_bootstrap;
+
+use service_bootstrap::LocalServiceStatus;
+
 const LOCAL_DAEMON: &str = match option_env!("MCG_DAEMON_URL") {
     Some(url) => url,
     None => "http://127.0.0.1:7777",
 };
+
+static LOCAL_SERVICE_STATUS: std::sync::OnceLock<LocalServiceStatus> = std::sync::OnceLock::new();
 
 #[derive(Deserialize, Serialize)]
 struct ConfigureMcpCommand {
@@ -86,7 +92,19 @@ const fn runtime_label() -> &'static str {
     "MCG desktop scaffold"
 }
 
+#[tauri::command]
+fn local_service_status() -> LocalServiceStatus {
+    LOCAL_SERVICE_STATUS.get().cloned().unwrap_or_else(|| {
+        LocalServiceStatus::failed("The local service bootstrap has not run yet.".into())
+    })
+}
+
 fn daemon_token() -> Result<String, String> {
+    if let Some(status) = LOCAL_SERVICE_STATUS.get()
+        && !status.ready
+    {
+        return Err(status.detail.clone());
+    }
     validate_local_daemon(LOCAL_DAEMON)?;
     let path = AppConfig::default().auth_token_path();
     std::fs::read_to_string(&path)
@@ -1566,10 +1584,14 @@ fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
 ///
 /// Panics when Tauri cannot initialize or run the application event loop.
 pub fn run() {
+    let service_status = service_bootstrap::ensure_local_service(LOCAL_DAEMON)
+        .unwrap_or_else(LocalServiceStatus::failed);
+    let _ = LOCAL_SERVICE_STATUS.set(service_status);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             runtime_label,
+            local_service_status,
             start_openai_oauth,
             complete_openai_oauth,
             cancel_openai_oauth,

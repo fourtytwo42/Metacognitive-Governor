@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "check:docs": "node scripts/check-docs.mjs",
+    "check:packaging": "node scripts/check-packaging.mjs",
     "check": "npm run typecheck --workspace @mcg/desktop",
     "test": "npm run test --workspace @mcg/desktop",
     "build": "npm run build --workspace @mcg/desktop",

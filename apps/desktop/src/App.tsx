@@ -50,6 +50,7 @@ import {
   loadSiteHealth,
   loadSshOperations,
   getSiteMonitor,
+  getLocalServiceStatus,
   getUserSettings,
   loadUserSettingsHistory,
   navigateBrowserSession,
@@ -106,6 +107,7 @@ import {
   type TaskEnvelope,
   type ApprovalRequest,
   type BackupSummary,
+  type LocalServiceStatus,
   type TaskEventsResponse,
   type ToolAuditResponse,
   type UserSettings,
@@ -255,6 +257,7 @@ function TaskEvidence({
 }
 
 export function App() {
+  const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
@@ -379,6 +382,19 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    getLocalServiceStatus()
+      .then((status) => {
+        if (active) setLocalService(status);
+      })
+      .catch((error) => {
+        if (active) setLocalService({
+          ready: false,
+          launched: false,
+          service: "mcg-daemon",
+          version: "unknown",
+          detail: errorMessage(error)
+        });
+      });
     getUserSettings()
       .then((settings) => {
         if (active) {
@@ -1605,7 +1621,13 @@ export function App() {
             <p className="eyebrow">METACOGNITIVE GOVERNOR</p>
             <h1>Your AI workspace</h1>
           </div>
-          <span className="status-pill"><i /> Local runtime</span>
+          <span
+            className={`status-pill${localService && !localService.ready ? " status-error" : ""}`}
+            title={localService?.detail}
+            role="status"
+          >
+            <i /> {localService?.ready ? `Local runtime · ${localService.version}` : localService ? "Local runtime needs attention" : "Starting local runtime…"}
+          </span>
         </header>
 
         <section className="hero-card">
@@ -1757,6 +1779,7 @@ export function App() {
                 <h2>Runtime status</h2>
                 <dl>
                   <div><dt>Daemon API</dt><dd>Authenticated local loopback</dd></div>
+                  <div><dt>Startup</dt><dd>{localService?.detail ?? "Checking packaged service…"}</dd></div>
                   <div><dt>Autonomy</dt><dd>Autonomous</dd></div>
                   <div><dt>Organization</dt><dd>Foundation</dd></div>
                   <div><dt>Provider</dt><dd>{providerStatus}</dd></div>

@@ -39,6 +39,7 @@ Implementation planning:
 - [M8 typed SSH remote execution](docs/architecture/typed-ssh.md)
 - [Durable owner settings](docs/architecture/settings.md)
 - [Portable backup and restore](docs/architecture/backups.md)
+- [Native packaging, startup, upgrade, and removal](docs/architecture/packaging.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 

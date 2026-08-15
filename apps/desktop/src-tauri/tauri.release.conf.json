@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "A local-first AI workspace that governs and verifies autonomous work.",
+    "longDescription": "MetaCognitive Governor coordinates AI providers, projects, tools, schedules, and measured improvements through a private local control plane.",
+    "externalBin": [
+      "binaries/mcg-service",
+      "binaries/mcg",
+      "binaries/mcg-shadow-runner"
+    ],
+    "resources": [
+      "../../../THIRD_PARTY_NOTICES.md",
+      "../../../licenses/Apache-2.0.txt"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

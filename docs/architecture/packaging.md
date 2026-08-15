@@ -1,0 +1,59 @@
+# Native Packaging, Startup, Upgrade, and Removal
+
+MCG release artifacts are built only on owner-controlled machines. GitHub stores source; it does not build, test, sign, or publish binaries. Both release builders refuse a dirty or uncommitted tree so the package manifest identifies the exact source commit rather than a merely nearby revision.
+
+## Installed layout
+
+Every native package contains one version-matched set:
+
+- `mcg-desktop`: the consumer Tauri application.
+- `mcg-service`: the desktop-managed copy of the loopback control plane.
+- `mcg`: the automation and administration CLI.
+- `mcg-shadow-runner`: the internal disposable Windows Sandbox helper.
+- `THIRD_PARTY_NOTICES.md` and the complete Apache-2.0 license text required by the adapted OpenAI OAuth implementation.
+
+Source and portable/headless workflows retain the `mcg-daemon` name. Tauri consumes target-suffixed build inputs through `tauri.release.conf.json` and installs them under stable adjacent names. The default development configuration has bundling disabled and no generated sidecar dependency, so a clean checkout can run ordinary Rust tests without first producing release binaries. The packaged daemon is deliberately called `mcg-service` so native builds never overwrite or contend with a running developer/headless `mcg-daemon`. Both are built from the same crate and version. The desktop never searches `PATH`, accepts a configured public address, or launches an environment-selected executable. It starts only the regular, non-symlink `mcg-service` file adjacent to its own executable.
+
+## One-click local service startup
+
+At desktop startup, the native layer probes only the compiled numeric HTTP loopback address. It accepts an exact `200` MCG health document with service name `mcg-daemon`, status `ok`, and the same application version as the desktop. It also requires the installation-local bearer token to be readable, non-empty, header-safe, and accepted by `/api/v1/system/status`; the authenticated status identity must match public health. A health-shaped foreign process therefore cannot be mistaken for the local authority.
+
+If nothing owns the port, the desktop launches the adjacent daemon without a console and waits up to eight seconds for the exact health and authentication contract. Concurrent desktop launches may start competing processes, but SQLite's data-directory lock and the loopback listener allow only one authority owner; both desktops converge on the surviving service. Closing the UI does not terminate headless or scheduled work.
+
+A foreign service, malformed health response, missing sidecar, unreadable token, or version mismatch is shown as `Local runtime needs attention`; MCG does not disguise it as a healthy runtime. Advanced mode includes the concrete startup diagnostic.
+
+## Local release builds
+
+Windows:
+
+```powershell
+./scripts/build-release.ps1
+```
+
+This builds release CLI/daemon/sandbox sidecars, stages them under target-triple names, creates a per-user NSIS installer, and writes `target/release/release-manifest.json` with the exact source commit, sizes, and SHA-256 digests.
+
+Linux:
+
+```bash
+./scripts/build-release.sh
+```
+
+This builds the same version-matched sidecars, creates `.deb` and AppImage packages, and writes the same manifest contract. The build machine must provide Tauri's documented GTK/WebKit and package-tool prerequisites. Generated binaries, packages, and manifests stay under ignored build directories and are never committed.
+
+## Upgrade and repair
+
+Install a newer package over the same per-user installation. Durable state remains outside the application directory (`%LOCALAPPDATA%\\MCG` on Windows, `$XDG_DATA_HOME/mcg` or `~/.local/share/mcg` on Linux). Database migrations run only after the new daemon acquires the exclusive data-directory lock.
+
+If an older daemon is still running, the new desktop refuses the version mismatch and tells the owner to stop the old service and reopen MCG. It never connects a new UI to an old control plane. Repair reinstalls the complete version-matched binary set and license resources without changing application data.
+
+Before a major upgrade, create and verify a `.mcgb` backup. Restore refuses databases newer than the running binary, preventing accidental downgrade migration.
+
+## Uninstall and user data
+
+Package removal deletes installed application files and shortcuts. It intentionally does not delete the external MCG data directory, credentials held by the OS credential service, portable backups, or pre-restore rollback databases. Destructive data removal is a separate, explicit future owner operation; uninstall must never imply consent to erase cognitive state.
+
+Reinstalling the same or a later compatible version reuses the retained state. Installer UAT must cover fresh install, first launch, second launch, upgrade with a stopped daemon, visible mismatch with an old running daemon, repair, uninstall, retained-data reinstall, and an explicit check that no GitHub-hosted compute was used.
+
+## Release gates still required
+
+Source packaging and unsigned owner-built artifacts are not a signed public release. Production completion still requires trusted Windows and Linux signing identities, clean-machine installer/upgrade/repair/uninstall UAT, malware reputation checks, and publication provenance. Missing signing authority must remain explicit rather than bypassed.

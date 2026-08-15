@@ -42,6 +42,8 @@ h2 { font-size: 1.3rem; letter-spacing: -.02em; }
 .muted { color: #8e9daf; line-height: 1.65; max-width: 65ch; }
 .status-pill { border: 1px solid #27374a; padding: 8px 12px; color: #aebed0; font-size: .82rem; }
 .status-pill i { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: #f6bf54; }
+.status-pill.status-error { border-color: #8e3f46; color: #ffd0d0; }
+.status-pill.status-error i { background: #ff747f; }
 
 .hero-card, .panel { border: 1px solid #1f2b3b; background: #0c121cdd; box-shadow: 0 18px 60px #0004; }
 .hero-card { padding: clamp(24px, 4vw, 48px); display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, 1.1fr); gap: 48px; }

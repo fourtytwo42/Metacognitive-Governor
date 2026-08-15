@@ -78,6 +78,7 @@ const client = vi.hoisted(() => ({
   ,listBackups: vi.fn()
   ,createBackup: vi.fn()
   ,verifyBackup: vi.fn()
+  ,localServiceStatus: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -156,12 +157,14 @@ vi.mock("./desktop-client", () => ({
   loadUserSettingsHistory: client.settingsHistory,
   listBackups: client.listBackups,
   createBackup: client.createBackup,
-  verifyBackup: client.verifyBackup
+  verifyBackup: client.verifyBackup,
+  getLocalServiceStatus: client.localServiceStatus
 }));
 
 import { App } from "./App";
 
 beforeEach(() => {
+  client.localServiceStatus.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
   client.cancel.mockReset();
@@ -290,6 +293,13 @@ beforeEach(() => {
     revisions: [{ settings, reason: "initial settings", changed_at: settings.updated_at }]
   });
   client.listBackups.mockResolvedValue({ backups: [] });
+  client.localServiceStatus.mockResolvedValue({
+    ready: true,
+    launched: true,
+    service: "mcg-daemon",
+    version: "0.1.0",
+    detail: "The packaged local service started successfully."
+  });
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
     revision: request.expected_revision + 1,
@@ -312,6 +322,19 @@ async function enableSimpleMode() {
   fireEvent.click(button);
   await screen.findByRole("button", { name: "Advanced mode" });
 }
+
+test("packaged local service readiness is visible and failures are not disguised", async () => {
+  client.localServiceStatus.mockResolvedValue({
+    ready: false,
+    launched: false,
+    service: "mcg-daemon",
+    version: "0.1.0",
+    detail: "The packaged service is missing. Repair or reinstall MCG."
+  });
+  render(<App />);
+  const status = (await screen.findByText("Local runtime needs attention")).closest("[role='status']");
+  expect(status).toHaveAttribute("title", "The packaged service is missing. Repair or reinstall MCG.");
+});
 
 test("owner settings persist autonomy with optimistic revision control", async () => {
   render(<App />);

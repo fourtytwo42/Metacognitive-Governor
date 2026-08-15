@@ -12,6 +12,7 @@
 /test-results/
 *.tsbuildinfo
 **/src-tauri/gen/
+**/src-tauri/binaries/
 
 # Application state and secrets
 /.env

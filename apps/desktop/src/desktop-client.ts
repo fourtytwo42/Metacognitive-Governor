@@ -3,6 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 export type OpenAiOAuthMethod = "browser" | "device_code";
 export type AutonomyPreset = "guided" | "balanced" | "autonomous";
 
+export interface LocalServiceStatus {
+  ready: boolean;
+  launched: boolean;
+  service: string;
+  version: string;
+  detail: string;
+}
+
 export interface UserSettings {
   schema_version: number;
   revision: number;
@@ -637,6 +645,10 @@ export function openExternalUrl(url: string): Promise<void> {
 
 export function listProviders(): Promise<ProviderListResponse> {
   return invoke("list_providers");
+}
+
+export function getLocalServiceStatus(): Promise<LocalServiceStatus> {
+  return invoke("local_service_status");
 }
 
 export function getUserSettings(): Promise<UserSettings> {
