@@ -74,6 +74,7 @@ requireText(windowsBuilder, "--bundles nsis", "Windows release builder");
 requireText(linuxBuilder, "--bundles deb,appimage", "Linux release builder");
 requireText(macosBuilder, "--bundles app", "macOS release builder");
 requireText(macosBuilder, "create-macos-dmg.sh", "macOS release builder");
+requireText(macosBuilder, 'rm -rf -- "$dmg_directory"', "macOS release builder");
 for (const invariant of ["hdiutil create", "hdiutil verify", "staging/MCG.app", "staging/Applications", "Refusing to replace existing disk image", "macOS disk images must be created on macOS"]) {
   requireText(macosDmgBuilder, invariant, "macOS disk-image builder");
 }

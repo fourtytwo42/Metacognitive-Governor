@@ -18,7 +18,14 @@ case "$(uname -m)" in
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
-dmg="$repository_root/target/release/bundle/dmg/MCG_${version}_${bundle_arch}.dmg"
+dmg_directory="$repository_root/target/release/bundle/dmg"
+if [[ "$dmg_directory" != "$repository_root/target/release/bundle/dmg" || "$dmg_directory" == "/" ]]; then
+  echo "Refusing unsafe macOS disk-image output cleanup: $dmg_directory" >&2
+  exit 1
+fi
+rm -rf -- "$dmg_directory"
+mkdir -p "$dmg_directory"
+dmg="$dmg_directory/MCG_${version}_${bundle_arch}.dmg"
 "$repository_root/scripts/create-macos-dmg.sh" \
   "$repository_root/target/release/bundle/macos/MCG.app" \
   "$dmg"

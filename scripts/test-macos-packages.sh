@@ -266,6 +266,10 @@ for _ in {1..100}; do
   pgrep -f "mcg-desktop" >/dev/null && break
   sleep 0.1
 done
+desktop_service_pid="$(lsof -nP -tiTCP:"$gui_port" -sTCP:LISTEN | head -n 1)"
+[[ "$desktop_service_pid" =~ ^[0-9]+$ ]] || { echo "Packaged desktop service PID was not observable." >&2; exit 1; }
+[[ "$(ps -p "$desktop_service_pid" -o comm=)" == *mcg-service ]] || { echo "Desktop loopback listener is not mcg-service." >&2; exit 1; }
+background_pids+=("$desktop_service_pid")
 sleep 2
 screencapture -x "$uat_root/desktop.png"
 [[ -s "$uat_root/desktop.png" ]] || { echo "Packaged desktop screenshot is empty." >&2; exit 1; }
@@ -275,9 +279,6 @@ pixel_height="$(sips -g pixelHeight "$uat_root/desktop.png" | awk '/pixelHeight:
   echo "Packaged desktop screenshot dimensions are invalid." >&2
   exit 1
 }
-desktop_service_pid="$(lsof -nP -tiTCP:"$gui_port" -sTCP:LISTEN | head -n 1)"
-[[ "$desktop_service_pid" =~ ^[0-9]+$ ]] || { echo "Packaged desktop service PID was not observable." >&2; exit 1; }
-[[ "$(ps -p "$desktop_service_pid" -o comm=)" == *mcg-service ]] || { echo "Desktop loopback listener is not mcg-service." >&2; exit 1; }
 stop_process "$desktop_pid"
 stop_process "$desktop_service_pid"
 background_pids=()
