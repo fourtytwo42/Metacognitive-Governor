@@ -682,10 +682,15 @@ fn is_lower_hex(value: &str) -> bool {
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<(), StorageError> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn sync_parent(_path: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    File::open(_path)?.sync_all()?;
     Ok(())
 }
 
