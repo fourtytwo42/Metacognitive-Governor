@@ -255,6 +255,12 @@ not release-qualified until daemon launch/control, durable catalog/audit, all
 interfaces, packaging/license, cross-platform crash recovery, and native UAT
 gates in `docs/architecture/plugins.md` are complete.
 
+Parent-client process tests additionally prove fixed-name runner selection,
+bounded one-shot pipes, a whole-transaction outer deadline with kill/reap cleanup,
+and strict agreement between response schema, plugin identity, result/error
+shape, and child exit status. These tests run natively on each owner-controlled
+release platform; they do not use GitHub-hosted execution.
+
 ## Coverage and release policy
 
 Coverage is a diagnostic, not a substitute for outcomes. Critical policy, state
