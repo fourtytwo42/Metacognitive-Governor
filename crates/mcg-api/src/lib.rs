@@ -2948,6 +2948,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::Test { .. }
             | SuccessCondition::StaticAnalysis { .. }
             | SuccessCondition::HttpResponds { .. }
+            | SuccessCondition::ServiceHealthy { .. }
             | SuccessCondition::PageRenders { .. }
             | SuccessCondition::ElementExists { .. }
             | SuccessCondition::BrowserWorkflow { .. }
@@ -3056,6 +3057,13 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
             description: format!("COMMAND SUCCEEDS {command}"),
         };
     }
+    if let Some(endpoint) = consumer_directive_value(trimmed, "SERVICE HEALTHY")
+        && consumer_credential_free_http_url(endpoint)
+    {
+        return SuccessCondition::ServiceHealthy {
+            endpoint: endpoint.to_owned(),
+        };
+    }
     if let Some(value) = consumer_directive_value(trimmed, "ELEMENT EXISTS")
         && let Some((url, selector)) = consumer_url_and_selector(value)
     {
@@ -3108,6 +3116,16 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
     SuccessCondition::Custom {
         description: trimmed.to_owned(),
     }
+}
+
+fn consumer_credential_free_http_url(value: &str) -> bool {
+    !value.chars().any(char::is_whitespace)
+        && url::Url::parse(value).is_ok_and(|value| {
+            matches!(value.scheme(), "http" | "https")
+                && value.username().is_empty()
+                && value.password().is_none()
+                && value.host_str().is_some()
+        })
 }
 
 fn consumer_directive_value<'a>(value: &'a str, directive: &str) -> Option<&'a str> {
@@ -4145,6 +4163,12 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_consumer_success_condition("SERVICE HEALTHY https://example.test/health?full=1"),
+            SuccessCondition::ServiceHealthy {
+                endpoint: "https://example.test/health?full=1".into(),
+            }
+        );
+        assert_eq!(
             parse_consumer_success_condition(
                 "ELEMENT EXISTS https://example.test/app main [data-ready='true']"
             ),
@@ -4210,6 +4234,10 @@ mod tests {
             "PAGE RENDERS https://user:secret@example.test",
             "PAGE RENDERS file:///tmp/page.html",
             "PAGE RENDERS https://example.test extra",
+            "SERVICE HEALTHY https://user:secret@example.test",
+            "SERVICE HEALTHY file:///tmp/health",
+            "SERVICE HEALTHY https://example.test extra",
+            "SERVICE HEALTHY ",
             "ELEMENT EXISTS https://user:secret@example.test #app",
             "ELEMENT EXISTS file:///tmp/page.html #app",
             "ELEMENT EXISTS https://example.test",
@@ -4815,6 +4843,44 @@ form.addEventListener('submit', (event) => {
             axum::serve(listener, app)
                 .await
                 .expect("HTTP objective fixture server");
+        });
+        format!("http://{address}")
+    }
+
+    async fn service_health_fixture(hits: Arc<AtomicUsize>) -> String {
+        let healthy_hits = hits.clone();
+        let degraded_hits = hits;
+        let app = Router::new()
+            .route(
+                "/health",
+                get(move || {
+                    let hits = healthy_hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (StatusCode::NO_CONTENT, "")
+                    }
+                }),
+            )
+            .route(
+                "/degraded",
+                get(move || {
+                    let hits = degraded_hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (StatusCode::SERVICE_UNAVAILABLE, "maintenance")
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("service-health fixture listener");
+        let address = listener
+            .local_addr()
+            .expect("service-health fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("service-health fixture server");
         });
         format!("http://{address}")
     }
@@ -7862,6 +7928,215 @@ form.addEventListener('submit', (event) => {
                 .is_none()
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Healthy, degraded, unavailable, and replay share one public fixture.
+    async fn consumer_service_health_is_governed_bounded_and_replay_safe() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# Service health fixture\n")
+            .expect("readme");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "service_health_fixture".into(),
+                    display_name: "Service Health Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let health_hits = Arc::new(AtomicUsize::new(0));
+        let target = service_health_fixture(health_hits.clone()).await;
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+
+        let mut healthy_task = TaskEnvelope::new("Verify the service is healthy");
+        healthy_task.project_id = Some(project.project_id);
+        healthy_task.success_conditions = vec![format!("SERVICE HEALTHY {target}/health")];
+        runtime.create_task(&healthy_task).expect("healthy task");
+        let healthy_path = format!("/api/v1/tasks/{}/launch", healthy_task.id);
+        let healthy = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&healthy_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("healthy response");
+        assert_eq!(healthy.status(), StatusCode::OK);
+        let healthy: LaunchTaskResponse = serde_json::from_slice(
+            &healthy
+                .into_body()
+                .collect()
+                .await
+                .expect("healthy body")
+                .to_bytes(),
+        )
+        .expect("healthy response body");
+        assert_eq!(healthy.task.state, TaskState::Completed);
+        let report = healthy.run.evaluations.first().expect("healthy report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert_eq!(
+            report.conditions[0].condition,
+            SuccessCondition::ServiceHealthy {
+                endpoint: format!("{target}/health"),
+            }
+        );
+        assert!(report.conditions[0].passed);
+        assert!(report.conditions[0].detail.contains("observed_status=204"));
+        assert_eq!(report.evidence[0].method, "governed_service_health");
+        assert!(report.evidence[0].artifact_sha256.is_some());
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&healthy_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("healthy replay");
+        let replay: LaunchTaskResponse = serde_json::from_slice(
+            &replay
+                .into_body()
+                .collect()
+                .await
+                .expect("replay body")
+                .to_bytes(),
+        )
+        .expect("replay response body");
+        assert!(replay.replayed);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(health_hits.load(Ordering::SeqCst), 1);
+
+        let mut degraded_task = TaskEnvelope::new("Reject a degraded service");
+        degraded_task.project_id = Some(project.project_id);
+        degraded_task.success_conditions = vec![format!("SERVICE HEALTHY {target}/degraded")];
+        runtime.create_task(&degraded_task).expect("degraded task");
+        let degraded = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    degraded_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+            )
+            .await
+            .expect("degraded response");
+        let degraded: LaunchTaskResponse = serde_json::from_slice(
+            &degraded
+                .into_body()
+                .collect()
+                .await
+                .expect("degraded body")
+                .to_bytes(),
+        )
+        .expect("degraded response body");
+        assert_eq!(degraded.task.state, TaskState::Failed);
+        assert_eq!(
+            degraded.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(!degraded.run.evaluations[0].conditions[0].passed);
+        assert!(
+            degraded.run.evaluations[0].conditions[0]
+                .detail
+                .contains("expected_status=200-299; observed_status=503")
+        );
+        assert!(
+            degraded.run.evaluations[0].evidence[0]
+                .artifact_sha256
+                .is_some()
+        );
+        assert_eq!(health_hits.load(Ordering::SeqCst), 2);
+
+        let unused = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unused endpoint reservation");
+        let unavailable = format!(
+            "http://{}/health",
+            unused.local_addr().expect("unused endpoint address")
+        );
+        drop(unused);
+        let mut unavailable_task = TaskEnvelope::new("Reject an unreachable service");
+        unavailable_task.project_id = Some(project.project_id);
+        unavailable_task.success_conditions = vec![format!("SERVICE HEALTHY {unavailable}")];
+        runtime
+            .create_task(&unavailable_task)
+            .expect("unavailable task");
+        let unavailable = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    unavailable_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("unavailable response");
+        let unavailable: LaunchTaskResponse = serde_json::from_slice(
+            &unavailable
+                .into_body()
+                .collect()
+                .await
+                .expect("unavailable body")
+                .to_bytes(),
+        )
+        .expect("unavailable response body");
+        assert_eq!(unavailable.task.state, TaskState::Failed);
+        assert_eq!(
+            unavailable.run.evaluations[0].evidence[0].method,
+            "governed_service_health"
+        );
+        assert!(
+            unavailable.run.evaluations[0].conditions[0]
+                .detail
+                .contains("objective check could not execute")
+        );
+        assert!(
+            unavailable.run.evaluations[0].evidence[0]
+                .artifact_sha256
+                .is_none()
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 6);
+        assert_eq!(health_hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

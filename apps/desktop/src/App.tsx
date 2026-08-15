@@ -1510,7 +1510,11 @@ export function App() {
               </label>
               <label>
                 Success conditions (one per line)
-                <textarea value={taskSuccess} onChange={(event) => setTaskSuccess(event.target.value)} />
+                <textarea
+                  value={taskSuccess}
+                  onChange={(event) => setTaskSuccess(event.target.value)}
+                  placeholder={"FILE EXISTS dist/output.json\nSERVICE HEALTHY http://127.0.0.1:3000/health"}
+                />
               </label>
               <label>
                 Risk

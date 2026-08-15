@@ -132,6 +132,16 @@ fail closed. Evaluation compares the `http.status` verification value rather tha
 generic 2xx success, so an expected 404 can pass while a reachable status mismatch,
 timeout, or connection failure settles as failed objective evidence.
 
+`SERVICE HEALTHY URL` becomes a typed `ServiceHealthy` condition for the common
+case where the exact successful status is intentionally not pinned. Runtime grants
+only the credential-free endpoint origin and performs the same bounded, audited,
+same-origin GET as other HTTP objectives. A final 200-299 status is healthy; every
+reachable 4xx/5xx response is a measured unhealthy failure with an immutable body
+artifact, while connection and timeout failures retain no fabricated response
+artifact. The report uses distinct `governed_service_health` evidence and records
+the observed status. Terminal launch replay performs neither another provider call
+nor another health request.
+
 `PAGE RENDERS URL` becomes a typed `PageRenders` condition backed by an actual
 ephemeral Chromium CDP session, not an HTTP-body heuristic. The browser uses a fresh
 profile, bounded viewport/time, no automatic download, and pre-send interception.
@@ -207,6 +217,10 @@ terminal settlement.
 The HTTP fixture proves an expected non-2xx response passes with a captured artifact,
 a status mismatch fails, and an unreachable origin records failed tool audit plus a
 terminal failed report instead of escaping as an API error.
+The service-health fixture separately proves a 204 response passes, a captured 503
+response fails as unhealthy, an unreachable endpoint fails without response evidence,
+unsafe endpoint syntax stays non-automatable, and terminal replay adds neither a
+provider call nor another network request.
 The browser fixtures use real Chromium to prove JavaScript hydration, DOM/title
 mutation, HTML/PNG capture, policy/audit integration, and pre-send blocking of a
 cross-origin subresource plus same-origin POST.

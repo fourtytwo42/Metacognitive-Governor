@@ -4901,6 +4901,7 @@ impl AppRuntime {
         }
         for condition in &conditions {
             if let SuccessCondition::HttpResponds { url, .. }
+            | SuccessCondition::ServiceHealthy { endpoint: url }
             | SuccessCondition::PageRenders { url }
             | SuccessCondition::ElementExists { url, .. }
             | SuccessCondition::ScreenshotMatches { url, .. } = condition
@@ -4958,6 +4959,14 @@ impl AppRuntime {
                 ToolRequestKind::HttpRequest {
                     method: "GET".into(),
                     url: url.clone(),
+                    headers: Vec::new(),
+                    body: None,
+                    max_response_bytes: 1_048_576,
+                }
+            } else if let SuccessCondition::ServiceHealthy { endpoint } = condition {
+                ToolRequestKind::HttpRequest {
+                    method: "GET".into(),
+                    url: endpoint.clone(),
                     headers: Vec::new(),
                     body: None,
                     max_response_bytes: 1_048_576,
@@ -7957,6 +7966,8 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
     objective_command(condition).map(str::to_owned).or_else(|| {
         if let SuccessCondition::HttpResponds { url, status } = condition {
             Some(format!("HTTP GET {url} returns {status}"))
+        } else if let SuccessCondition::ServiceHealthy { endpoint } = condition {
+            Some(format!("Service is healthy at {endpoint}"))
         } else if let SuccessCondition::PageRenders { url } = condition {
             Some(format!("Page renders at {url}"))
         } else if let SuccessCondition::ElementExists { url, selector } = condition {
@@ -8090,6 +8101,7 @@ fn objective_workflow_origins(
 fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
     match condition {
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
+        SuccessCondition::ServiceHealthy { .. } => "governed_service_health",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
         SuccessCondition::ElementExists { .. } => "governed_browser_element",
         SuccessCondition::BrowserWorkflow { .. } => "governed_browser_workflow",
@@ -8299,6 +8311,9 @@ fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome)
     if let SuccessCondition::HttpResponds { status, .. } = condition {
         return observed_http_status(outcome) == Some(*status);
     }
+    if matches!(condition, SuccessCondition::ServiceHealthy { .. }) {
+        return observed_http_status(outcome).is_some_and(|status| (200..300).contains(&status));
+    }
     if let SuccessCondition::FileExists {
         min_bytes,
         expected_sha256,
@@ -8356,6 +8371,14 @@ fn objective_condition_outcome_detail(
     if let SuccessCondition::HttpResponds { status, .. } = condition {
         return format!(
             "{}; expected_status={status}; observed_status={}",
+            outcome.summary,
+            observed_http_status(outcome)
+                .map_or_else(|| "unknown".into(), |value| value.to_string())
+        );
+    }
+    if matches!(condition, SuccessCondition::ServiceHealthy { .. }) {
+        return format!(
+            "{}; expected_status=200-299; observed_status={}",
             outcome.summary,
             observed_http_status(outcome)
                 .map_or_else(|| "unknown".into(), |value| value.to_string())
