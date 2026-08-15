@@ -4687,6 +4687,10 @@ impl AppRuntime {
             .find(|role| role.id == item.assigned_role)
             .cloned()
             .ok_or_else(|| StorageError::InvalidData("assigned role was not found".into()))?;
+        let active_organization = self
+            .organization(organization.organization_id)?
+            .ok_or_else(|| StorageError::Conflict("active organization was not found".into()))?;
+        let evaluation_only = active_organization.revision_id != organization.revision_id;
         let project = self
             .project(spec.project_id)?
             .ok_or(StorageError::ProjectNotFound(spec.project_id))?;
@@ -4699,7 +4703,11 @@ impl AppRuntime {
         let context_json = serde_json::to_vec(&context)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let context_fingerprint = format!("sha256:{:x}", Sha256::digest(context_json));
-        let (tools, external_tools) = self.resolve_agent_tools(role.kind, &spec.requested_tools)?;
+        let (tools, external_tools) = self.resolve_agent_tools_for_authority(
+            role.kind,
+            &spec.requested_tools,
+            evaluation_only,
+        )?;
         let routes = self.provider_route_candidates().await?;
         if routes.is_empty() {
             return Err(ProviderError::Configuration(
@@ -4865,6 +4873,24 @@ impl AppRuntime {
             }
         }
         Ok((definitions, bindings))
+    }
+
+    fn resolve_agent_tools_for_authority(
+        &self,
+        role: RoleKind,
+        requested: &[String],
+        evaluation_only: bool,
+    ) -> Result<(Vec<ToolDefinition>, Vec<ExternalToolBinding>), RuntimeError> {
+        if !evaluation_only {
+            return self.resolve_agent_tools(role, requested);
+        }
+        if !requested.is_empty() {
+            return Err(StorageError::Conflict(
+                "inactive candidate runs cannot receive host or MCP tools".into(),
+            )
+            .into());
+        }
+        Ok((Vec::new(), Vec::new()))
     }
 
     /// Builds a project-confined host execution plane, atomically dispatches the
@@ -7263,6 +7289,29 @@ mod tests {
         runtime.create_task(&task).expect("task should persist");
 
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
+    }
+
+    #[test]
+    fn inactive_candidate_authority_never_resolves_host_or_mcp_tools() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        let (tools, external) = runtime
+            .resolve_agent_tools_for_authority(RoleKind::Coder, &[], true)
+            .expect("evaluation-only empty tool plane");
+        assert!(tools.is_empty());
+        assert!(external.is_empty());
+        assert!(
+            runtime
+                .resolve_agent_tools_for_authority(RoleKind::Coder, &["fs.read".into()], true)
+                .is_err()
+        );
+        assert!(
+            !runtime
+                .resolve_agent_tools_for_authority(RoleKind::Coder, &[], false)
+                .expect("active role defaults")
+                .0
+                .is_empty()
+        );
     }
 
     #[test]

@@ -28,6 +28,9 @@ model route. Its authority contract has one representable value:
 `evaluation_only`. Shadow work cannot hold the production task lease, settle the
 production task, publish a Site, approve a tool, mutate a project, or write the
 active result. It may retain content-addressed output for independent evaluation.
+Runtime dispatch treats every run pinned to a non-active organization revision
+as evaluation-only: an explicit host/MCP tool request fails closed, and an empty
+request resolves to zero tools rather than the role's normal defaults.
 
 Shadow mode remains opt-in for normal consumers and enabled in development and
 scenario environments. A shadow result can influence production only after it

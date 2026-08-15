@@ -2261,6 +2261,15 @@ impl SqliteEventStore {
         let mut run = self
             .agent_run(instance.run_id)?
             .ok_or(StorageError::AgentRunNotFound(instance.run_id))?;
+        let run_revision = self
+            .organization_revision(run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                run.organization_revision_id,
+            ))?;
+        let active_revision = self
+            .organization(run_revision.organization_id)?
+            .ok_or_else(|| StorageError::Conflict("active organization was not found".into()))?;
+        let evaluation_only = active_revision.revision_id != run_revision.revision_id;
         if instance.state != AgentState::Running
             || lease.state != AgentLeaseState::Active
             || lease.instance_id != instance.id
@@ -2271,6 +2280,7 @@ impl SqliteEventStore {
             || result.model_calls.is_empty()
             || result.response.id.trim().is_empty()
             || result.response.model != result.pinned_route.target.model_id
+            || (evaluation_only && !result.tool_outcomes.is_empty())
             || result
                 .model_calls
                 .iter()
@@ -2589,6 +2599,15 @@ impl SqliteEventStore {
         let mut run = self
             .agent_run(instance.run_id)?
             .ok_or(StorageError::AgentRunNotFound(instance.run_id))?;
+        let run_revision = self
+            .organization_revision(run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                run.organization_revision_id,
+            ))?;
+        let active_revision = self
+            .organization(run_revision.organization_id)?
+            .ok_or_else(|| StorageError::Conflict("active organization was not found".into()))?;
+        let evaluation_only = active_revision.revision_id != run_revision.revision_id;
         if instance.state != AgentState::Running
             || lease.state != AgentLeaseState::Active
             || lease.instance_id != instance.id
@@ -2620,7 +2639,8 @@ impl SqliteEventStore {
         run.state = run_state;
         run.updated_at = at;
         let mut task_transition = None;
-        if let Some(mut task) = self.load_task(run.task_id)?
+        if !evaluation_only
+            && let Some(mut task) = self.load_task(run.task_id)?
             && task.state == TaskState::Active
         {
             let next = match disposition {
@@ -3637,6 +3657,129 @@ mod tests {
                 .is_err()
         );
         assert_eq!(reopened.event_count().expect("event count"), event_count);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Complete inactive-candidate authority chain is intentional.
+    fn failed_inactive_candidate_turn_cannot_change_the_real_task() {
+        let now = Utc::now();
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        let task = TaskEnvelope::new("real task remains authoritative");
+        store.create_task(&task).expect("task");
+        store
+            .transition_task(task.id, TaskState::Active)
+            .expect("active task");
+        let baseline = OrganizationGenome::consumer_default(now);
+        store
+            .record_organization_revision(&baseline)
+            .expect("baseline");
+        let mut candidate = baseline.clone();
+        candidate.revision_id = OrganizationRevisionId::new();
+        candidate.revision = 2;
+        candidate.parent_revision_id = Some(baseline.revision_id);
+        candidate.name = "evaluation-only candidate".into();
+        candidate.created_at = now + Duration::seconds(1);
+        store
+            .record_candidate_organization_revision(&candidate)
+            .expect("candidate");
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "evaluate without production authority",
+                RoleKind::Coder,
+                vec![SuccessCondition::Custom {
+                    description: "produce evaluation evidence".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&candidate, &planning, now + Duration::seconds(2))
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: candidate.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now + Duration::seconds(2),
+            updated_at: now + Duration::seconds(2),
+            completed_at: None,
+        };
+        store.create_agent_run(&run, &plan).expect("run");
+        store
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                now + Duration::seconds(3),
+            )
+            .expect("running");
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: plan.items[0].assigned_role,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:evaluation-only".into(),
+            confidence: ConfidenceEstimate::new(5_000, 0).expect("confidence"),
+            created_at: now + Duration::seconds(3),
+            updated_at: now + Duration::seconds(3),
+        };
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: Vec::new(),
+            reporting_interval_seconds: 30,
+            max_retries: 0,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: now + Duration::seconds(3),
+            expires_at: now + Duration::minutes(5),
+            heartbeat_at: now + Duration::seconds(3),
+        };
+        let (running, _) = store
+            .dispatch_agent_work(&instance, &lease, now + Duration::seconds(3))
+            .expect("dispatch");
+        store
+            .settle_agent_turn_error(
+                running.id,
+                lease.id,
+                AgentTurnDisposition::Failed,
+                "shadow_model_failure",
+                now + Duration::seconds(4),
+            )
+            .expect("settle shadow failure");
+        assert_eq!(
+            store
+                .load_task(task.id)
+                .expect("task")
+                .expect("present")
+                .state,
+            TaskState::Active
+        );
+        assert_eq!(
+            store
+                .agent_instance(instance.id)
+                .expect("instance")
+                .expect("present")
+                .state,
+            AgentState::Failed
+        );
     }
 
     #[test]
