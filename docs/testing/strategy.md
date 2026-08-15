@@ -164,7 +164,12 @@ machines. GitHub is source hosting only.
 M9 restart fixtures additionally prove that automatic ready shadow experiments
 create one stable inactive-candidate run, rebuild the copied task plan with an
 independent evaluator, never acquire host tools, and resume the same running
-identity after durable storage is reopened.
+identity after durable storage is reopened. A missing provider route creates no
+lease or model spend; crash-interrupted and failed leases remain explicit review
+boundaries instead of automatic paid retries. The deterministic provider fixture
+then completes every dependency-ordered candidate item, proves all tool outcomes
+remain empty, verifies the content-addressed result artifact, and confirms the
+receipt prevents another model call.
 
 ### Local release candidate
 

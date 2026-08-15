@@ -19,12 +19,13 @@ use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
     AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnCheckpoint,
     AgentTurnCheckpointSink, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
-    AgentUsageRecord, ConditionResult, ConfidenceEstimate, EvaluationEvidence, EvaluationOutcome,
-    EvaluationReport, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
-    ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
-    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
-    RunSupervisionSnapshot, ShadowExecutionReceipt, SuccessCondition, SupervisionAnalyzer,
-    SupervisionObservation, SupervisionSignal, TaskComplexity, WorkPlan,
+    AgentUsageRecord, ConditionResult, ConfidenceEstimate, EXPERIMENT_SCHEMA_VERSION,
+    EvaluationEvidence, EvaluationOutcome, EvaluationReport, ExperimentBenchmark,
+    ExperimentDecision, ExperimentDefinition, ExperimentMode, ExperimentState, ExternalToolBinding,
+    LeaseBudget, MeasuredCandidateDesigner, OrganizationGenome, OrganizationalMetrics, PlannedWork,
+    PlanningRequest, RoleKind, RunSupervisionSnapshot, ShadowAuthority, ShadowExecutionReceipt,
+    SuccessCondition, SupervisionAnalyzer, SupervisionObservation, SupervisionSignal,
+    TaskComplexity, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
@@ -414,6 +415,12 @@ pub struct AutomaticShadowLaunch {
     pub run: AgentRun,
     pub source_run_id: RunId,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomaticShadowExecution {
+    pub launch: AutomaticShadowLaunch,
+    pub receipt: ShadowExecutionReceipt,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3798,6 +3805,104 @@ impl AppRuntime {
             });
         }
         Ok(launches)
+    }
+
+    /// Executes stable automatic shadow plans with provider-only, zero-tool authority.
+    ///
+    /// A work item that already has a non-completed lease is never retried automatically. This
+    /// makes a crash-interrupted or failed paid turn an explicit review boundary. Successful full
+    /// plan output is captured in the local content-addressed artifact store before its immutable
+    /// evaluation-only receipt is recorded.
+    ///
+    /// # Errors
+    /// Returns an error for conflicting durable authority, provider failure, or artifact failure.
+    pub async fn execute_automatic_shadow_runs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AutomaticShadowExecution>, RuntimeError> {
+        let launches = self.start_ready_shadow_runs(limit)?;
+        if launches.is_empty() || self.provider_route_candidates().await?.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut executions = Vec::new();
+        for launch in launches {
+            if let Some(receipt) = self.execute_automatic_shadow_launch(&launch).await? {
+                executions.push(AutomaticShadowExecution { launch, receipt });
+            }
+        }
+        Ok(executions)
+    }
+
+    async fn execute_automatic_shadow_launch(
+        &self,
+        launch: &AutomaticShadowLaunch,
+    ) -> Result<Option<ShadowExecutionReceipt>, RuntimeError> {
+        let task = self
+            .task(launch.run.task_id)?
+            .ok_or(StorageError::TaskNotFound(launch.run.task_id))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            StorageError::InvalidData("automatic shadow task has no selected project".into())
+        })?;
+        let items = self.agent_run_view(launch.run.id)?.plan.items;
+        for item in items {
+            let view = self.agent_run_view(launch.run.id)?;
+            let completed = view
+                .leases
+                .iter()
+                .filter(|lease| lease.state == AgentLeaseState::Completed)
+                .map(|lease| lease.work_item_id)
+                .collect::<BTreeSet<_>>();
+            if completed.contains(&item.id) {
+                continue;
+            }
+            if view
+                .leases
+                .iter()
+                .any(|lease| lease.work_item_id == item.id)
+                || item
+                    .dependencies
+                    .iter()
+                    .any(|dependency| !completed.contains(dependency))
+            {
+                return Ok(None);
+            }
+            self.execute_agent_work(&AgentDispatchSpec {
+                run_id: launch.run.id,
+                work_item_id: item.id,
+                project_id,
+                target_path: None,
+                context_token_budget: 8_192,
+                requested_tools: Vec::new(),
+                estimated_output_tokens: 2_048,
+                max_model_calls: 4,
+            })
+            .await?;
+        }
+        let view = self.agent_run_view(launch.run.id)?;
+        if view.plan.items.iter().any(|item| {
+            !view.leases.iter().any(|lease| {
+                lease.work_item_id == item.id && lease.state == AgentLeaseState::Completed
+            })
+        }) {
+            return Ok(None);
+        }
+        let bytes = serde_json::to_vec(&view.results).map_err(StorageError::from)?;
+        let artifacts = self.config.data_directory.join("artifacts");
+        let artifact = ArtifactStore::open(&artifacts)
+            .map_err(runtime_tool_error)?
+            .capture(&bytes, "application/vnd.mcg.shadow-results+json")
+            .map_err(runtime_tool_error)?;
+        let receipt = ShadowExecutionReceipt {
+            schema_version: EXPERIMENT_SCHEMA_VERSION,
+            experiment_id: launch.experiment.id,
+            source_task_id: launch.run.task_id,
+            candidate_run_id: launch.run.id,
+            authority: ShadowAuthority::EvaluationOnly,
+            output_artifact_sha256: artifact.sha256,
+            completed_at: Utc::now(),
+        };
+        self.record_shadow_execution(&receipt)?;
+        Ok(Some(receipt))
     }
 
     fn load_or_create_automatic_shadow_run(
@@ -7392,8 +7497,8 @@ mod tests {
     use mcg_projects::{ContextAssembly, ContextCategory, ContextItem};
     use mcg_providers::{
         CONTRACT_VERSION, ContentPart, MessageRole, ModelCapabilities, ModelDescriptor,
-        ModelResponse, OutputItem, ProviderError, ProviderModelRef, RouteCandidate, RoutingPolicy,
-        ToolDefinition, Usage,
+        ModelResponse, OutputItem, ProviderAuthMode, ProviderError, ProviderKind, ProviderModelRef,
+        RouteCandidate, RoutingPolicy, ToolDefinition, Usage,
     };
     use mcg_tools::{
         BrokerControls, OutputRedactor, TOOL_SCHEMA_VERSION, ToolBroker, ToolExecutor, ToolOutcome,
@@ -7489,11 +7594,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::too_many_lines)] // One contiguous restart/exactly-once evidence scenario.
-    fn pending_evaluations_are_supervised_once_after_restart_including_empty_findings() {
+    async fn pending_evaluations_are_supervised_once_after_restart_including_empty_findings() {
         let directory = tempfile::tempdir().expect("data directory");
         let config = AppConfig::default().with_data_directory(directory.path());
+        let project_root = tempfile::tempdir().expect("project directory");
+        std::fs::write(project_root.path().join("package.json"), "{}").expect("manifest");
+        let project_id = ProjectId::new();
         let now = Utc::now();
         let run_id = RunId::new();
         let baseline_revision_id = OrganizationRevisionId::new();
@@ -7501,7 +7609,11 @@ mod tests {
         let passed_id = EvaluationId::new();
         {
             let runtime = AppRuntime::open(config.clone()).expect("runtime");
-            let task = TaskEnvelope::new("exercise automatic supervision");
+            runtime
+                .discover_project(project_root.path(), project_id)
+                .expect("project");
+            let mut task = TaskEnvelope::new("exercise automatic supervision");
+            task.project_id = Some(project_id);
             runtime.create_task(&task).expect("task");
             let genome = OrganizationGenome::consumer_default(now);
             let mut genome = genome;
@@ -7694,6 +7806,20 @@ mod tests {
         assert_ne!(shadow_launches[0].run.id, run_id);
         assert!(
             runtime
+                .execute_automatic_shadow_runs(2)
+                .await
+                .expect("no configured route is a safe no-op")
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .agent_run_view(shadow_launches[0].run.id)
+                .expect("shadow view")
+                .leases
+                .is_empty()
+        );
+        assert!(
+            runtime
                 .orchestrate_pending_candidates(8)
                 .expect("candidate marker replay")
                 .is_empty()
@@ -7728,7 +7854,7 @@ mod tests {
         );
         drop(runtime);
 
-        let reopened = AppRuntime::open(config).expect("second reopen");
+        let reopened = AppRuntime::open(config.clone()).expect("second reopen");
         assert_eq!(
             reopened
                 .supervision_observations()
@@ -7761,6 +7887,112 @@ mod tests {
         assert_eq!(resumed_shadow.len(), 1);
         assert!(resumed_shadow[0].replayed);
         assert_eq!(resumed_shadow[0].run.state, AgentRunState::Running);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture_calls = calls.clone();
+        let provider = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "shadow-model",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32_768
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                post(move || {
+                    let calls = fixture_calls.clone();
+                    async move {
+                        let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        Json(serde_json::json!({
+                            "id": format!("shadow-response-{call}"),
+                            "model": "shadow-model",
+                            "status": "completed",
+                            "output": [{
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "Evaluation-only candidate output."
+                                }]
+                            }],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 8,
+                                "total_tokens": 32
+                            }
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("shadow provider listener");
+        let address = listener.local_addr().expect("provider address");
+        tokio::spawn(async move {
+            axum::serve(listener, provider)
+                .await
+                .expect("shadow provider");
+        });
+        reopened
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "shadow_fixture".into(),
+                    display_name: "Shadow Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: format!("http://{address}/v1"),
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+        let executions = reopened
+            .execute_automatic_shadow_runs(2)
+            .await
+            .expect("execute candidate output");
+        assert_eq!(executions.len(), 1);
+        let receipt = &executions[0].receipt;
+        let shadow_view = reopened
+            .agent_run_view(receipt.candidate_run_id)
+            .expect("completed shadow turns");
+        assert_eq!(calls.load(Ordering::SeqCst), shadow_view.plan.items.len());
+        assert!(
+            shadow_view
+                .leases
+                .iter()
+                .all(|lease| lease.state == AgentLeaseState::Completed)
+        );
+        assert!(
+            shadow_view
+                .results
+                .iter()
+                .all(|result| result.tool_outcomes.is_empty())
+        );
+        let artifact = config
+            .data_directory
+            .join("artifacts")
+            .join(&receipt.output_artifact_sha256[..2])
+            .join(&receipt.output_artifact_sha256);
+        assert!(artifact.is_file());
+        assert!(
+            reopened
+                .execute_automatic_shadow_runs(2)
+                .await
+                .expect("receipt replay")
+                .is_empty()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), shadow_view.plan.items.len());
     }
 
     #[tokio::test]

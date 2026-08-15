@@ -48,7 +48,12 @@ changes during this automation; the generated shadow experiment stops in
 a stable run identity derived from the experiment, a fresh plan rebuilt against
 the inactive candidate, and no host authority. A crash after run creation or
 the `running` transition resumes that same candidate run rather than creating a
-second provider-work identity.
+second provider-work identity. When a discovered provider route exists, the
+scheduler executes dependency-ready items sequentially with an empty tool set.
+It never automatically retries an item after any non-completed durable lease;
+successful complete-plan output is retained in the local content-addressed
+artifact store before the immutable evaluation-only receipt commits. Missing
+routes are a no-spend no-op.
 
 ## Durable state
 

@@ -1179,9 +1179,9 @@ pub async fn run_scheduler_tick_at(
     runtime
         .orchestrate_pending_candidates(8)
         .map_err(|error| error.to_string())?;
-    runtime
-        .start_ready_shadow_runs(8)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = runtime.execute_automatic_shadow_runs(8).await {
+        tracing::warn!(%error, "automatic shadow execution paused for review or retry");
+    }
     runtime
         .poll_event_schedules(now)
         .map_err(|error| error.to_string())?;
