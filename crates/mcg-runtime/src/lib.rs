@@ -22,9 +22,9 @@ use mcg_agents::{
     AgentUsageRecord, ConditionResult, ConfidenceEstimate, EvaluationEvidence, EvaluationOutcome,
     EvaluationReport, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
     ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
-    OrganizationGenome, OrganizationalMetrics, RoleKind, RunSupervisionSnapshot,
-    ShadowExecutionReceipt, SuccessCondition, SupervisionAnalyzer, SupervisionObservation,
-    SupervisionSignal, WorkPlan,
+    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
+    RunSupervisionSnapshot, ShadowExecutionReceipt, SuccessCondition, SupervisionAnalyzer,
+    SupervisionObservation, SupervisionSignal, TaskComplexity, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
@@ -405,6 +405,14 @@ pub struct AgentRunView {
 pub struct InterfaceAgentRun {
     pub task: TaskEnvelope,
     pub view: AgentRunView,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomaticShadowLaunch {
+    pub experiment: ExperimentDefinition,
+    pub run: AgentRun,
+    pub source_run_id: RunId,
     pub replayed: bool,
 }
 
@@ -3716,6 +3724,166 @@ impl AppRuntime {
             })?)
     }
 
+    /// Creates or resumes stable evaluation-only runs for automatic shadow experiments.
+    ///
+    /// This stage creates no host authority and makes no provider call. A separate executor may
+    /// dispatch the returned running plan under the inactive-candidate tool restrictions.
+    ///
+    /// # Errors
+    /// Returns an error when source evidence, stable run identity, or experiment state conflicts.
+    pub fn start_ready_shadow_runs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AutomaticShadowLaunch>, RuntimeError> {
+        if !self.config.shadow_experiments {
+            return Ok(Vec::new());
+        }
+        let experiment_ids = self.store()?.executable_automatic_experiment_ids(limit)?;
+        let mut launches = Vec::with_capacity(experiment_ids.len());
+        for experiment_id in experiment_ids {
+            let mut experiment = self.experiment(experiment_id)?.ok_or_else(|| {
+                StorageError::Conflict("automatic experiment was not found".into())
+            })?;
+            let observation_id = *experiment.observation_ids.first().ok_or_else(|| {
+                StorageError::InvalidData("automatic experiment has no source observation".into())
+            })?;
+            let observation = self
+                .store()?
+                .supervision_observation(observation_id)?
+                .ok_or_else(|| StorageError::Conflict("source observation was not found".into()))?;
+            let source_run_id = observation.run_id.ok_or_else(|| {
+                StorageError::InvalidData("automatic experiment has no source run".into())
+            })?;
+            let source = self.agent_run_view(source_run_id)?;
+            if source.run.organization_revision_id != experiment.baseline_revision_id {
+                return Err(StorageError::Conflict(
+                    "automatic experiment source run does not use its baseline".into(),
+                )
+                .into());
+            }
+            let (mut run, replayed) =
+                self.load_or_create_automatic_shadow_run(&experiment, &source)?;
+            if matches!(
+                run.state,
+                AgentRunState::Planned | AgentRunState::Recovering
+            ) {
+                run =
+                    self.transition_agent_run(run.id, AgentRunState::Running, run.metrics.clone())?;
+            }
+            if run.state != AgentRunState::Running {
+                return Err(
+                    StorageError::Conflict("automatic shadow run is not resumable".into()).into(),
+                );
+            }
+            if experiment.state == ExperimentState::Ready {
+                experiment = self
+                    .transition_experiment(
+                        experiment.id,
+                        ExperimentState::Ready,
+                        ExperimentState::Running,
+                    )?
+                    .experiment;
+            }
+            if experiment.state != ExperimentState::Running {
+                return Err(StorageError::Conflict(
+                    "automatic shadow experiment is not running".into(),
+                )
+                .into());
+            }
+            launches.push(AutomaticShadowLaunch {
+                experiment,
+                run,
+                source_run_id,
+                replayed,
+            });
+        }
+        Ok(launches)
+    }
+
+    fn load_or_create_automatic_shadow_run(
+        &self,
+        experiment: &ExperimentDefinition,
+        source: &AgentRunView,
+    ) -> Result<(AgentRun, bool), RuntimeError> {
+        let candidate_run_id =
+            RunId::from_stable_bytes(automatic_shadow_run_id_bytes(experiment.id));
+        if let Some(run) = self.store()?.agent_run(candidate_run_id)? {
+            if run.task_id != source.run.task_id
+                || run.organization_revision_id != experiment.candidate_revision_id
+            {
+                return Err(StorageError::Conflict(
+                    "stable shadow run identity was reused with different authority".into(),
+                )
+                .into());
+            }
+            return Ok((run, true));
+        }
+        let candidate = self
+            .organization_revision(experiment.candidate_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                experiment.candidate_revision_id,
+            ))?;
+        let task = self
+            .task(source.run.task_id)?
+            .ok_or(StorageError::TaskNotFound(source.run.task_id))?;
+        let work = source
+            .plan
+            .items
+            .iter()
+            .map(|item| {
+                let role = candidate
+                    .roles
+                    .iter()
+                    .find(|role| role.id == item.assigned_role)
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "shadow source role is absent from candidate".into(),
+                        )
+                    })?;
+                Ok(PlannedWork {
+                    id: item.id,
+                    goal: item.goal.clone(),
+                    role: role.kind,
+                    dependencies: item.dependencies.clone(),
+                    success_conditions: item.success_conditions.clone(),
+                    risk_notes: item.risk_notes.clone(),
+                    budget_weight: 1,
+                    estimated_useful_seconds: 60,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let plan = mcg_agents::ExecutivePlanner::default()
+            .plan(
+                &candidate,
+                &PlanningRequest {
+                    run_id: candidate_run_id,
+                    task: task.clone(),
+                    complexity: if work.len() == 1 {
+                        TaskComplexity::Atomic
+                    } else {
+                        TaskComplexity::Compound
+                    },
+                    work,
+                    require_independent_evaluation: true,
+                },
+                experiment.updated_at,
+            )
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: candidate_run_id,
+            task_id: source.run.task_id,
+            organization_revision_id: experiment.candidate_revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: experiment.updated_at,
+            updated_at: experiment.updated_at,
+            completed_at: None,
+        };
+        self.create_agent_run(&run, &plan)?;
+        Ok((run, false))
+    }
+
     /// Loads a consumer evaluation checkpoint when objective execution has
     /// started or is waiting for approval.
     ///
@@ -5603,6 +5771,13 @@ fn automatic_experiment_id_bytes(
     let digest = Sha256::digest(format!(
         "mcg-auto-experiment\0{namespace}\0{observation_id}"
     ));
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes
+}
+
+fn automatic_shadow_run_id_bytes(experiment_id: ExperimentId) -> [u8; 16] {
+    let digest = Sha256::digest(format!("mcg-auto-shadow-run\0{experiment_id}"));
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     bytes
@@ -7503,6 +7678,20 @@ mod tests {
             .expect("present");
         assert!(candidate.evaluation.require_independent_evaluation);
         assert_eq!(candidate.parent_revision_id, Some(baseline_revision_id));
+        let shadow_launches = runtime
+            .start_ready_shadow_runs(2)
+            .expect("start evaluation-only shadow");
+        assert_eq!(shadow_launches.len(), 1);
+        assert!(!shadow_launches[0].replayed);
+        assert_eq!(
+            shadow_launches[0].run.organization_revision_id,
+            candidate.revision_id
+        );
+        assert_eq!(
+            shadow_launches[0].experiment.state,
+            ExperimentState::Running
+        );
+        assert_ne!(shadow_launches[0].run.id, run_id);
         assert!(
             runtime
                 .orchestrate_pending_candidates(8)
@@ -7564,8 +7753,14 @@ mod tests {
                 .expect("reopened experiment")
                 .expect("present")
                 .state,
-            ExperimentState::Ready
+            ExperimentState::Running
         );
+        let resumed_shadow = reopened
+            .start_ready_shadow_runs(2)
+            .expect("resume interrupted shadow");
+        assert_eq!(resumed_shadow.len(), 1);
+        assert!(resumed_shadow[0].replayed);
+        assert_eq!(resumed_shadow[0].run.state, AgentRunState::Running);
     }
 
     #[tokio::test]

@@ -161,6 +161,11 @@ machines. GitHub is source hosting only.
 - adversarial, fuzz, performance, and restart/recovery suites;
 - Windows and Linux packaged application smoke tests.
 
+M9 restart fixtures additionally prove that automatic ready shadow experiments
+create one stable inactive-candidate run, rebuild the copied task plan with an
+independent evaluator, never acquire host tools, and resume the same running
+identity after durable storage is reopened.
+
 ### Local release candidate
 
 - signed installer, upgrade, rollback, backup/restore, and uninstall tests;

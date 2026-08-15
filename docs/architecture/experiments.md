@@ -44,7 +44,11 @@ one bounded inactive candidate per organization. Stable candidate/experiment
 identities and migration 22 outcomes resume a candidate or draft experiment
 that committed immediately before a crash. The active organization head never
 changes during this automation; the generated shadow experiment stops in
-`ready` until evaluation-only execution begins.
+`ready` until evaluation-only execution begins. Ready experiments then receive
+a stable run identity derived from the experiment, a fresh plan rebuilt against
+the inactive candidate, and no host authority. A crash after run creation or
+the `running` transition resumes that same candidate run rather than creating a
+second provider-work identity.
 
 ## Durable state
 

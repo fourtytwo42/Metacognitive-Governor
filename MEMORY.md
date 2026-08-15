@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Complete M9 measured metacognitive improvement after establishing its durable supervision/experiment foundation.
-- Last meaningful change: Eligible slow-loop regression findings now automatically produce bounded inactive organization candidates and `ready` shadow experiments. Migration 22 retains immutable ready/stale outcomes; stable identities resume candidates and draft experiments across crash windows without changing the active organization head.
-- Next step: Execute ready candidates under explicit evaluation-only shadow authority, automatically derive paired benchmarks from real run evidence, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
+- Last meaningful change: Automatic ready experiments now create or resume one stable evaluation-only candidate run. The copied task is replanned against the inactive organization with independent evaluation, zero host authority, and restart-safe identity; the baseline task and active organization remain untouched.
+- Next step: Dispatch the stable candidate plan through an eligible provider under zero-tool shadow authority, retain independently evaluated output, automatically derive paired benchmarks, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
 - Blockers: None documented.
 
 ## Current State
@@ -26,6 +26,7 @@ Durable project context lives here. Update this file whenever information should
 - M9 automatic supervision analyzes only durable run/evaluation evidence. Every daemon scheduler tick drains up to 32 unsupervised evaluations; migration 21 records an immutable exactly-once marker even when no signal is produced, and processed evaluations replay their stored result rather than recomputing against later mutable run projections.
 - M9 candidate orchestration is enabled by default in development/test builds and opt-in in releases through `MCG_SHADOW_EXPERIMENTS`. The effective value is authenticated status/CLI-visible. When enabled, scheduler ticks create at most one active automatic candidate experiment per organization; regression candidates require independent evaluation, raise the confidence floor, and permit bounded Coder/Evaluator model escalation. Candidate/draft partial commits resume safely and the baseline stays active.
 - Inactive organization revisions are an enforced evaluation-only authority class: empty tool requests resolve to zero tools, explicit host/MCP tool requests fail closed, completed candidate turns cannot contain tool outcomes, and a failed candidate turn cannot transition the real task projection.
+- Automatic ready/running experiments without a receipt map to one digest-derived candidate run. Planning reuses copied task goals and conditions but resolves roles against the candidate and requires an independent Evaluator; planned/recovering runs advance to running and resume after reopen without creating a second paid-work identity.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
 - M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. Its client supports current/legacy HTTP and stdio configuration/discovery/calls through API, CLI, and desktop; expanded run-control/evaluation contracts remain in scope.
@@ -145,6 +146,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-15: Stable automatic shadow-run start passed formatting, 32 storage tests, 12 runtime tests, 45 API tests, the focused file-backed crash/reopen scenario, and strict all-feature/all-target Clippy for domain/storage/runtime/API. Each daemon scheduler tick now advances ready experiments: the copied plan is rebuilt against the inactive candidate with an independent evaluator, uses one digest-derived run identity, advances to running without provider or tool work, and resumes that same run after startup recovery. Automatic provider dispatch, output evaluation, and paired benchmarks remain next; no GitHub-hosted compute ran.
 
 - 2026-08-15: Shadow-authority hardening passed strict storage/runtime Clippy, formatting, 32 storage tests, and 12 runtime tests. Inactive candidates receive no default tools, reject explicit local/MCP tools, cannot commit tool outcomes, and do not block or otherwise transition the source task when their provider turn fails. This is the execution-plane prerequisite for automatic real-work shadow runs.
 

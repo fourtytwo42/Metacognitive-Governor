@@ -139,6 +139,16 @@ impl ExperimentId {
     }
 }
 
+impl RunId {
+    /// Creates a stable evaluation-only shadow-run identity from a 128-bit digest.
+    #[must_use]
+    pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {

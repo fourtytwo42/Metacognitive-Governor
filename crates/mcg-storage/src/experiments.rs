@@ -52,6 +52,46 @@ pub struct AutomaticExperimentOutcome {
 }
 
 impl SqliteEventStore {
+    /// Lists automatic experiments that are ready to start or running without a receipt.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds, malformed identities, or database failures.
+    pub fn executable_automatic_experiment_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExperimentId>, StorageError> {
+        if limit == 0 || limit > 128 {
+            return Err(StorageError::InvalidData(
+                "automatic shadow batch must contain 1 to 128 experiments".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StorageError::InvalidData("shadow batch is too large".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT e.experiment_id
+             FROM automatic_experiment_outcomes a
+             JOIN experiments e ON e.experiment_id = a.experiment_id
+             LEFT JOIN shadow_execution_receipts r ON r.experiment_id = e.experiment_id
+             WHERE a.disposition = 'ready'
+               AND e.state IN ('ready', 'running')
+               AND r.experiment_id IS NULL
+             ORDER BY e.created_at, e.experiment_id LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row?.parse().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "experiment_id".into(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
     /// Lists slow-loop observations that have no durable orchestration outcome.
     ///
     /// # Errors
