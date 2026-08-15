@@ -235,8 +235,16 @@ impl FilesystemExecutor {
         let mut pending = VecDeque::from([relative.clone()]);
         let mut entries = Vec::new();
         while let Some(directory) = pending.pop_front() {
+            // `strip_prefix` represents the capability root as an empty path,
+            // while cap-std requires `.` to open that directory on Unix. Keep
+            // the logical path empty so returned entries stay project-relative.
+            let open_directory = if directory.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                directory.as_path()
+            };
             let read_dir = root
-                .read_dir(&directory)
+                .read_dir(open_directory)
                 .map_err(|error| ToolError::Execution(format!("list directory: {error}")))?;
             for entry in read_dir {
                 let entry = entry.map_err(|error| {
@@ -604,6 +612,38 @@ mod tests {
                 Err(ToolError::Denied(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn capability_root_can_be_listed_without_leaking_dot_prefixes() {
+        let (project, executor) = executor();
+        std::fs::write(project.path().join("root.txt"), "fixture").expect("fixture");
+        std::fs::create_dir(project.path().join("src")).expect("source directory");
+        std::fs::write(project.path().join("src").join("nested.txt"), "fixture")
+            .expect("nested fixture");
+        let request = ToolRequest::new(
+            mcg_domain::TaskId::new(),
+            "list root",
+            ToolRequestKind::FsList {
+                path: project.path().to_string_lossy().into_owned(),
+                recursive: true,
+                max_entries: 16,
+            },
+        );
+
+        let observed = executor
+            .execute(ToolExecutionId::new(), &request)
+            .await
+            .expect("list capability root");
+        let entries = serde_json::from_str::<Vec<String>>(
+            observed.stdout.as_deref().expect("listing output"),
+        )
+        .expect("listing JSON");
+
+        assert!(entries.contains(&"root.txt".into()));
+        assert!(entries.contains(&"src".into()));
+        assert!(entries.contains(&"src/nested.txt".into()));
+        assert!(entries.iter().all(|entry| !entry.starts_with("./")));
     }
 
     #[tokio::test]
