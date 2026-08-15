@@ -176,8 +176,13 @@ transcript, malformed references remain inconclusive, and transcript bytes are
 independently re-hashed and matched to the exact condition before trusted code
 derives pass/fail from timeout and exit status. The automatic
 promotion/restart scenario combines real private-file evidence with an injected
-qualified command fixture; production still uses the unavailable backend until
-a platform implementation passes equivalent Windows and Linux adversarial gates.
+qualified command fixture. Cross-platform unit tests prove the Linux profile has
+no network sharing, mounts the retained workspace read-only, executes in a
+bounded tmpfs, preserves argument-vector semantics, rejects unsafe workspaces,
+and creates no evidence when the sandbox executable is absent. On Linux, an
+installed trusted bubblewrap additionally runs a live ephemeral-write and
+`/etc/passwd` escape scenario. Windows remains unavailable until a backend passes
+equivalent host adversarial gates.
 The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision promotes only the
 independently verified candidate while retaining one evaluation, benchmark, and

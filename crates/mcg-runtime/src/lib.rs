@@ -91,9 +91,11 @@ use mcg_tools::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use shadow_verification::UnavailableShadowCommandVerifier;
 use shadow_verification::{
     SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION, ShadowCommandTranscript, ShadowCommandVerification,
-    ShadowCommandVerifier, UnavailableShadowCommandVerifier,
+    ShadowCommandVerifier, default_shadow_command_verifier,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -913,7 +915,7 @@ impl AppRuntime {
             mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
-            shadow_command_verifier: Arc::new(UnavailableShadowCommandVerifier),
+            shadow_command_verifier: default_shadow_command_verifier(),
         }
     }
 
@@ -8202,8 +8204,8 @@ async fn verify_isolated_command_condition(
                 .filter(|record| {
                     record.schema_version == SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION
                         && record.condition == *condition
-                        && valid_optional_sha256(record.stdout_sha256.as_deref())
-                        && valid_optional_sha256(record.stderr_sha256.as_deref())
+                        && valid_optional_artifact(artifacts, record.stdout.as_ref())
+                        && valid_optional_artifact(artifacts, record.stderr.as_ref())
                 });
             let Some(record) = parsed else {
                 return (
@@ -8245,9 +8247,14 @@ async fn verify_isolated_command_condition(
     }
 }
 
-fn valid_optional_sha256(value: Option<&str>) -> bool {
-    value.is_none_or(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+fn valid_optional_artifact(
+    artifacts: &ArtifactStore,
+    artifact: Option<&mcg_tools::ArtifactReference>,
+) -> bool {
+    artifact.is_none_or(|artifact| {
+        artifacts
+            .verify_reference(artifact, SHADOW_MAX_COMMAND_TRANSCRIPT_BYTES)
+            .is_ok()
     })
 }
 
@@ -8738,6 +8745,7 @@ mod tests {
         Pass,
         Fail,
         MismatchedCondition,
+        InvalidOutputEvidence,
         InvalidEvidence,
     }
 
@@ -8776,8 +8784,16 @@ mod tests {
                 },
                 exit_code: Some(i32::from(!passed)),
                 timed_out: false,
-                stdout_sha256: None,
-                stderr_sha256: None,
+                stdout: matches!(self.0, FixtureShadowCommandResult::InvalidOutputEvidence).then(
+                    || mcg_tools::ArtifactReference {
+                        id: mcg_domain::ArtifactId::new(),
+                        sha256: "f".repeat(64),
+                        media_type: "text/plain".into(),
+                        size_bytes: 1,
+                        relative_path: format!("ff/{}", "f".repeat(64)),
+                    },
+                ),
+                stderr: None,
             })
             .expect("serialize fixture transcript");
             let transcript = artifacts
@@ -8999,6 +9015,17 @@ mod tests {
 
         let (result, evidence, supported) = verify_isolated_command_condition(
             &FixtureShadowCommandVerifier(FixtureShadowCommandResult::MismatchedCondition),
+            &artifacts,
+            workspace.path(),
+            &condition,
+        )
+        .await;
+        assert!(!supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+
+        let (result, evidence, supported) = verify_isolated_command_condition(
+            &FixtureShadowCommandVerifier(FixtureShadowCommandResult::InvalidOutputEvidence),
             &artifacts,
             workspace.path(),
             &condition,

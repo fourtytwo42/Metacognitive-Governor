@@ -84,14 +84,24 @@ Build, test, static-analysis, and exact `COMMAND SUCCEEDS` conditions now cross
 an explicit shadow-command-verifier boundary. A conforming backend must enforce
 filesystem, child-process, credential, and network isolation at the operating
 system boundary and return a bounded content-addressed transcript. The default
-backend is deliberately unavailable on every host: it launches no process and
-keeps those conditions inconclusive. Constraining only the child working
-directory is explicitly insufficient. This contract prevents later Linux,
-Windows, container, or VM backends from weakening shadow authority while host
-qualification is still pending. The trusted runtime reopens and hashes the
-versioned transcript, requires it to bind the exact condition, validates any
-output digests, and derives pass/fail from timeout and exit status rather than
-trusting a backend-supplied verdict.
+backend is unavailable on Windows and on Linux hosts without a trusted
+root-owned, non-setuid/non-setgid, non-writable `/usr/bin/bwrap` plus
+`/usr/bin/prlimit`; bubblewrap must be version 0.11.2 or newer. Otherwise it
+launches no process and keeps those conditions
+inconclusive. The Linux backend uses an empty mount namespace, unshares the
+network and every supported namespace, disables nested user namespaces, starts
+a new session, drops all capabilities, clears the environment, exposes only
+read-only system runtime paths and the retained source, and copies that source
+into a size-bounded private tmpfs. CPU time, address space, individual file
+size, process count, open files, output, source size/count/depth, and wall time
+are bounded. Command filesystem changes disappear with the tmpfs. A separate
+private proof file must show that setup completed before any exit can count as
+command evidence. Constraining only the child working directory is explicitly
+insufficient. The trusted runtime reopens and hashes the versioned transcript,
+requires it to bind the exact condition, independently verifies optional output
+artifacts, and derives pass/fail from timeout and exit status rather than
+trusting a backend-supplied verdict. Linux adversarial host qualification and a
+matching Windows backend remain required before this slice is production-complete.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and
