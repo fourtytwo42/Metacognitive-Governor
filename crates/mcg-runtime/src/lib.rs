@@ -70,12 +70,14 @@ use mcg_providers::{
 };
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
-    ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
+    ConsumerEvaluationCheckpointState, DataDirectoryLock, RecoveryReport, SqliteEventStore,
+    StorageError, acquire_data_directory_lock,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
-    AutomaticSupervisionMutation, CandidateRevisionMutation, ExperimentMutation, ScheduleClaim,
-    ScheduleWakeMutation, ShadowWorkspaceMutation,
+    AutomaticSupervisionMutation, BackupBundleManifest, BackupBundleSummary,
+    CandidateRevisionMutation, ExperimentMutation, ScheduleClaim, ScheduleWakeMutation,
+    ShadowWorkspaceMutation, create_backup_bundle_from_snapshot, verify_backup_bundle,
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
@@ -326,6 +328,7 @@ impl RuntimeError {
                     | StorageError::ScheduleNotFound(_)
                     | StorageError::PlatformSessionNotFound(_)
                     | StorageError::SiteNotFound(_)
+                    | StorageError::BackupNotFound(_)
             )
         )
     }
@@ -698,6 +701,7 @@ impl LocalAuth {
 
 pub struct AppRuntime {
     config: AppConfig,
+    _data_lock: Option<DataDirectoryLock>,
     settings: Arc<RwLock<UserSettings>>,
     store: Arc<Mutex<SqliteEventStore>>,
     event_sender: broadcast::Sender<EventEnvelope>,
@@ -746,6 +750,7 @@ impl AppRuntime {
     pub fn open(config: AppConfig) -> Result<Self, RuntimeError> {
         fs::create_dir_all(&config.data_directory)?;
         restrict_to_owner(&config.data_directory, 0o700)?;
+        let data_lock = acquire_data_directory_lock(&config.data_directory)?;
         let auth = LocalAuth::load_or_create(&config.auth_token_path())?;
         let mut store = SqliteEventStore::open(config.database_path())?;
         restrict_to_owner(&config.database_path(), 0o600)?;
@@ -775,6 +780,7 @@ impl AppRuntime {
         let mcp_credentials: Arc<dyn McpCredentialStore> = Arc::new(OsMcpCredentialStore);
         Ok(Self::assemble(
             config,
+            Some(data_lock),
             settings,
             store,
             auth,
@@ -853,6 +859,7 @@ impl AppRuntime {
             Arc::new(MemoryMcpCredentialStore::default());
         Ok(Self::assemble(
             config,
+            None,
             settings,
             store,
             auth,
@@ -879,6 +886,7 @@ impl AppRuntime {
     #[allow(clippy::too_many_arguments)] // Centralizes all recovered state and injected secure boundaries.
     fn assemble(
         config: AppConfig,
+        data_lock: Option<DataDirectoryLock>,
         settings: UserSettings,
         store: SqliteEventStore,
         auth: LocalAuth,
@@ -903,6 +911,7 @@ impl AppRuntime {
         let (event_sender, _) = broadcast::channel(256);
         Self {
             config,
+            _data_lock: data_lock,
             settings: Arc::new(RwLock::new(settings)),
             store: Arc::new(Mutex::new(store)),
             event_sender,
@@ -1010,6 +1019,76 @@ impl AppRuntime {
     /// Returns decoding or storage failures.
     pub fn user_settings_history(&self) -> Result<Vec<UserSettingsRevision>, RuntimeError> {
         Ok(self.store()?.user_settings_history()?)
+    }
+
+    /// Creates or verifies one caller-identified portable, secret-free backup.
+    ///
+    /// # Errors
+    /// Returns storage, filesystem, snapshot, or integrity failures.
+    pub fn create_backup(&self, backup_id: Uuid) -> Result<BackupBundleSummary, RuntimeError> {
+        let directory = self.config.data_directory.join("backups");
+        fs::create_dir_all(&directory)?;
+        restrict_to_owner(&directory, 0o700)?;
+        let destination = directory.join(format!("{backup_id}.mcgb"));
+        if destination.exists() {
+            return Ok(verify_backup_bundle(&destination)?);
+        }
+        let snapshot = directory.join(format!(".mcgb-{backup_id}-{}.sqlite3", Uuid::new_v4()));
+        let snapshot_result = self.store()?.snapshot_database(&snapshot);
+        if let Err(error) = snapshot_result {
+            let _ = fs::remove_file(&snapshot);
+            return Err(error.into());
+        }
+        let summary = create_backup_bundle_from_snapshot(
+            &snapshot,
+            &self.config.data_directory,
+            &destination,
+            env!("CARGO_PKG_VERSION"),
+            Utc::now(),
+        );
+        let _ = fs::remove_file(&snapshot);
+        let summary = summary?;
+        restrict_to_owner(&destination, 0o600)?;
+        Ok(summary)
+    }
+
+    /// Lists and verifies every portable backup in deterministic name order.
+    ///
+    /// # Errors
+    /// Returns filesystem or integrity failures. Invalid bundles never appear healthy.
+    pub fn backups(&self) -> Result<Vec<BackupBundleSummary>, RuntimeError> {
+        let directory = self.config.data_directory.join("backups");
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("mcgb") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        paths
+            .iter()
+            .map(|path| verify_backup_bundle(path).map_err(RuntimeError::from))
+            .collect()
+    }
+
+    /// Verifies one caller-identified backup without changing runtime state.
+    ///
+    /// # Errors
+    /// Returns missing-file, format, or integrity failures.
+    pub fn verify_backup(&self, backup_id: Uuid) -> Result<BackupBundleSummary, RuntimeError> {
+        let path = self
+            .config
+            .data_directory
+            .join("backups")
+            .join(format!("{backup_id}.mcgb"));
+        if !path.exists() {
+            return Err(StorageError::BackupNotFound(backup_id).into());
+        }
+        Ok(verify_backup_bundle(&path)?)
     }
 
     #[must_use]

@@ -75,6 +75,9 @@ const client = vi.hoisted(() => ({
   ,getSettings: vi.fn()
   ,updateSettings: vi.fn()
   ,settingsHistory: vi.fn()
+  ,listBackups: vi.fn()
+  ,createBackup: vi.fn()
+  ,verifyBackup: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -150,7 +153,10 @@ vi.mock("./desktop-client", () => ({
   decideExperiment: client.decideExperiment,
   getUserSettings: client.getSettings,
   updateUserSettings: client.updateSettings,
-  loadUserSettingsHistory: client.settingsHistory
+  loadUserSettingsHistory: client.settingsHistory,
+  listBackups: client.listBackups,
+  createBackup: client.createBackup,
+  verifyBackup: client.verifyBackup
 }));
 
 import { App } from "./App";
@@ -229,6 +235,9 @@ beforeEach(() => {
   client.getSettings.mockReset();
   client.updateSettings.mockReset();
   client.settingsHistory.mockReset();
+  client.listBackups.mockReset();
+  client.createBackup.mockReset();
+  client.verifyBackup.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.proxyUsage.mockResolvedValue({
@@ -280,6 +289,7 @@ beforeEach(() => {
   client.settingsHistory.mockResolvedValue({
     revisions: [{ settings, reason: "initial settings", changed_at: settings.updated_at }]
   });
+  client.listBackups.mockResolvedValue({ backups: [] });
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
     revision: request.expected_revision + 1,
@@ -318,6 +328,32 @@ test("owner settings persist autonomy with optimistic revision control", async (
   }));
   expect(await screen.findByText("Revision 2")).toBeInTheDocument();
   expect(within(panel).getByText("Ask before consequential local actions.")).toBeInTheDocument();
+});
+
+test("portable backup creation is explicit secret-free and verifiable", async () => {
+  const backup = {
+    backup_id: "00000000-0000-4000-8000-000000000401",
+    file_name: "00000000-0000-4000-8000-000000000401.mcgb",
+    sha256: "a".repeat(64),
+    size_bytes: 4096,
+    manifest: {
+      schema_version: 1,
+      application_version: "0.1.0",
+      created_at: "2026-08-15T00:00:00Z",
+      secrets_included: false,
+      entries: [{ path: "state/mcg.sqlite3", size_bytes: 2048, sha256: "b".repeat(64) }]
+    }
+  };
+  client.createBackup.mockResolvedValue(backup);
+  client.verifyBackup.mockResolvedValue(backup);
+  render(<App />);
+  const panel = await screen.findByLabelText("Portable backups");
+  fireEvent.click(within(panel).getByRole("button", { name: "Create backup" }));
+  await waitFor(() => expect(client.createBackup).toHaveBeenCalledWith(expect.any(String)));
+  expect(await within(panel).findByText(backup.file_name)).toBeInTheDocument();
+  expect(within(panel).getByText(/secrets excluded/)).toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Verify" }));
+  await waitFor(() => expect(client.verifyBackup).toHaveBeenCalledWith(backup.backup_id));
 });
 
 test("measured improvement stays simple by default and exposes controlled transitions in advanced mode", async () => {

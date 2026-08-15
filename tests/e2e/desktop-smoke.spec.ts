@@ -17,6 +17,7 @@ test.beforeEach(async ({ page }) => {
         invoke: async (command: string, args: { request?: typeof initial & { reason?: string } } = {}) => {
           if (command === "get_user_settings") return settings;
           if (command === "user_settings_history") return { revisions: [...history] };
+          if (command === "list_backups") return { backups: [] };
           if (command === "update_user_settings" && args.request) {
             settings = {
               schema_version: 1,

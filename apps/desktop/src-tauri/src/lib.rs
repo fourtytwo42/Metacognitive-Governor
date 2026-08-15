@@ -4,20 +4,21 @@ use mcg_agents::{
 };
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
-    CheckSiteHealthRequest, ClosePlatformSessionRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
-    CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, ExperimentBenchmarkListResponse,
-    ExperimentDecisionListResponse, ExperimentListResponse, LaunchTaskRequest, LaunchTaskResponse,
-    McpListResponse, NavigateBrowserSessionRequest, PlatformSessionHistoryResponse,
-    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
-    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, ShadowExecutionListResponse,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
-    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionExperimentRequest,
-    TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest,
+    BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
+    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
+    DiscoverProjectRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
+    ExperimentListResponse, LaunchTaskRequest, LaunchTaskResponse, McpListResponse,
+    NavigateBrowserSessionRequest, PlatformSessionHistoryResponse, PlatformSessionListResponse,
+    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
+    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionExperimentRequest, TransitionTaskRequest, UpdateSiteRequest,
+    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
+    WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
@@ -273,6 +274,61 @@ async fn user_settings_history() -> Result<UserSettingsHistoryResponse, String> 
         .json()
         .await
         .map_err(|error| format!("Settings history response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_backups() -> Result<BackupListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/backups"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Backups could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Backup listing").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Backup list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn create_backup(backup_id: String) -> Result<BackupSummaryResponse, String> {
+    let backup_id = uuid::Uuid::parse_str(&backup_id)
+        .map_err(|_| "Backup identity must be a UUID".to_owned())?;
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/backups/{backup_id}"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Backup could not be created: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Backup creation").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Backup response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn verify_backup(backup_id: String) -> Result<BackupSummaryResponse, String> {
+    let backup_id = uuid::Uuid::parse_str(&backup_id)
+        .map_err(|_| "Backup identity must be a UUID".to_owned())?;
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/backups/{backup_id}/verify"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Backup could not be verified: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Backup verification").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Backup verification response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -1522,6 +1578,9 @@ pub fn run() {
             get_user_settings,
             update_user_settings,
             user_settings_history,
+            list_backups,
+            create_backup,
+            verify_backup,
             provider_proxy_usage,
             provider_proxy_conversations,
             configure_provider,

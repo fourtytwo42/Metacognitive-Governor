@@ -30,6 +30,30 @@ export interface UserSettingsRevision {
   changed_at: string;
 }
 
+export interface BackupBundleEntry {
+  path: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface BackupSummary {
+  backup_id: string;
+  file_name: string;
+  sha256: string;
+  size_bytes: number;
+  manifest: {
+    schema_version: number;
+    application_version: string;
+    created_at: string;
+    secrets_included: boolean;
+    entries: BackupBundleEntry[];
+  };
+}
+
+export interface BackupListResponse {
+  backups: BackupSummary[];
+}
+
 export interface OAuthLoginStart {
   session_id: string;
   connection_id: string;
@@ -625,6 +649,18 @@ export function updateUserSettings(request: UpdateUserSettingsRequest): Promise<
 
 export function loadUserSettingsHistory(): Promise<UserSettingsHistoryResponse> {
   return invoke("user_settings_history");
+}
+
+export function listBackups(): Promise<BackupListResponse> {
+  return invoke("list_backups");
+}
+
+export function createBackup(backupId: string): Promise<BackupSummary> {
+  return invoke("create_backup", { backupId });
+}
+
+export function verifyBackup(backupId: string): Promise<BackupSummary> {
+  return invoke("verify_backup", { backupId });
 }
 
 export function providerProxyUsage(): Promise<ProxyUsageSummary> {

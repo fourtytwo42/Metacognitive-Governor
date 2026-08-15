@@ -69,6 +69,8 @@ The M8 host capability, durable session identity, custody, and restart rules are
 detailed in [`platform-sessions.md`](platform-sessions.md).
 The live owner-control boundary and its revision/restart guarantees are detailed
 in [`settings.md`](settings.md).
+Portable cognitive-state preservation, secret exclusion, and offline recovery
+are detailed in [`backups.md`](backups.md).
 Provider, tool, and storage implementations depend on domain contracts; runtime
 orchestrates them through traits. API clients never reach storage directly.
 

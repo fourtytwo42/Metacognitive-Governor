@@ -1,6 +1,7 @@
 use std::{io::Read, path::PathBuf, str::FromStr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
@@ -9,25 +10,25 @@ use mcg_agents::{
 };
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
-    AttachBrowserSessionRequest, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
-    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
-    CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
-    ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
-    ExperimentListResponse, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    NavigateBrowserSessionRequest, OrganizationListResponse, OrganizationMutationResponse,
-    PlanAgentRunRequest, PlanWorkRequest, PlatformSessionHistoryResponse,
-    PlatformSessionListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
-    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, ShadowExecutionListResponse,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
-    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
-    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest,
+    AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
+    CorrectMemoryClaimRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
+    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
+    DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
+    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
+    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionAgentRunRequest, TransitionExperimentRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
+    UpdateUserSettingsRequest, UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
@@ -54,6 +55,7 @@ use mcg_runtime::{
     RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
     SshHostMutation, SshOperationMutation, SupervisionMutation,
 };
+use mcg_storage::{restore_backup_bundle, verify_backup_bundle};
 use mcg_tools::{
     ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
     PersistentBrowserObservation,
@@ -118,6 +120,11 @@ enum Command {
     Settings {
         #[command(subcommand)]
         command: SettingsCommand,
+    },
+    /// Create, inspect, and restore portable secret-free backups.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
     },
     /// Create and inspect durable tasks.
     Task {
@@ -203,6 +210,34 @@ enum SettingsCommand {
     History {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Create an online-consistent backup through the running daemon.
+    Create {
+        #[arg(long)]
+        backup_id: Option<uuid::Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List and verify backups owned by the running daemon.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify any transferred .mcgb bundle without contacting the daemon.
+    Verify {
+        bundle: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a verified bundle while the daemon is stopped.
+    Restore {
+        bundle: PathBuf,
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -1125,6 +1160,26 @@ impl From<TaskStateArg> for TaskState {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = AppConfig::default();
+    if let Command::Backup { command } = &cli.command {
+        match command {
+            BackupCommand::Verify { bundle, json } => {
+                print_backup_bundle(&verify_backup_bundle(bundle)?, *json)?;
+                return Ok(());
+            }
+            BackupCommand::Restore { bundle, confirm } => {
+                if !confirm {
+                    return Err("backup restore requires --confirm and a stopped daemon".into());
+                }
+                let summary = restore_backup_bundle(bundle, &config.data_directory, Utc::now())?;
+                println!(
+                    "Restored {}. A pre-restore database backup was retained. Start mcg-daemon to migrate and recover projections.",
+                    summary.path.display()
+                );
+                return Ok(());
+            }
+            BackupCommand::Create { .. } | BackupCommand::List { .. } => {}
+        }
+    }
     let token = if let Ok(token) = std::env::var("MCG_AUTH_TOKEN") {
         token
     } else {
@@ -1143,6 +1198,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Status { json } => run_status(&client, host, token.trim(), json).await?,
         Command::Settings { command } => {
             run_settings(&client, host, token.trim(), command).await?;
+        }
+        Command::Backup { command } => {
+            run_backup(&client, host, token.trim(), command).await?;
         }
         Command::Task { command } => run_task(&client, host, token.trim(), command).await?,
         Command::Approval { command } => run_approval(&client, host, token.trim(), command).await?,
@@ -2619,6 +2677,84 @@ async fn run_settings(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+async fn run_backup(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: BackupCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        BackupCommand::Create { backup_id, json } => {
+            let backup_id = backup_id.unwrap_or_else(uuid::Uuid::new_v4);
+            let summary: BackupSummaryResponse = client
+                .post(format!("{host}/api/v1/backups/{backup_id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_backup_summary(&summary, json)?;
+        }
+        BackupCommand::List { json } => {
+            let response: BackupListResponse = client
+                .get(format!("{host}/api/v1/backups"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.backups.is_empty() {
+                println!("No portable backups have been created.");
+            } else {
+                for backup in response.backups {
+                    print_backup_summary(&backup, false)?;
+                }
+            }
+        }
+        BackupCommand::Verify { .. } | BackupCommand::Restore { .. } => {
+            unreachable!("offline backup commands return before daemon authentication")
+        }
+    }
+    Ok(())
+}
+
+fn print_backup_summary(
+    summary: &BackupSummaryResponse,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+    } else {
+        println!(
+            "{}  {} bytes  sha256={}  created={}  secrets=excluded",
+            summary.file_name, summary.size_bytes, summary.sha256, summary.manifest.created_at
+        );
+    }
+    Ok(())
+}
+
+fn print_backup_bundle(
+    summary: &mcg_storage::BackupBundleSummary,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+    } else {
+        println!(
+            "{} is valid: {} bytes, {} entries, sha256={}, secrets excluded",
+            summary.path.display(),
+            summary.size_bytes,
+            summary.manifest.entries.len(),
+            summary.sha256
+        );
     }
     Ok(())
 }
@@ -4274,6 +4410,36 @@ mod tests {
             history.command,
             Command::Settings {
                 command: SettingsCommand::History { json: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn backup_commands_separate_online_creation_from_confirmed_offline_restore() {
+        let create = Cli::try_parse_from([
+            "mcg",
+            "backup",
+            "create",
+            "--backup-id",
+            "00000000-0000-4000-8000-000000000401",
+            "--json",
+        ])
+        .expect("backup create command");
+        assert!(matches!(
+            create.command,
+            Command::Backup {
+                command: BackupCommand::Create {
+                    backup_id: Some(_),
+                    json: true
+                }
+            }
+        ));
+        let restore = Cli::try_parse_from(["mcg", "backup", "restore", "owner.mcgb", "--confirm"])
+            .expect("backup restore command");
+        assert!(matches!(
+            restore.command,
+            Command::Backup {
+                command: BackupCommand::Restore { confirm: true, .. }
             }
         ));
     }

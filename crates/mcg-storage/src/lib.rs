@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod agents;
+mod backup;
 mod experiments;
 mod mcp;
 mod platform;
@@ -26,6 +27,12 @@ mod settings;
 mod shadow_workspaces;
 mod sites;
 mod ssh;
+
+pub use backup::{
+    BACKUP_BUNDLE_SCHEMA_VERSION, BackupBundleEntry, BackupBundleManifest, BackupBundleSummary,
+    DataDirectoryLock, acquire_data_directory_lock, create_backup_bundle,
+    create_backup_bundle_from_snapshot, restore_backup_bundle, verify_backup_bundle,
+};
 
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
@@ -39,6 +46,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
+pub const STORAGE_SCHEMA_VERSION: i64 = 25;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -901,6 +909,8 @@ END;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[error("storage I/O failed: {0}")]
+    Io(#[from] std::io::Error),
     #[error("SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON serialization failed: {0}")]
@@ -929,6 +939,8 @@ pub enum StorageError {
     SiteNotFound(mcg_domain::SiteId),
     #[error("SSH host {0} was not found")]
     SshHostNotFound(mcg_domain::SshHostId),
+    #[error("backup {0} was not found")]
+    BackupNotFound(Uuid),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -988,6 +1000,16 @@ impl SqliteEventStore {
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );",
         )?;
+        let newest: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM mcg_schema",
+            [],
+            |row| row.get(0),
+        )?;
+        if newest > STORAGE_SCHEMA_VERSION {
+            return Err(StorageError::InvalidData(format!(
+                "database schema version {newest} is newer than supported version {STORAGE_SCHEMA_VERSION}"
+            )));
+        }
         for (version, sql) in [
             (1_i64, MIGRATION_1),
             (2_i64, MIGRATION_2),

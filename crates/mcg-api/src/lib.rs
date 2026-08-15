@@ -50,13 +50,13 @@ use mcg_providers::{
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, CandidateRevisionMutation,
-    ConsumerEvaluationProgress, EvidenceMutation, ExperimentMutation, McpMutation,
-    MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
-    PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
-    ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMonitorRequest,
-    SiteMutation, SiteRegistrationRequest, SiteUpdateRequest, SshHostMutation,
+    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, BackupBundleManifest,
+    BackupBundleSummary, CandidateRevisionMutation, ConsumerEvaluationProgress, EvidenceMutation,
+    ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod,
+    PlatformBrowserMutation, PlatformComputerActionMutation, PlatformComputerMutation,
+    PlatformSessionRequest, ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus,
+    ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
+    SiteMonitorRequest, SiteMutation, SiteRegistrationRequest, SiteUpdateRequest, SshHostMutation,
     SshHostRegistrationRequest, SshHostUpdateRequest, SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{
@@ -136,6 +136,20 @@ pub struct UpdateUserSettingsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserSettingsHistoryResponse {
     pub revisions: Vec<UserSettingsRevision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupSummaryResponse {
+    pub backup_id: uuid::Uuid,
+    pub file_name: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub manifest: BackupBundleManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupListResponse {
+    pub backups: Vec<BackupSummaryResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -922,6 +936,9 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             get(get_user_settings).put(update_user_settings),
         )
         .route("/api/v1/settings/history", get(user_settings_history))
+        .route("/api/v1/backups", get(list_backups))
+        .route("/api/v1/backups/{backup_id}", post(create_backup))
+        .route("/api/v1/backups/{backup_id}/verify", get(verify_backup))
         .route(
             "/api/v1/organizations/{organization_id}/experiments",
             get(list_experiments),
@@ -1434,6 +1451,65 @@ async fn user_settings_history(
             .user_settings_history()
             .map_err(map_runtime_error)?,
     }))
+}
+
+async fn list_backups(State(state): State<ApiState>) -> Result<Json<BackupListResponse>, ApiError> {
+    let backups = state
+        .runtime
+        .backups()
+        .map_err(map_runtime_error)?
+        .into_iter()
+        .map(backup_response)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(BackupListResponse { backups }))
+}
+
+async fn create_backup(
+    State(state): State<ApiState>,
+    Path(backup_id): Path<uuid::Uuid>,
+) -> Result<Json<BackupSummaryResponse>, ApiError> {
+    backup_response(
+        state
+            .runtime
+            .create_backup(backup_id)
+            .map_err(map_runtime_error)?,
+    )
+    .map(Json)
+}
+
+async fn verify_backup(
+    State(state): State<ApiState>,
+    Path(backup_id): Path<uuid::Uuid>,
+) -> Result<Json<BackupSummaryResponse>, ApiError> {
+    backup_response(
+        state
+            .runtime
+            .verify_backup(backup_id)
+            .map_err(map_runtime_error)?,
+    )
+    .map(Json)
+}
+
+fn backup_response(summary: BackupBundleSummary) -> Result<BackupSummaryResponse, ApiError> {
+    let file_name = summary
+        .path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| ApiError::internal("backup file name is invalid"))?
+        .to_owned();
+    let backup_id = summary
+        .path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .ok_or_else(|| ApiError::internal("backup identity is invalid"))?;
+    Ok(BackupSummaryResponse {
+        backup_id,
+        file_name,
+        sha256: summary.sha256,
+        size_bytes: summary.size_bytes,
+        manifest: summary.manifest,
+    })
 }
 
 async fn platform_capabilities(State(state): State<ApiState>) -> Json<PlatformCapabilitySnapshot> {
@@ -5055,6 +5131,13 @@ form.addEventListener('submit', (event) => {
         request.header("authorization", format!("Bearer {TEST_TOKEN}"))
     }
 
+    fn authorized_with(
+        request: axum::http::request::Builder,
+        token: &str,
+    ) -> axum::http::request::Builder {
+        request.header("authorization", format!("Bearer {token}"))
+    }
+
     fn mcp_request(
         id: &serde_json::Value,
         method: &str,
@@ -5247,6 +5330,99 @@ form.addEventListener('submit', (event) => {
         assert_eq!(history.revisions[0].settings, initial);
         assert_eq!(history.revisions[1].settings, updated);
         assert_eq!(history.revisions[1].reason, update.reason);
+    }
+
+    #[tokio::test]
+    async fn portable_backups_are_authenticated_idempotent_and_secret_free() {
+        let temporary = tempfile::tempdir().expect("backup tempdir");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let runtime = Arc::new(AppRuntime::open(config).expect("durable runtime"));
+        runtime
+            .create_task(&TaskEnvelope::new("preserve this task"))
+            .expect("task");
+        let token = runtime.auth().token_for_local_client().to_owned();
+        let app = router(runtime);
+        let backup_id = uuid::Uuid::new_v4();
+        let path = format!("/api/v1/backups/{backup_id}");
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post(&path)
+                    .body(Body::empty())
+                    .expect("backup request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let created = app
+            .clone()
+            .oneshot(
+                authorized_with(Request::post(&path), &token)
+                    .body(Body::empty())
+                    .expect("backup request"),
+            )
+            .await
+            .expect("backup response");
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: BackupSummaryResponse =
+            serde_json::from_value(response_json(created).await).expect("backup summary");
+        assert_eq!(created.backup_id, backup_id);
+        assert!(!created.manifest.secrets_included);
+        assert!(
+            created
+                .manifest
+                .entries
+                .iter()
+                .any(|entry| entry.path == "state/mcg.sqlite3")
+        );
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized_with(Request::post(&path), &token)
+                    .body(Body::empty())
+                    .expect("backup replay"),
+            )
+            .await
+            .expect("backup replay response");
+        let replay: BackupSummaryResponse =
+            serde_json::from_value(response_json(replay).await).expect("replay summary");
+        assert_eq!(replay, created);
+
+        let verified = app
+            .clone()
+            .oneshot(
+                authorized_with(Request::get(format!("{path}/verify")), &token)
+                    .body(Body::empty())
+                    .expect("verify request"),
+            )
+            .await
+            .expect("verify response");
+        assert_eq!(verified.status(), StatusCode::OK);
+        let listed = app
+            .oneshot(
+                authorized_with(Request::get("/api/v1/backups"), &token)
+                    .body(Body::empty())
+                    .expect("list request"),
+            )
+            .await
+            .expect("list response");
+        let listed: BackupListResponse =
+            serde_json::from_value(response_json(listed).await).expect("backup list");
+        assert_eq!(listed.backups, vec![created]);
+
+        let bundle = std::fs::read(
+            temporary
+                .path()
+                .join("backups")
+                .join(format!("{backup_id}.mcgb")),
+        )
+        .expect("backup bytes");
+        let token =
+            std::fs::read_to_string(temporary.path().join("local-auth-token")).expect("auth token");
+        assert!(!String::from_utf8_lossy(&bundle).contains(token.trim()));
     }
 
     #[tokio::test]

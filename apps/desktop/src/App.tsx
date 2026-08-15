@@ -8,6 +8,7 @@ import {
   cancelOpenAiOAuth,
   closePlatformSession,
   checkSiteHealth,
+  createBackup,
   createSiteMonitor,
   completeOpenAiOAuth,
   configureMcpConnection,
@@ -30,6 +31,7 @@ import {
   providerProxyConversations,
   providerProxyUsage,
   listApprovals,
+  listBackups,
   listSchedules,
   listSchedulerNotifications,
   listProjects,
@@ -103,6 +105,7 @@ import {
   setScheduleState,
   type TaskEnvelope,
   type ApprovalRequest,
+  type BackupSummary,
   type TaskEventsResponse,
   type ToolAuditResponse,
   type UserSettings,
@@ -111,6 +114,7 @@ import {
   transitionExperiment,
   updateSite,
   updateUserSettings,
+  verifyBackup,
   acknowledgeSchedulerNotification,
   decideExperiment,
   wakeSchedule
@@ -256,6 +260,9 @@ export function App() {
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [backups, setBackups] = useState<BackupSummary[]>([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
   const [oauthMethod, setOauthMethod] = useState<OpenAiOAuthMethod>("browser");
   const [login, setLogin] = useState<OAuthLoginStart | null>(null);
   const [providerStatus, setProviderStatus] = useState("Not connected");
@@ -388,6 +395,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setSettingsError(errorMessage(error));
+      });
+    listBackups()
+      .then((response) => {
+        if (active) setBackups(response.backups);
+      })
+      .catch((error) => {
+        if (active) setBackupError(errorMessage(error));
       });
     listMcpConnections()
       .then((response) => {
@@ -528,6 +542,32 @@ export function App() {
       { ...userSettings, advanced_mode: nextAdvanced },
       nextAdvanced ? "Enabled advanced interface" : "Enabled simple interface"
     );
+  }
+
+  async function makeBackup() {
+    setBackupBusy(true);
+    setBackupError(null);
+    try {
+      const backup = await createBackup(crypto.randomUUID());
+      setBackups((current) => [...current.filter((item) => item.backup_id !== backup.backup_id), backup]);
+    } catch (error) {
+      setBackupError(errorMessage(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function checkBackup(backupId: string) {
+    setBackupBusy(true);
+    setBackupError(null);
+    try {
+      const backup = await verifyBackup(backupId);
+      setBackups((current) => current.map((item) => item.backup_id === backupId ? backup : item));
+    } catch (error) {
+      setBackupError(errorMessage(error));
+    } finally {
+      setBackupBusy(false);
+    }
   }
 
   async function startLogin() {
@@ -2566,6 +2606,29 @@ export function App() {
               </ul>
             </div>}
           </div> : <p className="empty-state">Loading durable settings…</p>}
+          <div className="provider-connections" aria-label="Portable backups">
+            <div className="section-heading compact-heading">
+              <div>
+                <h3>Portable backups</h3>
+                <p className="muted">Preserve the database and immutable artifacts. Credentials and the local authentication token are always excluded.</p>
+              </div>
+              <button className="primary" type="button" disabled={backupBusy} onClick={makeBackup}>
+                {backupBusy ? "Working…" : "Create backup"}
+              </button>
+            </div>
+            {backupError && <p className="error-message" role="alert">{backupError}</p>}
+            {backups.length === 0 ? <p className="empty-state">No portable backups yet.</p> : backups.slice().reverse().map((backup) => (
+              <article className="provider-card" key={backup.backup_id}>
+                <div>
+                  <h3>{backup.file_name}</h3>
+                  <p>{formatBytes(backup.size_bytes)} · {new Date(backup.manifest.created_at).toLocaleString()} · secrets excluded</p>
+                  {advanced && <><code>{backup.sha256}</code><small>{backup.manifest.entries.length} verified entries · format {backup.manifest.schema_version}</small></>}
+                </div>
+                <button className="secondary" type="button" disabled={backupBusy} onClick={() => checkBackup(backup.backup_id)}>Verify</button>
+              </article>
+            ))}
+            <p className="form-note">Restore is intentionally offline: stop the daemon, then run <code>mcg backup restore PATH --confirm</code>. MCG retains the previous database for rollback.</p>
+          </div>
         </section>
       </main>
     </div>

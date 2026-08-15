@@ -38,6 +38,7 @@ Implementation planning:
 - [M8 Sites, deployment, and monitoring](docs/architecture/sites.md)
 - [M8 typed SSH remote execution](docs/architecture/typed-ssh.md)
 - [Durable owner settings](docs/architecture/settings.md)
+- [Portable backup and restore](docs/architecture/backups.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
@@ -79,6 +80,15 @@ opt into shadow experiments. Updates require the current revision, retain an
 immutable reasoned history, and apply to new authority decisions; startup-only
 trust roots such as data paths, loopback binding, and executable locations are
 not mutable through this surface.
+
+Create a portable, secret-free backup from the desktop Settings workspace or
+with `mcg backup create`. `mcg backup list` re-verifies stored bundles and
+`mcg backup verify PATH` validates a transferred bundle offline. Restore is an
+explicit offline recovery operation: stop the daemon and run
+`mcg backup restore PATH --confirm`. Credentials and the installation-local
+bearer token are never included; the destination machine retains its own token
+and credentials must be reconnected. The restore keeps the previous database in
+the data directory's `backups/` folder and never deletes it.
 
 The authenticated organization and run-control surface is available through the
 same daemon. Create a consumer-default organization, list it, plan work for an
