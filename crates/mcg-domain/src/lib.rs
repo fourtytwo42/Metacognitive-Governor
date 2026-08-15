@@ -72,6 +72,10 @@ domain_id!(PlatformCapabilitySnapshotId);
 domain_id!(PlatformSessionId);
 domain_id!(PlatformSessionEventId);
 domain_id!(ComputerActionBatchId);
+domain_id!(SiteId);
+domain_id!(SiteRevisionId);
+domain_id!(SiteDeploymentId);
+domain_id!(SiteHealthCheckId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.
@@ -337,6 +341,111 @@ pub struct PlatformSessionEvent {
 }
 
 pub const SCHEDULE_SCHEMA_VERSION: u16 = 1;
+
+pub const SITE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiteEnvironment {
+    Development,
+    Preview,
+    Production,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiteState {
+    Active,
+    MonitoringPaused,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteDeploymentCommand {
+    pub executable: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    /// Project-relative working directory. An empty string means project root.
+    pub working_directory: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Site {
+    pub schema_version: u16,
+    pub id: SiteId,
+    pub definition_hash: String,
+    pub revision: u32,
+    pub project_id: ProjectId,
+    pub display_name: String,
+    pub environment: SiteEnvironment,
+    pub public_url: String,
+    pub health_url: String,
+    pub hosting_provider: String,
+    pub deployment_command: Option<SiteDeploymentCommand>,
+    pub credential_reference: Option<String>,
+    pub state: SiteState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteRevision {
+    pub schema_version: u16,
+    pub id: SiteRevisionId,
+    pub site_id: SiteId,
+    pub revision: u32,
+    pub definition_hash: String,
+    pub site: Site,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiteDeploymentState {
+    Executing,
+    Succeeded,
+    Failed,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteDeployment {
+    pub schema_version: u16,
+    pub id: SiteDeploymentId,
+    pub site_id: SiteId,
+    pub site_revision: u32,
+    pub task_id: Option<TaskId>,
+    pub request_hash: String,
+    pub state: SiteDeploymentState,
+    pub detail: String,
+    #[serde(default)]
+    pub log_artifact_sha256: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiteHealthState {
+    Healthy,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteHealthCheck {
+    pub schema_version: u16,
+    pub id: SiteHealthCheckId,
+    pub site_id: SiteId,
+    pub request_hash: String,
+    pub state: SiteHealthState,
+    pub status_code: Option<u16>,
+    pub latency_milliseconds: u64,
+    pub detail: String,
+    pub response_artifact_sha256: Option<String>,
+    pub checked_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

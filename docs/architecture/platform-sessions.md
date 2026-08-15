@@ -162,3 +162,7 @@ Sites and typed SSH reuse this authority contract rather than inventing separate
 lifecycle rules. Computer control has passed native Windows/Linux automated
 qualification and agent-performed UAT, including durable policy, approval, lease,
 audit, exact replay, handoff privacy, and crash-recovery boundaries.
+
+The Sites registry, deployment, and monitoring contract is defined separately in
+[`sites.md`](sites.md); it reuses durable approval, audit, lease, scheduler, and
+artifact primitives but is not modeled as a live desktop-custody session.

@@ -95,6 +95,7 @@ pub struct RuntimeStatus {
     pub recovered_platform_sessions: u64,
     pub expired_platform_sessions: u64,
     pub recovered_computer_action_batches: u64,
+    pub recovered_site_deployments: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +534,7 @@ pub struct AppRuntime {
     recovered_platform_sessions: u64,
     expired_platform_sessions: u64,
     recovered_computer_action_batches: u64,
+    recovered_site_deployments: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
     browser_sessions: Arc<PersistentBrowserManager>,
     computer_sessions: Arc<ComputerUseManager>,
@@ -578,6 +580,7 @@ impl AppRuntime {
         let recovered_platform_sessions = store.recover_platform_sessions(startup_now)?;
         let recovered_computer_action_batches =
             store.recover_computer_action_batches(startup_now)?;
+        let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -600,6 +603,7 @@ impl AppRuntime {
             recovered_platform_sessions,
             expired_platform_sessions,
             recovered_computer_action_batches,
+            recovered_site_deployments,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -646,6 +650,7 @@ impl AppRuntime {
         let recovered_platform_sessions = store.recover_platform_sessions(startup_now)?;
         let recovered_computer_action_batches =
             store.recover_computer_action_batches(startup_now)?;
+        let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -670,6 +675,7 @@ impl AppRuntime {
             recovered_platform_sessions,
             expired_platform_sessions,
             recovered_computer_action_batches,
+            recovered_site_deployments,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -692,6 +698,7 @@ impl AppRuntime {
         recovered_platform_sessions: u64,
         expired_platform_sessions: u64,
         recovered_computer_action_batches: u64,
+        recovered_site_deployments: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
         browser_sessions: Arc<PersistentBrowserManager>,
         computer_sessions: Arc<ComputerUseManager>,
@@ -713,6 +720,7 @@ impl AppRuntime {
             recovered_platform_sessions,
             expired_platform_sessions,
             recovered_computer_action_batches,
+            recovered_site_deployments,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -754,6 +762,7 @@ impl AppRuntime {
             recovered_platform_sessions: self.recovered_platform_sessions,
             expired_platform_sessions: self.expired_platform_sessions,
             recovered_computer_action_batches: self.recovered_computer_action_batches,
+            recovered_site_deployments: self.recovered_site_deployments,
         }
     }
 

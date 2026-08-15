@@ -21,6 +21,7 @@ mod mcp;
 mod platform;
 mod providers;
 mod scheduler;
+mod sites;
 
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
@@ -532,6 +533,77 @@ BEFORE DELETE ON computer_action_batches BEGIN
 END;
 ";
 
+const MIGRATION_17: &str = r"
+CREATE TABLE IF NOT EXISTS sites (
+    site_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    definition_hash TEXT NOT NULL,
+    site_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS sites_project_state
+    ON sites(project_id, state, updated_at, site_id);
+
+CREATE TABLE IF NOT EXISTS site_revisions (
+    revision_id TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    definition_hash TEXT NOT NULL,
+    revision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(site_id, revision),
+    FOREIGN KEY(site_id) REFERENCES sites(site_id)
+);
+CREATE TRIGGER IF NOT EXISTS site_revisions_no_update
+BEFORE UPDATE ON site_revisions BEGIN
+    SELECT RAISE(FAIL, 'site revisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS site_revisions_no_delete
+BEFORE DELETE ON site_revisions BEGIN
+    SELECT RAISE(FAIL, 'site revisions are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS site_deployments (
+    deployment_id TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    deployment_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(site_id) REFERENCES sites(site_id)
+);
+CREATE INDEX IF NOT EXISTS site_deployments_history
+    ON site_deployments(site_id, created_at, deployment_id);
+CREATE TRIGGER IF NOT EXISTS site_deployments_no_delete
+BEFORE DELETE ON site_deployments BEGIN
+    SELECT RAISE(FAIL, 'site deployment history is immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS site_health_checks (
+    check_id TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    check_json TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    FOREIGN KEY(site_id) REFERENCES sites(site_id)
+);
+CREATE INDEX IF NOT EXISTS site_health_checks_history
+    ON site_health_checks(site_id, checked_at, check_id);
+CREATE TRIGGER IF NOT EXISTS site_health_checks_no_update
+BEFORE UPDATE ON site_health_checks BEGIN
+    SELECT RAISE(FAIL, 'site health observations are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS site_health_checks_no_delete
+BEFORE DELETE ON site_health_checks BEGIN
+    SELECT RAISE(FAIL, 'site health observations are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -558,6 +630,8 @@ pub enum StorageError {
     ScheduleNotFound(mcg_domain::ScheduleId),
     #[error("platform session {0} was not found")]
     PlatformSessionNotFound(mcg_domain::PlatformSessionId),
+    #[error("site {0} was not found")]
+    SiteNotFound(mcg_domain::SiteId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -634,6 +708,7 @@ impl SqliteEventStore {
             (14_i64, MIGRATION_14),
             (15_i64, MIGRATION_15),
             (16_i64, MIGRATION_16),
+            (17_i64, MIGRATION_17),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
