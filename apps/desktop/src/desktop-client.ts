@@ -95,6 +95,88 @@ export interface BackupListResponse {
   backups: BackupSummary[];
 }
 
+export type PluginCapability = "filesystem_read" | "filesystem_write" | "network" | "process" | "credentials";
+export type PluginCapabilityScope =
+  | { kind: "task_project" }
+  | { kind: "network_origin"; origin: string }
+  | { kind: "executable"; executable: string }
+  | { kind: "credential"; provider: string; key: string };
+
+export interface PluginCapabilityGrant {
+  schema_version: number;
+  capability: PluginCapability;
+  scopes: PluginCapabilityScope[];
+}
+
+export interface PluginManifest {
+  schema_version: number;
+  id: string;
+  display_name: string;
+  version: string;
+  class: "trusted_native" | "sandboxed_wasi";
+  requested_capabilities: PluginCapability[];
+}
+
+export interface PluginRevision {
+  schema_version: number;
+  id: string;
+  manifest: PluginManifest;
+  module_sha256: string;
+  module_size_bytes: number;
+  source: { kind: "local_import" } | { kind: "registry"; registry: string; package: string };
+  signature: {
+    state: "unsigned" | "verified";
+    scheme?: string;
+    signer?: string;
+    signature_sha256?: string;
+  };
+  installed_at: string;
+}
+
+export interface PluginInstallation {
+  schema_version: number;
+  plugin_id: string;
+  active_revision_id: string;
+  enabled: boolean;
+  capability_grants: PluginCapabilityGrant[];
+  revision: number;
+  updated_at: string;
+}
+
+export interface PluginDescriptor {
+  installation: PluginInstallation;
+  active_revision: PluginRevision;
+}
+
+export interface PluginListResponse { plugins: PluginDescriptor[]; }
+export interface InstallLocalPluginRequest { revision: PluginRevision; module_base64: string; }
+export interface InstallRegistryPluginRequest extends InstallLocalPluginRequest {
+  proof: { schema_version: number; scheme: string; signer: string; signature_base64: string };
+}
+export interface SetPluginGrantsRequest { expected_revision: number; grants: PluginCapabilityGrant[]; }
+export interface PluginInvocationRecord {
+  schema_version: number;
+  id: string;
+  plugin_id: string;
+  plugin_revision_id: string;
+  task_id?: string;
+  input_sha256: string;
+  state: "running" | "succeeded" | "failed" | "uncertain";
+  result_sha256?: string;
+  error_code?: string;
+  started_at: string;
+  completed_at?: string;
+}
+export interface PluginInvocationMutation {
+  invocation: PluginInvocationRecord;
+  result?: { schema_version: number; plugin_id: string; output: unknown };
+  replayed: boolean;
+}
+export interface PluginInvocationHistoryResponse {
+  invocation: PluginInvocationRecord;
+  history: PluginInvocationRecord[];
+}
+
 export interface OAuthLoginStart {
   session_id: string;
   connection_id: string;
@@ -710,6 +792,34 @@ export function createBackup(backupId: string): Promise<BackupSummary> {
 
 export function verifyBackup(backupId: string): Promise<BackupSummary> {
   return invoke("verify_backup", { backupId });
+}
+
+export function listPlugins(): Promise<PluginListResponse> {
+  return invoke("list_plugins");
+}
+
+export function installLocalPlugin(request: InstallLocalPluginRequest): Promise<PluginInstallation> {
+  return invoke("install_local_plugin", { request });
+}
+
+export function installRegistryPlugin(request: InstallRegistryPluginRequest): Promise<PluginInstallation> {
+  return invoke("install_registry_plugin", { request });
+}
+
+export function setPluginGrants(pluginId: string, request: SetPluginGrantsRequest): Promise<PluginInstallation> {
+  return invoke("set_plugin_grants", { pluginId, request });
+}
+
+export function setPluginEnabled(pluginId: string, expectedRevision: number, enabled: boolean): Promise<PluginInstallation> {
+  return invoke("set_plugin_enabled", { pluginId, request: { expected_revision: expectedRevision, enabled } });
+}
+
+export function invokePlugin(pluginId: string, invocationId: string, input: unknown, taskId?: string): Promise<PluginInvocationMutation> {
+  return invoke("invoke_plugin", { pluginId, invocationId, request: { task_id: taskId, input } });
+}
+
+export function getPluginInvocation(pluginId: string, invocationId: string): Promise<PluginInvocationHistoryResponse> {
+  return invoke("get_plugin_invocation", { pluginId, invocationId });
 }
 
 export function providerProxyUsage(): Promise<ProxyUsageSummary> {

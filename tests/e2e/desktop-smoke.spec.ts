@@ -11,13 +11,50 @@ test.beforeEach(async ({ page }) => {
       updated_at: "2026-08-15T00:00:00Z"
     };
     let settings = initial;
+    const plugin = {
+      installation: {
+        schema_version: 1,
+        plugin_id: "example.weather",
+        active_revision_id: "00000000-0000-4000-8000-000000000081",
+        enabled: false,
+        capability_grants: [] as unknown[],
+        revision: 1,
+        updated_at: "2026-08-15T00:00:00Z"
+      },
+      active_revision: {
+        schema_version: 1,
+        id: "00000000-0000-4000-8000-000000000081",
+        manifest: { schema_version: 1, id: "example.weather", display_name: "Weather helper", version: "1.0.0", class: "sandboxed_wasi", requested_capabilities: ["network"] },
+        module_sha256: "a".repeat(64),
+        module_size_bytes: 128,
+        source: { kind: "local_import" },
+        signature: { state: "unsigned" },
+        installed_at: "2026-08-15T00:00:00Z"
+      }
+    };
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
-        invoke: async (command: string, args: { request?: typeof initial & { reason?: string } } = {}) => {
+        invoke: async (command: string, args: Record<string, any> = {}) => {
           if (command === "get_user_settings") return settings;
           if (command === "user_settings_history") return { revisions: [...history] };
           if (command === "list_backups") return { backups: [] };
+          if (command === "list_plugins") return { plugins: [plugin] };
+          if (command === "set_plugin_grants") {
+            plugin.installation.capability_grants = args.request.grants;
+            plugin.installation.revision += 1;
+            return plugin.installation;
+          }
+          if (command === "set_plugin_enabled") {
+            plugin.installation.enabled = args.request.enabled;
+            plugin.installation.revision += 1;
+            return plugin.installation;
+          }
+          if (command === "invoke_plugin") return {
+            invocation: { schema_version: 1, id: args.invocationId, plugin_id: plugin.installation.plugin_id, plugin_revision_id: plugin.active_revision.id, input_sha256: "b".repeat(64), state: "succeeded", started_at: "2026-08-15T00:02:00Z", completed_at: "2026-08-15T00:02:01Z" },
+            result: { schema_version: 1, plugin_id: plugin.installation.plugin_id, output: { forecast: "sunny" } },
+            replayed: false
+          };
           if (command === "update_user_settings" && args.request) {
             settings = {
               schema_version: 1,
@@ -81,4 +118,20 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   expect(box).not.toBeNull();
   expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(720);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
+});
+
+test("plugin permission review gates enablement and invocation", async ({ page }) => {
+  await page.goto("/");
+
+  const plugins = page.getByRole("region", { name: "Plugins" });
+  await expect(plugins.getByRole("heading", { name: "Weather helper" })).toBeVisible();
+  await expect(plugins.getByRole("button", { name: "Enable" })).toBeDisabled();
+  await plugins.getByLabel("Weather helper network origin").fill("https://weather.example");
+  await plugins.getByRole("button", { name: "Grant requested access" }).click();
+  await expect(plugins.getByRole("button", { name: "Enable" })).toBeEnabled();
+  await plugins.getByRole("button", { name: "Enable" }).click();
+  await expect(plugins.getByText("Enabled", { exact: true })).toBeVisible();
+  await plugins.getByLabel("Plugin input (JSON)").fill('{"city":"Chicago"}');
+  await plugins.getByRole("button", { name: "Run plugin" }).click();
+  await expect(plugins.getByText('"forecast": "sunny"')).toBeVisible();
 });

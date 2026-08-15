@@ -14,12 +14,13 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationReport,
@@ -32,16 +33,18 @@ use mcg_domain::{
     ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, ExperimentId,
     MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
     PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
-    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
-    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, TaskBudget,
-    TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
+    PluginInvocationRecord, PluginRevision, ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
+    SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
+    SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
+use mcg_plugin_trust::PluginSignatureProof;
 use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
 };
@@ -54,11 +57,11 @@ use mcg_runtime::{
     BackupBundleSummary, CandidateRevisionMutation, ConsumerEvaluationProgress, DiagnosticReport,
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PlatformSessionRequest, ProjectMutation, ProviderMutation,
-    RuntimeError, RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
-    SiteMonitorMutation, SiteMonitorRequest, SiteMutation, SiteRegistrationRequest,
-    SiteUpdateRequest, SshHostMutation, SshHostRegistrationRequest, SshHostUpdateRequest,
-    SshOperationMutation, SupervisionMutation,
+    PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation, ProjectMutation,
+    ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation,
+    SiteHealthMutation, SiteMonitorMutation, SiteMonitorRequest, SiteMutation,
+    SiteRegistrationRequest, SiteUpdateRequest, SshHostMutation, SshHostRegistrationRequest,
+    SshHostUpdateRequest, SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
@@ -151,6 +154,55 @@ pub struct BackupSummaryResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupListResponse {
     pub backups: Vec<BackupSummaryResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginListResponse {
+    pub plugins: Vec<PluginDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginDescriptor {
+    pub installation: PluginInstallation,
+    pub active_revision: PluginRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallLocalPluginRequest {
+    pub revision: PluginRevision,
+    pub module_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallRegistryPluginRequest {
+    pub revision: PluginRevision,
+    pub module_base64: String,
+    pub proof: PluginSignatureProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPluginGrantsRequest {
+    pub expected_revision: u64,
+    pub grants: Vec<PluginCapabilityGrant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPluginEnabledRequest {
+    pub expected_revision: u64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvokePluginRequest {
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginInvocationHistoryResponse {
+    pub invocation: PluginInvocationRecord,
+    pub history: Vec<PluginInvocationRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -941,6 +993,27 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route("/api/v1/backups", get(list_backups))
         .route("/api/v1/backups/{backup_id}", post(create_backup))
         .route("/api/v1/backups/{backup_id}/verify", get(verify_backup))
+        .route("/api/v1/plugins", get(list_plugins))
+        .route(
+            "/api/v1/plugins/install/local",
+            post(install_local_plugin).layer(DefaultBodyLimit::max(90 * 1_024 * 1_024)),
+        )
+        .route(
+            "/api/v1/plugins/install/registry",
+            post(install_registry_plugin).layer(DefaultBodyLimit::max(90 * 1_024 * 1_024)),
+        )
+        .route(
+            "/api/v1/plugins/{plugin_id}/grants",
+            post(set_plugin_grants),
+        )
+        .route(
+            "/api/v1/plugins/{plugin_id}/enabled",
+            post(set_plugin_enabled),
+        )
+        .route(
+            "/api/v1/plugins/{plugin_id}/invocations/{invocation_id}",
+            get(get_plugin_invocation).post(invoke_plugin),
+        )
         .route(
             "/api/v1/organizations/{organization_id}/experiments",
             get(list_experiments),
@@ -1461,6 +1534,137 @@ async fn user_settings_history(
             .user_settings_history()
             .map_err(map_runtime_error)?,
     }))
+}
+
+async fn list_plugins(State(state): State<ApiState>) -> Result<Json<PluginListResponse>, ApiError> {
+    let installations = state
+        .runtime
+        .plugin_installations()
+        .map_err(map_runtime_error)?;
+    let mut plugins = Vec::with_capacity(installations.len());
+    for installation in installations {
+        let active_revision = state
+            .runtime
+            .plugin_revision(installation.active_revision_id)
+            .map_err(map_runtime_error)?
+            .ok_or_else(|| ApiError::internal("plugin active revision is missing"))?;
+        plugins.push(PluginDescriptor {
+            installation,
+            active_revision,
+        });
+    }
+    Ok(Json(PluginListResponse { plugins }))
+}
+
+async fn install_local_plugin(
+    State(state): State<ApiState>,
+    Json(request): Json<InstallLocalPluginRequest>,
+) -> Result<Json<PluginInstallation>, ApiError> {
+    let module = decode_plugin_module(&request.module_base64)?;
+    state
+        .runtime
+        .install_sandboxed_plugin(&request.revision, &module)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn install_registry_plugin(
+    State(state): State<ApiState>,
+    Json(request): Json<InstallRegistryPluginRequest>,
+) -> Result<Json<PluginInstallation>, ApiError> {
+    let module = decode_plugin_module(&request.module_base64)?;
+    state
+        .runtime
+        .install_verified_sandboxed_plugin(&request.revision, &module, &request.proof)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn set_plugin_grants(
+    State(state): State<ApiState>,
+    Path(plugin_id): Path<String>,
+    Json(request): Json<SetPluginGrantsRequest>,
+) -> Result<Json<PluginInstallation>, ApiError> {
+    state
+        .runtime
+        .set_plugin_capability_grants(&plugin_id, request.expected_revision, request.grants)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn set_plugin_enabled(
+    State(state): State<ApiState>,
+    Path(plugin_id): Path<String>,
+    Json(request): Json<SetPluginEnabledRequest>,
+) -> Result<Json<PluginInstallation>, ApiError> {
+    state
+        .runtime
+        .set_plugin_enabled(&plugin_id, request.expected_revision, request.enabled)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn invoke_plugin(
+    State(state): State<ApiState>,
+    Path((plugin_id, invocation_id)): Path<(String, String)>,
+    Json(request): Json<InvokePluginRequest>,
+) -> Result<Json<PluginInvocationMutation>, ApiError> {
+    let invocation_id = invocation_id
+        .parse::<PluginInvocationId>()
+        .map_err(|_| ApiError::bad_request("plugin invocation id must be a UUID"))?;
+    state
+        .runtime
+        .invoke_sandboxed_plugin(invocation_id, &plugin_id, request.task_id, request.input)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn get_plugin_invocation(
+    State(state): State<ApiState>,
+    Path((plugin_id, invocation_id)): Path<(String, String)>,
+) -> Result<Json<PluginInvocationHistoryResponse>, ApiError> {
+    let invocation_id = invocation_id
+        .parse::<PluginInvocationId>()
+        .map_err(|_| ApiError::bad_request("plugin invocation id must be a UUID"))?;
+    let invocation = state
+        .runtime
+        .plugin_invocation(invocation_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("plugin invocation {invocation_id} was not found"))
+        })?;
+    if invocation.plugin_id != plugin_id {
+        return Err(ApiError::not_found(format!(
+            "plugin invocation {invocation_id} was not found"
+        )));
+    }
+    let history = state
+        .runtime
+        .plugin_invocation_history(invocation_id)
+        .map_err(map_runtime_error)?;
+    Ok(Json(PluginInvocationHistoryResponse {
+        invocation,
+        history,
+    }))
+}
+
+fn decode_plugin_module(encoded: &str) -> Result<Vec<u8>, ApiError> {
+    if encoded.is_empty() || encoded.len() > 90 * 1_024 * 1_024 {
+        return Err(ApiError::bad_request(
+            "plugin module encoding is outside supported bounds",
+        ));
+    }
+    let module = STANDARD
+        .decode(encoded)
+        .map_err(|_| ApiError::bad_request("plugin module must be canonical base64"))?;
+    if module.is_empty() || module.len() > 64 * 1_024 * 1_024 || STANDARD.encode(&module) != encoded
+    {
+        return Err(ApiError::bad_request(
+            "plugin module must be canonical base64",
+        ));
+    }
+    Ok(module)
 }
 
 async fn list_backups(State(state): State<ApiState>) -> Result<Json<BackupListResponse>, ApiError> {
@@ -5775,6 +5979,9 @@ form.addEventListener('submit', (event) => {
                 "mcg_cancel_task",
                 "mcg_record_evaluation",
                 "mcg_run_agent",
+                "mcg_plugins_list",
+                "mcg_plugins_configure",
+                "mcg_plugins_invoke",
                 "mcg_system_status"
             ]
         );
@@ -7565,6 +7772,187 @@ form.addEventListener('submit', (event) => {
             .expect("cancelled complete response");
         assert_eq!(cancelled_complete.status(), StatusCode::BAD_REQUEST);
         assert_eq!(runtime.provider_connections().expect("providers").len(), 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercises the complete safe installation state machine over REST.
+    async fn plugin_rest_contract_installs_lists_grants_and_enables_explicitly() {
+        let runtime = test_runtime();
+        let app = router(runtime);
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: mcg_plugin_protocol::PLUGIN_SCHEMA_VERSION,
+                id: "example.api-plugin".into(),
+                display_name: "API plugin fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: vec![mcg_plugin_protocol::PluginCapability::FilesystemRead],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let install = InstallLocalPluginRequest {
+            revision: revision.clone(),
+            module_base64: STANDARD.encode(module),
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/plugins/install/local"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&install).expect("install JSON"),
+                    ))
+                    .expect("install request"),
+            )
+            .await
+            .expect("install response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let installed: PluginInstallation = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("installed plugin");
+        assert!(!installed.enabled);
+
+        let grants = SetPluginGrantsRequest {
+            expected_revision: installed.revision,
+            grants: vec![PluginCapabilityGrant {
+                schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+                capability: mcg_plugin_protocol::PluginCapability::FilesystemRead,
+                scopes: vec![mcg_domain::PluginCapabilityScope::TaskProject],
+            }],
+        };
+        let granted = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/plugins/{}/grants",
+                    revision.manifest.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&grants).expect("grant JSON")))
+                .expect("grant request"),
+            )
+            .await
+            .expect("grant response");
+        assert_eq!(granted.status(), StatusCode::OK);
+        let granted: PluginInstallation = serde_json::from_slice(
+            &granted
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("granted plugin");
+        assert!(!granted.enabled);
+
+        let enabled = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/plugins/{}/enabled",
+                    revision.manifest.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&SetPluginEnabledRequest {
+                        expected_revision: granted.revision,
+                        enabled: true,
+                    })
+                    .expect("enable JSON"),
+                ))
+                .expect("enable request"),
+            )
+            .await
+            .expect("enable response");
+        assert_eq!(enabled.status(), StatusCode::OK);
+        let enabled: PluginInstallation = serde_json::from_slice(
+            &enabled
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("enabled plugin");
+
+        let listed = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/plugins"))
+                    .body(Body::empty())
+                    .expect("list request"),
+            )
+            .await
+            .expect("list response");
+        let listed: PluginListResponse =
+            serde_json::from_slice(&listed.into_body().collect().await.expect("body").to_bytes())
+                .expect("plugin list");
+        assert_eq!(listed.plugins.len(), 1);
+        assert!(listed.plugins[0].installation.enabled);
+        assert_eq!(listed.plugins[0].active_revision, revision);
+
+        let mcp_list = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(71),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_plugins_list")),
+                    ("arguments".into(), serde_json::json!({})),
+                ]),
+                Some("mcg_plugins_list"),
+            ))
+            .await
+            .expect("MCP plugin list");
+        let mcp_list = response_json(mcp_list).await;
+        assert_eq!(
+            mcp_list.pointer("/result/structuredContent/plugins/0/installation/enabled"),
+            Some(&serde_json::json!(true))
+        );
+
+        let mcp_disable = app
+            .oneshot(mcp_request(
+                &serde_json::json!(72),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    ("name".into(), serde_json::json!("mcg_plugins_configure")),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "plugin_id": "example.api-plugin",
+                            "expected_revision": enabled.revision,
+                            "action": "set_enabled",
+                            "enabled": false
+                        }),
+                    ),
+                ]),
+                Some("mcg_plugins_configure"),
+            ))
+            .await
+            .expect("MCP plugin disable");
+        let mcp_disable = response_json(mcp_disable).await;
+        assert_eq!(
+            mcp_disable.pointer("/result/structuredContent/enabled"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[tokio::test]

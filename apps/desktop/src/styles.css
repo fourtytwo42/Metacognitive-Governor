@@ -188,6 +188,33 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 .connection-card h3 { margin: 0 0 5px; font-size: 1rem; }
 .connection-card p { margin: 0; color: #8e9daf; font-size: .82rem; }
 .connection-card code { display: inline-block; margin-top: 7px; color: #65dccc; font-size: .74rem; }
+.plugin-panel { margin-top: 18px; }
+.plugin-import { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(180px, .7fr) minmax(180px, .7fr) auto; gap: 14px; align-items: end; margin-top: 20px; padding: 16px; border: 1px solid #243246; background: #090f18; }
+.plugin-import h3 { margin: 0 0 5px; font-size: 1rem; }
+.plugin-import label, .plugin-runner label { display: grid; gap: 7px; color: #a8b6c6; font-size: .82rem; }
+.plugin-registry-import { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(240px, .8fr) auto; gap: 14px; align-items: end; margin-top: 10px; padding: 14px; border: 1px dashed #33455c; background: #090f18; }
+.plugin-registry-import h3 { margin: 0 0 5px; font-size: .95rem; }
+.plugin-registry-import label { display: grid; gap: 7px; color: #a8b6c6; font-size: .82rem; }
+.plugin-list { display: grid; gap: 14px; margin-top: 16px; }
+.plugin-card { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(260px, .8fr); gap: 18px; padding: 18px; border: 1px solid #243246; background: #090f18; }
+.plugin-card-heading { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 18px; }
+.plugin-card-heading h3 { margin: 0 0 5px; }
+.plugin-card-heading p { margin: 0; color: #8e9daf; font-size: .8rem; }
+.status-chip { height: fit-content; padding: 5px 8px; border: 1px solid #8e4f58; color: #ff9b9b; font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+.status-chip.status-enabled { border-color: #5db777; color: #8cdea4; }
+.plugin-permissions, .plugin-runner { display: grid; align-content: start; gap: 12px; padding: 14px; border: 1px solid #1f2b3b; background: #070b12; }
+.plugin-permissions h4 { margin: 0; }
+.plugin-permissions ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.plugin-permissions li { display: grid; grid-template-columns: minmax(120px, .45fr) minmax(170px, 1fr); align-items: center; gap: 10px; color: #91a2b4; font-size: .78rem; }
+.plugin-permissions strong { color: #cbd8e5; text-transform: capitalize; }
+.plugin-runner textarea { min-height: 92px; }
+.plugin-result { display: grid; gap: 8px; padding: 10px; border-left: 2px solid #42d9c8; color: #aebed0; background: #0a1019; }
+.plugin-result strong { text-transform: capitalize; }
+.plugin-result pre { max-height: 220px; margin: 0; overflow: auto; color: #dce8f3; white-space: pre-wrap; }
+.advanced-details { grid-column: 1 / -1; padding-top: 4px; color: #aebed0; }
+.advanced-details summary { cursor: pointer; color: #65dccc; }
+.advanced-details dl { margin: 12px 0; }
+.advanced-details code { overflow-wrap: anywhere; }
 .empty-state { margin: 0; padding: 24px; border: 1px dashed #29384b; color: #8190a2; text-align: center; }
 .computer-frame { margin: .8rem 0; }
 .computer-frame img { display: block; width: min(100%, 720px); max-height: 420px; object-fit: contain; object-position: left top; border: 1px solid #29384b; border-radius: 10px; background: #111; }
@@ -204,7 +231,8 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
   .sidebar { position: static; height: auto; display: grid; grid-template-columns: auto 1fr; gap: 14px; overflow: visible; border-right: 0; border-bottom: 1px solid #1d2736; }
   .sidebar nav { grid-column: 1 / -1; display: flex; overflow-x: auto; }
   .mode-button { grid-column: 2; grid-row: 1; margin: 0; justify-self: end; white-space: nowrap; }
-  .hero-card, .grid, .provider-panel, .provider-setup, .provider-advanced, .mcp-layout, .task-advanced, .scheduler-layout, .scheduler-advanced { grid-template-columns: 1fr; }
+  .hero-card, .grid, .provider-panel, .provider-setup, .provider-advanced, .mcp-layout, .task-advanced, .scheduler-layout, .scheduler-advanced, .plugin-import, .plugin-registry-import, .plugin-card { grid-template-columns: 1fr; }
+  .plugin-card-heading, .advanced-details { grid-column: auto; }
   .provider-setup .primary { justify-self: stretch; }
   .task-card { flex-direction: column; }
   .task-actions { justify-content: flex-start; }

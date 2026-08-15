@@ -8,10 +8,12 @@ use mcg_api::{
     CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
     CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
     DiscoverProjectRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
-    ExperimentListResponse, LaunchTaskRequest, LaunchTaskResponse, McpListResponse,
+    ExperimentListResponse, InstallLocalPluginRequest, InstallRegistryPluginRequest,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, McpListResponse,
     NavigateBrowserSessionRequest, PlatformSessionHistoryResponse, PlatformSessionListResponse,
-    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest,
-    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse, ProviderListResponse,
+    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
     SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
     SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
     SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
@@ -22,8 +24,8 @@ use mcg_api::{
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
-    PlatformCapabilitySnapshot, PlatformSession, ScheduleDefinition, SchedulerNotification, Site,
-    SiteMonitor, SshHost, TaskEnvelope,
+    PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ScheduleDefinition,
+    SchedulerNotification, Site, SiteMonitor, SshHost, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -33,9 +35,9 @@ use mcg_providers::{
 use mcg_runtime::{
     CandidateRevisionMutation, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
     OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
-    SshOperationMutation, SupervisionMutation,
+    PlatformComputerMutation, PluginInvocationMutation, ProjectMutation, ProviderMutation,
+    ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
+    SiteMutation, SshHostMutation, SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -326,6 +328,128 @@ async fn list_backups() -> Result<BackupListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Backup list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_plugins() -> Result<PluginListResponse, String> {
+    daemon_get("/api/v1/plugins", "Plugin listing").await
+}
+
+#[tauri::command]
+async fn install_local_plugin(
+    request: InstallLocalPluginRequest,
+) -> Result<PluginInstallation, String> {
+    daemon_post(
+        "/api/v1/plugins/install/local",
+        &request,
+        "Plugin installation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn install_registry_plugin(
+    request: InstallRegistryPluginRequest,
+) -> Result<PluginInstallation, String> {
+    daemon_post(
+        "/api/v1/plugins/install/registry",
+        &request,
+        "Verified plugin installation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_plugin_grants(
+    plugin_id: String,
+    request: SetPluginGrantsRequest,
+) -> Result<PluginInstallation, String> {
+    daemon_post(
+        &format!("/api/v1/plugins/{plugin_id}/grants"),
+        &request,
+        "Plugin grants",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_plugin_enabled(
+    plugin_id: String,
+    request: SetPluginEnabledRequest,
+) -> Result<PluginInstallation, String> {
+    daemon_post(
+        &format!("/api/v1/plugins/{plugin_id}/enabled"),
+        &request,
+        "Plugin state",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn invoke_plugin(
+    plugin_id: String,
+    invocation_id: String,
+    request: InvokePluginRequest,
+) -> Result<PluginInvocationMutation, String> {
+    let invocation_id = uuid::Uuid::parse_str(&invocation_id)
+        .map_err(|_| "Plugin invocation identity must be a UUID".to_owned())?;
+    daemon_post(
+        &format!("/api/v1/plugins/{plugin_id}/invocations/{invocation_id}"),
+        &request,
+        "Plugin invocation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_plugin_invocation(
+    plugin_id: String,
+    invocation_id: String,
+) -> Result<PluginInvocationHistoryResponse, String> {
+    let invocation_id = uuid::Uuid::parse_str(&invocation_id)
+        .map_err(|_| "Plugin invocation identity must be a UUID".to_owned())?;
+    daemon_get(
+        &format!("/api/v1/plugins/{plugin_id}/invocations/{invocation_id}"),
+        "Plugin invocation history",
+    )
+    .await
+}
+
+async fn daemon_get<T: serde::de::DeserializeOwned>(path: &str, label: &str) -> Result<T, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}{path}"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("{label} could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
+}
+
+async fn daemon_post<T: serde::de::DeserializeOwned>(
+    path: &str,
+    request: &impl Serialize,
+    label: &str,
+) -> Result<T, String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}{path}"))
+        .bearer_auth(daemon_token()?)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| format!("{label} could not be completed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -1595,6 +1719,7 @@ fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[allow(clippy::too_many_lines)] // Keeps the complete audited native command registry explicit.
 /// Starts the native desktop application.
 ///
 /// # Panics
@@ -1621,6 +1746,13 @@ pub fn run() {
             list_backups,
             create_backup,
             verify_backup,
+            list_plugins,
+            install_local_plugin,
+            install_registry_plugin,
+            set_plugin_grants,
+            set_plugin_enabled,
+            invoke_plugin,
+            get_plugin_invocation,
             provider_proxy_usage,
             provider_proxy_conversations,
             configure_provider,

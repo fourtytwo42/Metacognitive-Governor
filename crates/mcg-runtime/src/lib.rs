@@ -1511,6 +1511,45 @@ impl AppRuntime {
         self.store()?.plugin_installations().map_err(Into::into)
     }
 
+    /// Loads one immutable plugin revision without module bytes.
+    ///
+    /// # Errors
+    /// Returns storage or decoding failures.
+    pub fn plugin_revision(
+        &self,
+        revision_id: mcg_domain::PluginRevisionId,
+    ) -> Result<Option<PluginRevision>, RuntimeError> {
+        self.store()?
+            .plugin_revision(revision_id)
+            .map_err(Into::into)
+    }
+
+    /// Loads one durable plugin invocation projection without result content.
+    ///
+    /// # Errors
+    /// Returns storage or decoding failures.
+    pub fn plugin_invocation(
+        &self,
+        invocation_id: PluginInvocationId,
+    ) -> Result<Option<PluginInvocationRecord>, RuntimeError> {
+        self.store()?
+            .plugin_invocation(invocation_id)
+            .map_err(Into::into)
+    }
+
+    /// Loads immutable lifecycle snapshots for one plugin invocation.
+    ///
+    /// # Errors
+    /// Returns storage or decoding failures.
+    pub fn plugin_invocation_history(
+        &self,
+        invocation_id: PluginInvocationId,
+    ) -> Result<Vec<PluginInvocationRecord>, RuntimeError> {
+        self.store()?
+            .plugin_invocation_history(invocation_id)
+            .map_err(Into::into)
+    }
+
     /// Replaces one plugin's complete owner-issued capability grant set. Every
     /// change disables the plugin until a separate explicit enable mutation.
     ///

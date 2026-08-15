@@ -18,11 +18,11 @@ use mcg_agents::{
     ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
-    ExperimentId, OrganizationId, PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel,
-    RunId, ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
-    SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, TaskBudget, TaskEnvelope,
-    TaskId, TaskState, WorkItemId,
+    ExperimentId, OrganizationId, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInvocationId, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState,
+    SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId, SshOperationKind,
+    TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
@@ -1330,6 +1330,48 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mcg_plugins_list",
+            "title": "List MCG Plugins",
+            "description": "List installed plugin heads, active manifests, trust provenance, requested capabilities, exact grants, and enabled state without module or invocation content.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_plugins_configure",
+            "title": "Configure an MCG Plugin",
+            "description": "Replace one plugin's complete scoped grant set or explicitly enable/disable it using optimistic revision control. Grant changes always disable the plugin.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plugin_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "expected_revision": {"type": "integer", "minimum": 1},
+                    "action": {"type": "string", "enum": ["set_grants", "set_enabled"]},
+                    "grants": {"type": "array", "maxItems": 5, "items": {"type": "object"}},
+                    "enabled": {"type": "boolean"}
+                },
+                "required": ["plugin_id", "expected_revision", "action"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_plugins_invoke",
+            "title": "Invoke an MCG Plugin",
+            "description": "Invoke one explicitly enabled sandboxed plugin with a caller-owned UUID. Capability requests remain subject to the task project, grants, policy, approvals, audit, and non-replayable uncertainty rules.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plugin_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "invocation_id": {"type": "string", "format": "uuid"},
+                    "task_id": {"type": "string", "format": "uuid"},
+                    "input": {}
+                },
+                "required": ["plugin_id", "invocation_id", "input"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
+        }),
+        json!({
             "name": "mcg_system_status",
             "title": "Read MCG System Status",
             "description": "Return the daemon version, readiness, mode, and restart-recovery counts.",
@@ -1438,6 +1480,9 @@ async fn call_tool(
         "mcg_ssh_hosts" => ssh_hosts(state, &arguments),
         "mcg_ssh_register" => ssh_register(state, &arguments),
         "mcg_ssh_run" => ssh_run(state, &arguments).await,
+        "mcg_plugins_list" => plugins_list(state, &arguments),
+        "mcg_plugins_configure" => plugins_configure(state, &arguments),
+        "mcg_plugins_invoke" => plugins_invoke(state, &arguments).await,
         "mcg_run_task" => run_task(state, &arguments).await,
         "mcg_continue_task" => continue_task(state, &arguments).await,
         "mcg_cancel_task" => cancel_task(state, &arguments),
@@ -1460,6 +1505,129 @@ fn platform_capabilities(
     tool_success(Ok(json!({
         "capabilities": state.runtime.platform_capabilities()
     })))
+}
+
+fn plugins_list(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &[])?;
+    let installations = match state.runtime.plugin_installations() {
+        Ok(installations) => installations,
+        Err(error) => return Ok(plugin_mcp_error(&error)),
+    };
+    let mut plugins = Vec::with_capacity(installations.len());
+    for installation in installations {
+        let revision = match state
+            .runtime
+            .plugin_revision(installation.active_revision_id)
+        {
+            Ok(Some(revision)) => revision,
+            Ok(None) => {
+                return Ok(tool_error(
+                    "plugin_catalog_invalid",
+                    "An installed plugin active revision is missing",
+                ));
+            }
+            Err(error) => return Ok(plugin_mcp_error(&error)),
+        };
+        plugins.push(json!({
+            "installation": installation,
+            "active_revision": revision,
+        }));
+    }
+    tool_success(Ok(json!({"plugins": plugins})))
+}
+
+fn plugins_configure(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<PluginConfigureArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Plugin configuration arguments are invalid",
+        ));
+    };
+    let result = match request.action.as_str() {
+        "set_grants" if request.enabled.is_none() => state.runtime.set_plugin_capability_grants(
+            &request.plugin_id,
+            request.expected_revision,
+            request.grants.unwrap_or_default(),
+        ),
+        "set_enabled" if request.grants.is_none() && request.enabled.is_some() => {
+            state.runtime.set_plugin_enabled(
+                &request.plugin_id,
+                request.expected_revision,
+                request.enabled.unwrap_or(false),
+            )
+        }
+        _ => {
+            return Ok(tool_error(
+                "invalid_arguments",
+                "set_grants accepts only grants; set_enabled accepts only enabled",
+            ));
+        }
+    };
+    match result {
+        Ok(installation) => tool_success(serde_json::to_value(installation)),
+        Err(error) => Ok(plugin_mcp_error(&error)),
+    }
+}
+
+async fn plugins_invoke(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<PluginInvokeArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Plugin invocation arguments are invalid",
+        ));
+    };
+    let Ok(invocation_id) = PluginInvocationId::from_str(&request.invocation_id) else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Plugin invocation id must be a UUID",
+        ));
+    };
+    let task_id = match request.task_id {
+        Some(task_id) => match TaskId::from_str(&task_id) {
+            Ok(task_id) => Some(task_id),
+            Err(_) => {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "Plugin task id must be a UUID",
+                ));
+            }
+        },
+        None => None,
+    };
+    match state
+        .runtime
+        .invoke_sandboxed_plugin(invocation_id, &request.plugin_id, task_id, request.input)
+        .await
+    {
+        Ok(mutation) => tool_success(serde_json::to_value(mutation)),
+        Err(error) => Ok(plugin_mcp_error(&error)),
+    }
+}
+
+fn plugin_mcp_error(error: &mcg_runtime::RuntimeError) -> Value {
+    let code = if error.is_not_found() {
+        "plugin_not_found"
+    } else if error.is_conflict() {
+        "plugin_conflict"
+    } else if error.is_invalid_request() {
+        "invalid_arguments"
+    } else {
+        "runtime_error"
+    };
+    tool_error(code, &error.to_string())
 }
 
 fn experiments_inspect(
@@ -2595,6 +2763,28 @@ struct SshRunArguments {
     operation: SshOperationKind,
     #[serde(default = "default_ssh_timeout")]
     timeout_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginConfigureArguments {
+    plugin_id: String,
+    expected_revision: u64,
+    action: String,
+    #[serde(default)]
+    grants: Option<Vec<PluginCapabilityGrant>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginInvokeArguments {
+    plugin_id: String,
+    invocation_id: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    input: Value,
 }
 
 const fn default_ssh_port() -> u16 {

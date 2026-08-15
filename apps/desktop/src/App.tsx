@@ -25,6 +25,7 @@ import {
   handoffBrowserSession,
   handoffComputerSession,
   listMcpConnections,
+  listPlugins,
   listExperiments,
   listSupervisionObservations,
   listProviders,
@@ -60,6 +61,12 @@ import {
   type McpListItem,
   type McpProtocolMode,
   type McpTransportKind,
+  type PluginCapability,
+  type PluginCapabilityGrant,
+  type PluginDescriptor,
+  type PluginInvocationMutation,
+  type PluginManifest,
+  type InstallRegistryPluginRequest,
   openExternalUrl,
   type OAuthLoginStart,
   type OpenAiOAuthMethod,
@@ -103,6 +110,12 @@ import {
   registerSshHost,
   runSshOperation,
   runDiagnostics,
+  installLocalPlugin,
+  installRegistryPlugin,
+  invokePlugin,
+  getPluginInvocation,
+  setPluginEnabled,
+  setPluginGrants,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
@@ -170,6 +183,24 @@ function modelPrice(model: ProviderModel): string {
   const input = model.price.input_per_million === undefined ? "?" : `$${model.price.input_per_million.toFixed(2)}`;
   const output = model.price.output_per_million === undefined ? "?" : `$${model.price.output_per_million.toFixed(2)}`;
   return `${input} in · ${output} out / 1M`;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function capabilityLabel(capability: PluginCapability): string {
+  return capability.replaceAll("_", " ");
 }
 
 function TaskEvidence({
@@ -300,6 +331,16 @@ export function App() {
   const [mcpCredential, setMcpCredential] = useState("");
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState<string | null>(null);
+  const [plugins, setPlugins] = useState<PluginDescriptor[]>([]);
+  const [pluginManifestFile, setPluginManifestFile] = useState<File | null>(null);
+  const [pluginModuleFile, setPluginModuleFile] = useState<File | null>(null);
+  const [pluginRegistryPackageFile, setPluginRegistryPackageFile] = useState<File | null>(null);
+  const [pluginScopeDrafts, setPluginScopeDrafts] = useState<Record<string, Record<string, string>>>({});
+  const [pluginInputDrafts, setPluginInputDrafts] = useState<Record<string, string>>({});
+  const [pluginInvocations, setPluginInvocations] = useState<Record<string, PluginInvocationMutation | undefined>>({});
+  const [pluginHistoryCounts, setPluginHistoryCounts] = useState<Record<string, number>>({});
+  const [pluginBusy, setPluginBusy] = useState(false);
+  const [pluginError, setPluginError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskEnvelope[]>([]);
   const [taskGoal, setTaskGoal] = useState("");
   const [taskConstraints, setTaskConstraints] = useState("");
@@ -430,6 +471,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setMcpError(errorMessage(error));
+      });
+    listPlugins()
+      .then((response) => {
+        if (active) setPlugins(response.plugins);
+      })
+      .catch((error) => {
+        if (active) setPluginError(errorMessage(error));
       });
     listProviders()
       .then((response) => {
@@ -800,6 +848,172 @@ export function App() {
       setMcpError(errorMessage(error));
     } finally {
       setMcpBusy(false);
+    }
+  }
+
+  async function refreshPlugins() {
+    const response = await listPlugins();
+    setPlugins(response.plugins);
+  }
+
+  async function importPlugin() {
+    if (!pluginManifestFile || !pluginModuleFile) {
+      setPluginError("Choose both a plugin manifest and a WebAssembly module.");
+      return;
+    }
+    if (pluginManifestFile.size > 64 * 1024 || pluginModuleFile.size > 64 * 1024 * 1024) {
+      setPluginError("The manifest must be at most 64 KiB and the module at most 64 MiB.");
+      return;
+    }
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      const manifest = JSON.parse(await pluginManifestFile.text()) as PluginManifest;
+      if (manifest.schema_version !== 1 || manifest.class !== "sandboxed_wasi" || !manifest.id || !manifest.display_name || !manifest.version) {
+        throw new Error("The manifest is not a supported sandboxed WASI plugin manifest.");
+      }
+      const moduleBytes = new Uint8Array(await pluginModuleFile.arrayBuffer());
+      await installLocalPlugin({
+        revision: {
+          schema_version: 1,
+          id: crypto.randomUUID(),
+          manifest: { ...manifest, requested_capabilities: manifest.requested_capabilities ?? [] },
+          module_sha256: await sha256Hex(moduleBytes),
+          module_size_bytes: moduleBytes.byteLength,
+          source: { kind: "local_import" },
+          signature: { state: "unsigned" },
+          installed_at: new Date().toISOString()
+        },
+        module_base64: bytesToBase64(moduleBytes)
+      });
+      await refreshPlugins();
+      setPluginManifestFile(null);
+      setPluginModuleFile(null);
+    } catch (error) {
+      setPluginError(errorMessage(error));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function importRegistryPlugin() {
+    if (!pluginRegistryPackageFile) {
+      setPluginError("Choose a signed registry package request.");
+      return;
+    }
+    if (pluginRegistryPackageFile.size > 90 * 1024 * 1024) {
+      setPluginError("The signed registry package request must be at most 90 MiB.");
+      return;
+    }
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      const request = JSON.parse(await pluginRegistryPackageFile.text()) as InstallRegistryPluginRequest;
+      await installRegistryPlugin(request);
+      await refreshPlugins();
+      setPluginRegistryPackageFile(null);
+    } catch (error) {
+      setPluginError(errorMessage(error));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  function draftPluginScope(pluginId: string, field: string): string {
+    return pluginScopeDrafts[pluginId]?.[field] ?? "";
+  }
+
+  function updatePluginScope(pluginId: string, field: string, value: string) {
+    setPluginScopeDrafts((current) => ({
+      ...current,
+      [pluginId]: { ...current[pluginId], [field]: value }
+    }));
+  }
+
+  function requestedPluginGrants(plugin: PluginDescriptor): PluginCapabilityGrant[] {
+    return plugin.active_revision.manifest.requested_capabilities.map((capability) => {
+      let scopes: PluginCapabilityGrant["scopes"];
+      if (capability === "filesystem_read" || capability === "filesystem_write") {
+        scopes = [{ kind: "task_project" }];
+      } else if (capability === "network") {
+        const origin = draftPluginScope(plugin.installation.plugin_id, "network").trim();
+        if (!origin) throw new Error("Enter the exact network origin this plugin may contact.");
+        scopes = [{ kind: "network_origin", origin }];
+      } else if (capability === "process") {
+        const executable = draftPluginScope(plugin.installation.plugin_id, "process").trim();
+        if (!executable) throw new Error("Enter the exact executable this plugin may run.");
+        scopes = [{ kind: "executable", executable }];
+      } else {
+        const reference = draftPluginScope(plugin.installation.plugin_id, "credentials").trim();
+        const separator = reference.indexOf(":");
+        if (separator <= 0 || separator === reference.length - 1) {
+          throw new Error("Enter a credential reference as provider:key.");
+        }
+        scopes = [{ kind: "credential", provider: reference.slice(0, separator), key: reference.slice(separator + 1) }];
+      }
+      return { schema_version: 1, capability, scopes };
+    });
+  }
+
+  async function grantPluginAccess(plugin: PluginDescriptor) {
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await setPluginGrants(plugin.installation.plugin_id, {
+        expected_revision: plugin.installation.revision,
+        grants: requestedPluginGrants(plugin)
+      });
+      await refreshPlugins();
+    } catch (error) {
+      setPluginError(errorMessage(error));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function togglePlugin(plugin: PluginDescriptor) {
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await setPluginEnabled(
+        plugin.installation.plugin_id,
+        plugin.installation.revision,
+        !plugin.installation.enabled
+      );
+      await refreshPlugins();
+    } catch (error) {
+      setPluginError(errorMessage(error));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function runPlugin(plugin: PluginDescriptor) {
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      const input = JSON.parse(pluginInputDrafts[plugin.installation.plugin_id] || "{}");
+      const mutation = await invokePlugin(plugin.installation.plugin_id, crypto.randomUUID(), input);
+      setPluginInvocations((current) => ({ ...current, [plugin.installation.plugin_id]: mutation }));
+    } catch (error) {
+      setPluginError(errorMessage(error));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function refreshPluginHistory(plugin: PluginDescriptor) {
+    const invocation = pluginInvocations[plugin.installation.plugin_id]?.invocation;
+    if (!invocation) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      const response = await getPluginInvocation(plugin.installation.plugin_id, invocation.id);
+      setPluginHistoryCounts((current) => ({ ...current, [plugin.installation.plugin_id]: response.history.length }));
+    } catch (error) {
+      setPluginError(errorMessage(error));
+    } finally {
+      setPluginBusy(false);
     }
   }
 
@@ -1619,6 +1833,7 @@ export function App() {
           <a className="nav-item" href="#platform">Computer & browser</a>
           <a className="nav-item" href="#providers">Providers</a>
           <a className="nav-item" href="#mcp">Tools</a>
+          <a className="nav-item" href="#plugins">Plugins</a>
           <a className="nav-item" href="#settings">Settings</a>
         </nav>
         <button
@@ -2587,6 +2802,114 @@ export function App() {
                 ))
               )}
             </div>
+          </div>
+        </section>
+
+        <section className="panel plugin-panel" id="plugins" aria-labelledby="plugins-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">EXTENSIONS</p>
+              <h2 id="plugins-heading">Plugins</h2>
+              <p className="muted">Install sandboxed extensions, review every permission, then choose when to enable them.</p>
+            </div>
+            <span className="count-badge">{plugins.length} installed</span>
+          </div>
+
+          <div className="plugin-import" aria-label="Install local plugin">
+            <div>
+              <h3>Install from this computer</h3>
+              <p className="form-note">Local plugins are imported disabled and unsigned. MCG does not grant access automatically.</p>
+            </div>
+            <label>
+              Manifest (.json)
+              <input type="file" accept="application/json,.json" onChange={(event) => setPluginManifestFile(event.target.files?.[0] ?? null)} />
+            </label>
+            <label>
+              Module (.wasm)
+              <input type="file" accept="application/wasm,.wasm" onChange={(event) => setPluginModuleFile(event.target.files?.[0] ?? null)} />
+            </label>
+            <button className="primary" type="button" disabled={pluginBusy} onClick={importPlugin}>
+              {pluginBusy ? "Working…" : "Install plugin"}
+            </button>
+          </div>
+          {advanced && <div className="plugin-registry-import" aria-label="Install verified registry plugin">
+            <div>
+              <h3>Install signed registry package</h3>
+              <p className="form-note">Advanced: import the bounded package request supplied by a configured trusted registry.</p>
+            </div>
+            <label>
+              Signed package request (.json)
+              <input type="file" accept="application/json,.json" onChange={(event) => setPluginRegistryPackageFile(event.target.files?.[0] ?? null)} />
+            </label>
+            <button className="secondary" type="button" disabled={pluginBusy} onClick={importRegistryPlugin}>Verify and install</button>
+          </div>}
+          {pluginError && <p className="error-message" role="alert">{pluginError}</p>}
+
+          <div className="plugin-list" aria-label="Installed plugins">
+            {plugins.length === 0 ? <p className="empty-state">No plugins installed yet.</p> : plugins.map((plugin) => {
+              const installation = plugin.installation;
+              const manifest = plugin.active_revision.manifest;
+              const invocation = pluginInvocations[installation.plugin_id];
+              const granted = installation.capability_grants.length === manifest.requested_capabilities.length;
+              return <article className="plugin-card" key={installation.plugin_id}>
+                <div className="plugin-card-heading">
+                  <div>
+                    <h3>{manifest.display_name}</h3>
+                    <p>Version {manifest.version} · {plugin.active_revision.signature.state === "verified" ? "Verified publisher" : "Unsigned local plugin"}</p>
+                  </div>
+                  <span className={`status-chip ${installation.enabled ? "status-enabled" : "status-disabled"}`}>
+                    {installation.enabled ? "Enabled" : "Disabled"}
+                  </span>
+                </div>
+
+                <div className="plugin-permissions">
+                  <h4>Requested access</h4>
+                  {manifest.requested_capabilities.length === 0 ? <p className="form-note">No brokered access requested.</p> : <ul>
+                    {manifest.requested_capabilities.map((capability) => <li key={capability}>
+                      <strong>{capabilityLabel(capability)}</strong>
+                      {(capability === "filesystem_read" || capability === "filesystem_write") && <span>Current task project only</span>}
+                      {capability === "network" && <input aria-label={`${manifest.display_name} network origin`} value={draftPluginScope(installation.plugin_id, "network")} onChange={(event) => updatePluginScope(installation.plugin_id, "network", event.target.value)} placeholder="https://api.example.com" />}
+                      {capability === "process" && <input aria-label={`${manifest.display_name} executable`} value={draftPluginScope(installation.plugin_id, "process")} onChange={(event) => updatePluginScope(installation.plugin_id, "process", event.target.value)} placeholder="Exact executable path or name" />}
+                      {capability === "credentials" && <input aria-label={`${manifest.display_name} credential`} value={draftPluginScope(installation.plugin_id, "credentials")} onChange={(event) => updatePluginScope(installation.plugin_id, "credentials", event.target.value)} placeholder="provider:key" />}
+                    </li>)}
+                  </ul>}
+                  <div className="composer-actions">
+                    <button className="secondary" type="button" disabled={pluginBusy || installation.enabled} onClick={() => grantPluginAccess(plugin)}>
+                      {granted ? "Update access" : "Grant requested access"}
+                    </button>
+                    <button className={installation.enabled ? "secondary" : "primary"} type="button" disabled={pluginBusy || (!granted && !installation.enabled)} onClick={() => togglePlugin(plugin)}>
+                      {installation.enabled ? "Disable" : "Enable"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="plugin-runner">
+                  <label>
+                    Plugin input (JSON)
+                    <textarea value={pluginInputDrafts[installation.plugin_id] ?? ""} onChange={(event) => setPluginInputDrafts((current) => ({ ...current, [installation.plugin_id]: event.target.value }))} placeholder="{}" />
+                  </label>
+                  <button className="primary" type="button" disabled={pluginBusy || !installation.enabled} onClick={() => runPlugin(plugin)}>Run plugin</button>
+                  {invocation && <div className="plugin-result" role="status">
+                    <strong>{invocation.invocation.state}</strong>
+                    {invocation.result && <pre>{JSON.stringify(invocation.result.output, null, 2)}</pre>}
+                    {invocation.invocation.error_code && <code>{invocation.invocation.error_code}</code>}
+                  </div>}
+                </div>
+
+                {advanced && <details className="advanced-details">
+                  <summary>Audit details</summary>
+                  <dl>
+                    <div><dt>Plugin ID</dt><dd><code>{installation.plugin_id}</code></dd></div>
+                    <div><dt>Revision ID</dt><dd><code>{installation.active_revision_id}</code></dd></div>
+                    <div><dt>Module SHA-256</dt><dd><code>{plugin.active_revision.module_sha256}</code></dd></div>
+                    <div><dt>Source</dt><dd>{plugin.active_revision.source.kind.replaceAll("_", " ")}</dd></div>
+                  </dl>
+                  {invocation && <button className="secondary" type="button" disabled={pluginBusy} onClick={() => refreshPluginHistory(plugin)}>
+                    Refresh invocation history{pluginHistoryCounts[installation.plugin_id] !== undefined ? ` (${pluginHistoryCounts[installation.plugin_id]} records)` : ""}
+                  </button>}
+                </details>}
+              </article>;
+            })}
           </div>
         </section>
 

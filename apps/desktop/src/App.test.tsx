@@ -12,6 +12,13 @@ const client = vi.hoisted(() => ({
   configureProvider: vi.fn(),
   discoverProvider: vi.fn(),
   listMcp: vi.fn(),
+  listPlugins: vi.fn(),
+  installLocalPlugin: vi.fn(),
+  installRegistryPlugin: vi.fn(),
+  setPluginGrants: vi.fn(),
+  setPluginEnabled: vi.fn(),
+  invokePlugin: vi.fn(),
+  getPluginInvocation: vi.fn(),
   configureMcp: vi.fn(),
   discoverMcp: vi.fn(),
   listTasks: vi.fn(),
@@ -93,6 +100,13 @@ vi.mock("./desktop-client", () => ({
   configureProvider: client.configureProvider,
   discoverProvider: client.discoverProvider,
   listMcpConnections: client.listMcp,
+  listPlugins: client.listPlugins,
+  installLocalPlugin: client.installLocalPlugin,
+  installRegistryPlugin: client.installRegistryPlugin,
+  setPluginGrants: client.setPluginGrants,
+  setPluginEnabled: client.setPluginEnabled,
+  invokePlugin: client.invokePlugin,
+  getPluginInvocation: client.getPluginInvocation,
   configureMcpConnection: client.configureMcp,
   discoverMcpConnection: client.discoverMcp,
   listTasks: client.listTasks,
@@ -177,6 +191,13 @@ beforeEach(() => {
   client.configureProvider.mockReset();
   client.discoverProvider.mockReset();
   client.listMcp.mockReset();
+  client.listPlugins.mockReset();
+  client.installLocalPlugin.mockReset();
+  client.installRegistryPlugin.mockReset();
+  client.setPluginGrants.mockReset();
+  client.setPluginEnabled.mockReset();
+  client.invokePlugin.mockReset();
+  client.getPluginInvocation.mockReset();
   client.configureMcp.mockReset();
   client.discoverMcp.mockReset();
   client.listTasks.mockReset();
@@ -255,6 +276,7 @@ beforeEach(() => {
   });
   client.proxyConversations.mockResolvedValue({ conversations: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
+  client.listPlugins.mockResolvedValue({ plugins: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
   client.listApprovals.mockResolvedValue({ approvals: [] });
@@ -1369,4 +1391,59 @@ test("task evidence uses the durable blocked state when no evaluation exists", a
   fireEvent.click(await screen.findByRole("button", { name: "Evidence" }));
 
   expect(within(await screen.findByRole("region", { name: "Task evidence" })).getByText("Blocked")).toBeInTheDocument();
+});
+
+test("plugin access is scoped before the owner can enable an extension", async () => {
+  const installation = {
+    schema_version: 1,
+    plugin_id: "example.weather",
+    active_revision_id: "00000000-0000-4000-8000-000000000081",
+    enabled: false,
+    capability_grants: [],
+    revision: 1,
+    updated_at: "2026-08-15T00:00:00Z"
+  };
+  const descriptor = {
+    installation,
+    active_revision: {
+      schema_version: 1,
+      id: installation.active_revision_id,
+      manifest: {
+        schema_version: 1,
+        id: installation.plugin_id,
+        display_name: "Weather helper",
+        version: "1.0.0",
+        class: "sandboxed_wasi",
+        requested_capabilities: ["network"]
+      },
+      module_sha256: "a".repeat(64),
+      module_size_bytes: 128,
+      source: { kind: "local_import" },
+      signature: { state: "unsigned" },
+      installed_at: installation.updated_at
+    }
+  };
+  const grant = {
+    schema_version: 1,
+    capability: "network",
+    scopes: [{ kind: "network_origin", origin: "https://weather.example" }]
+  };
+  const granted = { ...descriptor, installation: { ...installation, revision: 2, capability_grants: [grant] } };
+  client.listPlugins.mockResolvedValueOnce({ plugins: [descriptor] }).mockResolvedValue({ plugins: [granted] });
+  client.setPluginGrants.mockResolvedValue(granted.installation);
+  client.setPluginEnabled.mockResolvedValue({ ...granted.installation, enabled: true, revision: 3 });
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Weather helper" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Enable" })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Weather helper network origin"), { target: { value: "https://weather.example" } });
+  fireEvent.click(screen.getByRole("button", { name: "Grant requested access" }));
+
+  await waitFor(() => expect(client.setPluginGrants).toHaveBeenCalledWith("example.weather", {
+    expected_revision: 1,
+    grants: [grant]
+  }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Enable" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Enable" }));
+  await waitFor(() => expect(client.setPluginEnabled).toHaveBeenCalledWith("example.weather", 2, true));
 });

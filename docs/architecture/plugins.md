@@ -96,7 +96,7 @@ invocation identity must match plugin, task, and input digest exactly.
 Release packaging builds and installs `mcg-plugin-runner` adjacent to
 `mcg-service` on Windows and Linux. The daemon's dependency tree still excludes
 the executor and Wasmtime; only the sidecar contains them. Development builds do
-not depend on generated sidecars, and no consumer interface routes plugin work yet.
+not depend on generated sidecars.
 
 ## Broker-issued capabilities
 
@@ -127,17 +127,32 @@ changed request. Approval waits settle the current invocation as failed; any
 runner or persistence failure after a host operation settles as uncertain and is
 never retried automatically.
 
+## Consumer and automation interfaces
+
+The authenticated loopback REST API is the canonical interface for listing,
+local import, verified registry installation, complete grant replacement,
+explicit enable/disable, stable invocation, and invocation-history reads. Request
+bodies and decoded modules are bounded, and local import rejects noncanonical
+base64 or mismatched module identities before durable mutation.
+
+The CLI exposes those lifecycle stages as separate `mcg plugin` commands. Tauri
+commands proxy the same loopback contracts without granting the webview direct
+daemon credentials. The desktop Plugins workspace imports a manifest/module pair
+disabled, explains requested capabilities, collects exact scopes, requires a
+separate enable action, and invokes only enabled plugins. Advanced mode exposes
+immutable identities, digests, invocation history, and signed registry package
+import. The MCP server exposes bounded list, configure, and invoke tools; package
+bytes remain on REST/CLI/Tauri transports so an MCP tool call cannot become a
+large-package upload channel.
+
 ## Remaining integration gates
 
-The execution kernel is only the first M10 boundary. Before plugins become a
-consumer feature, MCG still must add:
+Before plugin support is release-qualified, MCG still must add:
 
-- REST, MCP, CLI, Tauri, and simple/advanced desktop management surfaces;
 - plugin-aware backup/restore, migration, additional adversarial package tests,
   and native Windows/Linux UAT;
 - the complete Wasmtime Apache-2.0-with-LLVM-exceptions license in packages that
   contain the runtime.
 
-Until those gates pass, the kernel remains unavailable to consumer task routing.
-That fail-closed absence is intentional and must not be represented as complete
-plugin support.
+Until those gates pass, plugins remain an explicitly managed preview surface and
+must not be represented as release-qualified plugin support.

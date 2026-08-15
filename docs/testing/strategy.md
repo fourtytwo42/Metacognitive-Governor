@@ -288,6 +288,13 @@ encodings, and verified claims on local imports. Runtime integration additionall
 proves an invalid proof leaves both the artifact store and catalog untouched,
 while a valid registry package is persisted as verified but disabled.
 
+REST integration installs a local module, lists its active manifest, replaces
+the full scoped grant set, and enables it with optimistic revisions. The same
+fixture confirms the MCP inventory and configure tool observe and mutate the
+same durable head. CLI parser/integration tests keep install, grant, enable,
+invoke, and history operations explicit; desktop component tests prove an owner
+cannot enable a capability-bearing plugin until an exact scope has been granted.
+
 Capability-grant storage tests prove strict manifest subsets, exact scope
 normalization, optimistic conflicts, enable refusal for incomplete grants,
 disable-on-change, and reopen durability. Protocol tests reject undeclared

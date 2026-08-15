@@ -6,6 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use mcg_domain::{PluginInstallSource, PluginRevision, PluginSignature, PluginSignatureState};
 use mcg_plugin_protocol::{PluginCapability, PluginClass};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -25,7 +26,7 @@ pub struct TrustedPluginSigner {
 }
 
 /// Detached package proof supplied by a registry package.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginSignatureProof {
     pub schema_version: u16,
     pub scheme: String,

@@ -24,12 +24,14 @@ use mcg_api::{
     CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
     DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    LaunchExecution, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest, LaunchExecution,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
     MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
     OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
-    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest,
-    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
+    PluginListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
+    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
     SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
     SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
     SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
@@ -42,16 +44,19 @@ use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId,
     NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
-    SshHostId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
+    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
+    PluginSignatureState, ProjectId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
+    TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
     McpTransport,
 };
+use mcg_plugin_protocol::PluginManifest;
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
     CONTRACT_VERSION, ContentPart, MessageRole, ModelProbeReport, OutputItem, ProviderAuthMode,
@@ -61,9 +66,9 @@ use mcg_runtime::{
     AgentRunView, AgentTurnCommit, CandidateRevisionMutation, DiagnosticReport, DiagnosticSeverity,
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
-    SshOperationMutation, SupervisionMutation,
+    PlatformComputerMutation, PluginInvocationMutation, ProjectMutation, ProviderMutation,
+    RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
+    SshHostMutation, SshOperationMutation, SupervisionMutation,
 };
 use mcg_storage::{restore_backup_bundle, verify_backup_bundle};
 use mcg_tools::{
@@ -71,6 +76,7 @@ use mcg_tools::{
     PersistentBrowserObservation,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 #[derive(Serialize)]
@@ -197,6 +203,11 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Install, inspect, authorize, and invoke sandboxed plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Create and control durable unattended work.
     Schedule {
         #[command(subcommand)]
@@ -277,6 +288,63 @@ enum BackupCommand {
         bundle: PathBuf,
         #[arg(long)]
         confirm: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    /// List installed plugin heads, manifests, grants, trust, and enabled state.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import one local WASI module and manifest. The new revision remains disabled.
+    InstallLocal {
+        manifest: PathBuf,
+        module: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a registry package only after its detached signature verifies against owner trust roots.
+    InstallRegistry {
+        request: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace the complete scoped grant set from a JSON array; this disables the plugin.
+    SetGrants {
+        plugin_id: String,
+        expected_revision: u64,
+        grants: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly enable or disable one plugin head.
+    SetEnabled {
+        plugin_id: String,
+        expected_revision: u64,
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Invoke an enabled plugin with a caller-owned UUID and JSON input file.
+    Invoke {
+        plugin_id: String,
+        input: PathBuf,
+        #[arg(long)]
+        invocation_id: Option<PluginInvocationId>,
+        #[arg(long)]
+        task_id: Option<TaskId>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one invocation's current projection and immutable lifecycle history.
+    Invocation {
+        plugin_id: String,
+        invocation_id: PluginInvocationId,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1324,6 +1392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Mcp { command }) => {
             run_mcp(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Plugin { command }) => {
+            run_plugin(&client, host, token.trim(), command).await?;
         }
         Some(Command::Schedule { command }) => {
             run_schedule(&client, host, token.trim(), command).await?;
@@ -3944,6 +4015,262 @@ async fn run_mcp(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the explicit plugin grant/enable state machine visible.
+async fn run_plugin(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: PluginCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        PluginCommand::List { json } => {
+            let response: PluginListResponse =
+                get_authenticated(client, host, token, "/api/v1/plugins").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.plugins.is_empty() {
+                println!("No plugins installed.");
+            } else {
+                for plugin in response.plugins {
+                    println!(
+                        "{} {}  {}  {}  grants={}  revision={}",
+                        plugin.active_revision.manifest.display_name,
+                        plugin.active_revision.manifest.version,
+                        plugin.installation.plugin_id,
+                        if plugin.installation.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        plugin.installation.capability_grants.len(),
+                        plugin.installation.revision
+                    );
+                }
+            }
+        }
+        PluginCommand::InstallLocal {
+            manifest,
+            module,
+            json,
+        } => {
+            let manifest: PluginManifest = read_bounded_json(&manifest, 64 * 1_024)?;
+            let module = read_bounded_file(&module, 64 * 1_024 * 1_024)?;
+            let revision = PluginRevision {
+                schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+                id: PluginRevisionId::new(),
+                manifest,
+                module_sha256: format!("{:x}", Sha256::digest(&module)),
+                module_size_bytes: u64::try_from(module.len())?,
+                source: PluginInstallSource::LocalImport,
+                signature: PluginSignature {
+                    state: PluginSignatureState::Unsigned,
+                    scheme: None,
+                    signer: None,
+                    signature_sha256: None,
+                },
+                installed_at: Utc::now(),
+            };
+            let installation: PluginInstallation = post_authenticated(
+                client,
+                host,
+                token,
+                "/api/v1/plugins/install/local",
+                &InstallLocalPluginRequest {
+                    revision,
+                    module_base64: STANDARD.encode(module),
+                },
+            )
+            .await?;
+            print_plugin_installation(&installation, json)?;
+        }
+        PluginCommand::InstallRegistry { request, json } => {
+            let request: InstallRegistryPluginRequest =
+                read_bounded_json(&request, 90 * 1_024 * 1_024)?;
+            let installation: PluginInstallation = post_authenticated(
+                client,
+                host,
+                token,
+                "/api/v1/plugins/install/registry",
+                &request,
+            )
+            .await?;
+            print_plugin_installation(&installation, json)?;
+        }
+        PluginCommand::SetGrants {
+            plugin_id,
+            expected_revision,
+            grants,
+            json,
+        } => {
+            let grants: Vec<PluginCapabilityGrant> = read_bounded_json(&grants, 256 * 1_024)?;
+            let installation: PluginInstallation = post_authenticated(
+                client,
+                host,
+                token,
+                &format!("/api/v1/plugins/{plugin_id}/grants"),
+                &SetPluginGrantsRequest {
+                    expected_revision,
+                    grants,
+                },
+            )
+            .await?;
+            print_plugin_installation(&installation, json)?;
+        }
+        PluginCommand::SetEnabled {
+            plugin_id,
+            expected_revision,
+            enabled,
+            json,
+        } => {
+            let installation: PluginInstallation = post_authenticated(
+                client,
+                host,
+                token,
+                &format!("/api/v1/plugins/{plugin_id}/enabled"),
+                &SetPluginEnabledRequest {
+                    expected_revision,
+                    enabled,
+                },
+            )
+            .await?;
+            print_plugin_installation(&installation, json)?;
+        }
+        PluginCommand::Invoke {
+            plugin_id,
+            input,
+            invocation_id,
+            task_id,
+            json,
+        } => {
+            let input = read_bounded_json(&input, 1_024 * 1_024)?;
+            let invocation_id = invocation_id.unwrap_or_default();
+            let mutation: PluginInvocationMutation = post_authenticated(
+                client,
+                host,
+                token,
+                &format!("/api/v1/plugins/{plugin_id}/invocations/{invocation_id}"),
+                &InvokePluginRequest { task_id, input },
+            )
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}: {:?}{}",
+                    mutation.invocation.id,
+                    mutation.invocation.state,
+                    if mutation.replayed { " (replay)" } else { "" }
+                );
+                if let Some(result) = mutation.result {
+                    println!("{}", serde_json::to_string_pretty(&result.output)?);
+                }
+            }
+        }
+        PluginCommand::Invocation {
+            plugin_id,
+            invocation_id,
+            json,
+        } => {
+            let response: PluginInvocationHistoryResponse = get_authenticated(
+                client,
+                host,
+                token,
+                &format!("/api/v1/plugins/{plugin_id}/invocations/{invocation_id}"),
+            )
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!(
+                    "{}: {:?}",
+                    response.invocation.id, response.invocation.state
+                );
+                for snapshot in response.history {
+                    println!("  {:?}  {}", snapshot.state, snapshot.started_at);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn get_authenticated<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    path: &str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    Ok(client
+        .get(format!("{host}{path}"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+async fn post_authenticated<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    path: &str,
+    body: &impl Serialize,
+) -> Result<T, Box<dyn std::error::Error>> {
+    Ok(client
+        .post(format!("{host}{path}"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+fn read_bounded_file(
+    path: &std::path::Path,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum_bytes {
+        return Err(format!("{} is not a bounded regular file", path.display()).into());
+    }
+    Ok(std::fs::read(path)?)
+}
+
+fn read_bounded_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    maximum_bytes: u64,
+) -> Result<T, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_slice(&read_bounded_file(
+        path,
+        maximum_bytes,
+    )?)?)
+}
+
+fn print_plugin_installation(
+    installation: &PluginInstallation,
+    json: bool,
+) -> Result<(), serde_json::Error> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(installation)?);
+    } else {
+        println!(
+            "{}: {} (revision {}, grants={})",
+            installation.plugin_id,
+            if installation.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            installation.revision,
+            installation.capability_grants.len()
+        );
+    }
+    Ok(())
+}
+
 async fn list_mcp_configurations(
     client: &reqwest::Client,
     host: &str,
@@ -4622,6 +4949,84 @@ mod tests {
             parse_cli_value(r#"{"enabled":true}"#),
             serde_json::json!({"enabled": true})
         );
+    }
+
+    #[test]
+    fn plugin_commands_expose_explicit_install_grant_enable_and_invoke_steps() {
+        let install = Cli::try_parse_from([
+            "mcg",
+            "plugin",
+            "install-local",
+            "manifest.json",
+            "plugin.wasm",
+        ])
+        .expect("plugin install command");
+        assert!(matches!(
+            install.command,
+            Some(Command::Plugin {
+                command: PluginCommand::InstallLocal { .. }
+            })
+        ));
+
+        let registry = Cli::try_parse_from([
+            "mcg",
+            "plugin",
+            "install-registry",
+            "signed-package.json",
+            "--json",
+        ])
+        .expect("verified registry plugin install command");
+        assert!(matches!(
+            registry.command,
+            Some(Command::Plugin {
+                command: PluginCommand::InstallRegistry { json: true, .. }
+            })
+        ));
+
+        let enabled = Cli::try_parse_from([
+            "mcg",
+            "plugin",
+            "set-enabled",
+            "example.plugin",
+            "3",
+            "true",
+        ])
+        .expect("plugin enable command");
+        assert!(matches!(
+            enabled.command,
+            Some(Command::Plugin {
+                command: PluginCommand::SetEnabled {
+                    expected_revision: 3,
+                    enabled: true,
+                    ..
+                }
+            })
+        ));
+
+        let invoke = Cli::try_parse_from([
+            "mcg",
+            "plugin",
+            "invoke",
+            "example.plugin",
+            "input.json",
+            "--invocation-id",
+            "00000000-0000-4000-8000-000000000099",
+            "--task-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--json",
+        ])
+        .expect("plugin invoke command");
+        assert!(matches!(
+            invoke.command,
+            Some(Command::Plugin {
+                command: PluginCommand::Invoke {
+                    invocation_id: Some(_),
+                    task_id: Some(_),
+                    json: true,
+                    ..
+                }
+            })
+        ));
     }
 
     #[test]
