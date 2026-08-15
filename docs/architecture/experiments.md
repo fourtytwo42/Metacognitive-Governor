@@ -86,6 +86,10 @@ running to promoted. Promotion requires the configured number of distinct
 benchmarks, no more than the permitted regressions, the requested confidence,
 the expected current baseline, and candidate/baseline membership in the same
 organization.
+Automatic promotion additionally re-loads every referenced run and evaluation
+and requires each benchmark arm's revision, run, outcome, confidence, and
+metrics to match that durable evidence exactly. A syntactically valid benchmark
+cannot invent a passing arm for automatic promotion.
 
 ## Atomic promotion and reversion
 
@@ -105,6 +109,11 @@ reversion, but the same evidence and transaction invariants still apply.
 Automatic assessment also recovers the crash window after a benchmark commits
 but before `awaiting_decision`: the next scheduler tick advances and decides the
 same stable evidence without recreating evaluation, benchmark, or decision IDs.
+Reversion decisions carry explicit trigger evaluation IDs. Storage verifies
+each trigger belongs to a run pinned to the promoted candidate, occurred after
+the promotion decision, and reports failure or regression. Scheduler ticks find
+that evidence, create one stable reversion decision, and restore the exact
+baseline atomically; replay cannot revert twice.
 
 ## Interfaces
 

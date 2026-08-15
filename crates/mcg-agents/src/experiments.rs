@@ -571,6 +571,8 @@ pub struct ExperimentDecision {
     pub from_revision_id: OrganizationRevisionId,
     pub to_revision_id: OrganizationRevisionId,
     pub benchmark_ids: Vec<ExperimentBenchmarkId>,
+    #[serde(default)]
+    pub trigger_evaluation_ids: Vec<EvaluationId>,
     pub prospective_analysis: ProspectiveAnalysis,
     pub reason: String,
     pub decided_at: DateTime<Utc>,
@@ -591,6 +593,11 @@ impl ExperimentDecision {
         if self.from_revision_id == self.to_revision_id
             || self.benchmark_ids.is_empty()
             || self.benchmark_ids.len() > 1_024
+            || self.trigger_evaluation_ids.len() > 1_024
+            || (self.kind == ExperimentDecisionKind::Revert
+                && self.trigger_evaluation_ids.is_empty())
+            || (self.kind != ExperimentDecisionKind::Revert
+                && !self.trigger_evaluation_ids.is_empty())
             || self.reason.trim().is_empty()
             || self.reason.len() > 8_192
             || self.prospective_analysis.expected_benefits.len() > 128
@@ -710,6 +717,7 @@ mod tests {
             from_revision_id: revision,
             to_revision_id: OrganizationRevisionId::new(),
             benchmark_ids: vec![ExperimentBenchmarkId::new()],
+            trigger_evaluation_ids: Vec::new(),
             prospective_analysis: ProspectiveAnalysis {
                 expected_benefits: vec!["fewer retries".into()],
                 expected_risks: vec!["higher token cost".into()],

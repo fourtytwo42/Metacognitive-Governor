@@ -1186,6 +1186,9 @@ pub async fn run_scheduler_tick_at(
         .assess_automatic_shadow_runs(8)
         .map_err(|error| error.to_string())?;
     runtime
+        .revert_regressing_automatic_experiments(8)
+        .map_err(|error| error.to_string())?;
+    runtime
         .poll_event_schedules(now)
         .map_err(|error| error.to_string())?;
     runtime
@@ -9688,6 +9691,7 @@ form.addEventListener('submit', (event) => {
             from_revision_id: baseline.revision_id,
             to_revision_id: candidate.revision_id,
             benchmark_ids: vec![benchmark.id],
+            trigger_evaluation_ids: Vec::new(),
             prospective_analysis: mcg_agents::ProspectiveAnalysis {
                 expected_benefits: vec!["fewer repeated failures".into()],
                 expected_risks: vec!["fixture regression".into()],

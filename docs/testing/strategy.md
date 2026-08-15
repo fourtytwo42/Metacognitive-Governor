@@ -174,6 +174,11 @@ The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision rejects
 inconclusive evidence, retains one evaluation/benchmark/decision history, and
 leaves the exact baseline organization head active.
+Seeded promotion/reversion evidence additionally proves automatic promotion
+accepts only benchmark arms matching their durable run/evaluation records,
+moves the head only for matching passing evidence, detects a later candidate
+regression by evaluation ID, restores the exact baseline, and makes subsequent
+reversion scans observation-only.
 
 ### Local release candidate
 

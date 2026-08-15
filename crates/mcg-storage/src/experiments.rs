@@ -136,6 +136,70 @@ impl SqliteEventStore {
             .map_err(StorageError::from)
     }
 
+    /// Lists promoted automatic experiments with measured post-promotion regressions.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds, malformed evidence, or database failures.
+    pub fn automatic_reversion_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(ExperimentId, EvaluationId)>, StorageError> {
+        if limit == 0 || limit > 128 {
+            return Err(StorageError::InvalidData(
+                "automatic reversion batch must contain 1 to 128 experiments".into(),
+            ));
+        }
+        let query_limit = i64::try_from(limit.saturating_mul(32))
+            .map_err(|_| StorageError::InvalidData("reversion batch is too large".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT e.experiment_id, v.evaluation_id, v.evaluation_json
+             FROM automatic_experiment_outcomes a
+             JOIN experiments e ON e.experiment_id = a.experiment_id
+             JOIN experiment_decisions p
+               ON p.experiment_id = e.experiment_id AND p.kind = 'promote'
+             JOIN agent_runs r ON r.organization_revision_id = e.candidate_revision_id
+             JOIN evaluations v ON v.run_id = r.run_id AND v.evaluated_at > p.decided_at
+             LEFT JOIN experiment_decisions x
+               ON x.experiment_id = e.experiment_id AND x.kind = 'revert'
+             WHERE a.disposition = 'ready'
+               AND e.state = 'promoted'
+               AND x.experiment_id IS NULL
+             ORDER BY v.evaluated_at, v.evaluation_id LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([query_limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut candidates = Vec::new();
+        for (experiment_id, evaluation_id, json) in rows {
+            let experiment_id = experiment_id.parse().map_err(|_| {
+                StorageError::InvalidData("automatic reversion experiment id is invalid".into())
+            })?;
+            let evaluation: mcg_agents::EvaluationReport = serde_json::from_str(&json)?;
+            if evaluation.outcome == mcg_agents::EvaluationOutcome::Failed
+                || !evaluation.regressions.is_empty()
+            {
+                if !seen.insert(experiment_id) {
+                    continue;
+                }
+                let evaluation_id = evaluation_id.parse().map_err(|_| {
+                    StorageError::InvalidData("automatic reversion evaluation id is invalid".into())
+                })?;
+                candidates.push((experiment_id, evaluation_id));
+                if candidates.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Lists automatic experiments that are ready to start or running without a receipt.
     ///
     /// # Errors
@@ -1081,6 +1145,7 @@ impl SqliteEventStore {
                         "reversion direction, state, or active candidate is stale".into(),
                     ));
                 }
+                self.validate_reversion_evidence(&experiment, decision)?;
                 (ExperimentState::Reverted, true)
             }
             ExperimentDecisionKind::Reject => {
@@ -1289,6 +1354,42 @@ impl SqliteEventStore {
         }
         Ok(())
     }
+
+    fn validate_reversion_evidence(
+        &self,
+        experiment: &ExperimentDefinition,
+        decision: &ExperimentDecision,
+    ) -> Result<(), StorageError> {
+        let promoted_at = self
+            .experiment_decisions(experiment.id)?
+            .into_iter()
+            .filter(|prior| prior.kind == ExperimentDecisionKind::Promote)
+            .map(|prior| prior.decided_at)
+            .max()
+            .ok_or_else(|| StorageError::Conflict("reversion has no promotion decision".into()))?;
+        for evaluation_id in &decision.trigger_evaluation_ids {
+            let evaluation = self.evaluation(*evaluation_id)?.ok_or_else(|| {
+                StorageError::Conflict(format!(
+                    "reversion evaluation {evaluation_id} was not found"
+                ))
+            })?;
+            let run = self
+                .agent_run(evaluation.run_id)?
+                .ok_or(StorageError::AgentRunNotFound(evaluation.run_id))?;
+            if run.organization_revision_id != experiment.candidate_revision_id
+                || evaluation.evaluated_at <= promoted_at
+                || evaluation.evaluated_at > decision.decided_at
+                || (evaluation.outcome != mcg_agents::EvaluationOutcome::Failed
+                    && evaluation.regressions.is_empty())
+            {
+                return Err(StorageError::Conflict(
+                    "reversion evaluation does not prove a post-promotion candidate regression"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn same_json<T: serde::Serialize>(left: &T, right: &T) -> Result<bool, StorageError> {
@@ -1349,11 +1450,14 @@ const fn supervision_signal_name(value: SupervisionSignal) -> &'static str {
 mod tests {
     use chrono::{Duration, Utc};
     use mcg_agents::{
-        BenchmarkArmResult, ConfidenceEstimate, EXPERIMENT_SCHEMA_VERSION, EvaluationOutcome,
-        ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
-        ExperimentMode, ExperimentState, OrganizationalMetrics, ProspectiveAnalysis,
-        SUPERVISION_SCHEMA_VERSION, ShadowAuthority, ShadowExecutionReceipt, SupervisionEvidence,
-        SupervisionLoop, SupervisionObservation, SupervisionSignal,
+        AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, BenchmarkArmResult, ConditionResult,
+        ConfidenceEstimate, EXPERIMENT_SCHEMA_VERSION, EvaluationEvidence, EvaluationOutcome,
+        EvaluationReport, ExecutivePlanner, ExperimentBenchmark, ExperimentDecision,
+        ExperimentDecisionKind, ExperimentDefinition, ExperimentMode, ExperimentState,
+        OrganizationalMetrics, PlannedWork, PlanningRequest, ProspectiveAnalysis, RoleKind,
+        SUPERVISION_SCHEMA_VERSION, ShadowAuthority, ShadowExecutionReceipt, SuccessCondition,
+        SupervisionEvidence, SupervisionLoop, SupervisionObservation, SupervisionSignal,
+        TaskComplexity,
     };
     use mcg_domain::{
         EvaluationId, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId,
@@ -1465,6 +1569,11 @@ mod tests {
             from_revision_id: from,
             to_revision_id: to,
             benchmark_ids: vec![benchmark_id],
+            trigger_evaluation_ids: if kind == ExperimentDecisionKind::Revert {
+                vec![EvaluationId::new()]
+            } else {
+                Vec::new()
+            },
             prospective_analysis: ProspectiveAnalysis {
                 expected_benefits: vec!["fewer retries".into()],
                 expected_risks: vec!["higher cost".into()],
@@ -1623,13 +1732,86 @@ mod tests {
                 .revision_id,
             candidate.revision_id
         );
-        let revert = decision(
+        let task = TaskEnvelope::new("seed a measured post-promotion regression");
+        store.create_task(&task).expect("regression task");
+        let condition = SuccessCondition::Custom {
+            description: "candidate remains regression free".into(),
+        };
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "measure promoted candidate",
+                RoleKind::Conversation,
+                vec![condition.clone()],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&candidate, &planning, now + Duration::seconds(6))
+            .expect("regression plan");
+        store
+            .create_agent_run(
+                &AgentRun {
+                    schema_version: AGENT_RUN_SCHEMA_VERSION,
+                    id: planning.run_id,
+                    task_id: task.id,
+                    organization_revision_id: candidate.revision_id,
+                    state: AgentRunState::Planned,
+                    metrics: OrganizationalMetrics::default(),
+                    created_at: now + Duration::seconds(6),
+                    updated_at: now + Duration::seconds(6),
+                    completed_at: None,
+                },
+                &plan,
+            )
+            .expect("regression run");
+        let regression_evaluation = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: EvaluationId::new(),
+            run_id: planning.run_id,
+            task_id: task.id,
+            evaluator_instance_id: None,
+            conditions: vec![ConditionResult {
+                condition,
+                passed: false,
+                detail: "seeded post-promotion regression".into(),
+            }],
+            outcome: EvaluationOutcome::Failed,
+            confidence: ConfidenceEstimate::new(9_500, 1).expect("confidence"),
+            regressions: vec!["seeded post-promotion regression".into()],
+            evidence: vec![EvaluationEvidence {
+                method: "fixture".into(),
+                artifact_sha256: Some("d".repeat(64)),
+                event_sequence: None,
+                detail: "measured after promotion".into(),
+            }],
+            evaluated_at: now + Duration::seconds(7),
+        };
+        store
+            .record_evaluation(&regression_evaluation)
+            .expect("regression evaluation");
+        assert_eq!(
+            store
+                .automatic_reversion_candidates(8)
+                .expect("automatic regression candidate"),
+            vec![(definition.id, regression_evaluation.id)]
+        );
+        let mut revert = decision(
             &definition,
             ExperimentDecisionKind::Revert,
             benchmark.id,
-            now + Duration::seconds(6),
+            now + Duration::seconds(8),
         );
+        revert.trigger_evaluation_ids = vec![regression_evaluation.id];
         store.decide_experiment(&revert).expect("revert");
+        assert!(
+            store
+                .automatic_reversion_candidates(8)
+                .expect("settled reversion")
+                .is_empty()
+        );
         assert_eq!(
             store
                 .organization(baseline.organization_id)

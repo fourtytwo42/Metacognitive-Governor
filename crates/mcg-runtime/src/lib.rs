@@ -4153,8 +4153,20 @@ impl AppRuntime {
                 .iter()
                 .map(|benchmark| benchmark.regressions.len())
                 .sum::<usize>();
+            let evidence_matches = benchmarks
+                .iter()
+                .map(|benchmark| {
+                    Ok(
+                        self.benchmark_arm_matches_durable_evidence(&benchmark.baseline)?
+                            && self.benchmark_arm_matches_durable_evidence(&benchmark.candidate)?,
+                    )
+                })
+                .collect::<Result<Vec<_>, RuntimeError>>()?
+                .into_iter()
+                .all(|matches| matches);
             let promotable = benchmarks.len() >= usize::from(experiment.required_benchmarks)
                 && regression_count <= usize::from(experiment.maximum_regressions)
+                && evidence_matches
                 && benchmarks.iter().all(|benchmark| {
                     benchmark.candidate.outcome == EvaluationOutcome::Passed
                         && benchmark.candidate.confidence.basis_points
@@ -4187,6 +4199,7 @@ impl AppRuntime {
                 from_revision_id,
                 to_revision_id,
                 benchmark_ids: benchmarks.iter().map(|benchmark| benchmark.id).collect(),
+                trigger_evaluation_ids: Vec::new(),
                 prospective_analysis: ProspectiveAnalysis {
                     expected_benefits: vec![experiment.hypothesis.clone()],
                     expected_risks: vec![
@@ -4213,6 +4226,70 @@ impl AppRuntime {
             })?;
         }
         Ok(())
+    }
+
+    fn benchmark_arm_matches_durable_evidence(
+        &self,
+        arm: &BenchmarkArmResult,
+    ) -> Result<bool, RuntimeError> {
+        let Some(evaluation) = self.store()?.evaluation(arm.evaluation_id)? else {
+            return Ok(false);
+        };
+        let Some(run) = self.store()?.agent_run(arm.run_id)? else {
+            return Ok(false);
+        };
+        Ok(evaluation.run_id == arm.run_id
+            && evaluation.outcome == arm.outcome
+            && evaluation.confidence == arm.confidence
+            && run.organization_revision_id == arm.organization_revision_id
+            && run.metrics == arm.metrics)
+    }
+
+    /// Reverts promoted automatic candidates after a durable post-promotion regression.
+    ///
+    /// # Errors
+    /// Returns an error when regression provenance, revision direction, or decision state conflicts.
+    pub fn revert_regressing_automatic_experiments(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExperimentMutation>, RuntimeError> {
+        let candidates = self.store()?.automatic_reversion_candidates(limit)?;
+        let mut mutations = Vec::with_capacity(candidates.len());
+        for (experiment_id, evaluation_id) in candidates {
+            let experiment = self.experiment(experiment_id)?.ok_or_else(|| {
+                StorageError::Conflict("automatic experiment was not found".into())
+            })?;
+            let evaluation = self.store()?.evaluation(evaluation_id)?.ok_or_else(|| {
+                StorageError::Conflict("reversion evaluation was not found".into())
+            })?;
+            let benchmarks = self.experiment_benchmarks(experiment.id)?;
+            mutations.push(self.decide_experiment(&ExperimentDecision {
+                schema_version: EXPERIMENT_SCHEMA_VERSION,
+                id: ExperimentDecisionId::from_stable_bytes(automatic_shadow_evidence_id_bytes(
+                    "reversion",
+                    experiment.id,
+                )),
+                experiment_id: experiment.id,
+                kind: ExperimentDecisionKind::Revert,
+                from_revision_id: experiment.candidate_revision_id,
+                to_revision_id: experiment.baseline_revision_id,
+                benchmark_ids: benchmarks.iter().map(|benchmark| benchmark.id).collect(),
+                trigger_evaluation_ids: vec![evaluation.id],
+                prospective_analysis: ProspectiveAnalysis {
+                    expected_benefits: vec![
+                        "Restore the last measured baseline after a candidate regression.".into(),
+                    ],
+                    expected_risks: vec![
+                        "The candidate's intended improvement is disabled pending new evidence."
+                            .into(),
+                    ],
+                    historical_evidence: vec![evaluation.id.to_string()],
+                },
+                reason: "A durable post-promotion evaluation measured candidate regression.".into(),
+                decided_at: evaluation.evaluated_at,
+            })?);
+        }
+        Ok(mutations)
     }
 
     fn load_or_create_automatic_shadow_run(
@@ -8374,6 +8451,144 @@ mod tests {
             final_reopen
                 .assess_automatic_shadow_runs(2)
                 .expect("durable replay")
+                .is_empty()
+        );
+        let promotion_observation = SupervisionObservation {
+            id: SupervisionObservationId::new(),
+            observed_at: Utc::now(),
+            ..slow_observation.clone()
+        };
+        final_reopen
+            .record_supervision_observation(&promotion_observation)
+            .expect("promotion observation");
+        let promotion_experiment = ExperimentDefinition {
+            id: ExperimentId::new(),
+            state: ExperimentState::Draft,
+            observation_ids: vec![promotion_observation.id],
+            created_at: promotion_observation.observed_at,
+            updated_at: promotion_observation.observed_at,
+            ..assessments[0].experiment.clone()
+        };
+        final_reopen
+            .create_experiment(&promotion_experiment)
+            .expect("promotion experiment");
+        final_reopen
+            .transition_experiment(
+                promotion_experiment.id,
+                ExperimentState::Draft,
+                ExperimentState::Ready,
+            )
+            .expect("promotion ready");
+        final_reopen
+            .store()
+            .expect("store")
+            .record_automatic_experiment_outcome(&AutomaticExperimentOutcome {
+                observation_id: promotion_observation.id,
+                disposition: AutomaticExperimentDisposition::Ready,
+                candidate_revision_id: Some(candidate.revision_id),
+                experiment_id: Some(promotion_experiment.id),
+                detail: "seeded candidate is ready for promotion evidence".into(),
+                processed_at: promotion_observation.observed_at,
+                replayed: false,
+            })
+            .expect("automatic promotion outcome");
+        final_reopen
+            .transition_experiment(
+                promotion_experiment.id,
+                ExperimentState::Ready,
+                ExperimentState::Running,
+            )
+            .expect("promotion running");
+        let mut passing_candidate_evaluation = assessments[0].evaluation.clone();
+        passing_candidate_evaluation.id = EvaluationId::new();
+        passing_candidate_evaluation.outcome = EvaluationOutcome::Passed;
+        passing_candidate_evaluation.confidence =
+            ConfidenceEstimate::new(9_500, 1).expect("confidence");
+        passing_candidate_evaluation.regressions.clear();
+        for condition in &mut passing_candidate_evaluation.conditions {
+            condition.passed = true;
+            condition.detail = "seeded isolated scenario passed".into();
+        }
+        passing_candidate_evaluation.evaluated_at = Utc::now();
+        final_reopen
+            .record_evaluation(&passing_candidate_evaluation)
+            .expect("passing candidate evaluation");
+        let promoted_source_view = final_reopen
+            .agent_run_view(run_id)
+            .expect("source evidence");
+        let promoted_source_evaluation = promoted_source_view
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.id == passed_id)
+            .expect("passing source evaluation");
+        let promotion_benchmark = ExperimentBenchmark {
+            schema_version: EXPERIMENT_SCHEMA_VERSION,
+            id: ExperimentBenchmarkId::new(),
+            experiment_id: promotion_experiment.id,
+            scenario_key: "seeded/automatic-promotion".into(),
+            baseline: BenchmarkArmResult {
+                organization_revision_id: baseline_revision_id,
+                run_id,
+                evaluation_id: passed_id,
+                outcome: EvaluationOutcome::Passed,
+                confidence: promoted_source_evaluation.confidence,
+                metrics: promoted_source_view.run.metrics,
+                evidence_sha256: vec!["e".repeat(64)],
+            },
+            candidate: BenchmarkArmResult {
+                organization_revision_id: candidate.revision_id,
+                run_id: receipt.candidate_run_id,
+                evaluation_id: passing_candidate_evaluation.id,
+                outcome: EvaluationOutcome::Passed,
+                confidence: ConfidenceEstimate::new(9_500, 1).expect("confidence"),
+                metrics: shadow_view.run.metrics.clone(),
+                evidence_sha256: vec![receipt.output_artifact_sha256.clone()],
+            },
+            regressions: Vec::new(),
+            measured_at: passing_candidate_evaluation.evaluated_at + Duration::seconds(1),
+        };
+        final_reopen
+            .record_experiment_benchmark(&promotion_benchmark)
+            .expect("promotion benchmark");
+        final_reopen
+            .decide_automatic_experiments(8)
+            .expect("automatic promotion");
+        assert_eq!(
+            final_reopen
+                .organization(candidate.organization_id)
+                .expect("promoted organization")
+                .expect("present")
+                .revision_id,
+            candidate.revision_id
+        );
+        let mut post_promotion_regression = passing_candidate_evaluation;
+        post_promotion_regression.id = EvaluationId::new();
+        post_promotion_regression.outcome = EvaluationOutcome::Failed;
+        post_promotion_regression.regressions = vec!["seeded promoted regression".into()];
+        post_promotion_regression.conditions[0].passed = false;
+        post_promotion_regression.conditions[0].detail = "seeded promoted regression".into();
+        post_promotion_regression.evaluated_at =
+            promotion_benchmark.measured_at + Duration::seconds(1);
+        final_reopen
+            .record_evaluation(&post_promotion_regression)
+            .expect("post-promotion regression");
+        let reversions = final_reopen
+            .revert_regressing_automatic_experiments(8)
+            .expect("automatic reversion");
+        assert_eq!(reversions.len(), 1);
+        assert_eq!(reversions[0].experiment.state, ExperimentState::Reverted);
+        assert_eq!(
+            final_reopen
+                .organization(candidate.organization_id)
+                .expect("restored organization")
+                .expect("present")
+                .revision_id,
+            baseline_revision_id
+        );
+        assert!(
+            final_reopen
+                .revert_regressing_automatic_experiments(8)
+                .expect("reversion replay")
                 .is_empty()
         );
     }
