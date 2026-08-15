@@ -71,7 +71,7 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
     let executable = packaged_daemon_path(&std::env::current_exe().map_err(|error| {
         format!("The MCG desktop executable location could not be determined: {error}")
     })?)?;
-    launch_daemon(&executable)?;
+    launch_daemon(&executable, address, &config)?;
 
     let started = Instant::now();
     while started.elapsed() < STARTUP_TIMEOUT {
@@ -295,9 +295,11 @@ fn packaged_daemon_path(current_executable: &Path) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
-fn launch_daemon(executable: &Path) -> Result<(), String> {
+fn launch_daemon(executable: &Path, address: SocketAddr, config: &AppConfig) -> Result<(), String> {
     let mut command = Command::new(executable);
     command
+        .env("MCG_BIND_ADDRESS", address.to_string())
+        .env("MCG_DATA_DIR", &config.data_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
