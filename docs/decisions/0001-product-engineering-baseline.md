@@ -157,9 +157,9 @@
   uses builds, tests, HTTP checks, browser semantics, screenshots when useful, and
   deployment health checks.
 - Windows, Linux, and macOS packages ship together. Development and automated
-  release qualification initially run on Windows and Linux; macOS is produced as
-  a best-effort package until dedicated macOS testing is added. Release gates
-  include clean installation, first-run onboarding, provider connection, task
+  release qualification run on owner-controlled hosts for all three platforms;
+  macOS is a first-class gate with native package, signing, and real-device UAT.
+  Release gates include clean installation, first-run onboarding, provider connection, task
   execution, restart recovery, approval enforcement, and backup/restore.
 - Nondeterministic model behavior is tested with recorded fixtures and fake models
   for protocol guarantees, plus opt-in live-provider evals for behavior quality.

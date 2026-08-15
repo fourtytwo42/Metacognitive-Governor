@@ -59,9 +59,10 @@ if (config.bundle.windows?.nsis?.installMode !== "currentUser") {
   throw new Error("Windows installation must stay per-user until a privileged service design is approved.");
 }
 
-const [windowsBuilder, linuxBuilder, windowsPrepare, linuxPrepare, notices, apache, wasmtime] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, windowsPrepare, linuxPrepare, notices, apache, wasmtime] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
+  read("scripts/build-release-macos.sh"),
   read("scripts/prepare-sidecars.ps1"),
   read("scripts/prepare-sidecars.sh"),
   read("THIRD_PARTY_NOTICES.md"),
@@ -70,8 +71,10 @@ const [windowsBuilder, linuxBuilder, windowsPrepare, linuxPrepare, notices, apac
 ]);
 requireText(windowsBuilder, "--bundles nsis", "Windows release builder");
 requireText(linuxBuilder, "--bundles deb,appimage", "Linux release builder");
+requireText(macosBuilder, "--bundles app,dmg", "macOS release builder");
 requireText(windowsBuilder, "tauri.release.conf.json", "Windows release builder");
 requireText(linuxBuilder, "tauri.release.conf.json", "Linux release builder");
+requireText(macosBuilder, "tauri.release.conf.json", "macOS release builder");
 for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [linuxPrepare, "Linux sidecar preparer"]]) {
   for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-plugin-runner", "mcg-shadow-runner"]) requireText(source, binary, label);
   requireText(source, "rustc -vV", label);
@@ -92,7 +95,7 @@ if (wasmtimeLicenseDigest !== "23823edf263108ef7acbefde293225117b4784759c9c5bcd0
   throw new Error("Wasmtime 45.0.3 license payload does not match the reviewed upstream text.");
 }
 
-for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh"]) {
+for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/build-release-macos.sh", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh"]) {
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
@@ -103,11 +106,17 @@ const linuxPackageUat = await read("scripts/test-linux-packages.sh");
 for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
+const macosPackageUat = await read("scripts/test-macos-packages.sh");
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "protocolVersion", "screencapture", "remove_installed_app"]) {
+  requireText(macosPackageUat, invariant, "macOS package UAT");
+}
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");
 requireText(releaseSourceCheck, "--untracked-files=all", "release source preflight");
 requireText(windowsBuilder, "check-release-source.mjs", "Windows release builder");
 requireText(linuxBuilder, "check-release-source.mjs", "Linux release builder");
+requireText(macosBuilder, "check-release-source.mjs", "macOS release builder");
 
 await access(path.join(root, "scripts/test-linux-packages.sh"), constants.R_OK);
+await access(path.join(root, "scripts/test-macos-packages.sh"), constants.R_OK);
 
-console.log("Installer, sidecar, per-user, and license packaging contracts are valid.");
+console.log("Windows, Linux, and macOS installer, sidecar, data-retention, and license packaging contracts are valid.");

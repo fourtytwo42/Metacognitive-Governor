@@ -48,9 +48,25 @@ sudo MCG_UAT_USER="$USER" ./scripts/test-linux-packages.sh
 
 The harness refuses to replace an existing MCG package. In a unique external data directory it proves `.deb` install and same-version repair, daemon health and restart, authenticated CLI status/doctor/backup, modern MCP discovery and tool listing, installed desktop launch, AppImage extraction and launch, real X11 window creation, screenshot capture, uninstall, retained data, reinstall, and final application-file removal. Its temporary evidence directory is retained for review; it never writes credentials to output.
 
+macOS:
+
+```bash
+./scripts/build-release-macos.sh
+```
+
+The owner-controlled macOS builder creates `MCG.app` and a DMG, then writes the same exact-commit SHA-256 manifest for the distributable disk image. It never substitutes Linux cross-compilation for Apple's native bundle, code-signing, LaunchServices, Keychain, or Gatekeeper behavior.
+
+Run package UAT from the signed or explicitly owner-approved pre-release artifact:
+
+```bash
+MCG_MACOS_UAT_ALLOW_ADHOC=1 ./scripts/test-macos-packages.sh
+```
+
+The harness verifies the DMG and complete app payload, classifies its signature, copies it into a unique per-user UAT installation root, proves repair and retained external data, exercises the packaged plugin runner against valid and tampered modules, starts and restarts the packaged service, runs authenticated CLI diagnostics and backup, negotiates the modern MCP catalog, launches the packaged desktop, captures a real macOS screenshot, removes and reinstalls the app, and retains evidence for review. It never replaces an existing `/Applications` installation. Ad-hoc or unsigned testing requires an explicit environment opt-in and never counts as a public release. Set `MCG_MACOS_UAT_REQUIRE_NOTARIZED=1` for the final Gatekeeper/stapling gate.
+
 ## Upgrade and repair
 
-Install a newer package over the same per-user installation. Durable state remains outside the application directory (`%LOCALAPPDATA%\\MCG` on Windows, `$XDG_DATA_HOME/mcg` or `~/.local/share/mcg` on Linux). Database migrations run only after the new daemon acquires the exclusive data-directory lock.
+Install a newer package over the same per-user installation. Durable state remains outside the application directory (`%LOCALAPPDATA%\\MCG` on Windows, `$XDG_DATA_HOME/mcg` or `~/.local/share/mcg` on Linux, and the application-support directory resolved by macOS for `dev.mcg.desktop`). Database migrations run only after the new daemon acquires the exclusive data-directory lock.
 
 If an older daemon is still running, the new desktop refuses the version mismatch and tells the owner to stop the old service and reopen MCG. It never connects a new UI to an old control plane. Repair reinstalls the complete version-matched binary set and license resources without changing application data.
 
@@ -64,4 +80,4 @@ Reinstalling the same or a later compatible version reuses the retained state. I
 
 ## Release gates still required
 
-Source packaging and unsigned owner-built artifacts are not a signed public release. Production completion still requires trusted Windows and Linux signing identities, clean-machine installer/upgrade/repair/uninstall UAT, malware reputation checks, and publication provenance. Missing signing authority must remain explicit rather than bypassed.
+Source packaging and unsigned or ad-hoc owner-built artifacts are not a signed public release. Production completion requires trusted Windows, Linux, and macOS signing identities; macOS notarization and stapling; clean-machine installer/upgrade/repair/uninstall UAT on every supported desktop platform; malware reputation checks; and publication provenance. Missing signing authority must remain explicit rather than bypassed.

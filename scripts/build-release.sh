@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "Linux release builds must run on Linux. Use scripts/build-release-macos.sh on macOS." >&2
+  exit 1
+fi
+
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repository_root"
 node scripts/check-release-source.mjs

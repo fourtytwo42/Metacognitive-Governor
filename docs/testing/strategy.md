@@ -222,8 +222,8 @@ reversion scans observation-only.
 ### Local release candidate
 
 - signed installer, upgrade, rollback, backup/restore, and uninstall tests;
-- Windows/Linux clean-machine matrices and long-running soak;
-- macOS package build with an explicit best-effort support label until qualified;
+- Windows/Linux/macOS clean-machine matrices and long-running soak;
+- native macOS app/DMG build, signature/notarization validation, and installed-app UAT;
 - reproducibility, SBOM, provenance, and artifact signature checks.
 
 `npm run test:release-soak` drives the optimized `mcg-daemon` through its real

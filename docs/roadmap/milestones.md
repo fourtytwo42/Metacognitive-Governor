@@ -172,9 +172,9 @@ Deliver:
 - Performance, soak, chaos, installer, upgrade, and backup qualification.
 - Simple/advanced UX refinement across multiple real projects.
 
-Exit evidence: release gates pass on Windows and Linux; macOS limitations are
-clearly disclosed until equivalent qualification exists; routine regression
-testing is automated.
+Exit evidence: equivalent release gates pass on Windows, Linux, and macOS;
+platform-specific capability differences are explicit; routine regression testing
+is automated.
 
 ## M12 — Long-term roadmap
 

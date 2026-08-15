@@ -254,9 +254,9 @@ OpenAI-compatible and MCP adapters preserve caller-owned tools and maintain clea
 ## Platform and packaging
 
 Windows, Linux, and macOS installers are produced from the same source and bundle
-the daemon, CLI, desktop UI, migrations, and web assets. Windows and Linux are the
-initial qualified platforms. macOS packages are explicitly marked best-effort
-until macOS owner-controlled build and real-device tests are available.
+the daemon, CLI, desktop UI, migrations, and web assets. All three desktop
+platforms require owner-controlled native build, package, recovery, and real-device
+UAT; no platform is represented as qualified by a cross-compiled artifact alone.
 
 Android reuses portable domain/runtime crates but exposes a capability profile
 rather than pretending desktop process, filesystem, and browser access exists.
