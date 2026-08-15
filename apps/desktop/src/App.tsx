@@ -1513,7 +1513,7 @@ export function App() {
                 <textarea
                   value={taskSuccess}
                   onChange={(event) => setTaskSuccess(event.target.value)}
-                  placeholder={"FILE EXISTS dist/output.json\nSERVICE HEALTHY http://127.0.0.1:3000/health"}
+                  placeholder={"FILE EXISTS dist/output.json\nSERVICE HEALTHY http://127.0.0.1:3000/health\nACCESSIBILITY CHECK http://127.0.0.1:3000/"}
                 />
               </label>
               <label>

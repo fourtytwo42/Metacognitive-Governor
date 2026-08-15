@@ -386,6 +386,9 @@ pub enum SuccessCondition {
     PageRenders {
         url: String,
     },
+    Accessibility {
+        url: String,
+    },
     BrowserWorkflow {
         name: String,
         path: String,

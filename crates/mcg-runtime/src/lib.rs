@@ -4903,6 +4903,7 @@ impl AppRuntime {
             if let SuccessCondition::HttpResponds { url, .. }
             | SuccessCondition::ServiceHealthy { endpoint: url }
             | SuccessCondition::PageRenders { url }
+            | SuccessCondition::Accessibility { url }
             | SuccessCondition::ElementExists { url, .. }
             | SuccessCondition::ScreenshotMatches { url, .. } = condition
             {
@@ -4973,6 +4974,12 @@ impl AppRuntime {
                 }
             } else if let SuccessCondition::PageRenders { url } = condition {
                 ToolRequestKind::BrowserRender {
+                    url: url.clone(),
+                    viewport_width: 1_280,
+                    viewport_height: 720,
+                }
+            } else if let SuccessCondition::Accessibility { url } = condition {
+                ToolRequestKind::BrowserAccessibility {
                     url: url.clone(),
                     viewport_width: 1_280,
                     viewport_height: 720,
@@ -7970,6 +7977,8 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
             Some(format!("Service is healthy at {endpoint}"))
         } else if let SuccessCondition::PageRenders { url } = condition {
             Some(format!("Page renders at {url}"))
+        } else if let SuccessCondition::Accessibility { url } = condition {
+            Some(format!("Accessibility baseline passes at {url}"))
         } else if let SuccessCondition::ElementExists { url, selector } = condition {
             Some(format!("Element {selector} exists at {url}"))
         } else if let SuccessCondition::BrowserWorkflow { name, path, .. } = condition {
@@ -8103,6 +8112,7 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
         SuccessCondition::ServiceHealthy { .. } => "governed_service_health",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
+        SuccessCondition::Accessibility { .. } => "governed_browser_accessibility",
         SuccessCondition::ElementExists { .. } => "governed_browser_element",
         SuccessCondition::BrowserWorkflow { .. } => "governed_browser_workflow",
         SuccessCondition::ScreenshotMatches { .. } => "governed_screenshot_comparison",
@@ -8334,6 +8344,13 @@ fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome)
                 evidence.method == "browser.screenshot_pixel_diff" && evidence.passed
             });
     }
+    if matches!(condition, SuccessCondition::Accessibility { .. }) {
+        return outcome.status == ToolOutcomeStatus::Succeeded
+            && outcome
+                .verification
+                .iter()
+                .any(|evidence| evidence.method == "browser.accessibility" && evidence.passed);
+    }
     outcome.status == ToolOutcomeStatus::Succeeded
 }
 
@@ -8344,9 +8361,13 @@ fn objective_evidence_artifact<'a>(
     if matches!(condition, SuccessCondition::BrowserWorkflow { .. }) {
         return outcome.artifacts.get(2);
     }
+    if matches!(condition, SuccessCondition::Accessibility { .. }) {
+        return outcome.artifacts.get(2);
+    }
     if matches!(
         condition,
         SuccessCondition::PageRenders { .. }
+            | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
             | SuccessCondition::ScreenshotMatches { .. }
     ) {
@@ -8387,6 +8408,7 @@ fn objective_condition_outcome_detail(
     if matches!(
         condition,
         SuccessCondition::PageRenders { .. }
+            | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
             | SuccessCondition::BrowserWorkflow { .. }
             | SuccessCondition::ScreenshotMatches { .. }

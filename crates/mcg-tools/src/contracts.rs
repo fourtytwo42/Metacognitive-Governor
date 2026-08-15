@@ -309,6 +309,11 @@ pub enum ToolRequestKind {
         viewport_width: u32,
         viewport_height: u32,
     },
+    BrowserAccessibility {
+        url: String,
+        viewport_width: u32,
+        viewport_height: u32,
+    },
     BrowserWorkflow {
         workflow_path: String,
         expected_sha256: String,
@@ -444,6 +449,7 @@ impl ToolRequestKind {
             Self::HttpDownload { .. } => "http.download".into(),
             Self::BrowserRender { .. } => "browser.render".into(),
             Self::BrowserElementExists { .. } => "browser.element_exists".into(),
+            Self::BrowserAccessibility { .. } => "browser.accessibility".into(),
             Self::BrowserWorkflow { .. } => "browser.workflow".into(),
             Self::BrowserScreenshotMatches { .. } => "browser.screenshot_matches".into(),
             Self::ResearchVerify { .. } => "research.verify".into(),

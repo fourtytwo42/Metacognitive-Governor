@@ -153,6 +153,17 @@ screenshot hash in evaluation evidence. Missing local browser runtime is inconcl
 and blocks for setup/retry; a browser that launches but cannot render the page fails
 the objective.
 
+`ACCESSIBILITY CHECK URL` becomes a typed `Accessibility` condition using the same
+fresh-profile, same-origin, GET/HEAD-only Chromium boundary. MCG accessibility
+baseline v1 audits the hydrated DOM for a document language and non-empty title,
+exactly one main landmark, image alternative attributes, names for form controls and
+interactive elements, unique IDs, sequential heading levels, and the absence of
+positive `tabindex` values. The full versioned JSON audit is content-addressed beside
+the rendered HTML and PNG; the evaluation points to that audit rather than a prose
+claim. A baseline failure is an objective failure, while a missing browser remains an
+honest setup boundary. This deterministic baseline reduces manual regression work but
+does not claim complete WCAG conformance or replace assistive-technology UAT.
+
 `ELEMENT EXISTS URL selector` uses the same browser boundary but adds a bounded CSS
 selector assertion after hydration. `BROWSER WORKFLOW project/relative/file.json`
 binds a versioned JSON workflow and SHA-256 before model work. Evaluation first
@@ -224,6 +235,10 @@ provider call nor another network request.
 The browser fixtures use real Chromium to prove JavaScript hydration, DOM/title
 mutation, HTML/PNG capture, policy/audit integration, and pre-send blocking of a
 cross-origin subresource plus same-origin POST.
+The accessibility fixture proves a conforming hydrated page passes with versioned
+JSON/HTML/PNG evidence, multiple independent violations fail with exact counts,
+credential-bearing or ambiguous directive syntax stays non-automatable, and terminal
+replay adds neither provider nor page requests.
 The artifact fixture proves a binary file is streamed without stdout exposure,
 deduplicated by digest, bounded by the evidence limit, and combined with an exact
 discovered custom script. A missing file atomically fails the task/run with audited

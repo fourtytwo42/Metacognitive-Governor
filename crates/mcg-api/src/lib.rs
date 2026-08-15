@@ -2950,6 +2950,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::HttpResponds { .. }
             | SuccessCondition::ServiceHealthy { .. }
             | SuccessCondition::PageRenders { .. }
+            | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
             | SuccessCondition::BrowserWorkflow { .. }
             | SuccessCondition::ScreenshotMatches { .. }
@@ -3062,6 +3063,13 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
     {
         return SuccessCondition::ServiceHealthy {
             endpoint: endpoint.to_owned(),
+        };
+    }
+    if let Some(url) = consumer_directive_value(trimmed, "ACCESSIBILITY CHECK")
+        && consumer_credential_free_http_url(url)
+    {
+        return SuccessCondition::Accessibility {
+            url: url.to_owned(),
         };
     }
     if let Some(value) = consumer_directive_value(trimmed, "ELEMENT EXISTS")
@@ -4169,6 +4177,12 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_consumer_success_condition("ACCESSIBILITY CHECK https://example.test/app"),
+            SuccessCondition::Accessibility {
+                url: "https://example.test/app".into(),
+            }
+        );
+        assert_eq!(
             parse_consumer_success_condition(
                 "ELEMENT EXISTS https://example.test/app main [data-ready='true']"
             ),
@@ -4238,6 +4252,10 @@ mod tests {
             "SERVICE HEALTHY file:///tmp/health",
             "SERVICE HEALTHY https://example.test extra",
             "SERVICE HEALTHY ",
+            "ACCESSIBILITY CHECK https://user:secret@example.test",
+            "ACCESSIBILITY CHECK file:///tmp/page.html",
+            "ACCESSIBILITY CHECK https://example.test extra",
+            "ACCESSIBILITY CHECK ",
             "ELEMENT EXISTS https://user:secret@example.test #app",
             "ELEMENT EXISTS file:///tmp/page.html #app",
             "ELEMENT EXISTS https://example.test",
@@ -4881,6 +4899,48 @@ form.addEventListener('submit', (event) => {
             axum::serve(listener, app)
                 .await
                 .expect("service-health fixture server");
+        });
+        format!("http://{address}")
+    }
+
+    async fn accessibility_fixture(hits: Arc<AtomicUsize>) -> String {
+        let passing_hits = hits.clone();
+        let failing_hits = hits;
+        let app = Router::new()
+            .route(
+                "/passing",
+                get(move || {
+                    let hits = passing_hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Html(
+                            r#"<!doctype html><html lang="en"><head><title>Accessible application</title></head><body><main><h1>Dashboard</h1><label for="search">Search</label><input id="search"><button>Submit</button><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" alt=""></main></body></html>"#,
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/failing",
+                get(move || {
+                    let hits = failing_hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Html(
+                            r#"<!doctype html><html><head><title> </title></head><body><h1>Dashboard</h1><h3>Search</h3><input><button></button><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="></body></html>"#,
+                        )
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("accessibility fixture listener");
+        let address = listener
+            .local_addr()
+            .expect("accessibility fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("accessibility fixture server");
         });
         format!("http://{address}")
     }
@@ -8774,6 +8834,183 @@ form.addEventListener('submit', (event) => {
             .expect("missing workflow response");
         assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
         assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Pass, replay, and failure share one real browser fixture.
+    async fn consumer_accessibility_baseline_is_artifact_backed_and_replay_safe() {
+        let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# Accessibility fixture\n")
+            .expect("readme");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "accessibility_objective_fixture".into(),
+                    display_name: "Accessibility Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let page_hits = Arc::new(AtomicUsize::new(0));
+        let target = accessibility_fixture(page_hits.clone()).await;
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime.clone());
+
+        let mut passing_task = TaskEnvelope::new("Verify the accessible application baseline");
+        passing_task.project_id = Some(project.project_id);
+        passing_task.success_conditions = vec![format!("ACCESSIBILITY CHECK {target}/passing")];
+        runtime.create_task(&passing_task).expect("passing task");
+        let passing_path = format!("/api/v1/tasks/{}/launch", passing_task.id);
+        let passing = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&passing_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("passing response");
+        assert_eq!(passing.status(), StatusCode::OK);
+        let passing: LaunchTaskResponse = serde_json::from_slice(
+            &passing
+                .into_body()
+                .collect()
+                .await
+                .expect("passing body")
+                .to_bytes(),
+        )
+        .expect("passing response body");
+        assert_eq!(passing.task.state, TaskState::Completed);
+        let report = passing.run.evaluations.first().expect("passing report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert_eq!(
+            report.conditions[0].condition,
+            SuccessCondition::Accessibility {
+                url: format!("{target}/passing"),
+            }
+        );
+        assert!(report.conditions[0].passed);
+        assert!(
+            report.conditions[0]
+                .detail
+                .contains("browser.accessibility=true:language=true")
+        );
+        assert_eq!(report.evidence[0].method, "governed_browser_accessibility");
+        assert!(report.evidence[0].artifact_sha256.is_some());
+        let audit = runtime
+            .tool_audit(passing_task.id)
+            .expect("accessibility audit");
+        assert!(audit.iter().any(|record| {
+            record.phase == ToolAuditPhase::Completion
+                && record.tool == "browser.accessibility"
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+                && record.artifacts.len() == 3
+        }));
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(page_hits.load(Ordering::SeqCst), 1);
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&passing_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("passing replay");
+        let replay: LaunchTaskResponse = serde_json::from_slice(
+            &replay
+                .into_body()
+                .collect()
+                .await
+                .expect("replay body")
+                .to_bytes(),
+        )
+        .expect("replay response body");
+        assert!(replay.replayed);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(page_hits.load(Ordering::SeqCst), 1);
+
+        let mut failing_task = TaskEnvelope::new("Reject accessibility regressions");
+        failing_task.project_id = Some(project.project_id);
+        failing_task.success_conditions = vec![format!("ACCESSIBILITY CHECK {target}/failing")];
+        runtime.create_task(&failing_task).expect("failing task");
+        let failing = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/tasks/{}/launch",
+                    failing_task.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("failing response");
+        let failing: LaunchTaskResponse = serde_json::from_slice(
+            &failing
+                .into_body()
+                .collect()
+                .await
+                .expect("failing body")
+                .to_bytes(),
+        )
+        .expect("failing response body");
+        assert_eq!(failing.task.state, TaskState::Failed);
+        assert_eq!(
+            failing.run.evaluations[0].outcome,
+            EvaluationOutcome::Failed
+        );
+        assert!(!failing.run.evaluations[0].conditions[0].passed);
+        assert!(
+            failing.run.evaluations[0].conditions[0]
+                .detail
+                .contains("images_missing_alt=1")
+        );
+        assert!(
+            failing.run.evaluations[0].conditions[0]
+                .detail
+                .contains("controls_without_name=1")
+        );
+        assert!(
+            failing.run.evaluations[0].evidence[0]
+                .artifact_sha256
+                .is_some()
+        );
+        assert_eq!(model_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(page_hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use image::{ImageFormat, ImageReader, Limits};
 use mcg_domain::ToolExecutionId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -61,6 +61,51 @@ struct RenderState {
     height: u64,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessibilityAudit {
+    schema_version: u16,
+    document_language_present: bool,
+    non_empty_title: bool,
+    main_landmarks: u32,
+    images_missing_alt: u32,
+    controls_without_name: u32,
+    interactive_without_name: u32,
+    duplicate_ids: u32,
+    heading_order_violations: u32,
+    positive_tabindex: u32,
+}
+
+impl AccessibilityAudit {
+    fn passed(&self) -> bool {
+        self.schema_version == 1
+            && self.document_language_present
+            && self.non_empty_title
+            && self.main_landmarks == 1
+            && self.images_missing_alt == 0
+            && self.controls_without_name == 0
+            && self.interactive_without_name == 0
+            && self.duplicate_ids == 0
+            && self.heading_order_violations == 0
+            && self.positive_tabindex == 0
+    }
+
+    fn detail(&self) -> String {
+        format!(
+            "language={}; title={}; main_landmarks={}; images_missing_alt={}; controls_without_name={}; interactive_without_name={}; duplicate_ids={}; heading_order_violations={}; positive_tabindex={}",
+            self.document_language_present,
+            self.non_empty_title,
+            self.main_landmarks,
+            self.images_missing_alt,
+            self.controls_without_name,
+            self.interactive_without_name,
+            self.duplicate_ids,
+            self.heading_order_violations,
+            self.positive_tabindex
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InteractionTarget {
@@ -72,6 +117,61 @@ struct InteractionTarget {
     form_target: Option<String>,
     form_method: Option<String>,
 }
+
+const ACCESSIBILITY_AUDIT_SCRIPT: &str = r#"
+(() => {
+  const text = (element) => (element?.textContent || '').trim();
+  const labelledBy = (element) => (element.getAttribute('aria-labelledby') || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => text(document.getElementById(id)))
+    .join(' ')
+    .trim();
+  const hasName = (element) => Boolean(
+    (element.getAttribute('aria-label') || '').trim()
+    || labelledBy(element)
+    || text(element)
+    || (element.getAttribute('alt') || '').trim()
+    || (element.getAttribute('title') || '').trim()
+    || (element.getAttribute('value') || '').trim()
+  );
+  const controlsWithoutName = Array.from(
+    document.querySelectorAll("input:not([type='hidden']), select, textarea")
+  ).filter((element) => {
+    const labels = Array.from(element.labels || []).some((label) => text(label));
+    return !labels && !hasName(element);
+  }).length;
+  const interactiveWithoutName = Array.from(
+    document.querySelectorAll("button, a[href], [role='button'], [role='link']")
+  ).filter((element) => !hasName(element)).length;
+  const ids = new Set();
+  let duplicateIds = 0;
+  for (const element of document.querySelectorAll('[id]')) {
+    if (!element.id) continue;
+    if (ids.has(element.id)) duplicateIds += 1;
+    ids.add(element.id);
+  }
+  let previousHeading = 0;
+  let headingOrderViolations = 0;
+  for (const heading of document.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+    const level = Number(heading.tagName.slice(1));
+    if (previousHeading && level > previousHeading + 1) headingOrderViolations += 1;
+    previousHeading = level;
+  }
+  return {
+    schemaVersion: 1,
+    documentLanguagePresent: Boolean((document.documentElement.lang || '').trim()),
+    nonEmptyTitle: Boolean((document.title || '').trim()),
+    mainLandmarks: document.querySelectorAll('main, [role="main"]').length,
+    imagesMissingAlt: document.querySelectorAll('img:not([alt])').length,
+    controlsWithoutName,
+    interactiveWithoutName,
+    duplicateIds,
+    headingOrderViolations,
+    positiveTabindex: document.querySelectorAll('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])').length
+  };
+})()
+"#;
 
 impl BrowserExecutor {
     /// Creates an ephemeral browser renderer. An omitted executable uses the
@@ -119,6 +219,7 @@ impl BrowserExecutor {
         viewport_height: u32,
         comparison: Option<(&str, &str, u16, u8)>,
         element_selector: Option<&str>,
+        audit_accessibility: bool,
     ) -> Result<ToolOutcome, ToolError> {
         let started_at = Utc::now();
         let target = parse_browser_url(url)?;
@@ -349,7 +450,46 @@ impl BrowserExecutor {
             } else {
                 true
             };
-            let render_passed = ready && laid_out && captured && screenshot_passed && element_passed;
+            let accessibility_passed = if audit_accessibility {
+                let audit: AccessibilityAudit = page
+                    .evaluate(ACCESSIBILITY_AUDIT_SCRIPT)
+                    .await
+                    .map_err(|error| {
+                        ToolError::Execution(format!("audit page accessibility: {error}"))
+                    })?
+                    .into_value()
+                    .map_err(|error| {
+                        ToolError::Execution(format!("decode accessibility evidence: {error}"))
+                    })?;
+                if audit.schema_version != 1 {
+                    return Err(ToolError::Execution(
+                        "browser returned an unsupported accessibility evidence schema".into(),
+                    ));
+                }
+                let passed = audit.passed();
+                let detail = audit.detail();
+                let bytes = serde_json::to_vec(&audit).map_err(|error| {
+                    ToolError::Execution(format!("serialize accessibility evidence: {error}"))
+                })?;
+                artifacts.push(
+                    self.artifacts
+                        .capture(&bytes, "application/vnd.mcg.accessibility+json;version=1")?,
+                );
+                verification.push(VerificationEvidence {
+                    method: "browser.accessibility".into(),
+                    passed,
+                    detail,
+                });
+                passed
+            } else {
+                true
+            };
+            let render_passed = ready
+                && laid_out
+                && captured
+                && screenshot_passed
+                && element_passed
+                && accessibility_passed;
             let denied = denied_requests.load(Ordering::SeqCst);
             verification.push(VerificationEvidence {
                 method: "browser.network_scope".into(),
@@ -685,6 +825,7 @@ impl BrowserExecutor {
 
 #[async_trait]
 impl ToolExecutor for BrowserExecutor {
+    #[allow(clippy::too_many_lines)] // Keep exhaustive browser request dispatch explicit and auditable.
     async fn execute(
         &self,
         execution_id: ToolExecutionId,
@@ -704,6 +845,7 @@ impl ToolExecutor for BrowserExecutor {
                     *viewport_height,
                     None,
                     None,
+                    false,
                 )
                 .await
             }
@@ -721,6 +863,24 @@ impl ToolExecutor for BrowserExecutor {
                     *viewport_height,
                     None,
                     Some(selector),
+                    false,
+                )
+                .await
+            }
+            ToolRequestKind::BrowserAccessibility {
+                url,
+                viewport_width,
+                viewport_height,
+            } => {
+                self.render(
+                    execution_id,
+                    request,
+                    url,
+                    *viewport_width,
+                    *viewport_height,
+                    None,
+                    None,
+                    true,
                 )
                 .await
             }
@@ -770,6 +930,7 @@ impl ToolExecutor for BrowserExecutor {
                         *per_channel_threshold,
                     )),
                     None,
+                    false,
                 )
                 .await
             }
@@ -1157,6 +1318,22 @@ mod tests {
                         r#"<!doctype html><html><body><label>Name <input id="name"></label><button id="submit">Continue</button><output id="result"></output><a id="external" href="https://example.com/">External</a><a id="download" href="/file" download>Download</a><a id="new-context" href="/other" target="_blank">New context</a><form method="post" action="/mutation"><button id="post-form-button">Post</button></form><script>document.querySelector('#submit').addEventListener('click',()=>{document.querySelector('#result').textContent='Hello '+document.querySelector('#name').value; history.pushState({},'', '/done');});</script></body></html>"#,
                     )
                 }),
+            )
+            .route(
+                "/accessible",
+                get(|| async {
+                    Html(
+                        r#"<!doctype html><html lang="en"><head><title>Accessible fixture</title></head><body><main><h1>Account</h1><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" alt=""><label for="email">Email</label><input id="email"><button>Save</button><a href="/accessible">Refresh</a></main></body></html>"#,
+                    )
+                }),
+            )
+            .route(
+                "/inaccessible",
+                get(|| async {
+                    Html(
+                        r#"<!doctype html><html><head><title> </title></head><body><div id="duplicate"></div><div id="duplicate"></div><h1>Account</h1><h3>Details</h3><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><input><button></button><a href="/inaccessible"></a><div tabindex="2">Late focus</div></body></html>"#,
+                    )
+                }),
             );
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1237,6 +1414,61 @@ mod tests {
             evidence.method == "browser.element_exists"
                 && !evidence.passed
                 && evidence.detail.contains("matches=0")
+        }));
+
+        let accessibility_request = ToolRequest::new(
+            request.task_id,
+            "audit accessible page",
+            ToolRequestKind::BrowserAccessibility {
+                url: format!("http://{address}/accessible"),
+                viewport_width: 1_280,
+                viewport_height: 720,
+            },
+        );
+        let accessibility_outcome = executor
+            .execute(ToolExecutionId::new(), &accessibility_request)
+            .await
+            .expect("accessibility outcome");
+        assert_eq!(
+            accessibility_outcome.status,
+            ToolOutcomeStatus::Succeeded,
+            "{accessibility_outcome:#?}"
+        );
+        assert_eq!(accessibility_outcome.artifacts.len(), 3);
+        assert_eq!(
+            accessibility_outcome.artifacts[2].media_type,
+            "application/vnd.mcg.accessibility+json;version=1"
+        );
+        assert!(accessibility_outcome.verification.iter().any(|evidence| {
+            evidence.method == "browser.accessibility"
+                && evidence.passed
+                && evidence.detail.contains("images_missing_alt=0")
+        }));
+
+        let inaccessible_request = ToolRequest::new(
+            request.task_id,
+            "audit inaccessible page",
+            ToolRequestKind::BrowserAccessibility {
+                url: format!("http://{address}/inaccessible"),
+                viewport_width: 1_280,
+                viewport_height: 720,
+            },
+        );
+        let inaccessible_outcome = executor
+            .execute(ToolExecutionId::new(), &inaccessible_request)
+            .await
+            .expect("inaccessible outcome");
+        assert_eq!(inaccessible_outcome.status, ToolOutcomeStatus::Failed);
+        assert_eq!(inaccessible_outcome.artifacts.len(), 3);
+        assert!(inaccessible_outcome.verification.iter().any(|evidence| {
+            evidence.method == "browser.accessibility"
+                && !evidence.passed
+                && evidence.detail.contains("language=false")
+                && evidence.detail.contains("images_missing_alt=1")
+                && evidence.detail.contains("controls_without_name=1")
+                && evidence.detail.contains("duplicate_ids=1")
+                && evidence.detail.contains("heading_order_violations=1")
+                && evidence.detail.contains("positive_tabindex=1")
         }));
 
         let project = tempdir().expect("baseline project");

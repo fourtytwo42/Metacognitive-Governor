@@ -426,7 +426,8 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             write_path(destination),
         ],
         ToolRequestKind::BrowserRender { url, .. }
-        | ToolRequestKind::BrowserElementExists { url, .. } => vec![make(
+        | ToolRequestKind::BrowserElementExists { url, .. }
+        | ToolRequestKind::BrowserAccessibility { url, .. } => vec![make(
             ActionClass::ProjectRead,
             CapabilityEffect::Read,
             ResourceKind::NetworkOrigin,
@@ -725,7 +726,8 @@ fn primary_resource(request: &ToolRequest) -> String {
         ToolRequestKind::HttpRequest { url, .. }
         | ToolRequestKind::HttpDownload { url, .. }
         | ToolRequestKind::BrowserRender { url, .. }
-        | ToolRequestKind::BrowserElementExists { url, .. } => sanitized_url_resource(url),
+        | ToolRequestKind::BrowserElementExists { url, .. }
+        | ToolRequestKind::BrowserAccessibility { url, .. } => sanitized_url_resource(url),
         ToolRequestKind::BrowserScreenshotMatches {
             url, baseline_path, ..
         } => format!("{} against {baseline_path}", sanitized_url_resource(url)),

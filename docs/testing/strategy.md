@@ -152,6 +152,7 @@ machines. GitHub is source hosting only.
 - Rust format, clippy with warnings denied, unit/integration/contract tests;
 - frontend format, lint, typecheck, unit tests, and production build;
 - deterministic browser E2E smoke suite;
+- real-browser accessibility baseline pass/failure/replay scenarios;
 - secret and dependency-policy checks.
 
 ### Extended/local scheduled
