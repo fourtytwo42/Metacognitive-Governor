@@ -72,12 +72,20 @@ produced their source supervision observation. The candidate's completed
 Evaluator instance is required. The retained turn evidence proves real
 provider/tool-loop execution against the isolated copy. Conditions without an
 objective-specific verifier remain honestly inconclusive rather than treating
-model self-report or a generic file operation as success. The paired
+model self-report or a generic file operation as success. `FileExists` is the
+first supported verifier: assessment reopens the retained root through the
+capability-confined filesystem, accepts only a normalized project-relative path,
+captures at most 1 GiB of one regular file into the content-addressed artifact
+store, and compares declared minimum bytes and optional SHA-256. A missing,
+oversized, mismatched, traversal, or symlink-escape target fails closed. If all
+conditions are supported, all passes produce `passed` and any failure produces
+`failed`; the presence of any unsupported condition produces `inconclusive`.
+The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and
-confidence gates select promotion or rejection. Automatic shadows reject
-unverified conditions while retaining evidence; they never weaken the gate to
-manufacture a promotion.
+confidence gates select promotion or rejection. A fully verified file objective
+can therefore promote automatically; unverified conditions reject while
+retaining evidence and never weaken the gate to manufacture a promotion.
 
 ## Durable state
 

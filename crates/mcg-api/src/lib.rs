@@ -1184,6 +1184,7 @@ pub async fn run_scheduler_tick_at(
     }
     runtime
         .assess_automatic_shadow_runs(8)
+        .await
         .map_err(|error| error.to_string())?;
     runtime
         .revert_regressing_automatic_experiments(8)

@@ -4101,20 +4101,20 @@ impl AppRuntime {
     ///
     /// # Errors
     /// Returns an error for missing source evidence, invalid independent authority, or conflicts.
-    pub fn assess_automatic_shadow_runs(
+    pub async fn assess_automatic_shadow_runs(
         &self,
         limit: usize,
     ) -> Result<Vec<AutomaticShadowAssessment>, RuntimeError> {
         let experiment_ids = self.store()?.assessable_automatic_experiment_ids(limit)?;
         let mut assessments = Vec::with_capacity(experiment_ids.len());
         for experiment_id in experiment_ids {
-            assessments.push(self.assess_automatic_shadow_run(experiment_id)?);
+            assessments.push(self.assess_automatic_shadow_run(experiment_id).await?);
         }
         self.decide_automatic_experiments(limit)?;
         Ok(assessments)
     }
 
-    fn assess_automatic_shadow_run(
+    async fn assess_automatic_shadow_run(
         &self,
         experiment_id: ExperimentId,
     ) -> Result<AutomaticShadowAssessment, RuntimeError> {
@@ -4139,14 +4139,16 @@ impl AppRuntime {
         let source = self.agent_run_view(source_run_id)?;
         let baseline = self.source_evaluation_for_observation(&source, observation_id)?;
         let candidate = self.agent_run_view(receipt.candidate_run_id)?;
-        let evaluation = self.isolated_shadow_evaluation(&candidate, &receipt)?;
+        let evaluation = self
+            .isolated_shadow_evaluation(&candidate, &receipt)
+            .await?;
         let benchmark = self.automatic_shadow_benchmark(
             &experiment,
             &source,
             &baseline,
             &candidate,
             &evaluation,
-            receipt.completed_at,
+            evaluation.evaluated_at,
         )?;
         self.record_experiment_benchmark(&benchmark)?;
         Ok(AutomaticShadowAssessment {
@@ -4181,7 +4183,8 @@ impl AppRuntime {
         .into())
     }
 
-    fn isolated_shadow_evaluation(
+    #[allow(clippy::too_many_lines)] // Keep the complete independent evidence derivation auditable.
+    async fn isolated_shadow_evaluation(
         &self,
         candidate: &AgentRunView,
         receipt: &ShadowExecutionReceipt,
@@ -4219,7 +4222,47 @@ impl AppRuntime {
             .ok_or_else(|| {
                 StorageError::Conflict("shadow run has no completed independent evaluator".into())
             })?;
+        let workspace = self
+            .store()?
+            .shadow_workspace(receipt.experiment_id)?
+            .ok_or_else(|| StorageError::Conflict("shadow workspace was not found".into()))?;
+        if workspace.state != ShadowWorkspaceState::Retained
+            || workspace.experiment_id != receipt.experiment_id
+        {
+            return Err(StorageError::Conflict(
+                "shadow evaluation requires a retained private workspace".into(),
+            )
+            .into());
+        }
+        let data_root = self
+            .config
+            .data_directory
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let workspace_root = data_root
+            .join(&workspace.relative_path)
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !workspace_root.starts_with(&data_root) {
+            return Err(StorageError::Conflict(
+                "retained shadow workspace escaped the private data directory".into(),
+            )
+            .into());
+        }
+        let verifier = FilesystemExecutor::open(
+            [workspace_root.clone()],
+            self.config.data_directory.join("artifacts"),
+        )
+        .map_err(runtime_tool_error)?;
         let mut conditions = Vec::new();
+        let mut evidence = vec![EvaluationEvidence {
+            method: "isolated_shadow_execution".into(),
+            artifact_sha256: Some(receipt.output_artifact_sha256.clone()),
+            event_sequence: None,
+            detail: "Provider and bounded filesystem-tool evidence was retained under durable private-workspace authority.".into(),
+        }];
+        let mut unsupported = 0_u32;
+        let mut supported = 0_u32;
         for condition in candidate
             .plan
             .items
@@ -4230,13 +4273,29 @@ impl AppRuntime {
                 .iter()
                 .any(|result: &ConditionResult| result.condition == *condition)
             {
-                conditions.push(ConditionResult {
-                    condition: condition.clone(),
-                    passed: false,
-                    detail: "The candidate ran with a private project copy and bounded filesystem tools, but this objective had no independent objective-specific verification.".into(),
-                });
+                if matches!(condition, SuccessCondition::FileExists { .. }) {
+                    supported = supported.saturating_add(1);
+                    let (result, verification) = verify_isolated_file_condition(
+                        &verifier,
+                        candidate.run.task_id,
+                        &workspace_root,
+                        condition,
+                    )
+                    .await?;
+                    conditions.push(result);
+                    evidence.push(verification);
+                } else {
+                    unsupported = unsupported.saturating_add(1);
+                    conditions.push(ConditionResult {
+                        condition: condition.clone(),
+                        passed: false,
+                        detail: "This condition has no condition-specific verifier inside the private shadow workspace.".into(),
+                    });
+                }
             }
         }
+        let outcome = isolated_evaluation_outcome(&conditions, unsupported);
+        let regressions = isolated_evaluation_regressions(&conditions, unsupported);
         let report = EvaluationReport {
             schema_version: AGENT_RUN_SCHEMA_VERSION,
             id: evaluation_id,
@@ -4244,17 +4303,12 @@ impl AppRuntime {
             task_id: candidate.run.task_id,
             evaluator_instance_id: Some(evaluator_instance_id),
             conditions,
-            outcome: EvaluationOutcome::Inconclusive,
-            confidence: ConfidenceEstimate::new(10_000, 1)
+            outcome,
+            confidence: ConfidenceEstimate::new(10_000, supported.max(1))
                 .map_err(|error| StorageError::InvalidData(error.to_string()))?,
-            regressions: Vec::new(),
-            evidence: vec![EvaluationEvidence {
-                method: "isolated_shadow_execution".into(),
-                artifact_sha256: Some(receipt.output_artifact_sha256.clone()),
-                event_sequence: None,
-                detail: "Provider and filesystem-tool evidence exists under a durable isolated-workspace authority; objective settlement is withheld until an objective-specific verifier runs.".into(),
-            }],
-            evaluated_at: receipt.completed_at,
+            regressions,
+            evidence,
+            evaluated_at: Utc::now(),
         };
         self.record_evaluation(&report)?;
         Ok(report)
@@ -4305,9 +4359,7 @@ impl AppRuntime {
                 metrics: candidate.run.metrics.clone(),
                 evidence_sha256: vec![candidate_artifact.sha256],
             },
-            regressions: vec![
-                "candidate objective evidence is inconclusive without objective-specific isolated verification".into(),
-            ],
+            regressions: evaluation.regressions.clone(),
             measured_at,
         })
     }
@@ -8021,6 +8073,97 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
     }
 }
 
+async fn verify_isolated_file_condition(
+    verifier: &FilesystemExecutor,
+    task_id: TaskId,
+    workspace_root: &Path,
+    condition: &SuccessCondition,
+) -> Result<(ConditionResult, EvaluationEvidence), RuntimeError> {
+    let SuccessCondition::FileExists { path, .. } = condition else {
+        return Err(StorageError::InvalidData(
+            "isolated file verifier received a different condition kind".into(),
+        )
+        .into());
+    };
+    let absolute = objective_project_file_path(workspace_root.to_string_lossy().as_ref(), path)?;
+    let request = ToolRequest::new(
+        task_id,
+        "verify isolated shadow file objective",
+        ToolRequestKind::FsVerify {
+            path: absolute,
+            max_bytes: SHADOW_MAX_FILE_BYTES,
+        },
+    );
+    match verifier.execute(ToolExecutionId::new(), &request).await {
+        Ok(outcome) => {
+            let passed = objective_outcome_passed(condition, &outcome);
+            Ok((
+                ConditionResult {
+                    condition: condition.clone(),
+                    passed,
+                    detail: objective_condition_outcome_detail(condition, &outcome),
+                },
+                EvaluationEvidence {
+                    method: "isolated_file_verification".into(),
+                    artifact_sha256: objective_evidence_artifact(condition, &outcome)
+                        .map(|artifact| artifact.sha256.clone()),
+                    event_sequence: None,
+                    detail: if passed {
+                        "A regular file in the retained private workspace satisfied its size and digest requirements.".into()
+                    } else {
+                        "A regular file was captured from the retained private workspace but did not satisfy its declared size or digest requirements.".into()
+                    },
+                },
+            ))
+        }
+        Err(_) => Ok((
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "Private-workspace file verification failed closed; no qualifying regular-file artifact was captured.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_file_verification".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "The declared file could not be captured safely from the retained private workspace.".into(),
+            },
+        )),
+    }
+}
+
+fn isolated_evaluation_outcome(
+    conditions: &[ConditionResult],
+    unsupported: u32,
+) -> EvaluationOutcome {
+    if conditions.is_empty() || unsupported > 0 {
+        EvaluationOutcome::Inconclusive
+    } else if conditions.iter().all(|condition| condition.passed) {
+        EvaluationOutcome::Passed
+    } else {
+        EvaluationOutcome::Failed
+    }
+}
+
+fn isolated_evaluation_regressions(
+    conditions: &[ConditionResult],
+    unsupported: u32,
+) -> Vec<String> {
+    conditions
+        .iter()
+        .filter(|condition| !condition.passed)
+        .map(|condition| {
+            if unsupported > 0
+                && !matches!(condition.condition, SuccessCondition::FileExists { .. })
+            {
+                "candidate condition lacks an isolated verifier".into()
+            } else {
+                "candidate failed an isolated file objective".into()
+            }
+        })
+        .collect()
+}
+
 fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome) -> bool {
     if let SuccessCondition::HttpResponds { status, .. } = condition {
         return observed_http_status(outcome) == Some(*status);
@@ -8521,6 +8664,127 @@ mod tests {
     }
 
     #[test]
+    fn isolated_condition_outcomes_fail_closed_for_failure_and_unsupported_kinds() {
+        let file = SuccessCondition::FileExists {
+            path: "dist/result.bin".into(),
+            min_bytes: 1,
+            expected_sha256: None,
+        };
+        let passing = vec![ConditionResult {
+            condition: file.clone(),
+            passed: true,
+            detail: "verified".into(),
+        }];
+        assert_eq!(
+            isolated_evaluation_outcome(&passing, 0),
+            EvaluationOutcome::Passed
+        );
+        let failing = vec![ConditionResult {
+            condition: file,
+            passed: false,
+            detail: "missing".into(),
+        }];
+        assert_eq!(
+            isolated_evaluation_outcome(&failing, 0),
+            EvaluationOutcome::Failed
+        );
+        assert_eq!(isolated_evaluation_regressions(&failing, 0).len(), 1);
+        let unsupported = vec![ConditionResult {
+            condition: SuccessCondition::ServiceHealthy {
+                endpoint: "local-service".into(),
+            },
+            passed: false,
+            detail: "unsupported".into(),
+        }];
+        assert_eq!(
+            isolated_evaluation_outcome(&unsupported, 1),
+            EvaluationOutcome::Inconclusive
+        );
+        assert_eq!(
+            isolated_evaluation_regressions(&unsupported, 1),
+            vec!["candidate condition lacks an isolated verifier"]
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_file_verifier_captures_exact_evidence_and_rejects_unsafe_paths() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let artifacts = tempfile::tempdir().expect("artifacts");
+        std::fs::write(workspace.path().join("proof.bin"), b"proof").expect("proof file");
+        let verifier = FilesystemExecutor::open([workspace.path().to_path_buf()], artifacts.path())
+            .expect("filesystem verifier");
+        let digest = format!("{:x}", Sha256::digest(b"proof"));
+        let passing = SuccessCondition::FileExists {
+            path: "proof.bin".into(),
+            min_bytes: 5,
+            expected_sha256: Some(digest.clone()),
+        };
+        let (result, evidence) =
+            verify_isolated_file_condition(&verifier, TaskId::new(), workspace.path(), &passing)
+                .await
+                .expect("passing verification");
+        assert!(result.passed);
+        assert_eq!(evidence.artifact_sha256.as_deref(), Some(digest.as_str()));
+
+        let mismatch = SuccessCondition::FileExists {
+            path: "proof.bin".into(),
+            min_bytes: 5,
+            expected_sha256: Some("0".repeat(64)),
+        };
+        let (result, evidence) =
+            verify_isolated_file_condition(&verifier, TaskId::new(), workspace.path(), &mismatch)
+                .await
+                .expect("mismatch is measured");
+        assert!(!result.passed);
+        assert_eq!(evidence.artifact_sha256.as_deref(), Some(digest.as_str()));
+
+        let missing = SuccessCondition::FileExists {
+            path: "missing.bin".into(),
+            min_bytes: 5,
+            expected_sha256: None,
+        };
+        let (result, evidence) =
+            verify_isolated_file_condition(&verifier, TaskId::new(), workspace.path(), &missing)
+                .await
+                .expect("missing file fails closed");
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+
+        let traversal = SuccessCondition::FileExists {
+            path: "../outside.bin".into(),
+            min_bytes: 5,
+            expected_sha256: None,
+        };
+        assert!(
+            verify_isolated_file_condition(&verifier, TaskId::new(), workspace.path(), &traversal,)
+                .await
+                .is_err()
+        );
+
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.bin"), b"outside").expect("outside file");
+        let link = workspace.path().join("escape.bin");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(outside.path().join("secret.bin"), &link).is_ok();
+        #[cfg(windows)]
+        let linked =
+            std::os::windows::fs::symlink_file(outside.path().join("secret.bin"), &link).is_ok();
+        if linked {
+            let escape = SuccessCondition::FileExists {
+                path: "escape.bin".into(),
+                min_bytes: 1,
+                expected_sha256: None,
+            };
+            let (result, evidence) =
+                verify_isolated_file_condition(&verifier, TaskId::new(), workspace.path(), &escape)
+                    .await
+                    .expect("symlink escape fails as a condition");
+            assert!(!result.passed);
+            assert!(evidence.artifact_sha256.is_none());
+        }
+    }
+
+    #[test]
     fn committed_task_is_immediately_readable() {
         let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
             .expect("runtime should open");
@@ -8578,8 +8842,10 @@ mod tests {
             runtime
                 .record_organization_revision(&genome)
                 .expect("organization");
-            let condition = SuccessCondition::Custom {
-                description: "objective evidence exists".into(),
+            let condition = SuccessCondition::FileExists {
+                path: "package.json".into(),
+                min_bytes: 2,
+                expected_sha256: Some(format!("{:x}", Sha256::digest(b"{}"))),
             };
             let planning = PlanningRequest {
                 run_id,
@@ -9020,12 +9286,22 @@ mod tests {
         );
         let assessments = [reopened
             .assess_automatic_shadow_run(executions[0].launch.experiment.id)
+            .await
             .expect("assess retained shadow output")];
-        assert_eq!(
-            assessments[0].evaluation.outcome,
-            EvaluationOutcome::Inconclusive
+        assert_eq!(assessments[0].evaluation.outcome, EvaluationOutcome::Passed);
+        assert!(assessments[0].benchmark.regressions.is_empty());
+        assert!(
+            assessments[0]
+                .evaluation
+                .conditions
+                .iter()
+                .all(|condition| condition.passed)
         );
-        assert_eq!(assessments[0].benchmark.regressions.len(), 1);
+        assert!(assessments[0].evaluation.evidence.iter().any(|evidence| {
+            evidence.method == "isolated_file_verification"
+                && evidence.artifact_sha256.as_deref()
+                    == Some(format!("{:x}", Sha256::digest(b"{}")).as_str())
+        }));
         assert_eq!(
             reopened
                 .experiment(assessments[0].experiment.id)
@@ -9039,165 +9315,59 @@ mod tests {
         assert!(
             reopened
                 .assess_automatic_shadow_runs(2)
+                .await
                 .expect("resume automatic decision")
                 .is_empty()
         );
-        let rejected = reopened
+        let promoted = reopened
             .experiment(assessments[0].experiment.id)
-            .expect("rejected experiment")
+            .expect("promoted experiment")
             .expect("present");
-        assert_eq!(rejected.state, ExperimentState::Rejected);
+        assert_eq!(promoted.state, ExperimentState::Promoted);
         assert_eq!(
             reopened
-                .organization(rejected.organization_id)
-                .expect("active organization")
-                .expect("present")
-                .revision_id,
-            baseline_revision_id
-        );
-        let decisions = reopened
-            .experiment_decisions(rejected.id)
-            .expect("automatic decision");
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0].kind, ExperimentDecisionKind::Reject);
-        assert!(
-            reopened
-                .assess_automatic_shadow_runs(2)
-                .expect("assessment replay")
-                .is_empty()
-        );
-        drop(reopened);
-        let final_reopen = AppRuntime::open(config).expect("reopen rejected experiment");
-        assert_eq!(
-            final_reopen
-                .experiment(rejected.id)
-                .expect("durable rejection")
-                .expect("present")
-                .state,
-            ExperimentState::Rejected
-        );
-        assert!(
-            final_reopen
-                .assess_automatic_shadow_runs(2)
-                .expect("durable replay")
-                .is_empty()
-        );
-        let promotion_observation = SupervisionObservation {
-            id: SupervisionObservationId::new(),
-            observed_at: Utc::now(),
-            ..slow_observation.clone()
-        };
-        final_reopen
-            .record_supervision_observation(&promotion_observation)
-            .expect("promotion observation");
-        let promotion_experiment = ExperimentDefinition {
-            id: ExperimentId::new(),
-            state: ExperimentState::Draft,
-            observation_ids: vec![promotion_observation.id],
-            created_at: promotion_observation.observed_at,
-            updated_at: promotion_observation.observed_at,
-            ..assessments[0].experiment.clone()
-        };
-        final_reopen
-            .create_experiment(&promotion_experiment)
-            .expect("promotion experiment");
-        final_reopen
-            .transition_experiment(
-                promotion_experiment.id,
-                ExperimentState::Draft,
-                ExperimentState::Ready,
-            )
-            .expect("promotion ready");
-        final_reopen
-            .store()
-            .expect("store")
-            .record_automatic_experiment_outcome(&AutomaticExperimentOutcome {
-                observation_id: promotion_observation.id,
-                disposition: AutomaticExperimentDisposition::Ready,
-                candidate_revision_id: Some(candidate.revision_id),
-                experiment_id: Some(promotion_experiment.id),
-                detail: "seeded candidate is ready for promotion evidence".into(),
-                processed_at: promotion_observation.observed_at,
-                replayed: false,
-            })
-            .expect("automatic promotion outcome");
-        final_reopen
-            .transition_experiment(
-                promotion_experiment.id,
-                ExperimentState::Ready,
-                ExperimentState::Running,
-            )
-            .expect("promotion running");
-        let mut passing_candidate_evaluation = assessments[0].evaluation.clone();
-        passing_candidate_evaluation.id = EvaluationId::new();
-        passing_candidate_evaluation.outcome = EvaluationOutcome::Passed;
-        passing_candidate_evaluation.confidence =
-            ConfidenceEstimate::new(9_500, 1).expect("confidence");
-        passing_candidate_evaluation.regressions.clear();
-        for condition in &mut passing_candidate_evaluation.conditions {
-            condition.passed = true;
-            condition.detail = "seeded isolated scenario passed".into();
-        }
-        passing_candidate_evaluation.evaluated_at = Utc::now();
-        final_reopen
-            .record_evaluation(&passing_candidate_evaluation)
-            .expect("passing candidate evaluation");
-        let promoted_source_view = final_reopen
-            .agent_run_view(run_id)
-            .expect("source evidence");
-        let promoted_source_evaluation = promoted_source_view
-            .evaluations
-            .iter()
-            .find(|evaluation| evaluation.id == passed_id)
-            .expect("passing source evaluation");
-        let promotion_benchmark = ExperimentBenchmark {
-            schema_version: EXPERIMENT_SCHEMA_VERSION,
-            id: ExperimentBenchmarkId::new(),
-            experiment_id: promotion_experiment.id,
-            scenario_key: "seeded/automatic-promotion".into(),
-            baseline: BenchmarkArmResult {
-                organization_revision_id: baseline_revision_id,
-                run_id,
-                evaluation_id: passed_id,
-                outcome: EvaluationOutcome::Passed,
-                confidence: promoted_source_evaluation.confidence,
-                metrics: promoted_source_view.run.metrics,
-                evidence_sha256: vec!["e".repeat(64)],
-            },
-            candidate: BenchmarkArmResult {
-                organization_revision_id: candidate.revision_id,
-                run_id: receipt.candidate_run_id,
-                evaluation_id: passing_candidate_evaluation.id,
-                outcome: EvaluationOutcome::Passed,
-                confidence: ConfidenceEstimate::new(9_500, 1).expect("confidence"),
-                metrics: shadow_view.run.metrics.clone(),
-                evidence_sha256: vec![receipt.output_artifact_sha256.clone()],
-            },
-            regressions: Vec::new(),
-            measured_at: passing_candidate_evaluation.evaluated_at + Duration::seconds(1),
-        };
-        final_reopen
-            .record_experiment_benchmark(&promotion_benchmark)
-            .expect("promotion benchmark");
-        final_reopen
-            .decide_automatic_experiments(8)
-            .expect("automatic promotion");
-        assert_eq!(
-            final_reopen
-                .organization(candidate.organization_id)
+                .organization(promoted.organization_id)
                 .expect("promoted organization")
                 .expect("present")
                 .revision_id,
             candidate.revision_id
         );
-        let mut post_promotion_regression = passing_candidate_evaluation;
+        let decisions = reopened
+            .experiment_decisions(promoted.id)
+            .expect("automatic decision");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].kind, ExperimentDecisionKind::Promote);
+        assert!(
+            reopened
+                .assess_automatic_shadow_runs(2)
+                .await
+                .expect("assessment replay")
+                .is_empty()
+        );
+        drop(reopened);
+        let final_reopen = AppRuntime::open(config).expect("reopen promoted experiment");
+        assert_eq!(
+            final_reopen
+                .experiment(promoted.id)
+                .expect("durable promotion")
+                .expect("present")
+                .state,
+            ExperimentState::Promoted
+        );
+        assert!(
+            final_reopen
+                .assess_automatic_shadow_runs(2)
+                .await
+                .expect("durable replay")
+                .is_empty()
+        );
+        let mut post_promotion_regression = assessments[0].evaluation.clone();
         post_promotion_regression.id = EvaluationId::new();
         post_promotion_regression.outcome = EvaluationOutcome::Failed;
         post_promotion_regression.regressions = vec!["seeded promoted regression".into()];
         post_promotion_regression.conditions[0].passed = false;
         post_promotion_regression.conditions[0].detail = "seeded promoted regression".into();
-        post_promotion_regression.evaluated_at =
-            promotion_benchmark.measured_at + Duration::seconds(1);
+        post_promotion_regression.evaluated_at = Utc::now() + Duration::seconds(1);
         final_reopen
             .record_evaluation(&post_promotion_regression)
             .expect("post-promotion regression");
