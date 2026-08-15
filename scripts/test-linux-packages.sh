@@ -19,7 +19,7 @@ uat_user="${MCG_UAT_USER:-${SUDO_USER:-$(stat -c '%U' "$repository_root")}}"
 [[ -f "$appimage" ]] || { echo "Missing AppImage package: $appimage" >&2; exit 1; }
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
-for command in curl dpkg dpkg-deb find import pgrep python3 runuser stat xdotool Xvfb; do
+for command in curl dpkg dpkg-deb find import pgrep python3 runuser ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 
@@ -66,7 +66,7 @@ wait_for_health() {
   local port="$1"
   local attempt
   for attempt in $(seq 1 100); do
-    if curl --fail --silent --show-error "http://127.0.0.1:$port/api/v1/system/health" >"$uat_root/health-$port.json"; then
+    if curl --fail --silent "http://127.0.0.1:$port/api/v1/system/health" >"$uat_root/health-$port.json"; then
       return 0
     fi
     sleep 0.1
@@ -186,6 +186,10 @@ launch_and_capture() {
   local data_root="$2"
   local port="$3"
   local label="$4"
+  if ss -ltn "sport = :$port" | grep -q LISTEN; then
+    echo "$label requires unused loopback port $port." >&2
+    exit 1
+  fi
   runuser -u "$uat_user" -- env \
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" DISPLAY="$display" \
     MCG_DATA_DIR="$data_root" MCG_BIND_ADDRESS="127.0.0.1:$port" \
@@ -203,11 +207,23 @@ launch_and_capture() {
   [[ -n "$window_id" ]] || { echo "$label did not expose an MCG desktop window." >&2; exit 1; }
   runuser -u "$uat_user" -- env DISPLAY="$display" import -window root "$uat_root/$label.png"
   [[ -s "$uat_root/$label.png" ]] || { echo "$label screenshot is empty." >&2; exit 1; }
+  local service_pid
+  service_pid="$(ss -ltnp "sport = :$port" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n 1)"
+  [[ "$service_pid" =~ ^[0-9]+$ ]] || { echo "$label service PID was not observable." >&2; exit 1; }
+  [[ "$(basename "$(readlink -f "/proc/$service_pid/exe")")" == "mcg-service" ]] || {
+    echo "$label loopback listener is not mcg-service." >&2
+    exit 1
+  }
+  tr '\0' '\n' <"/proc/$service_pid/environ" | grep -Fxq "MCG_DATA_DIR=$data_root" || {
+    echo "$label service is not bound to its isolated data directory." >&2
+    exit 1
+  }
   stop_tree "$desktop_pid"
+  stop_tree "$service_pid"
   background_pids=("$xvfb_pid")
 }
 
-launch_and_capture /usr/bin/mcg-desktop "$uat_root/installed-desktop-data" 17779 installed
+launch_and_capture /usr/bin/mcg-desktop "$uat_root/installed-desktop-data" 7777 installed
 
 appimage_root="$uat_root/appimage"
 mkdir "$appimage_root"
@@ -219,7 +235,7 @@ for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/m
 done
 find "$appimage_root/squashfs-root" -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Apache-2.0.txt -print -quit | grep -q .
-launch_and_capture "$appimage_root/squashfs-root/AppRun" "$appimage_data" 17780 appimage
+launch_and_capture "$appimage_root/squashfs-root/AppRun" "$appimage_data" 7777 appimage
 
 dpkg -r "$package_name" >"$uat_root/deb-uninstall.log"
 package_installed=false
