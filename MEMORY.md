@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Finish adversarial cross-platform plugin tests and native package UAT on top of the qualified plugin-aware backup/restore and license-package checkpoints.
+- Current task: Build current clean Windows/Linux packages and complete native plugin/package UAT on top of the qualified backup, license, and adversarial package-test checkpoints.
 - Last meaningful change: Exact pushed commit `4e5c45b0aab4ed0ab4c45a66083f87da68ac0a6f` makes portable backup/restore semantically verify plugin catalog heads, immutable revisions, module/result artifacts, invocation projections, and exact history; Windows affected gates and exact-source Ubuntu qualification pass.
-- Next step: Commit and exact-source Ubuntu-qualify the Wasmtime license package contract, then run cross-platform adversarial plugin testing and native Windows/Linux package UAT.
+- Next step: Commit and exact-source Ubuntu-qualify the adversarial package UAT contract, then build fresh clean packages and execute current-candidate Windows/Linux native UAT.
 - Blockers: The installer already transferred to Win11-VM was built from older commit `4f8cfa3` and is no longer the current release candidate; it must not be used as final UAT evidence. A fresh current-source installer must be built and hash-verified. Launching newly transferred software through UI automation still requires explicit action-time confirmation. Win11-VM is available and unlocked, and Ubuntu is reachable noninteractively with the existing dedicated `mcg_m1_vm` SSH key (last verified 2026-08-15); credentials are intentionally not retained here.
 - Extended verification: Exact `9cec1c6` one-hour/10,000-task release soak lanes passed on Windows and Ubuntu on 2026-08-15. Preserved local logs are `target/soak-windows-1h.stdout.log`, empty `target/soak-windows-1h.stderr.log`, and `target/soak-ubuntu-1h.log`; hashes and measurements are in the Verification Ledger. A longer multi-hour release soak remains an end gate.
 
@@ -162,6 +162,10 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-15: Adversarial package UAT now executes one real digest-bound WASI module through the packaged plugin runner and requires a tampered digest to return nonzero with `module_digest_mismatch` and empty stderr. The fixture passed against the owner-local Windows runner and an exact existing Ubuntu runner; Windows PowerShell parsing, Ubuntu Bash syntax, packaging contracts, documentation validation, and diff hygiene pass. The first Windows smoke found and fixed use of a newer static SHA-256 API unavailable in Windows PowerShell 5. Fresh NSIS, `.deb`, and AppImage execution remains the native package gate. No GitHub-hosted compute ran.
+
+- 2026-08-15: Exact pushed license-package commit `099b846466f4c0e19182f205d7f5de09d64bf981` passed owner-controlled Ubuntu packaging/docs contracts and native Bash syntax checks from `/home/hendo420/mcg-worktree-099b846`; the shipped Wasmtime license file has byte SHA-256 `a6c48161a09acc75a0e25503bab66a731eb5fba5392ed4bb4743e4ba5085327a` on Linux and the contract validates its normalized reviewed-upstream digest. Fresh package payload inspection remains part of native UAT. No GitHub-hosted compute ran.
 
 - 2026-08-15: The plugin license-package checkpoint adds the complete Wasmtime 45.0.3 Apache-2.0-with-LLVM-exceptions text to every production bundle and makes Windows NSIS, Linux `.deb`, and AppImage UAT require the payload beside the plugin runner. The packaging gate pins the normalized reviewed upstream text to SHA-256 `23823edf263108ef7acbefde293225117b4784759c9c5bcd0b4966d0a1e34f55`; packaging contracts, documentation validation, and diff hygiene pass on Windows. Exact-source Ubuntu qualification and fresh package inspection remain next. No GitHub-hosted compute ran.
 

@@ -85,6 +85,70 @@ run_cli() {
     "$executable" --host "http://127.0.0.1:$port" "$@"
 }
 
+test_plugin_runner() {
+  local executable="$1"
+  local label="$2"
+  python3 - "$executable" "$uat_root/$label-plugin-runner.json" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+executable, report_path = sys.argv[1:]
+module = b'''(module
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (memory 1)
+  (export "memory" (memory 0))
+  (data (i32.const 8) "{\\22package\\22:true}")
+  (func (export "_start")
+    (i32.store (i32.const 0) (i32.const 8))
+    (i32.store (i32.const 4) (i32.const 16))
+    (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 24)))))'''
+request = {
+    "schema_version": 1,
+    "manifest": {
+        "schema_version": 1,
+        "id": "uat.package",
+        "display_name": "Package UAT",
+        "version": "1.0.0",
+        "class": "sandboxed_wasi",
+        "requested_capabilities": [],
+    },
+    "module_sha256": hashlib.sha256(module).hexdigest(),
+    "module_base64": base64.b64encode(module).decode("ascii"),
+    "input": {},
+}
+
+def invoke(value):
+    return subprocess.run(
+        [executable],
+        input=json.dumps(value).encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=15,
+        check=False,
+    )
+
+valid = invoke(request)
+assert valid.returncode == 0 and valid.stderr == b""
+valid_response = json.loads(valid.stdout)
+assert valid_response["state"] == "succeeded"
+assert valid_response["result"]["output"] == {"package": True}
+request["module_sha256"] = "0" * 64
+tampered = invoke(request)
+assert tampered.returncode != 0 and tampered.stderr == b""
+tampered_response = json.loads(tampered.stdout)
+assert tampered_response["error_code"] == "module_digest_mismatch"
+pathlib.Path(report_path).write_text(
+    json.dumps({"valid": valid_response["state"], "tampered": tampered_response["error_code"]}),
+    encoding="utf-8",
+)
+PY
+}
+
 dpkg -i "$deb" >"$uat_root/deb-install.log"
 package_installed=true
 for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner \
@@ -95,6 +159,7 @@ find /usr/share/icons/hicolor -type f -name 'mcg-desktop.png' -print -quit | gre
 find /usr/lib/MCG -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find /usr/lib/MCG -type f -name Apache-2.0.txt -print -quit | grep -q .
 find /usr/lib/MCG -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
+test_plugin_runner /usr/bin/mcg-plugin-runner installed
 
 sentinel="$installed_data/linux-package-uat-retained.txt"
 runuser -u "$uat_user" -- sh -c 'printf retain-on-uninstall > "$1"' sh "$sentinel"
@@ -244,6 +309,7 @@ done
 find "$appimage_root/squashfs-root" -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Apache-2.0.txt -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
+test_plugin_runner "$appimage_root/squashfs-root/usr/bin/mcg-plugin-runner" appimage
 launch_and_capture "$appimage_root/squashfs-root/AppRun" "$appimage_data" 7777 appimage
 
 dpkg -r "$package_name" >"$uat_root/deb-uninstall.log"
@@ -271,4 +337,5 @@ DATA_RETAINED=true
 REPAIR_PRESERVED_DATA=true
 REINSTALL_PRESERVED_DATA=true
 APPLICATION_REMOVED=true
+PLUGIN_RUNNERS_QUALIFIED=true
 EOF

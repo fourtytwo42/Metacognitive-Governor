@@ -251,9 +251,11 @@ of inherited environment or filesystem preopens even when a manifest declares
 capabilities. Runner tests additionally prove bounded/malformed request rejection,
 pre-execution module-digest rejection, and a real child process that consumes one
 request, returns one result, keeps stderr empty, and exits. The plugin feature is
-not release-qualified until daemon launch/control, durable catalog/audit, all
-interfaces, cross-platform crash recovery, adversarial packaging, and native UAT
-gates in `docs/architecture/plugins.md` are complete.
+not release-qualified until the native UAT gates in
+`docs/architecture/plugins.md` are complete. Package UAT invokes the installed NSIS, `.deb`, and
+AppImage plugin runners with one real digest-bound WASI module, requires empty
+diagnostic output, and proves digest tampering returns
+`module_digest_mismatch` with a failing process status.
 
 Parent-client process tests additionally prove fixed-name runner selection,
 bounded one-shot pipes, a whole-transaction outer deadline with kill/reap cleanup,
