@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Qualify and finish the typed outbound SSH execution surface for M8.
-- Last meaningful change: Typed pinned-host SSH inspect/execute/upload/download now flows through policy, approval, lease, audit, artifacts, durable replay/recovery, and REST/CLI/MCP/Tauri/desktop interfaces. Strict workspace Clippy, 50 tool tests, 28 storage tests, 10 runtime tests, 44 API tests, 17 Vitest tests, production frontend build, two Playwright flows, and docs are green on Windows.
-- Next step: Commit the coherent SSH checkpoint, run exact clean Windows and Ubuntu gates, run the live agent-backed Ubuntu SSH restart/replay fixture, and perform native UI UAT when the visible daemon can be upgraded safely.
+- Last meaningful change: Exact commit `f5a1a1b` passed complete clean Windows and Ubuntu verification. A real Linux `ssh-agent` fixture then proved pinned inspection, runtime restart, and observation-only replay; 18 desktop component tests now include the simple pinned-host/inspection flow.
+- Next step: Commit the final SSH UAT/evidence update, add live mutation/transfer and wrong-key qualification, then perform native Windows/Linux SSH UI UAT when agent/visible-daemon prerequisites allow it.
 - Blockers: None documented.
 
 ## Current State
@@ -685,9 +685,9 @@ When sources conflict, use this order:
 - Context: M8 required useful remote execution without adding built-in remote access to the harness.
 - Decision: Use outbound OpenSSH only, immutable owner-pinned host revisions, SSH-agent authentication, four typed POSIX operations, exact capability resources, and the shared approval/lease/audit broker. A claimed crash becomes non-replayable uncertainty.
 - Files: `crates/mcg-{domain,policy,storage,tools,runtime,api}/`, `apps/{mcg-cli,desktop}/`, `docs/architecture/typed-ssh.md`.
-- Commands/tests: Windows strict workspace Clippy; 2 focused SSH tool tests, 2 storage recovery tests, 10 runtime tests, 44 API tests, 17 Vitest tests, production build, two Playwright flows, and documentation validation.
-- Result: REST, CLI, MCP, Tauri, and desktop share one credential-free pinned-host/operation contract. Real Windows-to-Ubuntu probing found that the local Windows `ssh-agent` service is disabled; MCG correctly did not fall back to a password/private-key option. The executor now uses a real isolated empty config, and Windows prefers native System32 OpenSSH to avoid Git/MSYS path-dialect ambiguity.
-- Follow-up: Run clean exact-commit Windows/Linux gates and live Linux-agent inspect/execute/transfer/restart/replay qualification. Windows live SSH UAT requires enabling the native OpenSSH Authentication Agent service and loading the owner key.
+- Commands/tests: Exact `f5a1a1b` complete Windows `scripts/verify.ps1` passed in 424 seconds. Exact archived source passed Ubuntu `scripts/verify.sh` in 136 seconds after disk cleanup. Live Ubuntu agent-backed runtime inspect/restart/replay passed in 0.28 seconds. Strict workspace Clippy; 50 tool tests, 28 storage tests, 10 runtime tests, 44 API tests, 18 Vitest tests, production/native builds, two Playwright flows, and docs are green.
+- Result: REST, CLI, MCP, Tauri, and desktop share one credential-free pinned-host/operation contract. Real Windows-to-Ubuntu probing found that the local Windows `ssh-agent` service is disabled; MCG correctly did not fall back to a password/private-key option. The executor now uses a real isolated empty config, and Windows prefers native System32 OpenSSH to avoid Git/MSYS path-dialect ambiguity. Ubuntu initially filled its 48 GiB root volume with retained build targets; `cargo clean` removed 16.8 GiB only from `/home/hendo420/mcg-worktree-045dc93/target`, after which the complete gate passed.
+- Follow-up: Add live execute/upload/download and wrong-key qualification. Windows live SSH UAT requires enabling the native OpenSSH Authentication Agent service and loading the owner key; native stateful UI UAT still requires safely upgrading the visible daemon.
 
 ## Known Issues
 

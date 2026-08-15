@@ -210,6 +210,43 @@ beforeEach(() => {
   client.getSiteMonitor.mockRejectedValue(new Error("Site has no monitor"));
 });
 
+test("simple SSH flow registers a pinned host and performs read-only inspection", async () => {
+  const sshHost = {
+    id: "00000000-0000-4000-8000-000000000191",
+    revision: 1,
+    definition_hash: "a".repeat(64),
+    display_name: "Build VM",
+    hostname: "192.168.50.109",
+    port: 22,
+    username: "builder",
+    known_hosts_entry: "192.168.50.109 ssh-ed25519 AAAAfixture",
+    host_key_sha256: "SHA256:fixture",
+    state: "active" as const,
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.registerSshHost.mockResolvedValue(sshHost);
+  client.runSshOperation.mockResolvedValue({
+    operation: { id: "op", host_id: sshHost.id, host_revision: 1, state: "succeeded", kind: { kind: "inspect" }, detail: "ok", artifact_sha256: [], created_at: sshHost.created_at, updated_at: sshHost.updated_at },
+    replayed: false
+  });
+  client.loadSshOperations.mockResolvedValue({ operations: [] });
+  render(<App />);
+  const panel = await screen.findByRole("region", { name: "SSH hosts" });
+  fireEvent.change(within(panel).getByLabelText("Host name"), { target: { value: "Build VM" } });
+  fireEvent.change(within(panel).getByLabelText("Hostname or IP"), { target: { value: sshHost.hostname } });
+  fireEvent.change(within(panel).getByLabelText("SSH username"), { target: { value: sshHost.username } });
+  fireEvent.change(within(panel).getByLabelText("Pinned known_hosts line"), { target: { value: sshHost.known_hosts_entry } });
+  fireEvent.change(within(panel).getByLabelText("Verified host fingerprint"), { target: { value: sshHost.host_key_sha256 } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Register pinned host" }));
+  await screen.findByText("Build VM");
+  fireEvent.click(within(panel).getByRole("button", { name: "Inspect host" }));
+  await waitFor(() => expect(client.runSshOperation).toHaveBeenCalledWith(
+    sshHost.id,
+    expect.objectContaining({ operation: { kind: "inspect" }, timeout_seconds: 60 })
+  ));
+});
+
 test("simple Sites flow registers a selected project and records governed health", async () => {
   const project = {
     id: "00000000-0000-4000-8000-000000000121",
