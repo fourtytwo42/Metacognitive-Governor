@@ -24,7 +24,8 @@ use mcg_agents::{
     ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
     ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
     OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, ProspectiveAnalysis,
-    RoleKind, RunSupervisionSnapshot, ShadowAuthority, ShadowExecutionReceipt, SuccessCondition,
+    RoleKind, RunSupervisionSnapshot, SHADOW_WORKSPACE_SCHEMA_VERSION, ShadowAuthority,
+    ShadowExecutionReceipt, ShadowWorkspace, ShadowWorkspaceState, SuccessCondition,
     SupervisionAnalyzer, SupervisionObservation, SupervisionSignal, TaskComplexity, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
@@ -72,7 +73,7 @@ use mcg_storage::{
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
     AutomaticSupervisionMutation, CandidateRevisionMutation, ExperimentMutation, ScheduleClaim,
-    ScheduleWakeMutation,
+    ScheduleWakeMutation, ShadowWorkspaceMutation,
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
@@ -113,6 +114,7 @@ pub struct RuntimeStatus {
     pub recovered_computer_action_batches: u64,
     pub recovered_site_deployments: u64,
     pub recovered_ssh_operations: u64,
+    pub recovered_shadow_workspaces: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +467,12 @@ pub struct PreparedAgentTurn {
     pub project_root: std::path::PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct ShadowExecutionAuthority {
+    experiment_id: ExperimentId,
+    workspace_root: std::path::PathBuf,
+}
+
 #[derive(Clone)]
 struct RuntimeMcpExecutor {
     store: Arc<Mutex<SqliteEventStore>>,
@@ -693,6 +701,7 @@ pub struct AppRuntime {
     recovered_computer_action_batches: u64,
     recovered_site_deployments: u64,
     recovered_ssh_operations: u64,
+    recovered_shadow_workspaces: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
     browser_sessions: Arc<PersistentBrowserManager>,
     computer_sessions: Arc<ComputerUseManager>,
@@ -740,6 +749,7 @@ impl AppRuntime {
             store.recover_computer_action_batches(startup_now)?;
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
+        let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -764,6 +774,7 @@ impl AppRuntime {
             recovered_computer_action_batches,
             recovered_site_deployments,
             recovered_ssh_operations,
+            recovered_shadow_workspaces,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -812,6 +823,7 @@ impl AppRuntime {
             store.recover_computer_action_batches(startup_now)?;
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
+        let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -838,6 +850,7 @@ impl AppRuntime {
             recovered_computer_action_batches,
             recovered_site_deployments,
             recovered_ssh_operations,
+            recovered_shadow_workspaces,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -862,6 +875,7 @@ impl AppRuntime {
         recovered_computer_action_batches: u64,
         recovered_site_deployments: u64,
         recovered_ssh_operations: u64,
+        recovered_shadow_workspaces: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
         browser_sessions: Arc<PersistentBrowserManager>,
         computer_sessions: Arc<ComputerUseManager>,
@@ -885,6 +899,7 @@ impl AppRuntime {
             recovered_computer_action_batches,
             recovered_site_deployments,
             recovered_ssh_operations,
+            recovered_shadow_workspaces,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -929,6 +944,7 @@ impl AppRuntime {
             recovered_computer_action_batches: self.recovered_computer_action_batches,
             recovered_site_deployments: self.recovered_site_deployments,
             recovered_ssh_operations: self.recovered_ssh_operations,
+            recovered_shadow_workspaces: self.recovered_shadow_workspaces,
         }
     }
 
@@ -3815,7 +3831,159 @@ impl AppRuntime {
         Ok(launches)
     }
 
-    /// Executes stable automatic shadow plans with provider-only, zero-tool authority.
+    /// Creates one bounded, private, content-verified duplicate of the source project.
+    ///
+    /// The durable `preparing` claim commits before filesystem writes. A copy or verification
+    /// failure becomes `uncertain`; only a complete manifest match may become `ready`.
+    ///
+    /// # Errors
+    /// Returns an error for missing scope, unsafe source entries, exceeded bounds, or stale state.
+    pub fn prepare_shadow_workspace(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<ShadowWorkspaceMutation, RuntimeError> {
+        if let Some(existing) = self.store()?.shadow_workspace(experiment_id)? {
+            if existing.state == ShadowWorkspaceState::Ready {
+                return Ok(ShadowWorkspaceMutation {
+                    workspace: existing,
+                    replayed: true,
+                    events: Vec::new(),
+                });
+            }
+            return Err(
+                StorageError::Conflict("shadow workspace is not safely reusable".into()).into(),
+            );
+        }
+        let (experiment, project, source_root, data_root) =
+            self.shadow_workspace_source(experiment_id)?;
+        let project_id = project.project_id;
+        let manifest = scan_shadow_workspace_source(&source_root, &data_root)?;
+        let relative_path = format!("shadow-workspaces/{experiment_id}");
+        let definition_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    SHADOW_WORKSPACE_SCHEMA_VERSION,
+                    experiment.id,
+                    project.id,
+                    project.fingerprint,
+                    &manifest.sha256,
+                    &relative_path,
+                    SHADOW_MAX_FILES,
+                    SHADOW_MAX_TOTAL_BYTES,
+                    SHADOW_MAX_FILE_BYTES,
+                    SHADOW_MAX_DEPTH,
+                ))
+                .map_err(StorageError::from)?
+            )
+        );
+        let now = Utc::now();
+        let preparing = ShadowWorkspace {
+            schema_version: SHADOW_WORKSPACE_SCHEMA_VERSION,
+            experiment_id,
+            project_id,
+            state: ShadowWorkspaceState::Preparing,
+            definition_hash: definition_hash.clone(),
+            source_fingerprint: manifest.sha256.clone(),
+            relative_path: relative_path.clone(),
+            file_count: 0,
+            total_bytes: 0,
+            content_sha256: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let mutation = self.store()?.create_shadow_workspace(&preparing)?;
+        for event in &mutation.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        if mutation.replayed {
+            return Err(StorageError::Conflict(
+                "shadow workspace preparation is already in progress".into(),
+            )
+            .into());
+        }
+        let destination = data_root.join(&relative_path);
+        let copy_result = copy_shadow_workspace(&source_root, &destination, &manifest);
+        let copied = match copy_result {
+            Ok(copied) => copied,
+            Err(error) => {
+                let failed = self.store()?.fail_shadow_workspace(
+                    experiment_id,
+                    "bounded private project duplication failed",
+                    Utc::now(),
+                )?;
+                for event in &failed.events {
+                    let _ = self.event_sender.send(event.clone());
+                }
+                return Err(error);
+            }
+        };
+        let completed = self.store()?.complete_shadow_workspace(
+            experiment_id,
+            &definition_hash,
+            copied.file_count,
+            copied.total_bytes,
+            copied.sha256,
+            Utc::now(),
+        )?;
+        for event in &completed.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(completed)
+    }
+
+    fn shadow_workspace_source(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<
+        (
+            ExperimentDefinition,
+            ProjectModel,
+            std::path::PathBuf,
+            std::path::PathBuf,
+        ),
+        RuntimeError,
+    > {
+        let experiment = self
+            .experiment(experiment_id)?
+            .ok_or_else(|| StorageError::Conflict("shadow experiment was not found".into()))?;
+        if experiment.state != ExperimentState::Running {
+            return Err(StorageError::Conflict(
+                "shadow workspace requires a running experiment".into(),
+            )
+            .into());
+        }
+        let observation_id = *experiment.observation_ids.first().ok_or_else(|| {
+            StorageError::InvalidData("shadow experiment has no source observation".into())
+        })?;
+        let observation = self
+            .store()?
+            .supervision_observation(observation_id)?
+            .ok_or_else(|| StorageError::Conflict("source observation was not found".into()))?;
+        let task_id = observation.task_id.ok_or_else(|| {
+            StorageError::InvalidData("shadow observation has no source task".into())
+        })?;
+        let task = self
+            .task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            StorageError::InvalidData("shadow source task has no selected project".into())
+        })?;
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let source_root = std::path::PathBuf::from(&project.root)
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let data_root = self
+            .config
+            .data_directory
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        Ok((experiment, project, source_root, data_root))
+    }
+
+    /// Executes stable automatic shadow plans with private-copy filesystem authority.
     ///
     /// A work item that already has a non-completed lease is never retried automatically. This
     /// makes a crash-interrupted or failed paid turn an explicit review boundary. Successful full
@@ -3834,6 +4002,7 @@ impl AppRuntime {
         }
         let mut executions = Vec::new();
         for launch in launches {
+            self.prepare_shadow_workspace(launch.experiment.id)?;
             if let Some(receipt) = self.execute_automatic_shadow_launch(&launch).await? {
                 executions.push(AutomaticShadowExecution { launch, receipt });
             }
@@ -3851,6 +4020,14 @@ impl AppRuntime {
         let project_id = task.project_id.ok_or_else(|| {
             StorageError::InvalidData("automatic shadow task has no selected project".into())
         })?;
+        let workspace = self
+            .store()?
+            .shadow_workspace(launch.experiment.id)?
+            .ok_or_else(|| StorageError::Conflict("shadow workspace was not found".into()))?;
+        let shadow_authority = ShadowExecutionAuthority {
+            experiment_id: launch.experiment.id,
+            workspace_root: self.config.data_directory.join(&workspace.relative_path),
+        };
         let items = self.agent_run_view(launch.run.id)?.plan.items;
         for item in items {
             let view = self.agent_run_view(launch.run.id)?;
@@ -3874,16 +4051,19 @@ impl AppRuntime {
             {
                 return Ok(None);
             }
-            self.execute_agent_work(&AgentDispatchSpec {
-                run_id: launch.run.id,
-                work_item_id: item.id,
-                project_id,
-                target_path: None,
-                context_token_budget: 8_192,
-                requested_tools: Vec::new(),
-                estimated_output_tokens: 2_048,
-                max_model_calls: 4,
-            })
+            self.execute_agent_work_with_authority(
+                &AgentDispatchSpec {
+                    run_id: launch.run.id,
+                    work_item_id: item.id,
+                    project_id,
+                    target_path: None,
+                    context_token_budget: 8_192,
+                    requested_tools: Vec::new(),
+                    estimated_output_tokens: 2_048,
+                    max_model_calls: 4,
+                },
+                Some(shadow_authority.clone()),
+            )
             .await?;
         }
         let view = self.agent_run_view(launch.run.id)?;
@@ -3915,9 +4095,9 @@ impl AppRuntime {
 
     /// Converts completed automatic shadow output into paired evidence and a durable decision.
     ///
-    /// Current zero-tool shadows are scored honestly as inconclusive because copied production
-    /// objectives were not re-executed in an isolated project sandbox. They therefore produce a
-    /// benchmark regression and an automatic rejection while retaining all evidence for review.
+    /// Conditions without an objective-specific isolated verifier are scored honestly as
+    /// inconclusive. They therefore produce a benchmark regression and automatic rejection while
+    /// retaining the provider, tool, workspace, and evaluation evidence for review.
     ///
     /// # Errors
     /// Returns an error for missing source evidence, invalid independent authority, or conflicts.
@@ -3959,7 +4139,7 @@ impl AppRuntime {
         let source = self.agent_run_view(source_run_id)?;
         let baseline = self.source_evaluation_for_observation(&source, observation_id)?;
         let candidate = self.agent_run_view(receipt.candidate_run_id)?;
-        let evaluation = self.inconclusive_shadow_evaluation(&candidate, &receipt)?;
+        let evaluation = self.isolated_shadow_evaluation(&candidate, &receipt)?;
         let benchmark = self.automatic_shadow_benchmark(
             &experiment,
             &source,
@@ -4001,7 +4181,7 @@ impl AppRuntime {
         .into())
     }
 
-    fn inconclusive_shadow_evaluation(
+    fn isolated_shadow_evaluation(
         &self,
         candidate: &AgentRunView,
         receipt: &ShadowExecutionReceipt,
@@ -4053,7 +4233,7 @@ impl AppRuntime {
                 conditions.push(ConditionResult {
                     condition: condition.clone(),
                     passed: false,
-                    detail: "Shadow output was retained, but this production objective was not independently re-executed in an isolated project sandbox.".into(),
+                    detail: "The candidate ran with a private project copy and bounded filesystem tools, but this objective had no independent objective-specific verification.".into(),
                 });
             }
         }
@@ -4069,10 +4249,10 @@ impl AppRuntime {
                 .map_err(|error| StorageError::InvalidData(error.to_string()))?,
             regressions: Vec::new(),
             evidence: vec![EvaluationEvidence {
-                method: "evaluation_only_shadow_output".into(),
+                method: "isolated_shadow_execution".into(),
                 artifact_sha256: Some(receipt.output_artifact_sha256.clone()),
                 event_sequence: None,
-                detail: "Provider output exists under zero-tool authority; objective settlement is deliberately withheld.".into(),
+                detail: "Provider and filesystem-tool evidence exists under a durable isolated-workspace authority; objective settlement is withheld until an objective-specific verifier runs.".into(),
             }],
             evaluated_at: receipt.completed_at,
         };
@@ -4126,8 +4306,7 @@ impl AppRuntime {
                 evidence_sha256: vec![candidate_artifact.sha256],
             },
             regressions: vec![
-                "candidate objective evidence is inconclusive under zero-tool shadow authority"
-                    .into(),
+                "candidate objective evidence is inconclusive without objective-specific isolated verification".into(),
             ],
             measured_at,
         })
@@ -5304,6 +5483,15 @@ impl AppRuntime {
         &self,
         spec: &AgentDispatchSpec,
     ) -> Result<PreparedAgentTurn, RuntimeError> {
+        self.prepare_agent_turn_with_authority(spec, None).await
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep complete normal/shadow authority derivation together.
+    async fn prepare_agent_turn_with_authority(
+        &self,
+        spec: &AgentDispatchSpec,
+        shadow_authority: Option<&ShadowExecutionAuthority>,
+    ) -> Result<PreparedAgentTurn, RuntimeError> {
         if spec.context_token_budget < 64
             || spec.estimated_output_tokens == 0
             || spec.max_model_calls == 0
@@ -5351,23 +5539,51 @@ impl AppRuntime {
             .organization(organization.organization_id)?
             .ok_or_else(|| StorageError::Conflict("active organization was not found".into()))?;
         let evaluation_only = active_organization.revision_id != organization.revision_id;
-        let project = self
+        let mut project = self
             .project(spec.project_id)?
             .ok_or(StorageError::ProjectNotFound(spec.project_id))?;
-        let context = self.assemble_project_context(
-            spec.project_id,
-            Vec::new(),
-            spec.context_token_budget,
-            spec.target_path.as_deref(),
-        )?;
+        if evaluation_only {
+            let authority = shadow_authority.ok_or_else(|| {
+                StorageError::Conflict(
+                    "inactive candidate dispatch requires isolated shadow authority".into(),
+                )
+            })?;
+            self.validate_shadow_execution_authority(authority, &view.run, spec.project_id)?;
+            project.root = authority.workspace_root.to_string_lossy().into_owned();
+        } else if shadow_authority.is_some() {
+            return Err(StorageError::Conflict(
+                "active organization runs cannot use shadow authority".into(),
+            )
+            .into());
+        }
+        let mut context_items = ContextAssembler::from_project_for_target(
+            &project,
+            spec.target_path.as_deref().unwrap_or(""),
+        );
+        context_items.extend(
+            self.memory_claims(spec.project_id, None, true)?
+                .into_iter()
+                .map(|claim| ContextItem {
+                    category: ContextCategory::Memory,
+                    content: format!("{}.{} = {}", claim.namespace, claim.key, claim.value),
+                    source: claim.provenance.source,
+                    priority: if claim.state == mcg_projects::MemoryState::Durable {
+                        800
+                    } else {
+                        500
+                    },
+                    estimated_tokens: 0,
+                }),
+        );
+        let context = ContextAssembler::assemble(context_items, spec.context_token_budget);
         let context_json = serde_json::to_vec(&context)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let context_fingerprint = format!("sha256:{:x}", Sha256::digest(context_json));
-        let (tools, external_tools) = self.resolve_agent_tools_for_authority(
-            role.kind,
-            &spec.requested_tools,
-            evaluation_only,
-        )?;
+        let (tools, external_tools) = if evaluation_only {
+            Self::resolve_shadow_tools(role.kind, &spec.requested_tools)?
+        } else {
+            self.resolve_agent_tools(role.kind, &spec.requested_tools)?
+        };
         let routes = self.provider_route_candidates().await?;
         if routes.is_empty() {
             return Err(ProviderError::Configuration(
@@ -5535,22 +5751,84 @@ impl AppRuntime {
         Ok((definitions, bindings))
     }
 
-    fn resolve_agent_tools_for_authority(
-        &self,
+    fn resolve_shadow_tools(
         role: RoleKind,
         requested: &[String],
-        evaluation_only: bool,
     ) -> Result<(Vec<ToolDefinition>, Vec<ExternalToolBinding>), RuntimeError> {
-        if !evaluation_only {
-            return self.resolve_agent_tools(role, requested);
-        }
-        if !requested.is_empty() {
+        const SHADOW_SAFE_TOOLS: &[&str] =
+            &["fs.read", "fs.list", "fs.write", "fs.patch", "fs.mkdir"];
+        let allowed = role_tool_names(role);
+        let names = if requested.is_empty() {
+            allowed
+                .iter()
+                .copied()
+                .filter(|name| SHADOW_SAFE_TOOLS.contains(name))
+                .collect::<Vec<_>>()
+        } else {
+            let mut seen = BTreeSet::new();
+            for name in requested {
+                if !seen.insert(name.as_str())
+                    || !allowed.contains(&name.as_str())
+                    || !SHADOW_SAFE_TOOLS.contains(&name.as_str())
+                {
+                    return Err(StorageError::Conflict(format!(
+                        "tool {name} is not grantable under isolated shadow authority"
+                    ))
+                    .into());
+                }
+            }
+            requested.iter().map(String::as_str).collect()
+        };
+        Ok((
+            names
+                .into_iter()
+                .map(tool_definition)
+                .collect::<Result<Vec<_>, _>>()?,
+            Vec::new(),
+        ))
+    }
+
+    fn validate_shadow_execution_authority(
+        &self,
+        authority: &ShadowExecutionAuthority,
+        run: &AgentRun,
+        project_id: ProjectId,
+    ) -> Result<(), RuntimeError> {
+        let experiment = self
+            .experiment(authority.experiment_id)?
+            .ok_or_else(|| StorageError::Conflict("shadow experiment was not found".into()))?;
+        let workspace = self
+            .store()?
+            .shadow_workspace(authority.experiment_id)?
+            .ok_or_else(|| StorageError::Conflict("shadow workspace was not found".into()))?;
+        let expected_root = self
+            .config
+            .data_directory
+            .join(&workspace.relative_path)
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let supplied_root = authority
+            .workspace_root
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let data_root = self
+            .config
+            .data_directory
+            .canonicalize()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if experiment.state != ExperimentState::Running
+            || experiment.candidate_revision_id != run.organization_revision_id
+            || workspace.state != ShadowWorkspaceState::Ready
+            || workspace.project_id != project_id
+            || expected_root != supplied_root
+            || !supplied_root.starts_with(&data_root)
+        {
             return Err(StorageError::Conflict(
-                "inactive candidate runs cannot receive host or MCP tools".into(),
+                "isolated shadow execution authority is stale or mismatched".into(),
             )
             .into());
         }
-        Ok((Vec::new(), Vec::new()))
+        Ok(())
     }
 
     /// Builds a project-confined host execution plane, atomically dispatches the
@@ -5563,6 +5841,14 @@ impl AppRuntime {
     pub async fn execute_agent_work(
         &self,
         spec: &AgentDispatchSpec,
+    ) -> Result<AgentTurnCommit, RuntimeError> {
+        self.execute_agent_work_with_authority(spec, None).await
+    }
+
+    async fn execute_agent_work_with_authority(
+        &self,
+        spec: &AgentDispatchSpec,
+        shadow_authority: Option<ShadowExecutionAuthority>,
     ) -> Result<AgentTurnCommit, RuntimeError> {
         let task_id = self.agent_run_view(spec.run_id)?.run.task_id;
         let task = self
@@ -5577,7 +5863,10 @@ impl AppRuntime {
         let project = self
             .project(spec.project_id)?
             .ok_or(StorageError::ProjectNotFound(spec.project_id))?;
-        let root = std::path::PathBuf::from(project.root);
+        let root = shadow_authority.as_ref().map_or_else(
+            || std::path::PathBuf::from(&project.root),
+            |value| value.workspace_root.clone(),
+        );
         let artifacts = self.config.data_directory.join("artifacts");
         fs::create_dir_all(&artifacts)?;
         let credentials = Arc::new(RejectingCredentialResolver);
@@ -5612,7 +5901,9 @@ impl AppRuntime {
                 credentials: self.mcp_credentials.clone(),
             }),
         };
-        let prepared = self.prepare_agent_turn(spec).await?;
+        let prepared = self
+            .prepare_agent_turn_with_authority(spec, shadow_authority.as_ref())
+            .await?;
         let mut capabilities = CapabilityPolicy::project(&root);
         capabilities.allowed_network_origins.extend(
             prepared
@@ -5636,11 +5927,12 @@ impl AppRuntime {
         );
         let confidence = ConfidenceEstimate::new(5_000, 0)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-        self.execute_agent_turn(
+        self.execute_agent_turn_with_authority(
             prepared.request,
             &self.provider_gateway(),
             &broker,
             confidence,
+            shadow_authority.as_ref(),
         )
         .await
     }
@@ -5908,6 +6200,18 @@ impl AppRuntime {
         tools: &T,
         confidence: ConfidenceEstimate,
     ) -> Result<AgentTurnCommit, RuntimeError> {
+        self.execute_agent_turn_with_authority(request, models, tools, confidence, None)
+            .await
+    }
+
+    async fn execute_agent_turn_with_authority<M: AgentModelGateway, T: AgentToolGateway>(
+        &self,
+        request: AgentTurnRequest,
+        models: &M,
+        tools: &T,
+        confidence: ConfidenceEstimate,
+        shadow_authority: Option<&ShadowExecutionAuthority>,
+    ) -> Result<AgentTurnCommit, RuntimeError> {
         {
             let store = self.store()?;
             let stored_instance = store
@@ -5928,6 +6232,10 @@ impl AppRuntime {
                 .roles
                 .iter()
                 .any(|role| role == &request.role && role.id == stored_instance.role_id);
+            let active = store.organization(genome.organization_id)?.ok_or_else(|| {
+                StorageError::Conflict("active organization was not found".into())
+            })?;
+            let evaluation_only = active.revision_id != genome.revision_id;
             if stored_instance != request.instance
                 || stored_lease != request.lease
                 || run.state != AgentRunState::Running
@@ -5935,6 +6243,28 @@ impl AppRuntime {
             {
                 return Err(StorageError::Conflict(
                     "agent turn request uses stale or mismatched durable authority".into(),
+                )
+                .into());
+            }
+            if evaluation_only {
+                let authority = shadow_authority.ok_or_else(|| {
+                    StorageError::Conflict(
+                        "inactive candidate execution requires isolated shadow authority".into(),
+                    )
+                })?;
+                drop(store);
+                self.validate_shadow_execution_authority(
+                    authority,
+                    &run,
+                    self.task(run.task_id)?
+                        .and_then(|task| task.project_id)
+                        .ok_or_else(|| {
+                            StorageError::Conflict("shadow task has no selected project".into())
+                        })?,
+                )?;
+            } else if shadow_authority.is_some() {
+                return Err(StorageError::Conflict(
+                    "active organization execution cannot use shadow authority".into(),
                 )
                 .into());
             }
@@ -5968,6 +6298,7 @@ impl AppRuntime {
             request.lease.id,
             &result,
             confidence,
+            shadow_authority.map(|authority| authority.experiment_id),
             Utc::now(),
         )?;
         for event in &commit.events {
@@ -6282,6 +6613,238 @@ fn automatic_shadow_evidence_id_bytes(namespace: &str, experiment_id: Experiment
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     bytes
+}
+
+const SHADOW_MAX_FILES: u64 = 50_000;
+const SHADOW_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const SHADOW_MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+const SHADOW_MAX_DEPTH: usize = 32;
+
+struct ShadowWorkspaceManifest {
+    files: Vec<std::path::PathBuf>,
+    file_count: u64,
+    total_bytes: u64,
+    sha256: String,
+}
+
+fn scan_shadow_workspace_source(
+    source_root: &Path,
+    data_root: &Path,
+) -> Result<ShadowWorkspaceManifest, RuntimeError> {
+    if source_root == data_root {
+        return Err(StorageError::InvalidData(
+            "shadow source cannot be the private data directory".into(),
+        )
+        .into());
+    }
+    let mut directories = vec![(source_root.to_path_buf(), 0_usize)];
+    let mut files = Vec::new();
+    while let Some((directory, depth)) = directories.pop() {
+        if depth > SHADOW_MAX_DEPTH {
+            return Err(StorageError::InvalidData(
+                "shadow source exceeds the maximum directory depth".into(),
+            )
+            .into());
+        }
+        let mut entries = fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries.into_iter().rev() {
+            let path = entry.path();
+            if path == data_root {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(StorageError::InvalidData(
+                    "shadow source contains a symbolic link or junction".into(),
+                )
+                .into());
+            }
+            if metadata.is_dir() {
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                directories.push((path, depth + 1));
+            } else if metadata.is_file() {
+                if metadata.len() > SHADOW_MAX_FILE_BYTES {
+                    return Err(StorageError::InvalidData(
+                        "shadow source contains an oversized file".into(),
+                    )
+                    .into());
+                }
+                files.push(path);
+                if u64::try_from(files.len()).unwrap_or(u64::MAX) > SHADOW_MAX_FILES {
+                    return Err(StorageError::InvalidData(
+                        "shadow source exceeds the file-count limit".into(),
+                    )
+                    .into());
+                }
+            } else {
+                return Err(StorageError::InvalidData(
+                    "shadow source contains a non-regular filesystem entry".into(),
+                )
+                .into());
+            }
+        }
+    }
+    files.sort();
+    hash_shadow_files(source_root, files)
+}
+
+fn hash_shadow_files(
+    source_root: &Path,
+    files: Vec<std::path::PathBuf>,
+) -> Result<ShadowWorkspaceManifest, RuntimeError> {
+    let mut digest = Sha256::new();
+    let mut total_bytes = 0_u64;
+    for path in &files {
+        let relative = shadow_relative_path(source_root, path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(StorageError::InvalidData(
+                "shadow source changed during bounded scan".into(),
+            )
+            .into());
+        }
+        total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
+            StorageError::InvalidData("shadow source byte count overflowed".into())
+        })?;
+        if total_bytes > SHADOW_MAX_TOTAL_BYTES {
+            return Err(StorageError::InvalidData(
+                "shadow source exceeds the total byte limit".into(),
+            )
+            .into());
+        }
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        digest.update(metadata.len().to_le_bytes());
+        digest.update([0]);
+        let mut file = std::fs::File::open(path)?;
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        digest.update([0]);
+    }
+    Ok(ShadowWorkspaceManifest {
+        file_count: u64::try_from(files.len())
+            .map_err(|_| StorageError::InvalidData("too many shadow files".into()))?,
+        files,
+        total_bytes,
+        sha256: format!("{:x}", digest.finalize()),
+    })
+}
+
+fn copy_shadow_workspace(
+    source_root: &Path,
+    destination: &Path,
+    expected: &ShadowWorkspaceManifest,
+) -> Result<ShadowWorkspaceManifest, RuntimeError> {
+    if destination.exists() {
+        return Err(
+            StorageError::Conflict("shadow workspace destination already exists".into()).into(),
+        );
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        StorageError::InvalidData("shadow workspace destination has no parent".into())
+    })?;
+    fs::create_dir_all(parent)?;
+    fs::create_dir(destination)?;
+    let mut digest = Sha256::new();
+    let mut total_bytes = 0_u64;
+    for source in &expected.files {
+        let relative = shadow_relative_path(source_root, source)?;
+        let target = destination.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let metadata = fs::symlink_metadata(source)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > SHADOW_MAX_FILE_BYTES
+        {
+            return Err(
+                StorageError::InvalidData("shadow source changed before copy".into()).into(),
+            );
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut input = std::fs::File::open(source)?;
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&target)?;
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        digest.update(metadata.len().to_le_bytes());
+        digest.update([0]);
+        let mut observed = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read])?;
+            digest.update(&buffer[..read]);
+            observed = observed
+                .checked_add(
+                    u64::try_from(read).map_err(|_| {
+                        StorageError::InvalidData("shadow file size overflowed".into())
+                    })?,
+                )
+                .ok_or_else(|| StorageError::InvalidData("shadow file size overflowed".into()))?;
+        }
+        if observed != metadata.len() {
+            return Err(
+                StorageError::Conflict("shadow source changed while copying".into()).into(),
+            );
+        }
+        fs::set_permissions(&target, metadata.permissions())?;
+        output.sync_all()?;
+        digest.update([0]);
+        total_bytes = total_bytes
+            .checked_add(observed)
+            .ok_or_else(|| StorageError::InvalidData("shadow byte count overflowed".into()))?;
+    }
+    let copied = ShadowWorkspaceManifest {
+        files: expected.files.clone(),
+        file_count: expected.file_count,
+        total_bytes,
+        sha256: format!("{:x}", digest.finalize()),
+    };
+    if copied.file_count != expected.file_count
+        || copied.total_bytes != expected.total_bytes
+        || copied.sha256 != expected.sha256
+    {
+        return Err(StorageError::Conflict(
+            "shadow workspace content does not match the claimed source manifest".into(),
+        )
+        .into());
+    }
+    Ok(copied)
+}
+
+fn shadow_relative_path(source_root: &Path, path: &Path) -> Result<String, RuntimeError> {
+    let relative = path
+        .strip_prefix(source_root)
+        .map_err(|_| StorageError::InvalidData("shadow source escaped its root".into()))?;
+    let value = relative.to_str().ok_or_else(|| {
+        StorageError::InvalidData("shadow source path is not valid Unicode".into())
+    })?;
+    if value.is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(StorageError::InvalidData(
+            "shadow source path is not a safe relative path".into(),
+        )
+        .into());
+    }
+    Ok(value.replace('\\', "/"))
 }
 
 fn automatic_experiment_definition(
@@ -7968,25 +8531,23 @@ mod tests {
     }
 
     #[test]
-    fn inactive_candidate_authority_never_resolves_host_or_mcp_tools() {
-        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
-            .expect("runtime");
-        let (tools, external) = runtime
-            .resolve_agent_tools_for_authority(RoleKind::Coder, &[], true)
-            .expect("evaluation-only empty tool plane");
-        assert!(tools.is_empty());
+    fn isolated_candidate_authority_only_resolves_workspace_filesystem_tools() {
+        let (tools, external) = AppRuntime::resolve_shadow_tools(RoleKind::Coder, &[])
+            .expect("isolated filesystem tool plane");
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.read", "fs.list", "fs.write", "fs.patch", "fs.mkdir"]
+        );
         assert!(external.is_empty());
         assert!(
-            runtime
-                .resolve_agent_tools_for_authority(RoleKind::Coder, &["fs.read".into()], true)
-                .is_err()
+            AppRuntime::resolve_shadow_tools(RoleKind::Coder, &["process.exec".into()]).is_err()
         );
         assert!(
-            !runtime
-                .resolve_agent_tools_for_authority(RoleKind::Coder, &[], false)
-                .expect("active role defaults")
-                .0
-                .is_empty()
+            AppRuntime::resolve_shadow_tools(RoleKind::Coder, &["mcp::connection::tool".into()])
+                .is_err()
         );
     }
 
@@ -8285,6 +8846,14 @@ mod tests {
         assert_eq!(resumed_shadow[0].run.state, AgentRunState::Running);
         let calls = Arc::new(AtomicUsize::new(0));
         let fixture_calls = calls.clone();
+        let experiment_id = candidate_outcome.experiment_id.expect("experiment id");
+        let shadow_manifest = config
+            .data_directory
+            .join("shadow-workspaces")
+            .join(experiment_id.to_string())
+            .join("package.json")
+            .to_string_lossy()
+            .into_owned();
         let provider = Router::new()
             .route(
                 "/v1/models",
@@ -8295,7 +8864,8 @@ mod tests {
                             "id": "shadow-model",
                             "object": "model",
                             "owned_by": "fixture",
-                            "context_window": 32_768
+                            "context_window": 32_768,
+                            "supported_parameters": ["tools"]
                         }]
                     }))
                 }),
@@ -8304,20 +8874,35 @@ mod tests {
                 "/v1/responses",
                 post(move || {
                     let calls = fixture_calls.clone();
+                    let shadow_manifest = shadow_manifest.clone();
                     async move {
                         let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
-                        Json(serde_json::json!({
-                            "id": format!("shadow-response-{call}"),
-                            "model": "shadow-model",
-                            "status": "completed",
-                            "output": [{
+                        let output = if call % 2 == 1 {
+                            serde_json::json!([{
+                                "type": "function_call",
+                                "call_id": format!("shadow-read-{call}"),
+                                "name": "fs.read",
+                                "arguments": serde_json::json!({
+                                    "path": shadow_manifest,
+                                    "max_bytes": 128
+                                }).to_string(),
+                                "status": "completed"
+                            }])
+                        } else {
+                            serde_json::json!([{
                                 "type": "message",
                                 "role": "assistant",
                                 "content": [{
                                     "type": "output_text",
-                                    "text": "Evaluation-only candidate output."
+                                    "text": "Isolated candidate inspected its copied manifest."
                                 }]
-                            }],
+                            }])
+                        };
+                        Json(serde_json::json!({
+                            "id": format!("shadow-response-{call}"),
+                            "model": "shadow-model",
+                            "status": "completed",
+                            "output": output,
                             "usage": {
                                 "input_tokens": 24,
                                 "output_tokens": 8,
@@ -8362,18 +8947,59 @@ mod tests {
         let shadow_view = reopened
             .agent_run_view(receipt.candidate_run_id)
             .expect("completed shadow turns");
-        assert_eq!(calls.load(Ordering::SeqCst), shadow_view.plan.items.len());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            shadow_view.plan.items.len() * 2
+        );
         assert!(
             shadow_view
                 .leases
                 .iter()
                 .all(|lease| lease.state == AgentLeaseState::Completed)
         );
+        assert!(shadow_view.results.iter().all(|result| {
+            result.tool_outcomes.len() == 1
+                && result.tool_outcomes[0].status == ToolOutcomeStatus::Succeeded
+        }));
+        let workspace = reopened
+            .store()
+            .expect("store")
+            .shadow_workspace(experiment_id)
+            .expect("workspace query")
+            .expect("workspace");
+        assert_eq!(workspace.state, ShadowWorkspaceState::Retained);
+        assert_eq!(workspace.file_count, 1);
+        assert_eq!(
+            std::fs::read(
+                config
+                    .data_directory
+                    .join(&workspace.relative_path)
+                    .join("package.json")
+            )
+            .expect("copied manifest"),
+            b"{}"
+        );
+        let workspace_root = config.data_directory.join(&workspace.relative_path);
+        let executor =
+            FilesystemExecutor::open([workspace_root], config.data_directory.join("artifacts"))
+                .expect("isolated filesystem executor");
+        let outside_request = ToolRequest::new(
+            receipt.source_task_id,
+            "attempt original project read",
+            ToolRequestKind::FsRead {
+                path: project_root
+                    .path()
+                    .join("package.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                max_bytes: 128,
+            },
+        );
         assert!(
-            shadow_view
-                .results
-                .iter()
-                .all(|result| result.tool_outcomes.is_empty())
+            executor
+                .execute(ToolExecutionId::new(), &outside_request)
+                .await
+                .is_err()
         );
         let artifact = config
             .data_directory
@@ -8388,7 +9014,10 @@ mod tests {
                 .expect("receipt replay")
                 .is_empty()
         );
-        assert_eq!(calls.load(Ordering::SeqCst), shadow_view.plan.items.len());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            shadow_view.plan.items.len() * 2
+        );
         let assessments = [reopened
             .assess_automatic_shadow_run(executions[0].launch.experiment.id)
             .expect("assess retained shadow output")];

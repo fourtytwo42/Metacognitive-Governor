@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState,
     AgentState, AgentTurnCheckpoint, AgentTurnResult, AgentUsageRecord, AssignedModel,
-    ConfidenceEstimate, EvaluationReport, OrganizationGenome, OrganizationalMetrics, UsageKind,
-    WorkPlan,
+    ConfidenceEstimate, EvaluationReport, ExperimentState, OrganizationGenome,
+    OrganizationalMetrics, ShadowWorkspaceState, UsageKind, WorkPlan,
 };
 use mcg_domain::{
-    AgentInstanceId, AgentLeaseId, OrganizationId, OrganizationRevisionId, ProjectSnapshotId,
-    RunId, TaskEnvelope, TaskState, ToolRequestId,
+    AgentInstanceId, AgentLeaseId, ExperimentId, OrganizationId, OrganizationRevisionId,
+    ProjectSnapshotId, RunId, TaskEnvelope, TaskState, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState};
@@ -2250,6 +2250,7 @@ impl SqliteEventStore {
         lease_id: AgentLeaseId,
         result: &AgentTurnResult,
         confidence: ConfidenceEstimate,
+        shadow_experiment_id: Option<ExperimentId>,
         at: DateTime<Utc>,
     ) -> Result<AgentTurnCommit, StorageError> {
         let mut instance = self
@@ -2270,6 +2271,28 @@ impl SqliteEventStore {
             .organization(run_revision.organization_id)?
             .ok_or_else(|| StorageError::Conflict("active organization was not found".into()))?;
         let evaluation_only = active_revision.revision_id != run_revision.revision_id;
+        let isolated_shadow_authorized = if evaluation_only && !result.tool_outcomes.is_empty() {
+            let experiment_id = shadow_experiment_id.ok_or_else(|| {
+                StorageError::InvalidData(
+                    "inactive candidate tool outcomes require isolated shadow authority".into(),
+                )
+            })?;
+            let experiment = self.experiment(experiment_id)?.ok_or_else(|| {
+                StorageError::Conflict("shadow authority experiment was not found".into())
+            })?;
+            let workspace = self.shadow_workspace(experiment_id)?.ok_or_else(|| {
+                StorageError::Conflict("shadow authority workspace was not found".into())
+            })?;
+            let task = self
+                .load_task(run.task_id)?
+                .ok_or(StorageError::TaskNotFound(run.task_id))?;
+            experiment.state == ExperimentState::Running
+                && experiment.candidate_revision_id == run.organization_revision_id
+                && workspace.state == ShadowWorkspaceState::Ready
+                && task.project_id == Some(workspace.project_id)
+        } else {
+            false
+        };
         if instance.state != AgentState::Running
             || lease.state != AgentLeaseState::Active
             || lease.instance_id != instance.id
@@ -2280,7 +2303,7 @@ impl SqliteEventStore {
             || result.model_calls.is_empty()
             || result.response.id.trim().is_empty()
             || result.response.model != result.pinned_route.target.model_id
-            || (evaluation_only && !result.tool_outcomes.is_empty())
+            || (evaluation_only && !result.tool_outcomes.is_empty() && !isolated_shadow_authorized)
             || result
                 .model_calls
                 .iter()

@@ -52,6 +52,8 @@ pub enum EventKind {
     ShadowExecutionRecorded,
     ExperimentBenchmarkRecorded,
     ExperimentDecisionRecorded,
+    ShadowWorkspacePrepared,
+    ShadowWorkspaceStateChanged,
 }
 
 impl EventKind {
@@ -99,6 +101,8 @@ impl EventKind {
             Self::ShadowExecutionRecorded => "shadow_execution_recorded",
             Self::ExperimentBenchmarkRecorded => "experiment_benchmark_recorded",
             Self::ExperimentDecisionRecorded => "experiment_decision_recorded",
+            Self::ShadowWorkspacePrepared => "shadow_workspace_prepared",
+            Self::ShadowWorkspaceStateChanged => "shadow_workspace_state_changed",
         }
     }
 
@@ -175,6 +179,12 @@ impl EventKind {
             }
             "experiment_decision_recorded" | "ExperimentDecisionRecorded" => {
                 Ok(Self::ExperimentDecisionRecorded)
+            }
+            "shadow_workspace_prepared" | "ShadowWorkspacePrepared" => {
+                Ok(Self::ShadowWorkspacePrepared)
+            }
+            "shadow_workspace_state_changed" | "ShadowWorkspaceStateChanged" => {
+                Ok(Self::ShadowWorkspaceStateChanged)
             }
             other => Err(other.to_owned()),
         }

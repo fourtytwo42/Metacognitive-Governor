@@ -23,14 +23,25 @@ all interfaces serialize the same bounded values.
 
 ## Shadow isolation
 
-Shadow execution receives copied task input and a candidate organization or
-model route. Its authority contract has one representable value:
-`evaluation_only`. Shadow work cannot hold the production task lease, settle the
-production task, publish a Site, approve a tool, mutate a project, or write the
-active result. It may retain content-addressed output for independent evaluation.
-Runtime dispatch treats every run pinned to a non-active organization revision
-as evaluation-only: an explicit host/MCP tool request fails closed, and an empty
-request resolves to zero tools rather than the role's normal defaults.
+Shadow execution receives a private, bounded copy of the selected project and a
+candidate organization or model route. Its authority contract has one
+representable value: `evaluation_only`. Shadow work cannot hold the production
+task lease, settle the production task, publish a Site, approve a tool, mutate
+the source project, use MCP/network/system/process authority, or write the active
+result. It may use only role-appropriate filesystem primitives rooted at the
+private copy and retain content-addressed output for independent evaluation.
+Dispatch and atomic turn commit both revalidate the running experiment,
+candidate revision, project identity, and ready workspace.
+
+Migration 23 claims each stable `shadow-workspaces/{experiment_id}` path before
+copying. Preparation rejects symlinks/junctions, non-regular entries, non-Unicode
+relative paths, excessive depth, files, or bytes; skips `.git` and the app-data
+subtree; uses create-new writes; preserves source permissions; and hashes ordered
+relative paths, lengths, and bytes. A completed copy records its source
+fingerprint, definition hash, file/byte bounds, and content SHA-256. A
+crash-interrupted or failed preparation becomes `uncertain` and is never run or
+silently replaced; completed `ready` evidence replays exactly after restart.
+Receipt creation atomically moves that workspace to non-runnable `retained`.
 
 Shadow mode remains opt-in for normal consumers and enabled in development and
 scenario environments. A shadow result can influence production only after it
@@ -46,10 +57,11 @@ that committed immediately before a crash. The active organization head never
 changes during this automation; the generated shadow experiment stops in
 `ready` until evaluation-only execution begins. Ready experiments then receive
 a stable run identity derived from the experiment, a fresh plan rebuilt against
-the inactive candidate, and no host authority. A crash after run creation or
+the inactive candidate, and only private-copy filesystem authority. A crash after run creation or
 the `running` transition resumes that same candidate run rather than creating a
 second provider-work identity. When a discovered provider route exists, the
-scheduler executes dependency-ready items sequentially with an empty tool set.
+scheduler prepares the durable private copy and executes dependency-ready items
+sequentially with the bounded filesystem tool set.
 It never automatically retries an item after any non-completed durable lease;
 successful complete-plan output is retained in the local content-addressed
 artifact store before the immutable evaluation-only receipt commits. Missing
@@ -57,18 +69,19 @@ routes are a no-spend no-op.
 
 Completed automatic receipts are assessed against the exact evaluation that
 produced their source supervision observation. The candidate's completed
-Evaluator instance is required. Until a separate isolated project sandbox can
-re-execute production objectives, zero-tool output is recorded honestly as an
-inconclusive evaluation rather than treating model self-report as success. The
-paired baseline/candidate reports are themselves content-addressed, the
-benchmark receives a stable identity, and the configured benchmark, regression,
-and confidence gates select promotion or rejection. Current zero-tool automatic
-shadows therefore reject while retaining evidence; they never weaken the gate
-to manufacture a promotion.
+Evaluator instance is required. The retained turn evidence proves real
+provider/tool-loop execution against the isolated copy. Conditions without an
+objective-specific verifier remain honestly inconclusive rather than treating
+model self-report or a generic file operation as success. The paired
+baseline/candidate reports are themselves content-addressed, the benchmark
+receives a stable identity, and the configured benchmark, regression, and
+confidence gates select promotion or rejection. Automatic shadows reject
+unverified conditions while retaining evidence; they never weaken the gate to
+manufacture a promotion.
 
 ## Durable state
 
-SQLite migrations 20-22 retain:
+SQLite migrations 20-23 retain:
 
 - immutable supervision observations;
 - one mutable experiment projection whose definition hash and revision pairing
@@ -79,6 +92,7 @@ SQLite migrations 20-22 retain:
   pointer.
 - exactly-once evaluation-supervision markers and immutable automatic candidate
   outcomes, including stale-baseline dispositions.
+- durable private-workspace lifecycle and immutable scope/content evidence.
 
 Experiment states are `draft`, `ready`, `running`, `awaiting_decision`,
 `promoted`, `rejected`, and `reverted`. A candidate cannot jump directly from

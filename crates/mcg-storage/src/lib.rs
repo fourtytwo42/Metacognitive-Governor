@@ -22,6 +22,7 @@ mod mcp;
 mod platform;
 mod providers;
 mod scheduler;
+mod shadow_workspaces;
 mod sites;
 mod ssh;
 
@@ -34,6 +35,7 @@ pub use experiments::{
     CandidateRevisionMutation, ExperimentMutation,
 };
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
+pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
 
@@ -810,6 +812,27 @@ BEFORE DELETE ON automatic_experiment_outcomes BEGIN
 END;
 ";
 
+const MIGRATION_23: &str = r"
+CREATE TABLE IF NOT EXISTS shadow_workspaces (
+    experiment_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    workspace_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id),
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS shadow_workspaces_state
+    ON shadow_workspaces(state, updated_at, experiment_id);
+CREATE TRIGGER IF NOT EXISTS shadow_workspaces_no_delete
+BEFORE DELETE ON shadow_workspaces BEGIN
+    SELECT RAISE(FAIL, 'shadow workspace history cannot be deleted');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -922,6 +945,7 @@ impl SqliteEventStore {
             (20_i64, MIGRATION_20),
             (21_i64, MIGRATION_21),
             (22_i64, MIGRATION_22),
+            (23_i64, MIGRATION_23),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

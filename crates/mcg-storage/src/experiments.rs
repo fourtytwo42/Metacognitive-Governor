@@ -1,6 +1,6 @@
 use mcg_agents::{
     ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
-    ExperimentMode, ExperimentState, ShadowExecutionReceipt, SupervisionLoop,
+    ExperimentMode, ExperimentState, ShadowExecutionReceipt, ShadowWorkspaceState, SupervisionLoop,
     SupervisionObservation, SupervisionSignal,
 };
 use mcg_domain::{
@@ -981,6 +981,33 @@ impl SqliteEventStore {
             Some(receipt.source_task_id),
             serde_json::to_value(receipt)?,
         );
+        let retained_workspace = self
+            .shadow_workspace(receipt.experiment_id)?
+            .map(|mut workspace| {
+                if workspace.state != ShadowWorkspaceState::Ready {
+                    return Err(StorageError::Conflict(
+                        "shadow receipt requires a ready private workspace".into(),
+                    ));
+                }
+                let previous = workspace.state;
+                workspace.state = ShadowWorkspaceState::Retained;
+                workspace.updated_at = receipt.completed_at;
+                workspace
+                    .validate()
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                let event = EventEnvelope::new(
+                    EventKind::ShadowWorkspaceStateChanged,
+                    Some(receipt.source_task_id),
+                    serde_json::json!({
+                        "from": previous,
+                        "to": workspace.state,
+                        "workspace": &workspace,
+                        "reason": "shadow_execution_recorded"
+                    }),
+                );
+                Ok((workspace, event))
+            })
+            .transpose()?;
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO shadow_execution_receipts(
@@ -995,6 +1022,23 @@ impl SqliteEventStore {
             ],
         )?;
         Self::insert_event(&transaction, &event)?;
+        if let Some((workspace, workspace_event)) = retained_workspace {
+            let changed = transaction.execute(
+                "UPDATE shadow_workspaces SET state = 'retained', workspace_json = ?1, updated_at = ?2
+                 WHERE experiment_id = ?3 AND state = 'ready'",
+                params![
+                    serde_json::to_string(&workspace)?,
+                    workspace.updated_at.to_rfc3339(),
+                    workspace.experiment_id.to_string()
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StorageError::Conflict(
+                    "shadow workspace changed before receipt commit".into(),
+                ));
+            }
+            Self::insert_event(&transaction, &workspace_event)?;
+        }
         transaction.commit()?;
         Ok(false)
     }

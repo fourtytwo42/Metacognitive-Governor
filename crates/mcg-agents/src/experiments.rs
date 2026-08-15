@@ -12,6 +12,7 @@ use crate::{
 
 pub const SUPERVISION_SCHEMA_VERSION: u16 = 1;
 pub const EXPERIMENT_SCHEMA_VERSION: u16 = 1;
+pub const SHADOW_WORKSPACE_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -454,6 +455,62 @@ impl ExperimentDefinition {
 #[serde(rename_all = "snake_case")]
 pub enum ShadowAuthority {
     EvaluationOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadowWorkspaceState {
+    Preparing,
+    Ready,
+    Uncertain,
+    Retained,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowWorkspace {
+    pub schema_version: u16,
+    pub experiment_id: ExperimentId,
+    pub project_id: mcg_domain::ProjectId,
+    pub state: ShadowWorkspaceState,
+    pub definition_hash: String,
+    pub source_fingerprint: String,
+    pub relative_path: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub content_sha256: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl ShadowWorkspace {
+    /// Validates a credential-free, data-directory-relative workspace projection.
+    ///
+    /// # Errors
+    /// Returns an invariant error for unsupported versions or malformed bounded evidence.
+    pub fn validate(&self) -> Result<(), ExperimentError> {
+        let path = std::path::Path::new(&self.relative_path);
+        let path_is_safe = !self.relative_path.is_empty()
+            && path.is_relative()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)));
+        if self.schema_version != SHADOW_WORKSPACE_SCHEMA_VERSION
+            || !valid_sha256(&self.definition_hash)
+            || !valid_sha256(&self.source_fingerprint)
+            || !path_is_safe
+            || self
+                .content_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+            || (self.state == ShadowWorkspaceState::Ready
+                && (self.content_sha256.is_none() || self.updated_at < self.created_at))
+            || (self.state == ShadowWorkspaceState::Preparing
+                && (self.file_count != 0 || self.total_bytes != 0 || self.content_sha256.is_some()))
+        {
+            return Err(ExperimentError::InvalidEvidence);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
