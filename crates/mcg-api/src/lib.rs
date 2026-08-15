@@ -4921,7 +4921,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)] // Complete generated website stays readable as one fixture.
-    async fn website_builder_fixture(project_root: &std::path::Path) -> String {
+    async fn website_builder_fixture() -> String {
         const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -4990,7 +4990,7 @@ form.addEventListener('submit', (event) => {
                     "call_id": id,
                     "name": "fs.write",
                     "arguments": serde_json::to_string(&serde_json::json!({
-                        "path": project_root.join(path).to_string_lossy(),
+                        "path": path,
                         "content": content,
                         "create_new": true
                     })).expect("tool arguments")
@@ -11982,7 +11982,7 @@ form.addEventListener('submit', (event) => {
                     id: "website_fixture".into(),
                     display_name: "Website Builder Fixture".into(),
                     kind: ProviderKind::OpenAiCompatible,
-                    base_url: website_builder_fixture(std::path::Path::new(&project.root)).await,
+                    base_url: website_builder_fixture().await,
                     auth_mode: ProviderAuthMode::None,
                     organization: None,
                     project: None,
@@ -12058,6 +12058,18 @@ form.addEventListener('submit', (event) => {
             3
         );
         assert!(audit.iter().all(|record| record.tool == "fs.write"));
+        let completed_resources = audit
+            .iter()
+            .filter(|record| record.phase == ToolAuditPhase::Completion)
+            .map(|record| std::path::PathBuf::from(&record.resource))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            completed_resources,
+            ["index.html", "styles.css", "app.js"]
+                .into_iter()
+                .map(|path| std::path::Path::new(&project.root).join(path))
+                .collect()
+        );
 
         let evaluator_endpoint =
             format!("/api/v1/runs/{}/work/{}/execute", run.id, evaluator_item.id);

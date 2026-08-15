@@ -62,6 +62,12 @@ through the supplied policy broker. The model receives the broker's bounded,
 redacted `ToolOutcome` as a canonical Responses `function_call_output`. Unknown,
 unexposed, unleased, duplicate, or malformed tool calls fail before the executor
 is invoked. Model calls and total tool calls have hard iteration limits.
+Model-facing filesystem, process-working-directory, and repository arguments may
+use ordinary project-relative paths. Runtime resolves only paths without parent,
+root, or platform-prefix components against the exact already-authorized project
+root before policy evaluation. Absolute paths and traversal attempts are left to
+the existing fail-closed capability and executor checks, so convenience never
+widens authority.
 
 Runtime rechecks the supplied instance, lease, role, run, and organization
 revision against current durable state before releasing the storage lock and

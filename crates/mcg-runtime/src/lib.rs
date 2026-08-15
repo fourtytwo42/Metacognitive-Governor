@@ -9,7 +9,7 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    path::Path,
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, RwLock},
     time::Instant,
 };
@@ -7555,10 +7555,11 @@ impl AppRuntime {
         );
         let confidence = ConfidenceEstimate::new(5_000, 0)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let scoped_tools = ProjectScopedAgentTools::new(&broker, root);
         self.execute_agent_turn_with_authority(
             prepared.request,
             &self.provider_gateway(),
-            &broker,
+            &scoped_tools,
             confidence,
             shadow_authority.as_ref(),
         )
@@ -7751,6 +7752,7 @@ impl AppRuntime {
         }
         let confidence = ConfidenceEstimate::new(5_000, 0)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let scoped_tools = ProjectScopedAgentTools::new(&broker, root);
         self.execute_agent_turn(
             AgentTurnRequest {
                 role,
@@ -7765,7 +7767,7 @@ impl AppRuntime {
                 max_model_calls: checkpoint.request.max_model_calls,
             },
             &self.provider_gateway(),
-            &broker,
+            &scoped_tools,
             confidence,
         )
         .await
@@ -9206,6 +9208,110 @@ struct DurableAgentTurnCheckpointSink {
     store: Arc<Mutex<SqliteEventStore>>,
 }
 
+/// Resolves ordinary model-facing project-relative paths into the exact root
+/// already granted to the broker. Traversal and absolute paths are deliberately
+/// left untouched so the existing capability and executor checks still deny
+/// unsafe requests and retain their normal audit evidence.
+struct ProjectScopedAgentTools<'a, T> {
+    inner: &'a T,
+    root: PathBuf,
+}
+
+impl<'a, T> ProjectScopedAgentTools<'a, T> {
+    fn new(inner: &'a T, root: PathBuf) -> Self {
+        Self { inner, root }
+    }
+}
+
+#[async_trait]
+impl<T: AgentToolGateway> AgentToolGateway for ProjectScopedAgentTools<'_, T> {
+    async fn execute(&self, request: &ToolRequest) -> Result<ToolOutcome, ToolError> {
+        let mut scoped = request.clone();
+        resolve_project_relative_tool_paths(&mut scoped.kind, &self.root);
+        self.inner.execute(&scoped).await
+    }
+}
+
+fn resolve_project_relative_tool_paths(kind: &mut ToolRequestKind, root: &Path) {
+    let resolve = |value: &mut String| {
+        let supplied = Path::new(value);
+        if supplied.is_absolute()
+            || supplied.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return;
+        }
+        let mut resolved = root.to_path_buf();
+        for component in supplied.components() {
+            if let Component::Normal(segment) = component {
+                resolved.push(segment);
+            }
+        }
+        *value = resolved.to_string_lossy().into_owned();
+    };
+    match kind {
+        ToolRequestKind::FsRead { path, .. }
+        | ToolRequestKind::FsVerify { path, .. }
+        | ToolRequestKind::FsWrite { path, .. }
+        | ToolRequestKind::FsPatch { path, .. }
+        | ToolRequestKind::FsList { path, .. }
+        | ToolRequestKind::FsMkdir { path, .. }
+        | ToolRequestKind::FsDelete { path, .. } => resolve(path),
+        ToolRequestKind::FsMove { from, to } | ToolRequestKind::FsCopy { from, to } => {
+            resolve(from);
+            resolve(to);
+        }
+        ToolRequestKind::ProcessExec { options }
+        | ToolRequestKind::ProcessSpawn { options }
+        | ToolRequestKind::SiteDeploy { options, .. } => resolve(&mut options.cwd),
+        ToolRequestKind::ShellExec { cwd, .. } => resolve(cwd),
+        ToolRequestKind::HttpDownload { destination, .. } => resolve(destination),
+        ToolRequestKind::BrowserWorkflow { workflow_path, .. } => resolve(workflow_path),
+        ToolRequestKind::BrowserScreenshotMatches { baseline_path, .. } => {
+            resolve(baseline_path);
+        }
+        ToolRequestKind::ResearchVerify { evidence_path, .. } => resolve(evidence_path),
+        ToolRequestKind::GitStatus { repository }
+        | ToolRequestKind::GitDiff { repository, .. }
+        | ToolRequestKind::GitCommit { repository, .. }
+        | ToolRequestKind::GitCheckout { repository, .. }
+        | ToolRequestKind::GitApplyPatch { repository, .. } => resolve(repository),
+        ToolRequestKind::GitWorktreeCreate {
+            repository,
+            worktree,
+            ..
+        }
+        | ToolRequestKind::GitWorktreeRemove {
+            repository,
+            worktree,
+            ..
+        } => {
+            resolve(repository);
+            resolve(worktree);
+        }
+        ToolRequestKind::ProcessStatus { .. }
+        | ToolRequestKind::ProcessStdin { .. }
+        | ToolRequestKind::ProcessKill { .. }
+        | ToolRequestKind::HttpRequest { .. }
+        | ToolRequestKind::BrowserRender { .. }
+        | ToolRequestKind::BrowserElementExists { .. }
+        | ToolRequestKind::BrowserAccessibility { .. }
+        | ToolRequestKind::SystemInfo
+        | ToolRequestKind::SystemEnv { .. }
+        | ToolRequestKind::SystemProcesses
+        | ToolRequestKind::MemorySearch { .. }
+        | ToolRequestKind::MemoryRead { .. }
+        | ToolRequestKind::MemoryWrite { .. }
+        | ToolRequestKind::ComputerActions { .. }
+        | ToolRequestKind::SshOperation { .. }
+        | ToolRequestKind::McpCall { .. } => {}
+    }
+}
+
 impl AgentTurnCheckpointSink for DurableAgentTurnCheckpointSink {
     fn save(&self, checkpoint: &AgentTurnCheckpoint) -> Result<(), String> {
         self.store
@@ -10323,6 +10429,54 @@ mod tests {
     };
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn model_tool_paths_resolve_inside_the_granted_project_root() {
+        let project = tempfile::tempdir().expect("project");
+        let root = project.path().canonicalize().expect("canonical project");
+
+        let mut list = ToolRequestKind::FsList {
+            path: ".".into(),
+            recursive: false,
+            max_entries: 32,
+        };
+        resolve_project_relative_tool_paths(&mut list, &root);
+        let ToolRequestKind::FsList { path, .. } = list else {
+            unreachable!();
+        };
+        assert_eq!(PathBuf::from(path), root);
+
+        let mut read = ToolRequestKind::FsRead {
+            path: "src/./index.html".into(),
+            max_bytes: 1024,
+        };
+        resolve_project_relative_tool_paths(&mut read, &root);
+        let ToolRequestKind::FsRead { path, .. } = read else {
+            unreachable!();
+        };
+        assert_eq!(PathBuf::from(path), root.join("src").join("index.html"));
+
+        let mut traversal = ToolRequestKind::FsRead {
+            path: "../secret".into(),
+            max_bytes: 1024,
+        };
+        resolve_project_relative_tool_paths(&mut traversal, &root);
+        let ToolRequestKind::FsRead { path, .. } = traversal else {
+            unreachable!();
+        };
+        assert_eq!(path, "../secret");
+
+        let outside = root.parent().expect("project parent").join("outside");
+        let mut absolute = ToolRequestKind::FsRead {
+            path: outside.to_string_lossy().into_owned(),
+            max_bytes: 1024,
+        };
+        resolve_project_relative_tool_paths(&mut absolute, &root);
+        let ToolRequestKind::FsRead { path, .. } = absolute else {
+            unreachable!();
+        };
+        assert_eq!(PathBuf::from(path), outside);
+    }
 
     #[derive(Clone, Copy)]
     enum FixtureShadowCommandResult {
