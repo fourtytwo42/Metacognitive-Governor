@@ -32,6 +32,14 @@ Windows:
 
 This builds release CLI/daemon/sandbox sidecars, stages them under target-triple names, creates a per-user NSIS installer, and writes `target/release/release-manifest.json` with the exact source commit, sizes, and SHA-256 digests.
 
+Run Windows package UAT from an interactive owner session:
+
+```powershell
+./scripts/test-windows-installer.ps1 -InstallerPath C:\path\to\MCG_0.1.0_x64-setup.exe
+```
+
+The harness refuses an existing registered installation, installs into a unique temporary root, verifies the complete payload and licenses, exercises valid and tampered packaged plugins, proves daemon restart, CLI status/doctor/backup, modern MCP discovery and tool listing, launches the packaged desktop on its fixed loopback port, captures and validates a real nonblank Windows screenshot, then proves repair, uninstall, retained external data, reinstall, final removal, and failure cleanup. `-SkipDesktop` exists only for an owner-host preflight whose port 7777 is deliberately occupied; clean-machine release UAT must not use it.
+
 Linux:
 
 ```bash
