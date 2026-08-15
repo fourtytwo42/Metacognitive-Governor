@@ -1249,7 +1249,7 @@ export function App() {
         trigger: configuredScheduleTrigger(),
         context_token_budget: 8192,
         requested_tools: [],
-        estimated_output_tokens: 4096,
+        estimated_output_tokens: 8192,
         max_model_calls: positiveWholeNumber(scheduleModelCalls, "Model call limit")
       });
       replaceSchedule(schedule);

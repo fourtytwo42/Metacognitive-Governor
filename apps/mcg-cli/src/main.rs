@@ -1019,7 +1019,7 @@ enum RunCommand {
         context_token_budget: u32,
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
-        #[arg(long, default_value_t = 4_096)]
+        #[arg(long, default_value_t = 8_192)]
         estimated_output_tokens: u64,
         #[arg(long, default_value_t = 8)]
         max_model_calls: u16,
@@ -1728,7 +1728,7 @@ fn default_launch_request() -> LaunchTaskRequest {
         target_path: None,
         context_token_budget: 8_192,
         requested_tools: Vec::new(),
-        estimated_output_tokens: 4_096,
+        estimated_output_tokens: 8_192,
         max_model_calls: 8,
     }
 }
@@ -3090,7 +3090,7 @@ async fn create_schedule_cli(
             target_path: None,
             context_token_budget: 16_384,
             requested_tools: Vec::new(),
-            estimated_output_tokens: 4_096,
+            estimated_output_tokens: 8_192,
             max_model_calls: 8,
         })
         .send()
@@ -4872,6 +4872,14 @@ async fn resolve_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consumer_launch_defaults_allow_complete_generated_file_calls() {
+        let request = default_launch_request();
+        assert_eq!(request.context_token_budget, 8_192);
+        assert_eq!(request.estimated_output_tokens, 8_192);
+        assert_eq!(request.max_model_calls, 8);
+    }
 
     #[test]
     fn consumer_modes_preserve_bare_project_json_stream_and_interactive_forms() {

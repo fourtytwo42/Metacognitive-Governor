@@ -760,7 +760,7 @@ const fn default_context_token_budget() -> u32 {
 }
 
 const fn default_estimated_output_tokens() -> u64 {
-    4_096
+    8_192
 }
 
 const fn default_max_model_calls() -> u16 {
@@ -4413,6 +4413,13 @@ mod tests {
             }
         );
         assert_eq!(default_max_model_calls(), 8);
+        assert_eq!(default_estimated_output_tokens(), 8_192);
+
+        let consumer: LaunchTaskRequest =
+            serde_json::from_str("{}").expect("consumer request defaults");
+        assert_eq!(consumer.context_token_budget, 16_384);
+        assert_eq!(consumer.estimated_output_tokens, 8_192);
+        assert_eq!(consumer.max_model_calls, 8);
     }
 
     #[tokio::test]

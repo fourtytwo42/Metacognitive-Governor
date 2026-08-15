@@ -981,7 +981,7 @@ export function launchTask(taskId: string): Promise<LaunchTaskResponse> {
     request: {
       context_token_budget: 8192,
       requested_tools: [],
-      estimated_output_tokens: 4096,
+      estimated_output_tokens: 8192,
       max_model_calls: 8
     }
   });
@@ -993,7 +993,7 @@ export function retryTask(taskId: string): Promise<LaunchTaskResponse> {
     request: {
       context_token_budget: 8192,
       requested_tools: [],
-      estimated_output_tokens: 4096,
+      estimated_output_tokens: 8192,
       max_model_calls: 8
     }
   });
@@ -1005,7 +1005,7 @@ export function resumeTask(taskId: string): Promise<LaunchTaskResponse> {
     request: {
       context_token_budget: 8192,
       requested_tools: [],
-      estimated_output_tokens: 4096,
+      estimated_output_tokens: 8192,
       max_model_calls: 8
     }
   });

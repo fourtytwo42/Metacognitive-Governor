@@ -25,6 +25,12 @@ canonicalizes and discovers a new project, or refreshes the matching existing
 project before creating the task. Repeated CLI use therefore reuses one durable
 project identity while observing current instructions and manifests.
 
+Consumer launches reserve 8,192 output tokens per model call by default. This
+allows a normal generated source file and its complete JSON tool envelope to be
+returned without the former 4,096-token truncation boundary. Advanced callers
+can still set a different bounded estimate; normal task and schedule budgets
+continue to limit aggregate use.
+
 Normal output shows project, task identity, durable state, execution guidance,
 and the latest assistant response when one exists. `run --json` returns the
 complete `LaunchTaskResponse`. `run --stream-json` writes newline-delimited JSON:

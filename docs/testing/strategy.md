@@ -119,6 +119,9 @@ Evaluator's responsibility and is never inferred from a substring match alone.
 - Test OpenAI-compatible streaming, tool calls, structured output, errors, and usage.
 - Maintain provider-specific conformance exceptions as data with an expiry date.
 - Fuzz parsers and reject oversized/deep/malformed untrusted payloads safely.
+- Assert the same 8,192-token consumer response default across REST, MCP, CLI,
+  desktop launch/retry/resume, and schedules; live representative generation must
+  complete file-tool JSON rather than relying on malformed-output repair.
 
 ## UI and E2E testing
 

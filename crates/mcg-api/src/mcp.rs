@@ -1152,7 +1152,7 @@ fn tool_definitions() -> Vec<Value> {
                     "target_path": {"type": "string", "maxLength": 4096},
                     "context_token_budget": {"type": "integer", "minimum": 1, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
                     "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true, "maxItems": 128},
-                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
                     "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
                 },
                 "required": ["schedule_id", "project_id", "name", "goal", "trigger"],
@@ -1207,7 +1207,7 @@ fn tool_definitions() -> Vec<Value> {
                     "target_path": {"type": "string", "maxLength": 4096},
                     "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "uniqueItems": true, "maxItems": 128},
                     "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
-                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
                     "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
                 },
                 "required": ["request_key", "project_id", "goal"],
@@ -1232,7 +1232,7 @@ fn tool_definitions() -> Vec<Value> {
                     "target_path": {"type": "string", "maxLength": 4096},
                     "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "uniqueItems": true, "maxItems": 128},
                     "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
-                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
                     "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
                 },
                 "required": ["task_id", "action"],
@@ -1316,7 +1316,7 @@ fn tool_definitions() -> Vec<Value> {
                         "maxItems": 16
                     },
                     "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
-                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
                     "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
                 },
                 "required": ["request_key", "project_id", "goal"],
@@ -3090,7 +3090,7 @@ const fn default_scheduler_context_tokens() -> u32 {
 }
 
 const fn default_scheduler_output_tokens() -> u64 {
-    4_096
+    8_192
 }
 
 const fn default_scheduler_model_calls() -> u16 {
@@ -3216,7 +3216,7 @@ const fn default_context_tokens() -> u32 {
 }
 
 const fn default_output_tokens() -> u64 {
-    4_096
+    8_192
 }
 
 const fn default_model_calls() -> u16 {
@@ -4294,6 +4294,12 @@ fn json_response(status: StatusCode, body: &Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consumer_tools_default_to_a_complete_file_sized_response_budget() {
+        assert_eq!(default_output_tokens(), 8_192);
+        assert_eq!(default_scheduler_output_tokens(), 8_192);
+    }
 
     #[test]
     fn mirrored_names_decode_only_the_standard_safe_forms() {
