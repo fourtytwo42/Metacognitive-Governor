@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Qualify the completed M8 Sites revision and scheduler-backed monitoring contracts on Windows and Ubuntu.
+- Current task: Continue the production-readiness roadmap after the cross-platform-qualified M8 Sites revision and monitoring checkpoint.
 - Last meaningful change: Immutable Site updates/archive and one durable interval monitor per Site now share REST, CLI, MCP, Tauri, and desktop controls. Monitor occurrence settlement, observed state, and transition notification commit atomically; unchanged outages coalesce.
-- Next step: Run the complete local Windows gate, commit/push the exact source checkpoint, run the exact commit through Ubuntu verification, and perform representative native Site UAT while preserving the restored visible Windows OAuth handoff.
+- Next step: Continue remaining PRD execution-plane interfaces (typed SSH is the next dependency-ordered M8 surface), then broaden representative project and native UAT while preserving the restored visible Windows OAuth handoff.
 - Blockers: None documented.
 
 ## Current State
@@ -676,9 +676,9 @@ When sources conflict, use this order:
 - Context: The governed Site runtime lacked revision-safe lifecycle changes and automatic health admission; splitting occurrence settlement from monitor projection updates could lose an alert during a crash.
 - Decision: Require expected-revision updates with immutable history and terminal archive. Bind one Site to one regular interval schedule, derive health-check identity from the occurrence UUID, and atomically settle the leased occurrence, monitor projection, and state-change notification. Treat reachable unexpected statuses as degraded; emit no baseline alert and coalesce unchanged states.
 - Files: `crates/mcg-{domain,storage,runtime,api}/`, `apps/{mcg-cli,desktop}/`, `README.md`, `docs/architecture/sites.md`, `docs/testing/strategy.md`.
-- Commands/tests: Strict workspace all-target clippy; 44 API tests; focused Site storage restart/lifecycle tests; 17 desktop Vitest tests; TypeScript check.
-- Result: REST, MCP, CLI, Tauri, and desktop expose update/archive and monitor configuration. Restart persistence, exact monitor replay, healthy/outage/repeated-outage/recovery behavior, and transactional pause/archive schedule synchronization pass locally on Windows.
-- Follow-up: Complete the full Windows verification lane, exact-commit Ubuntu lane, and representative native UI UAT before treating this checkpoint as cross-platform qualified.
+- Commands/tests: Exact commit `045dc939831a6afc6179578ef58c7fa464e1d2c5` passed complete clean Windows `scripts/verify.ps1` in 339.8 seconds and complete Ubuntu `scripts/verify.sh` in 354.7 seconds. This includes strict workspace clippy, full Rust/restart/live GPU45/browser/computer suites, 44 API tests, 17 desktop Vitest tests, documentation/typecheck/build, native Tauri builds, and two Playwright E2E tests per OS. Ubuntu log: `/home/hendo420/mcg-worktree-045dc93/verify-linux.log` (last verified 2026-08-14).
+- Result: REST, MCP, CLI, Tauri, and desktop expose update/archive and monitor configuration. Restart persistence, exact monitor replay, healthy/outage/repeated-outage/recovery behavior, and transactional pause/archive schedule synchronization are cross-platform qualified. Computer-use inspection of the exact Windows binary confirmed all day-one navigation and the simple-mode Sites registration surface with accessible labels.
+- Follow-up: The exact native binary could not perform stateful Site UAT against the currently running older daemon without replacing its preserved OAuth handoff; stateful behavior is covered by exact-runtime integration/E2E tests. Repeat the complete native stateful journey when the live daemon can be upgraded safely, and continue typed SSH.
 
 ## Known Issues
 
