@@ -26,7 +26,7 @@ try {
     }
 
     $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File
-    foreach ($name in @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt")) {
+    foreach ($name in @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")) {
         if ($installed.Name -notcontains $name) {
             throw "Installed payload is missing $name."
         }

@@ -31,8 +31,9 @@ capability-restricted third-party plugins.
   MCG plugin boundary.
 
 The complete upstream license, including the LLVM exceptions appended to the
-Apache 2.0 terms, must be included before the plugin runtime enters a packaged
-MCG binary. Packaging integration remains an explicit plugin-milestone gate.
+Apache 2.0 terms, is shipped as
+`licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt` in every package that
+contains the plugin runtime.
 
 ## ed25519-dalek and curve25519-dalek
 

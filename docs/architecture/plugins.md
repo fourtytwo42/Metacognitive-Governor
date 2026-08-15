@@ -147,11 +147,10 @@ large-package upload channel.
 
 ## Remaining integration gates
 
-Before plugin support is release-qualified, MCG still must add:
-
-- additional adversarial package tests and native Windows/Linux UAT;
-- the complete Wasmtime Apache-2.0-with-LLVM-exceptions license in packages that
-  contain the runtime.
+Before plugin support is release-qualified, MCG still must add additional
+adversarial package tests and native Windows/Linux UAT. The package contract now
+requires the complete Wasmtime Apache-2.0-with-LLVM-exceptions license anywhere
+the plugin runner is shipped.
 
 Until those gates pass, plugins remain an explicitly managed preview surface and
 must not be represented as release-qualified plugin support.

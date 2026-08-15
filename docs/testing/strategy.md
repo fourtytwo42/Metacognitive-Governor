@@ -252,7 +252,7 @@ capabilities. Runner tests additionally prove bounded/malformed request rejectio
 pre-execution module-digest rejection, and a real child process that consumes one
 request, returns one result, keeps stderr empty, and exits. The plugin feature is
 not release-qualified until daemon launch/control, durable catalog/audit, all
-interfaces, packaging/license, cross-platform crash recovery, and native UAT
+interfaces, cross-platform crash recovery, adversarial packaging, and native UAT
 gates in `docs/architecture/plugins.md` are complete.
 
 Parent-client process tests additionally prove fixed-name runner selection,

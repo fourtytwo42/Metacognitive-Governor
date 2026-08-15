@@ -1,5 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
 
@@ -47,20 +48,25 @@ for (const icon of expectedIcons) {
     }
   }
 }
-for (const resource of ["../../../THIRD_PARTY_NOTICES.md", "../../../licenses/Apache-2.0.txt"]) {
+for (const resource of [
+  "../../../THIRD_PARTY_NOTICES.md",
+  "../../../licenses/Apache-2.0.txt",
+  "../../../licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt"
+]) {
   if (!config.bundle.resources?.includes(resource)) throw new Error(`Installer resource missing: ${resource}`);
 }
 if (config.bundle.windows?.nsis?.installMode !== "currentUser") {
   throw new Error("Windows installation must stay per-user until a privileged service design is approved.");
 }
 
-const [windowsBuilder, linuxBuilder, windowsPrepare, linuxPrepare, notices, apache] = await Promise.all([
+const [windowsBuilder, linuxBuilder, windowsPrepare, linuxPrepare, notices, apache, wasmtime] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/prepare-sidecars.ps1"),
   read("scripts/prepare-sidecars.sh"),
   read("THIRD_PARTY_NOTICES.md"),
-  read("licenses/Apache-2.0.txt")
+  read("licenses/Apache-2.0.txt"),
+  read("licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
 ]);
 requireText(windowsBuilder, "--bundles nsis", "Windows release builder");
 requireText(linuxBuilder, "--bundles deb,appimage", "Linux release builder");
@@ -75,16 +81,26 @@ for (const section of ["1. Definitions.", "2. Grant of Copyright License.", "9. 
   requireText(apache, section, "Apache-2.0 license payload");
 }
 if (apache.length < 10_000) throw new Error("Apache-2.0 license payload appears truncated.");
+for (const section of ["1. Definitions.", "END OF TERMS AND CONDITIONS", "LLVM Exceptions to the Apache 2.0 License", "embedded into an Object form of such source code"]) {
+  requireText(wasmtime, section, "Wasmtime license payload");
+}
+if (wasmtime.length < 12_000) throw new Error("Wasmtime license payload appears truncated.");
+const wasmtimeLicenseDigest = createHash("sha256")
+  .update(wasmtime.replaceAll("\r\n", "\n").trimEnd())
+  .digest("hex");
+if (wasmtimeLicenseDigest !== "23823edf263108ef7acbefde293225117b4784759c9c5bcd0b4966d0a1e34f55") {
+  throw new Error("Wasmtime 45.0.3 license payload does not match the reviewed upstream text.");
+}
 
 for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh"]) {
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");

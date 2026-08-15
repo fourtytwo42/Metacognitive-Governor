@@ -94,6 +94,7 @@ done
 find /usr/share/icons/hicolor -type f -name 'mcg-desktop.png' -print -quit | grep -q .
 find /usr/lib/MCG -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find /usr/lib/MCG -type f -name Apache-2.0.txt -print -quit | grep -q .
+find /usr/lib/MCG -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
 
 sentinel="$installed_data/linux-package-uat-retained.txt"
 runuser -u "$uat_user" -- sh -c 'printf retain-on-uninstall > "$1"' sh "$sentinel"
@@ -242,6 +243,7 @@ for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/m
 done
 find "$appimage_root/squashfs-root" -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Apache-2.0.txt -print -quit | grep -q .
+find "$appimage_root/squashfs-root" -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
 launch_and_capture "$appimage_root/squashfs-root/AppRun" "$appimage_data" 7777 appimage
 
 dpkg -r "$package_name" >"$uat_root/deb-uninstall.log"
