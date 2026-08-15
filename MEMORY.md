@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Close M8 native Windows/Linux UAT, then begin M9 measured improvement.
-- Last meaningful change: Isolated Windows native UAT registered a real pinned Ubuntu host without disturbing the preserved daemon. The expected missing-agent failure exposed that the desktop hid durable SSH failure detail; the card now shows actionable detail/exit code and advanced evidence identity, with an 18-test component regression suite.
-- Next step: Rebuild/recheck the corrected isolated Windows desktop, perform equivalent Linux native UI UAT, record M8 exit evidence, and begin M9 supervision/experiment architecture.
+- Current task: Close M8 native Linux UAT after completing a dedicated clean Win11-VM consumer qualification checkpoint, then begin M9 measured improvement.
+- Last meaningful change: Clean Win11-VM UAT exposed and fixed the production-build invocation, a Windows CLI/GUI filename collision in the qualification bundle, the native project-picker's obsolete daemon route, hidden project errors, and blocked evidence incorrectly labeled in progress. The corrected app passed project/task/provider/restart UAT with 20 desktop regression flows.
+- Next step: Perform the equivalent corrected Linux native UI journey, record M8 exit evidence, and begin M9 supervision/experiment architecture.
 - Blockers: None documented.
 
 ## Current State
@@ -17,6 +17,7 @@ Durable project context lives here. Update this file whenever information should
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
+- A Windows portable qualification layout keeps `mcg-desktop.exe`, `mcg-daemon.exe`, and `mcg.exe` distinct and launches the daemon plus GUI without requiring a developer toolchain. Production installer/signing/upgrade/uninstall work remains a later release gate.
 - The desktop task view loads authoritative event history and immutable governed-tool audit together. Simple mode summarizes outcomes, checks, tool runs, artifacts, and condition results; advanced mode adds ordered events, resources, verification records, and artifact hashes.
 - The desktop provider workspace supports OpenAI subscription OAuth, OpenAI API keys, OpenRouter, and arbitrary OpenAI-compatible/local endpoints. It discovers before saving, stores credentials through the existing OS credential service, labels billing explicitly, and displays known price metadata or `Cost unknown`.
 - The desktop Projects panel lists durable discovered workspaces with language/build/test/Git context and exposes paths, branches, and instruction-conflict counts only in advanced mode.
@@ -52,6 +53,7 @@ Durable project context lives here. Update this file whenever information should
 - Deeply integrate automated unit, integration, scenario, contract, and end-to-end testing.
 - Run builds and automated tests locally only. Do not use GitHub Actions or any GitHub-hosted automation that can incur usage charges.
 - Use the owner-controlled Ubuntu VM at `192.168.50.109` for Linux desktop, daemon, CLI, and test qualification; never persist its credentials in repository files or memory.
+- Use the owner-controlled `Win11-VM` through Chrome Remote Desktop for clean Windows consumer installation and UAT; treat its browser/authentication state as stale until freshly verified.
 - Production completion requires the agent to perform real user acceptance testing on both Windows and Linux through computer-use or equivalent user-facing interaction, fix material defects found, and leave minimal routine human regression work.
 - Keep the full PRD vision in scope; use multiple real projects, initially websites/apps, to refine the system.
 - Support OpenAI OAuth and API keys, OpenRouter, local OpenAI-compatible servers, and arbitrary OpenAI-compatible providers with user-supplied credentials.
@@ -137,6 +139,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-14: Dedicated clean `Win11-VM` consumer UAT passed through Chrome Remote Desktop. The production Tauri build rendered without a developer toolchain, discovered two live GPU45 models, registered projects through the native picker, created a project-bound task, failed closed on unsatisfied tool-routing requirements, and retained providers/projects/task/evidence across daemon termination and restart. The qualification found and fixed the obsolete native discovery route, hidden project errors, and blocked evidence labeled `In progress`; 20 Vitest flows, frontend typecheck, Rust formatting, two desktop Rust tests, strict desktop Clippy, and the production no-bundle build pass. Final `mcg-desktop.exe` SHA-256 is `E1CE0ECDD56D835A1CE0D07E5D190889696256481A77A3E489787A83E51C6CC2`; refreshed qualification archive `MCG-0.1.0-windows-x64-portable-tauri.zip` SHA-256 is `6830CAB0221488950B0710F4E240A8FD4C71AFB83AD0CBB47181EA9D41173C55`. No GitHub-hosted compute ran.
 
 - 2026-08-14: Sites persistence foundation added migration 17 and `SITE_SCHEMA_VERSION = 1` contracts for revisioned project-bound properties, structured deployment commands, deployment dispositions, and health observations. The runtime now routes health through bounded exact-origin HTTP and deployments through exact Site/Process/Directory capabilities, approval, lease, audit, and artifact capture. REST, CLI, MCP, Tauri, and desktop expose registration, history, health, and deploy with caller-owned identities. Cross-interface tests prove one network request/process side effect under replay; 44 API tests, 7 CLI tests, 17 Vitest tests, two Playwright flows, strict workspace Clippy, and all unlocked workspace Rust tests pass. Full `cargo test --workspace` on Windows is blocked only because the intentionally preserved live daemon executable is locked; `--exclude mcg-daemon --exclude mcg-desktop` is green and desktop library tests pass separately. Exact commit `8650d205815a7a5973bc561bd77e2c2308114691` passed complete Ubuntu `./scripts/verify.sh` in 353.8 seconds, including the full Rust workspace, docs, frontend, debug Tauri build, and Playwright. Revision mutation, scheduler monitoring/notifications, and native Sites UAT remain.
 
@@ -688,6 +692,15 @@ When sources conflict, use this order:
 - Commands/tests: Exact `f5a1a1b` complete Windows `scripts/verify.ps1` passed in 424 seconds. Exact archived source passed Ubuntu `scripts/verify.sh` in 136 seconds after disk cleanup. Live Ubuntu agent-backed runtime inspect/restart/replay passed in 0.28 seconds. Strict workspace Clippy; 50 tool tests, 28 storage tests, 10 runtime tests, 44 API tests, 18 Vitest tests, production/native builds, two Playwright flows, and docs are green.
 - Result: REST, CLI, MCP, Tauri, and desktop share one credential-free pinned-host/operation contract. Real Windows-to-Ubuntu probing found that the local Windows `ssh-agent` service is disabled; MCG correctly did not fall back to a password/private-key option. The executor now uses a real isolated empty config, and Windows prefers native System32 OpenSSH to avoid Git/MSYS path-dialect ambiguity. Ubuntu initially filled its 48 GiB root volume with retained build targets; `cargo clean` removed 16.8 GiB only from `/home/hendo420/mcg-worktree-045dc93/target`, after which the complete gate passed.
 - Follow-up: Windows live SSH UAT requires enabling the native OpenSSH Authentication Agent service and loading the owner key; native stateful UI UAT still requires safely upgrading the visible daemon. Linux live qualification passed wrong-key rejection, literal typed execution, hash-verified upload/download, cleanup, restart, and exact replay.
+
+### 2026-08-14 - Dedicated Win11 Consumer UAT Checkpoint
+
+- Context: M8 required real Windows UAT on a clean owner-controlled machine rather than a development host.
+- Decision: Use `Win11-VM` through Chrome Remote Desktop and transfer only hash-verified locally built qualification artifacts. Keep GitHub source-only and do not weaken the host firewall for transfer.
+- Files: `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/App.tsx`, `apps/desktop/src/App.test.tsx`, `packaging/windows/portable/`.
+- Commands/tests: Tauri production `build --no-bundle`; 20 Vitest flows; root typecheck; Rust formatting; 2 desktop Rust tests; strict desktop Clippy. Final native desktop SHA-256 `E1CE0ECDD56D835A1CE0D07E5D190889696256481A77A3E489787A83E51C6CC2` was verified through the VM transfer path; refreshed qualification archive SHA-256 is `6830CAB0221488950B0710F4E240A8FD4C71AFB83AD0CBB47181EA9D41173C55`.
+- Result: The VM had no Git, Node, Rust, Cargo, or rustc. The production app launched with its bundled web assets; GPU45 discovered 2 current models; CLI status/provider/project/task commands worked; the native picker registered a second project; a real task blocked honestly when no model satisfied tool-routing requirements; daemon termination/restart preserved the provider, both projects, blocked task, and evidence. UAT found and fixed the obsolete `/api/v1/projects/discover` desktop route, invisible project-screen errors, and a blocked evidence summary that said `In progress`. Direct Cargo packaging was rejected because it embedded the development URL; Tauri's production build path is required. A case-insensitive `MCG.exe`/`mcg.exe` collision was removed from the portable layout.
+- Follow-up: Run the corrected native journey on Linux, then close M8. Production installer, signing, service registration, upgrade/repair, and uninstall gates remain open and the portable bundle is qualification-only.
 
 ## Known Issues
 

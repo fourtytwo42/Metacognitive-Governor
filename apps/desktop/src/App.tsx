@@ -145,11 +145,13 @@ function modelPrice(model: ProviderModel): string {
 function TaskEvidence({
   history,
   audit,
-  advanced
+  advanced,
+  state
 }: {
   history: TaskEventsResponse;
   audit: ToolAuditResponse;
   advanced: boolean;
+  state: TaskEnvelope["state"];
 }) {
   const evaluation = history.events
     .slice()
@@ -163,11 +165,20 @@ function TaskEvidence({
     ).values()
   );
   const passingChecks = conditions.filter((condition) => condition.passed).length;
+  const outcome = evaluation?.payload?.outcome ?? ({
+    pending: "Pending",
+    active: "In progress",
+    waiting_for_approval: "Waiting for approval",
+    blocked: "Blocked",
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled"
+  } satisfies Record<TaskEnvelope["state"], string>)[state];
 
   return (
     <section className="task-evidence" aria-label="Task evidence">
       <div className="evidence-overview">
-        <div><span>Outcome</span><strong>{evaluation?.payload?.outcome ?? "In progress"}</strong></div>
+        <div><span>Outcome</span><strong>{outcome}</strong></div>
         <div><span>Checks</span><strong>{passingChecks} / {conditions.length}</strong></div>
         <div><span>Tool runs</span><strong>{completions.length}</strong></div>
         <div><span>Artifacts</span><strong>{artifacts.length}</strong></div>
@@ -259,6 +270,8 @@ export function App() {
   const [taskAudit, setTaskAudit] = useState<Record<string, ToolAuditResponse | undefined>>({});
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
+  const [projectError, setProjectError] = useState<string | null>(null);
+  const [projectErrorSurface, setProjectErrorSurface] = useState<"task" | "projects">("projects");
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [schedules, setSchedules] = useState<ScheduleDefinition[]>([]);
   const [scheduleNotifications, setScheduleNotifications] = useState<SchedulerNotification[]>([]);
@@ -348,7 +361,7 @@ export function App() {
         if (active) setProjects(response.projects);
       })
       .catch((error) => {
-        if (active) setTaskError(errorMessage(error));
+        if (active) setProjectError(errorMessage(error));
       });
     listApprovals()
       .then((response) => {
@@ -748,17 +761,18 @@ export function App() {
     }
   }
 
-  function taskEvidence(taskId: string) {
-    const history = taskHistory[taskId];
-    const audit = taskAudit[taskId];
+  function taskEvidence(task: TaskEnvelope) {
+    const history = taskHistory[task.id];
+    const audit = taskAudit[task.id];
     return history && audit
-      ? <TaskEvidence history={history} audit={audit} advanced={advanced} />
+      ? <TaskEvidence history={history} audit={audit} advanced={advanced} state={task.state} />
       : null;
   }
 
-  async function chooseProject() {
+  async function chooseProject(surface: "task" | "projects") {
     setTaskBusy(true);
-    setTaskError(null);
+    setProjectError(null);
+    setProjectErrorSurface(surface);
     try {
       const root = await pickProjectDirectory();
       if (!root) return;
@@ -769,7 +783,7 @@ export function App() {
         ...current.filter((project) => project.project_id !== mutation.project.project_id)
       ]);
     } catch (error) {
-      setTaskError(errorMessage(error));
+      setProjectError(errorMessage(error));
     } finally {
       setTaskBusy(false);
     }
@@ -1445,12 +1459,13 @@ export function App() {
                   {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
                 </select>
               </label>}
-              <button className="secondary" type="button" disabled={taskBusy} onClick={chooseProject}>Open folder</button>
+              <button className="secondary" type="button" disabled={taskBusy} onClick={() => chooseProject("task")}>Open folder</button>
               <button className="primary" type="button" disabled={taskBusy} onClick={addTask}>
                 {taskBusy ? "Creating..." : "Create task"}
               </button>
             </div>
             {taskError && <p className="error-message" role="alert">{taskError}</p>}
+            {projectError && projectErrorSurface === "task" && <p className="error-message" role="alert">{projectError}</p>}
           </div>
         </section>
 
@@ -1476,7 +1491,7 @@ export function App() {
                     <span>{approvals.find((approval) => approval.task_id === task.id)?.reason}</span>
                     {advanced && <code>{approvals.find((approval) => approval.task_id === task.id)?.resource}</code>}
                   </div>}
-                  {taskEvidence(task.id)}
+                  {taskEvidence(task)}
                 </div>
                 <div className="task-actions">
                   {task.state === "pending" && <button className="primary" type="button" disabled={taskBusy || !task.project_id} title={task.project_id ? undefined : "Select a project before starting"} onClick={() => startTask(task.id)}>Start task</button>}
@@ -1498,7 +1513,7 @@ export function App() {
                 <p className="eyebrow">PROJECTS</p>
                 <h2>Your workspaces</h2>
               </div>
-              <button className="secondary" type="button" disabled={taskBusy} onClick={chooseProject}>Add project folder</button>
+              <button className="secondary" type="button" disabled={taskBusy} onClick={() => chooseProject("projects")}>Add project folder</button>
             </div>
             {projects.length === 0 ? <p className="empty-state">Open a folder to discover its language, build, tests, repository, and instructions.</p> : <div className="project-list">
               {projects.map((project) => {
@@ -1519,6 +1534,7 @@ export function App() {
                 </article>;
               })}
             </div>}
+            {projectError && projectErrorSurface === "projects" && <p className="error-message" role="alert">{projectError}</p>}
           </article>
 
           <article className="panel runtime-panel">

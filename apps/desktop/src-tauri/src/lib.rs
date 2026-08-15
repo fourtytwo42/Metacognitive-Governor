@@ -1175,7 +1175,7 @@ async fn pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>,
 #[tauri::command]
 async fn discover_project(request: DiscoverProjectRequest) -> Result<ProjectMutation, String> {
     let response = reqwest::Client::new()
-        .post(format!("{LOCAL_DAEMON}/api/v1/projects/discover"))
+        .post(format!("{LOCAL_DAEMON}/api/v1/projects"))
         .bearer_auth(daemon_token()?)
         .json(&request)
         .send()

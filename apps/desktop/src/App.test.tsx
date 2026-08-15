@@ -1062,3 +1062,41 @@ test("native project selection discovers the folder and associates the new task"
     project_id: project.project_id
   }));
 });
+
+test("project discovery errors remain visible on the Projects screen", async () => {
+  const root = "C:\\Projects\\broken";
+  client.pickProject.mockResolvedValue(root);
+  client.discoverProject.mockRejectedValue(new Error("Project discovery failed (405 Method Not Allowed)"));
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("link", { name: "Projects" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add project folder" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Project discovery failed (405 Method Not Allowed)");
+});
+
+test("task evidence uses the durable blocked state when no evaluation exists", async () => {
+  const blockedTask = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000099",
+    project_id: null,
+    goal: "Blocked fixture",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "blocked",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:01Z"
+  };
+  client.listTasks.mockResolvedValue({ tasks: [blockedTask] });
+  client.taskEvents.mockResolvedValue({
+    events: [{ sequence: 1, kind: "task_created", occurred_at: blockedTask.created_at }]
+  });
+  client.taskAudit.mockResolvedValue({ records: [] });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Evidence" }));
+
+  expect(within(await screen.findByRole("region", { name: "Task evidence" })).getByText("Blocked")).toBeInTheDocument();
+});
