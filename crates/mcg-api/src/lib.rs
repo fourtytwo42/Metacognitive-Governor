@@ -6496,6 +6496,100 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    async fn official_typescript_sdk_negotiates_lists_calls_streams_and_replays() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(
+            project_root.path().join("README.md"),
+            "Official SDK fixture",
+        )
+        .expect("project fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "typescript_sdk_provider".into(),
+                    display_name: "TypeScript SDK Provider".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: consumer_task_model_fixture_with_delay(Duration::from_millis(250))
+                        .await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("SDK fixture listener");
+        let address = listener.local_addr().expect("SDK fixture address");
+        let app = router(runtime.clone());
+        let _server = AbortTask(tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("SDK fixture server");
+        }));
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test-mcp-typescript-sdk.mjs");
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::process::Command::new("node")
+                .arg(script)
+                .arg(format!("http://{address}/mcp"))
+                .arg(project_id.to_string())
+                .env("MCG_SDK_TOKEN", TEST_TOKEN)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("official SDK fixture timeout")
+        .expect("launch official SDK fixture");
+        let stdout = String::from_utf8(output.stdout).expect("SDK stdout UTF-8");
+        let stderr = String::from_utf8(output.stderr).expect("SDK stderr UTF-8");
+        assert!(!stdout.contains(TEST_TOKEN));
+        assert!(!stderr.contains(TEST_TOKEN));
+        assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+        let report: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("SDK report JSON");
+        assert_eq!(report["era"], serde_json::json!("modern"));
+        assert_eq!(report["protocolVersion"], serde_json::json!("2026-07-28"));
+        assert_eq!(
+            report["serverName"],
+            serde_json::json!("metacognitive-governor")
+        );
+        assert!(report["toolCount"].as_u64().is_some_and(|count| count > 10));
+        assert!(
+            report["progressCount"]
+                .as_u64()
+                .is_some_and(|count| count >= 2)
+        );
+        let tasks = runtime.tasks().expect("SDK tasks");
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.state == TaskState::Completed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.state == TaskState::Cancelled)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn mcp_scheduler_tools_create_replay_list_and_remove_one_definition() {
         let runtime = test_runtime();

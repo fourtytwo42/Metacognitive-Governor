@@ -250,17 +250,27 @@ unrelated-task isolation, payload omission, a final complete JSON-RPC result,
 ordinary JSON replay when no token is supplied, and atomic task/run cancellation
 when a client drops a live response stream.
 
+The pinned official `@modelcontextprotocol/client` 2.0.0 fixture runs as a real
+Node client against a real loopback MCG server. It proves automatic modern-era
+discovery, per-request bearer authentication, server identity/capability parsing,
+typed tool listing, a read-only status call, a complete provider-backed consumer
+task with SDK progress callbacks, exact replay, invalid-token rejection, and SDK
+`AbortSignal` closure reaching durable task/run cancellation. The fixture passes
+the bearer only through a child environment variable and asserts that neither
+child output stream contains it.
+
 A second file-backed consumer fixture uses a destructive/open-world external MCP
 tool in guided mode. It proves the remote call remains at zero before approval,
 reopens the daemon while waiting, restores provider/catalog and agent authority,
 executes the remote side effect exactly once, and continues the pinned model turn
 without repeating the paid pre-approval inference.
 
-This is a broad MCP server plus HTTP/stdio client implementation, but native
-interoperability and catalog-change subscription work remain. Remaining M6 work
-includes:
-
-- opt-in `subscriptions/listen` streams only where MCG has useful runtime
-  tool/prompt/resource catalog-change notifications to publish;
-- interoperability fixtures against representative third-party MCP SDKs and
-  both-platform native desktop UAT.
+This is a broad MCP server plus HTTP/stdio client implementation with official
+TypeScript SDK interoperability. MCG's server-side tools are fixed for the life
+of a daemon build, and it currently advertises no prompts or resources. It
+therefore deliberately does not advertise or open a `subscriptions/listen`
+stream: an empty permanent stream would provide no useful catalog-change event.
+Add that capability when a server-side tool, prompt, or resource catalog becomes
+runtime-mutable. Remaining M6 qualification is installed native MCP UAT on both
+Windows and Linux; additional SDK/client matrix entries can deepen compatibility
+evidence without weakening that release gate.

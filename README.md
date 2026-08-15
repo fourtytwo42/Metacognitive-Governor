@@ -358,9 +358,12 @@ verification, durable replay, and terminal settlement path. Callers can opt
 `mcg_run_task` into request-scoped SSE progress with `_meta.progressToken`; MCG
 streams only durable task event kinds/sequences, returns the final tool result on
 the same response, and cancels nonterminal task/run authority if that response is
-closed. See
+closed. An owner-local contract test pins the official
+`@modelcontextprotocol/client` 2.0.0 package and exercises discovery, bearer
+authentication, listing, calls, progress, replay, and stream-close cancellation
+against a real MCG loopback server. See
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
-the remaining catalog-change subscription and native interoperability work.
+remaining native interoperability work.
 
 MCG can also connect to Streamable HTTP or local stdio MCP servers. Use
 `mcg mcp add-http ID NAME URL`; select `--auth bearer-token` and pipe the secret
