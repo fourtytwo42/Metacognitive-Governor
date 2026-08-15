@@ -84,7 +84,7 @@ for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner.exe", "installer
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window root"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");

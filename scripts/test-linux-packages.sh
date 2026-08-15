@@ -19,7 +19,7 @@ uat_user="${MCG_UAT_USER:-${SUDO_USER:-$(stat -c '%U' "$repository_root")}}"
 [[ -f "$appimage" ]] || { echo "Missing AppImage package: $appimage" >&2; exit 1; }
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
-for command in curl dpkg dpkg-deb find import pgrep python3 runuser ss stat xdotool Xvfb; do
+for command in curl dpkg dpkg-deb find identify import pgrep python3 runuser ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 
@@ -205,8 +205,15 @@ launch_and_capture() {
     sleep 0.1
   done
   [[ -n "$window_id" ]] || { echo "$label did not expose an MCG desktop window." >&2; exit 1; }
-  runuser -u "$uat_user" -- env DISPLAY="$display" import -window root "$uat_root/$label.png"
+  sleep 2
+  runuser -u "$uat_user" -- env DISPLAY="$display" import -window "$window_id" "$uat_root/$label.png"
   [[ -s "$uat_root/$label.png" ]] || { echo "$label screenshot is empty." >&2; exit 1; }
+  local screenshot_colors
+  screenshot_colors="$(identify -format '%k' "$uat_root/$label.png")"
+  [[ "$screenshot_colors" =~ ^[0-9]+$ && "$screenshot_colors" -gt 16 ]] || {
+    echo "$label screenshot is blank or has too little rendered content." >&2
+    exit 1
+  }
   local service_pid
   service_pid="$(ss -ltnp "sport = :$port" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n 1)"
   [[ "$service_pid" =~ ^[0-9]+$ ]] || { echo "$label service PID was not observable." >&2; exit 1; }
