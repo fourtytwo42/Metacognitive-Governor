@@ -66,6 +66,14 @@ impl ProviderCredential {
         Ok(Self(secret))
     }
 
+    /// Exposes the secret only to an executor that has already passed the
+    /// host's credential-reference policy boundary. Callers must never log,
+    /// serialize, or return this value to an agent or plugin guest.
+    #[must_use]
+    pub fn expose_to_host_executor(&self) -> &str {
+        &self.0
+    }
+
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }

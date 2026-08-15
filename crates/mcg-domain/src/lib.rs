@@ -964,12 +964,30 @@ pub struct PluginRevision {
     pub installed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginCapabilityScope {
+    TaskProject,
+    NetworkOrigin { origin: String },
+    Executable { executable: String },
+    Credential { provider: String, key: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCapabilityGrant {
+    pub schema_version: u16,
+    pub capability: mcg_plugin_protocol::PluginCapability,
+    pub scopes: Vec<PluginCapabilityScope>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginInstallation {
     pub schema_version: u16,
     pub plugin_id: String,
     pub active_revision_id: PluginRevisionId,
     pub enabled: bool,
+    #[serde(default)]
+    pub capability_grants: Vec<PluginCapabilityGrant>,
     pub revision: u64,
     pub updated_at: DateTime<Utc>,
 }
@@ -1149,5 +1167,21 @@ mod tests {
         assert!(PlatformSessionState::Requested.is_live());
         assert!(PlatformSessionState::HandedOff.is_live());
         assert!(!PlatformSessionState::Failed.is_live());
+    }
+
+    #[test]
+    fn legacy_plugin_installation_defaults_to_no_capability_grants() {
+        let revision_id = PluginRevisionId::new();
+        let document = serde_json::json!({
+            "schema_version": PLUGIN_CATALOG_SCHEMA_VERSION,
+            "plugin_id": "example.legacy",
+            "active_revision_id": revision_id,
+            "enabled": false,
+            "revision": 1,
+            "updated_at": Utc::now(),
+        });
+        let installation: PluginInstallation =
+            serde_json::from_value(document).expect("legacy installation");
+        assert!(installation.capability_grants.is_empty());
     }
 }

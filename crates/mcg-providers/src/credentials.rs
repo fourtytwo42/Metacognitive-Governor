@@ -132,7 +132,7 @@ impl ProviderCredentialStore for MemoryProviderCredentialStore {
             .map_err(|_| credential_store_error("credential-store lock was poisoned"))?
             .insert(
                 credential_key(connection_id, slot),
-                credential.expose().to_owned(),
+                credential.expose_to_host_executor().to_owned(),
             );
         Ok(())
     }

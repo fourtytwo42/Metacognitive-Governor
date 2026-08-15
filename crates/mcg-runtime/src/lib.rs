@@ -39,17 +39,17 @@ use mcg_domain::{
     PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
     PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
     PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
-    PlatformSessionState, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
-    PluginInvocationState, PluginRevision, ProjectId, ProxyConversationId, RiskLevel, RunId,
-    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
-    SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState,
-    SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId,
-    SshHostState, SshOperation, SshOperationId, SshOperationKind, SshOperationState,
-    SupervisionObservationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
-    ToolRequestId, WorkItemId,
+    PlatformSessionState, PluginCapabilityGrant, PluginCapabilityScope, PluginInstallation,
+    PluginInvocationId, PluginInvocationRecord, PluginInvocationState, PluginRevision, ProjectId,
+    ProxyConversationId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
+    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
+    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
+    SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
+    SshOperationId, SshOperationKind, SshOperationState, SupervisionObservationId, TaskBudget,
+    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -57,7 +57,11 @@ use mcg_mcp::{
     McpCredential, McpCredentialStore, McpError, McpProtocolMode, McpToolCatalog,
     MemoryMcpCredentialStore, OsMcpCredentialStore,
 };
-use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginResult, WasiPluginLimits};
+use mcg_plugin_protocol::{
+    PLUGIN_CAPABILITY_TURN_LIMIT, PLUGIN_SCHEMA_VERSION, PluginCapability,
+    PluginCapabilityOperation, PluginCapabilityOutcome, PluginCapabilityRequest, PluginGuestTurn,
+    PluginHostTurn, PluginResult, PluginValueSource, WasiPluginLimits,
+};
 use mcg_plugin_runner::{
     PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest, PluginRunnerResponse,
     PluginRunnerState,
@@ -75,9 +79,9 @@ use mcg_providers::{
     BrowserAuthorizationConfig, DeviceAuthorizationConfig, MemoryProviderCredentialStore,
     ModelProbeReport, ModelRequest, ModelResponse, OAuthTokenSet, OsProviderCredentialStore,
     PROXY_LEDGER_SCHEMA_VERSION, ProviderConnection, ProviderCredential, ProviderCredentialStore,
-    ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, ProxyCallRecord,
-    ProxyConversation, ProxyConversationView, ProxyUsageSummary, RouteCandidate, RoutingPolicy,
-    ToolDefinition, clear_provider_credentials, save_provider_credentials,
+    ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, ProviderSecretSlot,
+    ProxyCallRecord, ProxyConversation, ProxyConversationView, ProxyUsageSummary, RouteCandidate,
+    RoutingPolicy, ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
@@ -94,14 +98,15 @@ use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
     BrokerControls, BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep,
     ComputerUseAction, ComputerUseBatchResult, ComputerUseFrame, ComputerUseManager,
-    ComputerUseObservation, ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor,
-    GitExecutor, HostExecutor, HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor,
-    OutputRedactor, PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation,
-    ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver,
-    ResearchEvidenceDocument, ResearchExecutor, SshExecutor, SystemExecutor, TOOL_SCHEMA_VERSION,
-    ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
-    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
-    browser_runtime_available, computer_use_runtime_available,
+    ComputerUseObservation, CredentialReference, CredentialResolver, ExecutionLease,
+    ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HeaderValue, HostExecutor,
+    HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
+    PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation,
+    ProcessEnvironmentVariable, ProcessExecutor, ProcessOptions, ProcessStream,
+    RejectingCredentialResolver, ResearchEvidenceDocument, ResearchExecutor, SecretMaterial,
+    SshExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker,
+    ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
+    VerificationEvidence, browser_runtime_available, computer_use_runtime_available,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -797,6 +802,39 @@ fn package_plugin_runner() -> Option<Arc<dyn PluginRunnerGateway>> {
     Some(Arc::new(ProcessPluginRunnerGateway(client)))
 }
 
+#[derive(Clone)]
+struct ProviderToolCredentialResolver {
+    store: Arc<dyn ProviderCredentialStore>,
+}
+
+#[async_trait]
+impl CredentialResolver for ProviderToolCredentialResolver {
+    async fn resolve(&self, reference: &CredentialReference) -> Result<SecretMaterial, ToolError> {
+        let slot = match reference.key.as_str() {
+            "primary" => ProviderSecretSlot::Primary,
+            "oauth_id_token" => ProviderSecretSlot::OAuthIdToken,
+            "oauth_refresh_token" => ProviderSecretSlot::OAuthRefreshToken,
+            _ => {
+                return Err(ToolError::Denied(format!(
+                    "credential key {}/{} is unsupported",
+                    reference.provider, reference.key
+                )));
+            }
+        };
+        let credential = self
+            .store
+            .load(&reference.provider, slot)
+            .map_err(|error| ToolError::Execution(error.to_string()))?
+            .ok_or_else(|| {
+                ToolError::Denied(format!(
+                    "credential reference {}/{} is unavailable",
+                    reference.provider, reference.key
+                ))
+            })?;
+        SecretMaterial::new(credential.expose_to_host_executor())
+    }
+}
+
 fn validate_plugin_invocation_replay(
     invocation: &PluginInvocationRecord,
     plugin_id: &str,
@@ -813,6 +851,279 @@ fn validate_plugin_invocation_replay(
         )));
     }
     Ok(())
+}
+
+const fn plugin_runner_failure(
+    error: &PluginRunnerClientError,
+    capability_executed: bool,
+) -> (PluginInvocationState, &'static str) {
+    if capability_executed {
+        return (PluginInvocationState::Uncertain, "runner_uncertain");
+    }
+    match error {
+        PluginRunnerClientError::Unavailable | PluginRunnerClientError::RequestTooLarge => {
+            (PluginInvocationState::Failed, "runner_unavailable")
+        }
+        PluginRunnerClientError::Timeout
+        | PluginRunnerClientError::ResponseTooLarge
+        | PluginRunnerClientError::DiagnosticOutput
+        | PluginRunnerClientError::InvalidResponse
+        | PluginRunnerClientError::Process => {
+            (PluginInvocationState::Uncertain, "runner_uncertain")
+        }
+    }
+}
+
+fn plugin_tool_kind(
+    operation: &PluginCapabilityOperation,
+    grants: &[PluginCapabilityGrant],
+    project_root: &Path,
+) -> Result<ToolRequestKind, ToolError> {
+    for capability in operation.required_capabilities() {
+        if !grants.iter().any(|grant| grant.capability == capability) {
+            return Err(ToolError::Denied(format!(
+                "plugin capability {capability:?} is not granted"
+            )));
+        }
+    }
+    match operation {
+        PluginCapabilityOperation::FilesystemRead { path, max_bytes } => {
+            require_task_project_grant(grants, PluginCapability::FilesystemRead)?;
+            Ok(ToolRequestKind::FsRead {
+                path: plugin_project_path(project_root, path, false)?,
+                max_bytes: *max_bytes,
+            })
+        }
+        PluginCapabilityOperation::FilesystemWrite {
+            path,
+            content,
+            create_new,
+        } => {
+            require_task_project_grant(grants, PluginCapability::FilesystemWrite)?;
+            Ok(ToolRequestKind::FsWrite {
+                path: plugin_project_path(project_root, path, false)?,
+                content: content.clone(),
+                create_new: *create_new,
+            })
+        }
+        PluginCapabilityOperation::HttpRequest {
+            method,
+            url,
+            headers,
+            body,
+            max_response_bytes,
+        } => {
+            let parsed = url::Url::parse(url)
+                .map_err(|_| ToolError::Invalid("plugin HTTP URL is invalid".into()))?;
+            let origin = parsed.origin().ascii_serialization();
+            if !grant_scopes(grants, PluginCapability::Network).any(|scope| {
+                matches!(scope, PluginCapabilityScope::NetworkOrigin { origin: allowed } if allowed == &origin)
+            }) {
+                return Err(ToolError::Denied(format!(
+                    "plugin network origin {origin} is not granted"
+                )));
+            }
+            Ok(ToolRequestKind::HttpRequest {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers
+                    .iter()
+                    .map(|header| {
+                        Ok(mcg_tools::RequestHeader {
+                            name: header.name.clone(),
+                            value: plugin_value_source(&header.value, grants)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ToolError>>()?,
+                body: body.clone(),
+                max_response_bytes: *max_response_bytes,
+            })
+        }
+        PluginCapabilityOperation::ProcessExec {
+            executable,
+            argv,
+            cwd,
+            env,
+            stdin,
+        } => {
+            if !grant_scopes(grants, PluginCapability::Process).any(|scope| {
+                matches!(scope, PluginCapabilityScope::Executable { executable: allowed } if allowed.eq_ignore_ascii_case(executable))
+            }) {
+                return Err(ToolError::Denied(format!(
+                    "plugin executable {executable} is not granted"
+                )));
+            }
+            Ok(ToolRequestKind::ProcessExec {
+                options: ProcessOptions {
+                    executable: executable.clone(),
+                    argv: argv.clone(),
+                    cwd: plugin_project_path(project_root, cwd, true)?,
+                    env: env
+                        .iter()
+                        .map(|variable| {
+                            Ok(ProcessEnvironmentVariable {
+                                name: variable.name.clone(),
+                                value: plugin_value_source(&variable.value, grants)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ToolError>>()?,
+                    stdin: if stdin.is_some() {
+                        ProcessStream::Piped
+                    } else {
+                        ProcessStream::Null
+                    },
+                    stdin_data: stdin.clone(),
+                    stdout: ProcessStream::Piped,
+                    stderr: ProcessStream::Piped,
+                },
+            })
+        }
+    }
+}
+
+fn grant_scopes(
+    grants: &[PluginCapabilityGrant],
+    capability: PluginCapability,
+) -> impl Iterator<Item = &PluginCapabilityScope> {
+    grants
+        .iter()
+        .filter(move |grant| grant.capability == capability)
+        .flat_map(|grant| grant.scopes.iter())
+}
+
+fn require_task_project_grant(
+    grants: &[PluginCapabilityGrant],
+    capability: PluginCapability,
+) -> Result<(), ToolError> {
+    if grant_scopes(grants, capability)
+        .any(|scope| matches!(scope, PluginCapabilityScope::TaskProject))
+    {
+        Ok(())
+    } else {
+        Err(ToolError::Denied(format!(
+            "plugin {capability:?} task-project scope is not granted"
+        )))
+    }
+}
+
+fn plugin_value_source(
+    source: &PluginValueSource,
+    grants: &[PluginCapabilityGrant],
+) -> Result<HeaderValue, ToolError> {
+    match source {
+        PluginValueSource::Literal(value) => Ok(HeaderValue::Literal(value.clone())),
+        PluginValueSource::Credential(reference) => {
+            if !grant_scopes(grants, PluginCapability::Credentials).any(|scope| {
+                matches!(
+                    scope,
+                    PluginCapabilityScope::Credential { provider, key }
+                    if provider == &reference.provider && key == &reference.key
+                )
+            }) {
+                return Err(ToolError::Denied(format!(
+                    "plugin credential reference {}/{} is not granted",
+                    reference.provider, reference.key
+                )));
+            }
+            Ok(HeaderValue::Credential(CredentialReference {
+                provider: reference.provider.clone(),
+                key: reference.key.clone(),
+            }))
+        }
+    }
+}
+
+fn plugin_project_path(
+    project_root: &Path,
+    relative: &str,
+    allow_root: bool,
+) -> Result<String, ToolError> {
+    let path = Path::new(relative);
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => normalized.push(value),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                return Err(ToolError::Denied(
+                    "plugin project path escapes its task project".into(),
+                ));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() && !allow_root {
+        return Err(ToolError::Invalid("plugin project path is empty".into()));
+    }
+    Ok(project_root.join(normalized).to_string_lossy().into_owned())
+}
+
+fn plugin_capability_policy(
+    grants: &[PluginCapabilityGrant],
+    project_root: &Path,
+) -> CapabilityPolicy {
+    let mut policy = CapabilityPolicy::project(project_root);
+    policy.filesystem_read_roots.clear();
+    policy.filesystem_write_roots.clear();
+    policy.allowed_executables.clear();
+    policy.allowed_shells.clear();
+    policy.allowed_network_origins.clear();
+    policy.allow_shell = false;
+    policy.allow_git_mutation = false;
+    policy.managed_process_control = mcg_policy::CapabilityAccess::Denied;
+    policy.system_inspection = mcg_policy::CapabilityAccess::Denied;
+    for grant in grants {
+        for scope in &grant.scopes {
+            match (grant.capability, scope) {
+                (PluginCapability::FilesystemRead, PluginCapabilityScope::TaskProject) => {
+                    policy
+                        .filesystem_read_roots
+                        .push(project_root.to_path_buf());
+                }
+                (PluginCapability::FilesystemWrite, PluginCapabilityScope::TaskProject) => {
+                    policy
+                        .filesystem_write_roots
+                        .push(project_root.to_path_buf());
+                }
+                (PluginCapability::Network, PluginCapabilityScope::NetworkOrigin { origin }) => {
+                    policy.allowed_network_origins.push(origin.clone());
+                }
+                (PluginCapability::Process, PluginCapabilityScope::Executable { executable }) => {
+                    policy.allowed_executables.push(executable.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    policy
+}
+
+fn plugin_tool_outcome(outcome: &ToolOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "status": outcome.status,
+        "summary": bounded_plugin_output_text(&outcome.summary, 4_096),
+        "exit_code": outcome.exit_code,
+        "stdout": outcome.stdout.as_deref().map(|value| bounded_plugin_output_text(value, 48 * 1_024)),
+        "stderr": outcome.stderr.as_deref().map(|value| bounded_plugin_output_text(value, 48 * 1_024)),
+        "artifacts": outcome.artifacts.iter().take(16).collect::<Vec<_>>(),
+        "verification": outcome.verification.iter().take(16).map(|evidence| serde_json::json!({
+            "method": bounded_plugin_output_text(&evidence.method, 256),
+            "passed": evidence.passed,
+            "detail": bounded_plugin_output_text(&evidence.detail, 1_024),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn bounded_plugin_output_text(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}[TRUNCATED]", &value[..end])
 }
 
 pub struct AppRuntime {
@@ -1200,6 +1511,22 @@ impl AppRuntime {
         self.store()?.plugin_installations().map_err(Into::into)
     }
 
+    /// Replaces one plugin's complete owner-issued capability grant set. Every
+    /// change disables the plugin until a separate explicit enable mutation.
+    ///
+    /// # Errors
+    /// Returns not-found, stale-revision, scope validation, or storage failures.
+    pub fn set_plugin_capability_grants(
+        &self,
+        plugin_id: &str,
+        expected_revision: u64,
+        grants: Vec<PluginCapabilityGrant>,
+    ) -> Result<PluginInstallation, RuntimeError> {
+        self.store()?
+            .set_plugin_capability_grants(plugin_id, expected_revision, grants, Utc::now())
+            .map_err(Into::into)
+    }
+
     /// Enables or disables one plugin head with optimistic revision control.
     ///
     /// # Errors
@@ -1290,6 +1617,7 @@ impl AppRuntime {
             .await
     }
 
+    #[allow(clippy::too_many_lines)] // Keeps the bounded guest/broker settlement state machine contiguous.
     async fn execute_plugin_invocation(
         &self,
         running: PluginInvocationRecord,
@@ -1321,59 +1649,286 @@ impl AppRuntime {
                 Some("runner_unavailable"),
             );
         };
-        let request = PluginRunnerRequest {
+        let capability_aware = !revision.manifest.requested_capabilities.is_empty();
+        let mut host_turn = PluginHostTurn {
             schema_version: PLUGIN_SCHEMA_VERSION,
-            manifest: revision.manifest,
-            module_sha256: revision.module_sha256,
-            module_base64: STANDARD.encode(module),
-            input,
-            limits,
+            original_input: input.clone(),
+            outcomes: Vec::new(),
         };
-        match runner.invoke(&request).await {
-            Ok(response) if response.state == PluginRunnerState::Succeeded => {
-                let result = response.result.ok_or_else(|| {
-                    StorageError::InvalidData("runner success omitted its result".into())
-                })?;
-                let result_bytes = serde_json::to_vec(&result).map_err(StorageError::from)?;
-                match artifact_store
-                    .capture(&result_bytes, "application/vnd.mcg.plugin-result+json")
-                {
-                    Ok(artifact) => self.settle_plugin_invocation(
+        let mut request_ids = BTreeSet::new();
+        for _ in 0..=PLUGIN_CAPABILITY_TURN_LIMIT {
+            let runner_input = if capability_aware {
+                serde_json::to_value(&host_turn).map_err(StorageError::from)?
+            } else {
+                input.clone()
+            };
+            let request = PluginRunnerRequest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                manifest: revision.manifest.clone(),
+                module_sha256: revision.module_sha256.clone(),
+                module_base64: STANDARD.encode(&module),
+                input: runner_input,
+                limits: limits.clone(),
+            };
+            let response = match runner.invoke(&request).await {
+                Ok(response) if response.state == PluginRunnerState::Succeeded => response,
+                Ok(response) => {
+                    return self.settle_plugin_invocation(
                         running,
-                        PluginInvocationState::Succeeded,
-                        Some((artifact.sha256, result)),
+                        PluginInvocationState::Failed,
                         None,
-                    ),
-                    Err(_) => self.settle_plugin_invocation(
+                        response.error_code.as_deref().or(Some("runner_failed")),
+                    );
+                }
+                Err(error) => {
+                    let (state, code) =
+                        plugin_runner_failure(&error, !host_turn.outcomes.is_empty());
+                    return self.settle_plugin_invocation(running, state, None, Some(code));
+                }
+            };
+            let Some(mut result) = response.result else {
+                return self.settle_plugin_invocation(
+                    running,
+                    if host_turn.outcomes.is_empty() {
+                        PluginInvocationState::Failed
+                    } else {
+                        PluginInvocationState::Uncertain
+                    },
+                    None,
+                    Some("runner_result_missing"),
+                );
+            };
+            if !capability_aware {
+                return self.persist_plugin_result(&artifact_store, running, result);
+            }
+            let guest_turn: PluginGuestTurn = match serde_json::from_value(result.output.clone()) {
+                Ok(turn) => turn,
+                Err(_) => {
+                    return self.settle_plugin_invocation(
                         running,
-                        PluginInvocationState::Uncertain,
+                        if host_turn.outcomes.is_empty() {
+                            PluginInvocationState::Failed
+                        } else {
+                            PluginInvocationState::Uncertain
+                        },
                         None,
-                        Some("result_persistence_failed"),
-                    ),
+                        Some("guest_contract_invalid"),
+                    );
+                }
+            };
+            match guest_turn {
+                PluginGuestTurn::Completed { output } => {
+                    result.output = output;
+                    return self.persist_plugin_result(&artifact_store, running, result);
+                }
+                PluginGuestTurn::CapabilityRequest { request } => {
+                    if host_turn.outcomes.len() == PLUGIN_CAPABILITY_TURN_LIMIT
+                        || request.validate(&revision.manifest).is_err()
+                        || !request_ids.insert(request.id.clone())
+                    {
+                        return self.settle_plugin_invocation(
+                            running,
+                            if host_turn.outcomes.is_empty() {
+                                PluginInvocationState::Failed
+                            } else {
+                                PluginInvocationState::Uncertain
+                            },
+                            None,
+                            Some("capability_contract_invalid"),
+                        );
+                    }
+                    match self
+                        .execute_plugin_capability(&running, &revision, &request)
+                        .await
+                    {
+                        Ok(outcome) if outcome.status == ToolOutcomeStatus::Succeeded => {
+                            let outcome = plugin_tool_outcome(&outcome);
+                            host_turn.outcomes.push(PluginCapabilityOutcome::Succeeded {
+                                request_id: request.id,
+                                outcome,
+                            });
+                        }
+                        Ok(_) => host_turn.outcomes.push(PluginCapabilityOutcome::Failed {
+                            request_id: request.id,
+                            error_code: "tool_failed".into(),
+                        }),
+                        Err(ToolError::ApprovalRequired { .. }) => {
+                            return self.settle_plugin_invocation(
+                                running,
+                                PluginInvocationState::Failed,
+                                None,
+                                Some("capability_approval_required"),
+                            );
+                        }
+                        Err(ToolError::Denied(_) | ToolError::Invalid(_)) => {
+                            return self.settle_plugin_invocation(
+                                running,
+                                PluginInvocationState::Failed,
+                                None,
+                                Some("capability_denied"),
+                            );
+                        }
+                        Err(_) => {
+                            return self.settle_plugin_invocation(
+                                running,
+                                PluginInvocationState::Uncertain,
+                                None,
+                                Some("capability_execution_uncertain"),
+                            );
+                        }
+                    }
                 }
             }
-            Ok(response) => self.settle_plugin_invocation(
-                running,
-                PluginInvocationState::Failed,
-                None,
-                response.error_code.as_deref().or(Some("runner_failed")),
+        }
+        self.settle_plugin_invocation(
+            running,
+            PluginInvocationState::Uncertain,
+            None,
+            Some("capability_turn_limit"),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Constructs one complete least-authority broker boundary.
+    async fn execute_plugin_capability(
+        &self,
+        running: &PluginInvocationRecord,
+        revision: &PluginRevision,
+        capability_request: &PluginCapabilityRequest,
+    ) -> Result<ToolOutcome, ToolError> {
+        let task_id = running
+            .task_id
+            .ok_or_else(|| ToolError::Denied("plugin capabilities require a task".into()))?;
+        let task = self
+            .task(task_id)
+            .map_err(|error| ToolError::Execution(error.to_string()))?
+            .ok_or_else(|| ToolError::Denied("plugin capability task was not found".into()))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            ToolError::Denied("plugin capabilities require a task project".into())
+        })?;
+        let project = self
+            .project(project_id)
+            .map_err(|error| ToolError::Execution(error.to_string()))?
+            .ok_or_else(|| ToolError::Denied("plugin capability project was not found".into()))?;
+        let installation = self
+            .store()
+            .map_err(|error| ToolError::Execution(error.to_string()))?
+            .plugin_installation(&running.plugin_id)
+            .map_err(|error| ToolError::Execution(error.to_string()))?
+            .ok_or_else(|| ToolError::Denied("plugin installation was not found".into()))?;
+        if !installation.enabled || installation.active_revision_id != revision.id {
+            return Err(ToolError::Denied(
+                "plugin authority changed during invocation".into(),
+            ));
+        }
+
+        let root = std::path::PathBuf::from(&project.root);
+        let kind = plugin_tool_kind(
+            &capability_request.operation,
+            &installation.capability_grants,
+            &root,
+        )?;
+        let mut request = ToolRequest::new(
+            task_id,
+            format!(
+                "Plugin {} capability {}",
+                running.plugin_id, capability_request.id
             ),
-            Err(error) => {
-                let (state, code) = match error {
-                    PluginRunnerClientError::Unavailable
-                    | PluginRunnerClientError::RequestTooLarge => {
-                        (PluginInvocationState::Failed, "runner_unavailable")
-                    }
-                    PluginRunnerClientError::Timeout
-                    | PluginRunnerClientError::ResponseTooLarge
-                    | PluginRunnerClientError::DiagnosticOutput
-                    | PluginRunnerClientError::InvalidResponse
-                    | PluginRunnerClientError::Process => {
-                        (PluginInvocationState::Uncertain, "runner_uncertain")
-                    }
-                };
-                self.settle_plugin_invocation(running, state, None, Some(code))
-            }
+            kind,
+        );
+        let operation = serde_json::to_vec(capability_request)
+            .map_err(|error| ToolError::Invalid(error.to_string()))?;
+        let digest = Sha256::digest(
+            [
+                b"mcg.plugin.capability.v1".as_slice(),
+                revision.id.to_string().as_bytes(),
+                task_id.to_string().as_bytes(),
+                running.input_sha256.as_bytes(),
+                &operation,
+            ]
+            .concat(),
+        );
+        let mut stable = [0_u8; 16];
+        stable.copy_from_slice(&digest[..16]);
+        request.id = ToolRequestId::from_stable_bytes(stable);
+
+        let artifact_root = self.config.data_directory.join("artifacts");
+        let credentials: Arc<dyn CredentialResolver> = Arc::new(ProviderToolCredentialResolver {
+            store: self.provider_credentials.clone(),
+        });
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([root.clone()], &artifact_root)
+                .map_err(|error| ToolError::Execution(error.to_string()))?,
+        );
+        let process = Arc::new(
+            ProcessExecutor::new([root.clone()], credentials.clone())
+                .map_err(|error| ToolError::Execution(error.to_string()))?,
+        );
+        let http = Arc::new(
+            HttpExecutor::new(credentials, filesystem.clone(), &artifact_root)
+                .map_err(|error| ToolError::Execution(error.to_string()))?,
+        );
+        let host = HostExecutor {
+            filesystem: filesystem.clone(),
+            process: process.clone(),
+            http: http.clone(),
+            browser: Arc::new(
+                BrowserExecutor::with_filesystem(
+                    self.config.browser_executable.clone(),
+                    &artifact_root,
+                    filesystem,
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?,
+            ),
+            research: Arc::new(ResearchExecutor::new(http)),
+            system: Arc::new(SystemExecutor),
+            git: Arc::new(
+                GitExecutor::new(process, [root.clone()], &artifact_root)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?,
+            ),
+            memory: Arc::new(MemoryExecutor::new(InMemoryMemoryRepository::default())),
+            external: Arc::new(RuntimeMcpExecutor {
+                store: self.store.clone(),
+                credentials: self.mcp_credentials.clone(),
+            }),
+        };
+        let capabilities = plugin_capability_policy(&installation.capability_grants, &root);
+        let control = self.tool_control();
+        ToolBroker::new(
+            host,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.user_settings().autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        )
+        .execute(&request)
+        .await
+    }
+
+    fn persist_plugin_result(
+        &self,
+        artifact_store: &ArtifactStore,
+        running: PluginInvocationRecord,
+        result: PluginResult,
+    ) -> Result<PluginInvocationMutation, RuntimeError> {
+        let result_bytes = serde_json::to_vec(&result).map_err(StorageError::from)?;
+        match artifact_store.capture(&result_bytes, "application/vnd.mcg.plugin-result+json") {
+            Ok(artifact) => self.settle_plugin_invocation(
+                running,
+                PluginInvocationState::Succeeded,
+                Some((artifact.sha256, result)),
+                None,
+            ),
+            Err(_) => self.settle_plugin_invocation(
+                running,
+                PluginInvocationState::Uncertain,
+                None,
+                Some("result_persistence_failed"),
+            ),
         }
     }
 
@@ -9777,6 +10332,42 @@ mod tests {
         }
     }
 
+    struct ScriptedPluginRunner {
+        turns: Mutex<VecDeque<PluginGuestTurn>>,
+        inputs: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl PluginRunnerGateway for ScriptedPluginRunner {
+        async fn invoke(
+            &self,
+            request: &PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            self.inputs
+                .lock()
+                .expect("plugin input fixture")
+                .push(request.input.clone());
+            let turn = self
+                .turns
+                .lock()
+                .expect("plugin turn fixture")
+                .pop_front()
+                .expect("scripted plugin turn");
+            Ok(PluginRunnerResponse {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                plugin_id: Some(request.manifest.id.clone()),
+                state: PluginRunnerState::Succeeded,
+                result: Some(PluginResult {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    plugin_id: request.manifest.id.clone(),
+                    output: serde_json::to_value(turn).expect("serialize plugin guest turn"),
+                }),
+                error_code: None,
+                detail: None,
+            })
+        }
+    }
+
     #[async_trait]
     impl ShadowCommandVerifier for FixtureShadowCommandVerifier {
         async fn verify(
@@ -10127,6 +10718,115 @@ mod tests {
         let diagnostics = reopened.diagnostics(Utc::now()).expect("diagnostics");
         assert_eq!(diagnostics.counts.plugins, 1);
         assert_eq!(diagnostics.counts.plugin_invocations, 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // End-to-end authority evidence is clearest as one fixture.
+    async fn plugin_capability_turn_reads_only_its_task_project_through_the_broker() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("proof.txt"), "brokered proof")
+            .expect("project fixture");
+        let data = tempfile::tempdir().expect("data directory");
+        let config = AppConfig::default().with_data_directory(data.path());
+        let mut runtime =
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let mut task = TaskEnvelope::new("exercise a brokered plugin read");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create task");
+
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.brokered-read".into(),
+                display_name: "Brokered read fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::FilesystemRead],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installed = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install plugin");
+        let granted = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installed.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemRead,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+            )
+            .expect("grant task project read");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, granted.revision, true)
+            .expect("enable plugin");
+
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        runtime.plugin_runner = Some(Arc::new(ScriptedPluginRunner {
+            turns: Mutex::new(VecDeque::from([
+                PluginGuestTurn::CapabilityRequest {
+                    request: PluginCapabilityRequest {
+                        schema_version: PLUGIN_SCHEMA_VERSION,
+                        id: "read-proof".into(),
+                        operation: PluginCapabilityOperation::FilesystemRead {
+                            path: "proof.txt".into(),
+                            max_bytes: 1_024,
+                        },
+                    },
+                },
+                PluginGuestTurn::Completed {
+                    output: serde_json::json!({"observed": true}),
+                },
+            ])),
+            inputs: inputs.clone(),
+        }));
+        let mutation = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "read proof"}),
+            )
+            .await
+            .expect("invoke brokered plugin");
+        assert_eq!(mutation.invocation.state, PluginInvocationState::Succeeded);
+        assert_eq!(
+            mutation.result.expect("result").output,
+            serde_json::json!({"observed": true})
+        );
+        let inputs = inputs.lock().expect("recorded inputs");
+        assert_eq!(inputs.len(), 2);
+        let second: PluginHostTurn =
+            serde_json::from_value(inputs[1].clone()).expect("second host turn");
+        let PluginCapabilityOutcome::Succeeded { outcome, .. } = &second.outcomes[0] else {
+            panic!("brokered read must succeed")
+        };
+        assert!(
+            outcome["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("brokered proof"))
+        );
+        let audit = runtime.tool_audit(task.id).expect("tool audit");
+        assert_eq!(audit.len(), 2);
+        assert!(audit.iter().all(|record| record.tool == "fs.read"));
     }
 
     #[test]

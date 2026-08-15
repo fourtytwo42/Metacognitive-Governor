@@ -246,9 +246,9 @@ only in the controller's SSH agent.
 
 `mcg-plugins` contract tests prove static trusted-native identity/routing and the
 closed-authority WASI kernel. Sandboxed fixtures cover one bounded JSON result,
-unknown-import denial, fuel exhaustion, memory/output ceilings, requested-
-capability denial, and the absence of inherited environment or filesystem
-preopens. Runner tests additionally prove bounded/malformed request rejection,
+unknown-import denial, fuel exhaustion, memory/output ceilings, and the absence
+of inherited environment or filesystem preopens even when a manifest declares
+capabilities. Runner tests additionally prove bounded/malformed request rejection,
 pre-execution module-digest rejection, and a real child process that consumes one
 request, returns one result, keeps stderr empty, and exits. The plugin feature is
 not release-qualified until daemon launch/control, durable catalog/audit, all
@@ -287,6 +287,18 @@ cross-registry replay, malformed or cross-labeled trust roots, noncanonical
 encodings, and verified claims on local imports. Runtime integration additionally
 proves an invalid proof leaves both the artifact store and catalog untouched,
 while a valid registry package is persisted as verified but disabled.
+
+Capability-grant storage tests prove strict manifest subsets, exact scope
+normalization, optimistic conflicts, enable refusal for incomplete grants,
+disable-on-change, and reopen durability. Protocol tests reject undeclared
+operations, malformed credential references, duplicate turn identities, and
+excessive histories. Runtime integration proves a declared and owner-granted
+project read executes only through the durable broker, produces decision and
+completion audit records, and returns a bounded host outcome on the next guest
+turn. Cross-platform qualification must additionally cover approval/retry,
+origin/executable/credential denial, turn limits, tool-success/runner-failure
+uncertainty, and real packaged sidecar execution before consumer routing is
+enabled.
 
 ## Coverage and release policy
 

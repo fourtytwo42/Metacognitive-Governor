@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    PLUGIN_CATALOG_SCHEMA_VERSION, PluginInstallSource, PluginInstallation, PluginInvocationRecord,
-    PluginInvocationState, PluginRevision, PluginRevisionId, PluginSignatureState,
+    PLUGIN_CATALOG_SCHEMA_VERSION, PluginCapabilityGrant, PluginCapabilityScope,
+    PluginInstallSource, PluginInstallation, PluginInvocationRecord, PluginInvocationState,
+    PluginRevision, PluginRevisionId, PluginSignatureState,
 };
-use mcg_plugin_protocol::PluginClass;
+use mcg_plugin_protocol::{PluginCapability, PluginClass};
 use mcg_plugin_trust::{PLUGIN_SIGNATURE_SCHEME, VerifiedPluginRevision};
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -99,6 +100,7 @@ impl SqliteEventStore {
             plugin_id: revision.manifest.id.clone(),
             active_revision_id: revision.id,
             enabled,
+            capability_grants: Vec::new(),
             revision: head_revision,
             updated_at: revision.installed_at,
         };
@@ -160,6 +162,13 @@ impl SqliteEventStore {
         if installation.enabled == enabled {
             return Ok(installation);
         }
+        if enabled {
+            let revision = load_plugin_revision(&transaction, installation.active_revision_id)?
+                .ok_or(StorageError::PluginRevisionNotFound(
+                    installation.active_revision_id,
+                ))?;
+            validate_grants_cover_manifest(&installation.capability_grants, &revision)?;
+        }
         installation.revision = installation
             .revision
             .checked_add(1)
@@ -172,6 +181,58 @@ impl SqliteEventStore {
              WHERE plugin_id = ?5 AND revision = ?6",
             params![
                 enabled,
+                to_sql_revision(installation.revision)?,
+                serde_json::to_string(&installation)?,
+                changed_at.to_rfc3339(),
+                plugin_id,
+                to_sql_revision(expected_revision)?,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(installation)
+    }
+
+    /// Replaces the complete owner-issued capability grant set using optimistic
+    /// revision control. Any change disables the plugin atomically.
+    ///
+    /// # Errors
+    /// Rejects stale writers, malformed or excessive scopes, capabilities not
+    /// requested by the active manifest, and storage failures.
+    pub fn set_plugin_capability_grants(
+        &mut self,
+        plugin_id: &str,
+        expected_revision: u64,
+        mut grants: Vec<PluginCapabilityGrant>,
+        changed_at: DateTime<Utc>,
+    ) -> Result<PluginInstallation, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let mut installation = load_plugin_installation(&transaction, plugin_id)?
+            .ok_or_else(|| StorageError::PluginNotFound(plugin_id.into()))?;
+        if installation.revision != expected_revision {
+            return Err(StorageError::Conflict(format!(
+                "plugin installation revision is {}, expected {expected_revision}",
+                installation.revision
+            )));
+        }
+        let revision = load_plugin_revision(&transaction, installation.active_revision_id)?.ok_or(
+            StorageError::PluginRevisionNotFound(installation.active_revision_id),
+        )?;
+        normalize_and_validate_plugin_grants(&mut grants, &revision)?;
+        if installation.capability_grants == grants {
+            return Ok(installation);
+        }
+        installation.revision = installation
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Conflict("plugin revision is exhausted".into()))?;
+        installation.capability_grants = grants;
+        installation.enabled = false;
+        installation.updated_at = changed_at;
+        transaction.execute(
+            "UPDATE plugin_installations SET
+                enabled = 0, revision = ?1, installation_json = ?2, updated_at = ?3
+             WHERE plugin_id = ?4 AND revision = ?5",
+            params![
                 to_sql_revision(installation.revision)?,
                 serde_json::to_string(&installation)?,
                 changed_at.to_rfc3339(),
@@ -451,6 +512,107 @@ fn validate_running_invocation(invocation: &PluginInvocationRecord) -> Result<()
         ));
     }
     Ok(())
+}
+
+fn normalize_and_validate_plugin_grants(
+    grants: &mut [PluginCapabilityGrant],
+    revision: &PluginRevision,
+) -> Result<(), StorageError> {
+    if grants.len() > 5 {
+        return Err(StorageError::InvalidData(
+            "plugin capability grant count is excessive".into(),
+        ));
+    }
+    grants.sort_by_key(|grant| grant.capability);
+    let mut capabilities = std::collections::BTreeSet::new();
+    for grant in grants {
+        grant.scopes.sort();
+        if grant.schema_version != PLUGIN_CATALOG_SCHEMA_VERSION
+            || !revision
+                .manifest
+                .requested_capabilities
+                .contains(&grant.capability)
+            || !capabilities.insert(grant.capability)
+            || grant.scopes.is_empty()
+            || grant.scopes.len() > 32
+        {
+            return Err(StorageError::InvalidData(
+                "plugin capability grant identity is invalid".into(),
+            ));
+        }
+        let mut scopes = std::collections::BTreeSet::new();
+        for scope in &grant.scopes {
+            if !scopes.insert(scope.clone()) || !valid_plugin_scope(grant.capability, scope) {
+                return Err(StorageError::InvalidData(
+                    "plugin capability grant scope is invalid".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_grants_cover_manifest(
+    grants: &[PluginCapabilityGrant],
+    revision: &PluginRevision,
+) -> Result<(), StorageError> {
+    let mut normalized = grants.to_vec();
+    normalize_and_validate_plugin_grants(&mut normalized, revision)?;
+    if normalized != grants
+        || revision
+            .manifest
+            .requested_capabilities
+            .iter()
+            .any(|capability| !grants.iter().any(|grant| grant.capability == *capability))
+    {
+        return Err(StorageError::Conflict(
+            "plugin cannot be enabled until every requested capability has an exact grant".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_plugin_scope(capability: PluginCapability, scope: &PluginCapabilityScope) -> bool {
+    match (capability, scope) {
+        (
+            PluginCapability::FilesystemRead | PluginCapability::FilesystemWrite,
+            PluginCapabilityScope::TaskProject,
+        ) => true,
+        (PluginCapability::Network, PluginCapabilityScope::NetworkOrigin { origin }) => {
+            url::Url::parse(origin).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.path() == "/"
+                    && url.origin().ascii_serialization() == *origin
+            })
+        }
+        (PluginCapability::Process, PluginCapabilityScope::Executable { executable }) => {
+            bounded_scope_text(executable, 1_024)
+        }
+        (PluginCapability::Credentials, PluginCapabilityScope::Credential { provider, key }) => {
+            valid_credential_component(provider) && valid_credential_component(key)
+        }
+        _ => false,
+    }
+}
+
+fn bounded_scope_text(value: &str, maximum: usize) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= maximum
+        && !value.contains('\0')
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_credential_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'/')
+        })
 }
 
 fn validate_terminal_invocation(invocation: &PluginInvocationRecord) -> Result<(), StorageError> {
@@ -854,6 +1016,123 @@ mod tests {
                 .expect("idempotent recovery")
                 .invocations_marked_uncertain,
             0
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle proves grant, enable, revoke, conflict, and reopen atomically.
+    fn capability_grants_are_scoped_optimistic_and_disable_on_change() {
+        let directory = tempdir().expect("tempdir");
+        let database = directory.path().join("mcg.sqlite3");
+        let at = Utc::now();
+        let mut plugin = revision(at);
+        plugin.manifest.requested_capabilities =
+            vec![PluginCapability::Network, PluginCapability::FilesystemRead];
+        let mut store = SqliteEventStore::open(&database).expect("store");
+        let installed = store
+            .install_unsigned_local_plugin_revision(&plugin)
+            .expect("install");
+        assert!(matches!(
+            store.set_plugin_enabled(&plugin.manifest.id, installed.revision, true, at),
+            Err(StorageError::Conflict(_))
+        ));
+
+        let invalid = vec![PluginCapabilityGrant {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            capability: PluginCapability::Network,
+            scopes: vec![PluginCapabilityScope::TaskProject],
+        }];
+        assert!(matches!(
+            store.set_plugin_capability_grants(
+                &plugin.manifest.id,
+                installed.revision,
+                invalid,
+                at + Duration::seconds(1),
+            ),
+            Err(StorageError::InvalidData(_))
+        ));
+
+        let grants = vec![
+            PluginCapabilityGrant {
+                schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                capability: PluginCapability::Network,
+                scopes: vec![PluginCapabilityScope::NetworkOrigin {
+                    origin: "http://127.0.0.1:3000".into(),
+                }],
+            },
+            PluginCapabilityGrant {
+                schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                capability: PluginCapability::FilesystemRead,
+                scopes: vec![PluginCapabilityScope::TaskProject],
+            },
+        ];
+        let granted = store
+            .set_plugin_capability_grants(
+                &plugin.manifest.id,
+                installed.revision,
+                grants.clone(),
+                at + Duration::seconds(2),
+            )
+            .expect("grant");
+        assert_eq!(granted.revision, 2);
+        assert!(!granted.enabled);
+        assert_eq!(
+            granted.capability_grants[0].capability,
+            PluginCapability::FilesystemRead
+        );
+        let enabled = store
+            .set_plugin_enabled(
+                &plugin.manifest.id,
+                granted.revision,
+                true,
+                at + Duration::seconds(3),
+            )
+            .expect("enable");
+        assert!(enabled.enabled);
+        assert_eq!(enabled.revision, 3);
+        assert!(matches!(
+            store.set_plugin_capability_grants(
+                &plugin.manifest.id,
+                granted.revision,
+                grants.clone(),
+                at + Duration::seconds(4),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+
+        let changed = vec![
+            PluginCapabilityGrant {
+                schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                capability: PluginCapability::FilesystemRead,
+                scopes: vec![PluginCapabilityScope::TaskProject],
+            },
+            PluginCapabilityGrant {
+                schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                capability: PluginCapability::Network,
+                scopes: vec![PluginCapabilityScope::NetworkOrigin {
+                    origin: "https://api.example".into(),
+                }],
+            },
+        ];
+        let disabled = store
+            .set_plugin_capability_grants(
+                &plugin.manifest.id,
+                enabled.revision,
+                changed,
+                at + Duration::seconds(5),
+            )
+            .expect("change grants");
+        assert_eq!(disabled.revision, 4);
+        assert!(!disabled.enabled);
+        drop(store);
+
+        let reopened = SqliteEventStore::open(database).expect("reopen");
+        assert_eq!(
+            reopened
+                .plugin_installation(&plugin.manifest.id)
+                .expect("installation")
+                .expect("installed"),
+            disabled
         );
     }
 }

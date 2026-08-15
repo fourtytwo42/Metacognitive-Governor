@@ -22,10 +22,11 @@ One JSON document is provided on an in-memory stdin stream and exactly one JSON
 document is required on bounded stdout. Any stderr output makes the invocation
 fail; it is never treated as a successful result.
 
-The initial executor grants no host capabilities. It inherits no environment,
+The executor grants no ambient host capabilities. It inherits no environment,
 host terminal, host stdio, directory preopen, or network address. Unknown imports
-fail linking. A manifest requesting filesystem, network, process, or credential
-authority is denied rather than partially executed.
+fail linking. Declaring filesystem, network, process, or credential authority in
+a manifest does not change the WASI context; declarations only make the bounded
+daemon request protocol eligible for separate owner grants.
 
 Every invocation has explicit module, input, output, linear-memory, table,
 instance, fuel, and asynchronous wall-time ceilings. Fuel terminates CPU loops;
@@ -97,12 +98,40 @@ Release packaging builds and installs `mcg-plugin-runner` adjacent to
 the executor and Wasmtime; only the sidecar contains them. Development builds do
 not depend on generated sidecars, and no consumer interface routes plugin work yet.
 
+## Broker-issued capabilities
+
+Owner grants are durable, optimistic-revisioned, and must cover every capability
+declared by the active manifest before a plugin can be enabled. Filesystem access
+is scoped only to the invocation task's discovered project, network access to
+exact canonical HTTP(S) origins, process access to exact executable identities,
+and credential access to exact provider/key references. Grant changes atomically
+disable the plugin; enabling it again is always a separate explicit mutation.
+
+A capability-aware guest receives a versioned `PluginHostTurn`, then either
+returns a final value or one bounded `PluginCapabilityRequest`. The daemon
+validates the request against the immutable manifest and current grants, resolves
+project-relative paths without traversal, and translates it to the same
+`ToolRequest`/`ToolBroker` path used by governed agents. The normal autonomy
+preset, owner constitution, approval repository, leases, artifact store, output
+redaction, and immutable tool audit therefore remain authoritative. The runner is
+still one-shot and receives no preopen, socket, process, environment, or raw
+secret authority.
+
+At most eight capability requests are accepted. Returned tool data is a bounded,
+redacted projection; complete artifacts and audit evidence stay in host storage.
+Credential references are resolved only inside the HTTP/process executor and raw
+values never cross back to the guest. Stable request identities bind the plugin
+revision, task, original input digest, and complete capability operation, so an
+owner can approve and retry a fresh plugin invocation without authorizing a
+changed request. Approval waits settle the current invocation as failed; any
+runner or persistence failure after a host operation settles as uncertain and is
+never retried automatically.
+
 ## Remaining integration gates
 
 The execution kernel is only the first M10 boundary. Before plugins become a
 consumer feature, MCG still must add:
 
-- explicit broker-issued capability adapters instead of ambient WASI grants;
 - REST, MCP, CLI, Tauri, and simple/advanced desktop management surfaces;
 - plugin-aware backup/restore, migration, additional adversarial package tests,
   and native Windows/Linux UAT;

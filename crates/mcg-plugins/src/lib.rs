@@ -133,12 +133,6 @@ impl WasiPluginExecutor {
                 "WASI executor accepts only sandboxed-WASI plugins".into(),
             ));
         }
-        if !manifest.requested_capabilities.is_empty() {
-            return Err(PluginError::CapabilityDenied(format!(
-                "{} requests host capabilities that this executor does not grant",
-                manifest.id
-            )));
-        }
         let input = serde_json::to_vec(input)
             .map_err(|error| PluginError::InvalidResult(error.to_string()))?;
         let output = self.invoke_bytes(manifest, module_bytes, &input).await?;
@@ -358,15 +352,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wasi_plugins_receive_no_manifest_capability_by_default() {
+    async fn wasi_capability_declarations_never_create_ambient_preopens() {
         let executor = WasiPluginExecutor::new(WasiPluginLimits::default()).expect("executor");
         let mut requested = manifest();
         requested.requested_capabilities = vec![PluginCapability::FilesystemRead];
-        let empty = br#"(module (func (export "_start")))"#;
-        assert!(matches!(
-            executor.invoke_json(&requested, empty, &json!({})).await,
-            Err(PluginError::CapabilityDenied(_))
-        ));
+        let probe = br#"
+            (module
+              (import "wasi_snapshot_preview1" "fd_prestat_get"
+                (func $fd_prestat_get (param i32 i32) (result i32)))
+              (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+              (memory 1)
+              (export "memory" (memory 0))
+              (data (i32.const 8) "{\22ambient\22:false}")
+              (func (export "_start")
+                (if (i32.eqz (call $fd_prestat_get (i32.const 3) (i32.const 32)))
+                  (then unreachable))
+                (i32.store (i32.const 0) (i32.const 8))
+                (i32.store (i32.const 4) (i32.const 17))
+                (drop (call $fd_write
+                  (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 24)))))
+        "#;
+        let result = executor
+            .invoke_json(&requested, probe, &json!({}))
+            .await
+            .expect("capability declaration does not create a WASI preopen");
+        assert_eq!(result.output, json!({"ambient": false}));
     }
 
     #[tokio::test]
