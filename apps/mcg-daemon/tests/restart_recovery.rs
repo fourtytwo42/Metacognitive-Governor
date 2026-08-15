@@ -97,6 +97,7 @@ async fn task_history_and_projection_survive_abrupt_daemon_restart() {
 
     let created: TaskMutationResponse = client
         .post(format!("{first_host}/api/v1/tasks"))
+        .header(reqwest::header::CONNECTION, "close")
         .bearer_auth(&first_token)
         .json(&CreateTaskRequest {
             goal: "survive abrupt daemon restart".to_owned(),
@@ -169,6 +170,7 @@ async fn live_platform_authority_is_interrupted_with_history_after_daemon_restar
     let session_id = PlatformSessionId::new();
     let created: PlatformSession = client
         .post(format!("{first_host}/api/v1/platform/sessions"))
+        .header(reqwest::header::CONNECTION, "close")
         .bearer_auth(&token)
         .json(&CreatePlatformSessionRequest {
             session_id,
