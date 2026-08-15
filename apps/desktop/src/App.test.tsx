@@ -230,7 +230,12 @@ test("simple SSH flow registers a pinned host and performs read-only inspection"
     operation: { id: "op", host_id: sshHost.id, host_revision: 1, state: "succeeded", kind: { kind: "inspect" }, detail: "ok", artifact_sha256: [], created_at: sshHost.created_at, updated_at: sshHost.updated_at },
     replayed: false
   });
-  client.loadSshOperations.mockResolvedValue({ operations: [] });
+  client.loadSshOperations.mockResolvedValue({ operations: [{
+    id: "00000000-0000-4000-8000-000000000192", host_id: sshHost.id, host_revision: 1,
+    state: "failed", kind: { kind: "inspect" }, detail: "OpenSSH operation exited with 255",
+    exit_code: 255, artifact_sha256: ["b".repeat(64)], created_at: sshHost.created_at,
+    updated_at: sshHost.updated_at
+  }] });
   render(<App />);
   const panel = await screen.findByRole("region", { name: "SSH hosts" });
   fireEvent.change(within(panel).getByLabelText("Host name"), { target: { value: "Build VM" } });
@@ -245,6 +250,7 @@ test("simple SSH flow registers a pinned host and performs read-only inspection"
     sshHost.id,
     expect.objectContaining({ operation: { kind: "inspect" }, timeout_seconds: 60 })
   ));
+  expect(await within(panel).findByText("OpenSSH operation exited with 255 · exit 255")).toBeInTheDocument();
 });
 
 test("simple Sites flow registers a selected project and records governed health", async () => {

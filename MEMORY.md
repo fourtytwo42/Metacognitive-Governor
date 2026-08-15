@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Qualify and finish the typed outbound SSH execution surface for M8.
-- Last meaningful change: Exact commit `f5a1a1b` passed complete clean Windows and Ubuntu verification. Real Linux `ssh-agent` fixtures prove wrong-key rejection, literal argv execution, SHA-256-verified upload/download, remote cleanup, runtime restart, and observation-only replay; 18 desktop component tests cover the simple pinned-host/inspection flow.
-- Next step: Perform native Windows/Linux SSH UI UAT when agent/visible-daemon prerequisites allow it, then continue the remaining M8 execution-plane and broader production roadmap.
+- Current task: Close M8 native Windows/Linux UAT, then begin M9 measured improvement.
+- Last meaningful change: Isolated Windows native UAT registered a real pinned Ubuntu host without disturbing the preserved daemon. The expected missing-agent failure exposed that the desktop hid durable SSH failure detail; the card now shows actionable detail/exit code and advanced evidence identity, with an 18-test component regression suite.
+- Next step: Rebuild/recheck the corrected isolated Windows desktop, perform equivalent Linux native UI UAT, record M8 exit evidence, and begin M9 supervision/experiment architecture.
 - Blockers: None documented.
 
 ## Current State

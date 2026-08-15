@@ -1644,6 +1644,7 @@ export function App() {
                     <h3>{host.display_name}</h3>
                     <small>{host.username}@{host.hostname}:{host.port}</small>
                     {latest && <small>Last operation: {latest.kind.kind} · {latest.state}</small>}
+                    {latest && latest.state !== "succeeded" && <small role="status">{latest.detail || "The SSH operation did not complete successfully."}{latest.exit_code !== undefined ? ` · exit ${latest.exit_code}` : ""}</small>}
                     {advanced && <><code>{host.id}</code><code>revision {host.revision} · {host.host_key_sha256}</code></>}
                   </div>
                   <div className="task-actions">
@@ -1653,7 +1654,10 @@ export function App() {
                       <button className="secondary" type="button" disabled={sshBusy || !sshOperationJson[host.id]?.trim()} onClick={() => executeSsh(host)}>Run typed operation</button>
                     </>}
                   </div>
-                  {advanced && sshOperations[host.id] && <div className="evidence-details"><span>{sshOperations[host.id]?.operations.length} retained operations</span></div>}
+                  {advanced && sshOperations[host.id] && <div className="evidence-details">
+                    <span>{sshOperations[host.id]?.operations.length} retained operations</span>
+                    {latest && <span>{latest.artifact_sha256.length} evidence artifacts · operation {latest.id}</span>}
+                  </div>}
                 </article>;
               })}
             </div>
