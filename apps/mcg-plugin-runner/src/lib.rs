@@ -7,10 +7,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "executor")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use mcg_plugins::{
-    PLUGIN_SCHEMA_VERSION, PluginManifest, PluginResult, WasiPluginExecutor, WasiPluginLimits,
-};
+use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginManifest, PluginResult, WasiPluginLimits};
+#[cfg(feature = "executor")]
+use mcg_plugins::WasiPluginExecutor;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -238,6 +239,7 @@ impl PluginRunnerResponse {
 /// # Errors
 /// This function represents failures in the returned versioned response rather
 /// than exposing an unstructured error channel.
+#[cfg(feature = "executor")]
 pub async fn execute_request(request_bytes: &[u8]) -> PluginRunnerResponse {
     if request_bytes.len() > RUNNER_REQUEST_MAX_BYTES {
         return PluginRunnerResponse::failed(
@@ -389,10 +391,11 @@ const fn runner_file_name() -> &'static str {
 mod tests {
     use serde_json::json;
 
-    use mcg_plugins::{PluginClass, PluginManifest};
+    use mcg_plugin_protocol::{PluginClass, PluginManifest};
 
     use super::*;
 
+    #[cfg(feature = "executor")]
     fn request(module: &[u8]) -> PluginRunnerRequest {
         PluginRunnerRequest {
             schema_version: PLUGIN_SCHEMA_VERSION,
@@ -411,6 +414,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "executor")]
     #[tokio::test]
     async fn digest_mismatch_fails_before_execution() {
         let module = br#"(module (func (export "_start")))"#;
@@ -424,6 +428,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "executor")]
     #[tokio::test]
     async fn malformed_and_oversized_requests_are_bounded() {
         let malformed = execute_request(b"not-json").await;

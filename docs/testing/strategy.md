@@ -261,6 +261,11 @@ and strict agreement between response schema, plugin identity, result/error
 shape, and child exit status. These tests run natively on each owner-controlled
 release platform; they do not use GitHub-hosted execution.
 
+The daemon-side dependency shape is also a release contract:
+`mcg-plugin-runner --no-default-features` must remain free of `mcg-plugins`,
+Wasmtime, and WASI dependencies. The executable's required `executor` feature is
+tested separately with the full sandbox kernel.
+
 ## Coverage and release policy
 
 Coverage is a diagnostic, not a substitute for outcomes. Critical policy, state

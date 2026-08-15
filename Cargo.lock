@@ -3470,10 +3470,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcg-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "mcg-plugin-runner"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "mcg-plugin-protocol",
  "mcg-plugins",
  "serde",
  "serde_json",
@@ -3486,9 +3496,8 @@ dependencies = [
 name = "mcg-plugins"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "mcg-plugin-protocol",
  "serde_json",
- "thiserror 2.0.20",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",

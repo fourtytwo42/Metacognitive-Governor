@@ -49,6 +49,13 @@ Timeout and pipe failures kill and reap the child. The parent accepts a response
 only when schema, plugin identity, structured success/failure fields, and exit
 status all agree.
 
+All cross-process manifests, limits, requests, results, and errors live in the
+lightweight `mcg-plugin-protocol` crate. `mcg-plugin-runner` exposes its parent
+client without executor features, while the executable requires the `executor`
+feature and links `mcg-plugins` plus Wasmtime. This split is structural: the
+daemon can launch and validate the sidecar without embedding the untrusted-module
+compiler/runtime in its own process.
+
 ## Remaining integration gates
 
 The execution kernel is only the first M10 boundary. Before plugins become a

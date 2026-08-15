@@ -4,11 +4,11 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest, WasiPluginLimits};
 use mcg_plugin_runner::{
     PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest, PluginRunnerResponse,
     PluginRunnerState, sha256_hex,
 };
-use mcg_plugins::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest, WasiPluginLimits};
 use serde_json::json;
 
 #[test]

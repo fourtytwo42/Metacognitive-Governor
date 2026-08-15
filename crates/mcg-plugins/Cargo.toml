@@ -6,9 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde.workspace = true
+mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
