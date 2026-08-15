@@ -13,6 +13,8 @@ path = "src/main.rs"
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
+eventsource-stream.workspace = true
+futures-util.workspace = true
 mcg-agents = { path = "../../crates/mcg-agents" }
 mcg-api = { path = "../../crates/mcg-api" }
 mcg-config = { path = "../../crates/mcg-config" }
@@ -34,3 +36,6 @@ zeroize.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

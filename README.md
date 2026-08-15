@@ -40,6 +40,7 @@ Implementation planning:
 - [Durable owner settings](docs/architecture/settings.md)
 - [Portable backup and restore](docs/architecture/backups.md)
 - [Secret-free system diagnostics](docs/architecture/diagnostics.md)
+- [Interactive, piped, JSON, and streaming consumer CLI](docs/architecture/consumer-cli.md)
 - [Native packaging, startup, upgrade, and removal](docs/architecture/packaging.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
@@ -75,6 +76,22 @@ cargo run -p mcg-daemon
 cargo run -p mcg-cli -- status
 cargo run -p mcg-cli -- doctor
 ```
+
+The first-class consumer CLI uses the same durable project/task/run authority as
+the desktop:
+
+```powershell
+mcg
+mcg "fix the failing tests"
+mcg -C C:\projects\example "build and verify the website"
+git diff | mcg "review this diff"
+mcg -C C:\projects\example run --json "fix issue 419"
+mcg -C C:\projects\example run --stream-json "fix issue 419"
+```
+
+Piped input is bounded and becomes durable owner-supplied task context; do not
+pipe credentials. Streaming mode emits task-scoped durable events followed by a
+complete result as NDJSON. Existing administrative subcommands remain intact.
 
 Owner-facing behavior is restart-safe and shared by every interface. Use the
 desktop Settings workspace or `mcg settings show|set|history` to select Guided,

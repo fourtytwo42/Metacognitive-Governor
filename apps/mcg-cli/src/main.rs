@@ -1,8 +1,16 @@
-use std::{io::Read, path::PathBuf, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    ffi::OsString,
+    io::{BufRead, IsTerminal, Read, Write},
+    path::PathBuf,
+    str::FromStr,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
     OrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation,
@@ -16,7 +24,7 @@ use mcg_api::{
     CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
     DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    LaunchExecution, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
     MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
     OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
@@ -39,14 +47,15 @@ use mcg_domain::{
     SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
     SshHostId, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
+use mcg_events::EventEnvelope;
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
     McpTransport,
 };
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
-    CONTRACT_VERSION, ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderKind,
-    ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
+    CONTRACT_VERSION, ContentPart, MessageRole, ModelProbeReport, OutputItem, ProviderAuthMode,
+    ProviderConnection, ProviderKind, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, CandidateRevisionMutation, DiagnosticReport, DiagnosticSeverity,
@@ -98,15 +107,23 @@ impl Drop for ProviderConfigurePayload {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "mcg", version, about = "MetaCognitive Governor CLI")]
+#[command(
+    name = "mcg",
+    version,
+    about = "MetaCognitive Governor CLI",
+    after_help = "Consumer usage:\n  mcg\n  mcg \"fix the failing tests\"\n  mcg -C PATH \"build and verify the website\"\n  git diff | mcg \"review this diff\"\n  mcg -C PATH run --json \"fix issue 419\"\n  mcg -C PATH run --stream-json \"fix issue 419\""
+)]
 struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:7777")]
     host: String,
     /// Override the local daemon bearer-token file.
     #[arg(long)]
     token_file: Option<PathBuf>,
+    /// Select the project directory for consumer work (defaults to the current directory).
+    #[arg(short = 'C', long = "project", global = true)]
+    project: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,10 +173,19 @@ enum Command {
         #[command(subcommand)]
         command: OrganizationCommand,
     },
-    /// Plan, inspect, start, and cancel durable agent runs.
+    /// Run a consumer goal or manage lower-level durable agent runs.
     Run {
         #[command(subcommand)]
-        command: RunCommand,
+        command: Option<RunCommand>,
+        /// Emit a completed consumer submission as one JSON document.
+        #[arg(long)]
+        json: bool,
+        /// Emit task events and the final result as newline-delimited JSON.
+        #[arg(long, conflicts_with = "json")]
+        stream_json: bool,
+        /// Consumer goal when no administrative run subcommand is supplied.
+        #[arg(value_name = "GOAL", num_args = 0..)]
+        goal: Vec<String>,
     },
     /// Configure and discover model providers.
     Provider {
@@ -196,6 +222,9 @@ enum Command {
         #[command(subcommand)]
         command: ExperimentCommand,
     },
+    /// Treat an otherwise unknown command line as a consumer goal.
+    #[command(external_subcommand)]
+    Prompt(Vec<OsString>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1167,10 +1196,11 @@ impl From<TaskStateArg> for TaskState {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // Keeps offline recovery, authentication, and all CLI modes visible together.
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = AppConfig::default();
-    if let Command::Backup { command } = &cli.command {
+    if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
                 print_backup_bundle(&verify_backup_bundle(bundle)?, *json)?;
@@ -1203,49 +1233,483 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let host = cli.host.trim_end_matches('/');
     let client = reqwest::Client::new();
+    let project = cli.project.unwrap_or(std::env::current_dir()?);
 
     match cli.command {
-        Command::Status { json } => run_status(&client, host, token.trim(), json).await?,
-        Command::Doctor { json, strict } => {
+        Some(Command::Status { json }) => run_status(&client, host, token.trim(), json).await?,
+        Some(Command::Doctor { json, strict }) => {
             run_doctor(&client, host, token.trim(), json, strict).await?;
         }
-        Command::Settings { command } => {
+        Some(Command::Settings { command }) => {
             run_settings(&client, host, token.trim(), command).await?;
         }
-        Command::Backup { command } => {
+        Some(Command::Backup { command }) => {
             run_backup(&client, host, token.trim(), command).await?;
         }
-        Command::Task { command } => run_task(&client, host, token.trim(), command).await?,
-        Command::Approval { command } => run_approval(&client, host, token.trim(), command).await?,
-        Command::Project { command } => run_project(&client, host, token.trim(), command).await?,
-        Command::Organization { command } => {
+        Some(Command::Task { command }) => run_task(&client, host, token.trim(), command).await?,
+        Some(Command::Approval { command }) => {
+            run_approval(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Project { command }) => {
+            run_project(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Organization { command }) => {
             run_organization(&client, host, token.trim(), command).await?;
         }
-        Command::Run { command } => run_agent(&client, host, token.trim(), command).await?,
-        Command::Provider { command } => {
+        Some(Command::Run {
+            command: Some(command),
+            json,
+            stream_json,
+            goal,
+        }) => {
+            if json || stream_json || !goal.is_empty() {
+                return Err(
+                    "administrative run subcommands cannot be combined with a consumer goal or output mode"
+                        .into(),
+                );
+            }
+            run_agent(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Run {
+            command: None,
+            json,
+            stream_json,
+            goal,
+        }) => {
+            let goal = validated_goal(&goal.join(" "))?;
+            let supplemental = read_optional_piped_input()?;
+            run_consumer_submission(
+                &client,
+                host,
+                token.trim(),
+                &project,
+                &goal,
+                supplemental,
+                consumer_output(json, stream_json),
+            )
+            .await?;
+        }
+        Some(Command::Prompt(words)) => {
+            let goal = os_words_to_goal(words)?;
+            let supplemental = read_optional_piped_input()?;
+            run_consumer_submission(
+                &client,
+                host,
+                token.trim(),
+                &project,
+                &goal,
+                supplemental,
+                ConsumerOutput::Human,
+            )
+            .await?;
+        }
+        None if std::io::stdin().is_terminal() => {
+            run_interactive(&client, host, token.trim(), &project).await?;
+        }
+        None => {
+            let goal = validated_goal(&read_bounded_stdin()?)?;
+            run_consumer_submission(
+                &client,
+                host,
+                token.trim(),
+                &project,
+                &goal,
+                None,
+                ConsumerOutput::Human,
+            )
+            .await?;
+        }
+        Some(Command::Provider { command }) => {
             run_provider(&client, host, token.trim(), command).await?;
         }
-        Command::Mcp { command } => {
+        Some(Command::Mcp { command }) => {
             run_mcp(&client, host, token.trim(), command).await?;
         }
-        Command::Schedule { command } => {
+        Some(Command::Schedule { command }) => {
             run_schedule(&client, host, token.trim(), command).await?;
         }
-        Command::Platform { command } => {
+        Some(Command::Platform { command }) => {
             run_platform(&client, host, token.trim(), command).await?;
         }
-        Command::Site { command } => {
+        Some(Command::Site { command }) => {
             run_site(&client, host, token.trim(), command).await?;
         }
-        Command::Ssh { command } => {
+        Some(Command::Ssh { command }) => {
             run_ssh(&client, host, token.trim(), command).await?;
         }
-        Command::Experiment { command } => {
+        Some(Command::Experiment { command }) => {
             run_experiment(&client, host, token.trim(), command).await?;
         }
     }
 
     Ok(())
+}
+
+const MAX_CONSUMER_INPUT_BYTES: u64 = 1_048_576;
+const MAX_CONSUMER_GOAL_CHARS: usize = 32_768;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConsumerOutput {
+    Human,
+    Json,
+    StreamJson,
+}
+
+const fn consumer_output(json: bool, stream_json: bool) -> ConsumerOutput {
+    if json {
+        ConsumerOutput::Json
+    } else if stream_json {
+        ConsumerOutput::StreamJson
+    } else {
+        ConsumerOutput::Human
+    }
+}
+
+fn validated_goal(value: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let goal = value.trim();
+    if goal.is_empty() {
+        return Err("consumer goal cannot be empty".into());
+    }
+    if goal.chars().count() > MAX_CONSUMER_GOAL_CHARS {
+        return Err(
+            format!("consumer goal exceeds the {MAX_CONSUMER_GOAL_CHARS}-character limit").into(),
+        );
+    }
+    Ok(goal.to_owned())
+}
+
+fn os_words_to_goal(words: Vec<OsString>) -> Result<String, Box<dyn std::error::Error>> {
+    let words = words
+        .into_iter()
+        .map(|word| {
+            word.into_string()
+                .map_err(|_| "consumer goals must be valid Unicode")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validated_goal(&words.join(" "))
+}
+
+fn read_optional_piped_input() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    let input = read_bounded_stdin()?;
+    if input.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(input))
+    }
+}
+
+fn read_bounded_stdin() -> Result<String, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(MAX_CONSUMER_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONSUMER_INPUT_BYTES {
+        return Err(
+            format!("standard input exceeds the {MAX_CONSUMER_INPUT_BYTES}-byte limit").into(),
+        );
+    }
+    Ok(String::from_utf8(bytes).map_err(|_| "standard input must be valid UTF-8")?)
+}
+
+async fn run_interactive(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("MCG interactive mode · project {}", project.display());
+    println!("Enter a goal, or :quit to exit.");
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    loop {
+        print!("mcg> ");
+        std::io::stdout().flush()?;
+        let mut goal = String::new();
+        if input.read_line(&mut goal)? == 0 {
+            break;
+        }
+        let goal = goal.trim();
+        if matches!(goal, ":quit" | ":exit") {
+            break;
+        }
+        if goal.is_empty() {
+            continue;
+        }
+        let goal = validated_goal(goal)?;
+        if let Err(error) = run_consumer_submission(
+            client,
+            host,
+            token,
+            project,
+            &goal,
+            None,
+            ConsumerOutput::Human,
+        )
+        .await
+        {
+            eprintln!("Task could not be submitted: {error}");
+        }
+    }
+    Ok(())
+}
+
+async fn run_consumer_submission(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_root: &std::path::Path,
+    goal: &str,
+    supplemental_input: Option<String>,
+    output: ConsumerOutput,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let canonical_root = std::fs::canonicalize(project_root)?;
+    let root = canonical_root
+        .to_str()
+        .ok_or("project directory must be valid Unicode")?;
+    let project = resolve_consumer_project(client, host, token, root).await?;
+    let constraints = supplemental_input
+        .map(|input| vec![format!("Owner-supplied standard input:\n{input}")])
+        .unwrap_or_default();
+    let created: TaskMutationResponse = client
+        .post(format!("{host}/api/v1/tasks"))
+        .bearer_auth(token)
+        .json(&CreateTaskRequest {
+            goal: goal.to_owned(),
+            project_id: Some(project.project.project_id),
+            thread_id: None,
+            constraints,
+            success_conditions: Vec::new(),
+            risk: None,
+            budget: None,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    if output == ConsumerOutput::StreamJson {
+        println!(
+            "{}",
+            serde_json::json!({"type": "task", "task": &created.task})
+        );
+        std::io::stdout().flush()?;
+        return stream_consumer_launch(client, host, token, &created).await;
+    }
+
+    let result = launch_consumer_task(client, host, token, created.task.id).await?;
+    if output == ConsumerOutput::Json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Project: {}", project.project.root);
+        println!("Task: {}", result.task.id);
+        println!("Status: {}", result.task.state);
+        println!("{}", launch_execution_detail(&result.execution));
+        if let Some(text) = consumer_result_text(&result) {
+            println!("\n{text}");
+        }
+    }
+    ensure_consumer_success(&result)
+}
+
+async fn resolve_consumer_project(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    canonical_root: &str,
+) -> Result<ProjectMutation, Box<dyn std::error::Error>> {
+    let projects: ProjectListResponse = client
+        .get(format!("{host}/api/v1/projects"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if let Some(project) = projects
+        .projects
+        .into_iter()
+        .find(|project| paths_match_for_host(std::path::Path::new(&project.root), canonical_root))
+    {
+        return Ok(client
+            .post(format!(
+                "{host}/api/v1/projects/{}/refresh",
+                project.project_id
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?);
+    }
+    Ok(client
+        .post(format!("{host}/api/v1/projects"))
+        .bearer_auth(token)
+        .json(&DiscoverProjectRequest {
+            root: canonical_root.to_owned(),
+            project_id: None,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+fn paths_match_for_host(existing: &std::path::Path, canonical_root: &str) -> bool {
+    #[cfg(windows)]
+    {
+        existing
+            .to_string_lossy()
+            .eq_ignore_ascii_case(canonical_root)
+    }
+    #[cfg(not(windows))]
+    {
+        existing == std::path::Path::new(canonical_root)
+    }
+}
+
+async fn launch_consumer_task(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    task_id: TaskId,
+) -> Result<LaunchTaskResponse, Box<dyn std::error::Error>> {
+    Ok(client
+        .post(format!("{host}/api/v1/tasks/{task_id}/launch"))
+        .bearer_auth(token)
+        .json(&default_launch_request())
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+async fn stream_consumer_launch(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    created: &TaskMutationResponse,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .get(format!(
+            "{host}/api/v1/events/stream?after={}",
+            created.event.sequence
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut events = response.bytes_stream().eventsource();
+    let mut launch = Box::pin(launch_consumer_task(client, host, token, created.task.id));
+    let mut emitted = BTreeSet::new();
+    loop {
+        tokio::select! {
+            result = &mut launch => {
+                let result = result?;
+                let history: TaskEventsResponse = client
+                    .get(format!("{host}/api/v1/tasks/{}/events", created.task.id))
+                    .bearer_auth(token)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                for event in history.events {
+                    if event.sequence > created.event.sequence && emitted.insert(event.sequence) {
+                        print_consumer_event(&event)?;
+                    }
+                }
+                println!("{}", serde_json::json!({"type": "result", "result": &result}));
+                std::io::stdout().flush()?;
+                return ensure_consumer_success(&result);
+            }
+            event = events.next() => {
+                let Some(event) = event else {
+                    return Err("daemon event stream ended before task launch completed".into());
+                };
+                let event = event?;
+                if event.data.is_empty() {
+                    continue;
+                }
+                let envelope: EventEnvelope = serde_json::from_str(&event.data)?;
+                if envelope.task_id == Some(created.task.id) && emitted.insert(envelope.sequence) {
+                    print_consumer_event(&envelope)?;
+                }
+            }
+        }
+    }
+}
+
+fn print_consumer_event(event: &EventEnvelope) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::json!({"type": "event", "event": event}));
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn default_launch_request() -> LaunchTaskRequest {
+    LaunchTaskRequest {
+        target_path: None,
+        context_token_budget: 8_192,
+        requested_tools: Vec::new(),
+        estimated_output_tokens: 4_096,
+        max_model_calls: 8,
+    }
+}
+
+fn launch_execution_detail(execution: &LaunchExecution) -> &str {
+    match execution {
+        LaunchExecution::NotStarted { detail }
+        | LaunchExecution::AwaitingApproval { detail }
+        | LaunchExecution::AwaitingEvaluation { detail }
+        | LaunchExecution::Blocked { detail }
+        | LaunchExecution::Completed { detail }
+        | LaunchExecution::Failed { detail } => detail,
+    }
+}
+
+fn ensure_consumer_success(result: &LaunchTaskResponse) -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(result.execution, LaunchExecution::Completed { .. }) {
+        Ok(())
+    } else {
+        Err(format!(
+            "consumer task {} requires attention: {}",
+            result.task.id,
+            launch_execution_detail(&result.execution)
+        )
+        .into())
+    }
+}
+
+fn consumer_result_text(result: &LaunchTaskResponse) -> Option<String> {
+    let text = result
+        .run
+        .results
+        .iter()
+        .rev()
+        .flat_map(|result| result.response.output.iter().rev())
+        .find_map(|item| match item {
+            OutputItem::Message {
+                role: MessageRole::Assistant,
+                content,
+            } => Some(
+                content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })?;
+    (!text.trim().is_empty()).then_some(text)
 }
 
 async fn run_ssh(
@@ -2987,13 +3451,7 @@ async fn run_consumer_task(
     let result: LaunchTaskResponse = client
         .post(format!("{host}/api/v1/tasks/{task_id}/{action}"))
         .bearer_auth(token)
-        .json(&LaunchTaskRequest {
-            target_path: None,
-            context_token_budget: 8_192,
-            requested_tools: Vec::new(),
-            estimated_output_tokens: 4_096,
-            max_model_calls: 8,
-        })
+        .json(&default_launch_request())
         .send()
         .await?
         .error_for_status()?
@@ -4089,6 +4547,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn consumer_modes_preserve_bare_project_json_stream_and_interactive_forms() {
+        let bare =
+            Cli::try_parse_from(["mcg", "fix the failing tests"]).expect("bare consumer goal");
+        assert!(matches!(
+            bare.command,
+            Some(Command::Prompt(words))
+                if words == vec![OsString::from("fix the failing tests")]
+        ));
+
+        let structured = Cli::try_parse_from([
+            "mcg",
+            "-C",
+            "fixture-project",
+            "run",
+            "--json",
+            "fix",
+            "issue",
+            "419",
+        ])
+        .expect("structured consumer goal");
+        assert_eq!(structured.project, Some(PathBuf::from("fixture-project")));
+        assert!(matches!(
+            structured.command,
+            Some(Command::Run {
+                command: None,
+                json: true,
+                stream_json: false,
+                goal,
+            }) if goal == ["fix", "issue", "419"]
+        ));
+
+        let streaming = Cli::try_parse_from(["mcg", "run", "--stream-json", "build a website"])
+            .expect("streaming consumer goal");
+        assert!(matches!(
+            streaming.command,
+            Some(Command::Run {
+                command: None,
+                json: false,
+                stream_json: true,
+                ..
+            })
+        ));
+
+        let interactive = Cli::try_parse_from(["mcg"]).expect("interactive mode");
+        assert!(interactive.command.is_none());
+        assert!(Cli::try_parse_from(["mcg", "run", "--json", "--stream-json", "invalid"]).is_err());
+    }
+
+    #[test]
     fn evaluation_file_command_is_available_for_replayable_evidence() {
         let cli = Cli::try_parse_from([
             "mcg",
@@ -4099,9 +4606,10 @@ mod tests {
         ])
         .expect("evaluation command");
         assert!(matches!(
-            cli.command,
+            cli.command.expect("command"),
             Command::Run {
-                command: RunCommand::Evaluate { id, file }
+                command: Some(RunCommand::Evaluate { id, file }),
+                ..
             } if id == "00000000-0000-0000-0000-000000000001"
                 && file == std::path::Path::new("evaluation.json")
         ));
@@ -4132,7 +4640,7 @@ mod tests {
         ])
         .expect("interval command");
         assert!(matches!(
-            interval.command,
+            interval.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::CreateInterval {
                     seconds: 300,
@@ -4152,7 +4660,7 @@ mod tests {
         ])
         .expect("once command");
         assert!(matches!(
-            once.command,
+            once.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::CreateOnce { .. }
             }
@@ -4173,7 +4681,7 @@ mod tests {
         ])
         .expect("cron command");
         assert!(matches!(
-            cron.command,
+            cron.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::CreateCron { expression, .. }
             } if expression == "0 2 * * *"
@@ -4191,7 +4699,7 @@ mod tests {
         ])
         .expect("watch command");
         assert!(matches!(
-            watch.command,
+            watch.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::CreateWatch {
                     poll_seconds: 15,
@@ -4210,7 +4718,7 @@ mod tests {
         ])
         .expect("event command");
         assert!(matches!(
-            event.command,
+            event.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::CreateEvent { event_kind, .. }
             } if event_kind == "task_failed"
@@ -4229,7 +4737,7 @@ mod tests {
         ])
         .expect("heartbeat command");
         assert!(matches!(
-            heartbeat.command,
+            heartbeat.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::CreateHeartbeat {
                     idle_seconds: 600,
@@ -4254,7 +4762,7 @@ mod tests {
         ])
         .expect("wake command");
         assert!(matches!(
-            wake.command,
+            wake.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::Wake {
                     severity: NotificationSeverityArg::High,
@@ -4265,7 +4773,7 @@ mod tests {
         let notifications = Cli::try_parse_from(["mcg", "schedule", "notifications", "--all"])
             .expect("notifications command");
         assert!(matches!(
-            notifications.command,
+            notifications.command.expect("command"),
             Command::Schedule {
                 command: ScheduleCommand::Notifications { all: true }
             }
@@ -4289,7 +4797,7 @@ mod tests {
         ])
         .expect("platform request");
         assert!(matches!(
-            request.command,
+            request.command.expect("command"),
             Command::Platform {
                 command: PlatformCommand::RequestBrowser {
                     session_id: Some(id),
@@ -4302,7 +4810,7 @@ mod tests {
         let capabilities = Cli::try_parse_from(["mcg", "platform", "capabilities", "--json"])
             .expect("capabilities");
         assert!(matches!(
-            capabilities.command,
+            capabilities.command.expect("command"),
             Command::Platform {
                 command: PlatformCommand::Capabilities { json: true }
             }
@@ -4310,7 +4818,7 @@ mod tests {
         let attach = Cli::try_parse_from(["mcg", "platform", "attach", session_id, "--visible"])
             .expect("attach");
         assert!(matches!(
-            attach.command,
+            attach.command.expect("command"),
             Command::Platform {
                 command: PlatformCommand::Attach { visible: true, .. }
             }
@@ -4325,7 +4833,7 @@ mod tests {
         ])
         .expect("navigate");
         assert!(matches!(
-            navigate.command,
+            navigate.command.expect("command"),
             Command::Platform {
                 command: PlatformCommand::Navigate { json: true, .. }
             }
@@ -4358,7 +4866,7 @@ mod tests {
         ])
         .expect("Site registration command");
         assert!(matches!(
-            register.command,
+            register.command.expect("command"),
             Command::Site {
                 command: SiteCommand::Register {
                     site_id: Some(id),
@@ -4383,7 +4891,7 @@ mod tests {
         ])
         .expect("Site deployment command");
         assert!(matches!(
-            deploy.command,
+            deploy.command.expect("command"),
             Command::Site {
                 command: SiteCommand::Deploy { json: true, .. }
             }
@@ -4402,7 +4910,7 @@ mod tests {
         ])
         .expect("Site monitor command");
         assert!(matches!(
-            monitor.command,
+            monitor.command.expect("command"),
             Command::Site {
                 command: SiteCommand::Monitor {
                     interval_seconds: 60,
@@ -4418,7 +4926,7 @@ mod tests {
         let candidate = Cli::try_parse_from(["mcg", "experiment", "candidate", "candidate.json"])
             .expect("candidate command");
         assert!(matches!(
-            candidate.command,
+            candidate.command.expect("command"),
             Command::Experiment {
                 command: ExperimentCommand::Candidate { request }
             } if request == std::path::Path::new("candidate.json")
@@ -4433,7 +4941,7 @@ mod tests {
         ])
         .expect("transition command");
         assert!(matches!(
-            transition.command,
+            transition.command.expect("command"),
             Command::Experiment {
                 command: ExperimentCommand::Transition {
                     expected: ExperimentStateArg::Running,
@@ -4461,7 +4969,7 @@ mod tests {
         ])
         .expect("settings set command");
         assert!(matches!(
-            set.command,
+            set.command.expect("command"),
             Command::Settings {
                 command: SettingsCommand::Set {
                     advanced_mode: Some(true),
@@ -4474,7 +4982,7 @@ mod tests {
         let history = Cli::try_parse_from(["mcg", "settings", "history", "--json"])
             .expect("settings history command");
         assert!(matches!(
-            history.command,
+            history.command.expect("command"),
             Command::Settings {
                 command: SettingsCommand::History { json: true }
             }
@@ -4493,7 +5001,7 @@ mod tests {
         ])
         .expect("backup create command");
         assert!(matches!(
-            create.command,
+            create.command.expect("command"),
             Command::Backup {
                 command: BackupCommand::Create {
                     backup_id: Some(_),
@@ -4504,7 +5012,7 @@ mod tests {
         let restore = Cli::try_parse_from(["mcg", "backup", "restore", "owner.mcgb", "--confirm"])
             .expect("backup restore command");
         assert!(matches!(
-            restore.command,
+            restore.command.expect("command"),
             Command::Backup {
                 command: BackupCommand::Restore { confirm: true, .. }
             }
@@ -4516,7 +5024,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["mcg", "doctor", "--json", "--strict"]).expect("doctor command");
         assert!(matches!(
-            cli.command,
+            cli.command.expect("command"),
             Command::Doctor {
                 json: true,
                 strict: true
