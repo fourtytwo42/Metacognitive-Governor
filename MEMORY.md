@@ -6,7 +6,7 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Complete M9 measured metacognitive improvement after establishing its durable supervision/experiment foundation.
-- Last meaningful change: Exact commit `90845d2` has the full M9 experiment lifecycle across authenticated REST, CLI, MCP, Tauri, resumable events, and the desktop Improvement workspace. Windows local qualification is green; a cold-build timing race in the scheduler restart test was corrected to compare against the completed restart clock.
+- Last meaningful change: Exact commit `a52db8f` has the full M9 experiment lifecycle across authenticated REST, CLI, MCP, Tauri, resumable events, and the desktop Improvement workspace. Complete Windows and Ubuntu local qualification is green; a cold-build timing race in the scheduler restart test was corrected to compare against the completed restart clock.
 - Next step: Add automatic fast/medium/slow observation production and candidate/shadow/benchmark orchestration over real runs, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
 - Blockers: None documented.
 
@@ -142,6 +142,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-15: Exact pushed commit `a52db8f` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 362 seconds from `/home/hendo420/mcg-worktree-a52db8f`: dependency audit, formatting, strict workspace Clippy, every Rust unit/integration/doc test, live GPU45/browser/computer/SSH fixtures, documentation, frontend typecheck, 21 Vitest flows, production frontend, native Tauri/GTK, and two Playwright flows. `.source-commit`, `.qualified-commit`, `verify-final.exit=0`, and `verify-linux.log` remain with the source. Before staging, only the prior exact `1cb32b2` worktree's verified regenerable target cache was cleaned, restoring 33 GiB; its source/evidence/artifacts remain. No GitHub-hosted compute ran.
 
 - 2026-08-15: Exact source commit `90845d27101581b0cefc092e3294a8afd216f479` passed the complete Windows gate in equivalent preserved-daemon lanes: strict workspace formatting/Clippy; every Rust unit/integration/doc test including 45 API, 31 storage, 10 runtime, 8 CLI, three daemon restart, live GPU45/browser/computer/SSH fixtures; docs; frontend typecheck, 21 Vitest flows, production build, native Tauri debug build, and two Playwright flows. The normal verifier could not replace the owner daemon locked on port 7777, so Rust ran in an isolated target and native Tauri/Playwright then ran against the shared cache without touching either live daemon. The isolated cold build exposed a pre-existing test-clock race (`fixture start + 1s` could precede slow startup recovery); the test now reclaims at `completed restart + 1s`. After the full Rust suite passed, only the exact disposable 22.5 GiB target was cleaned, and the remaining native/E2E gates passed. No GitHub-hosted compute ran.
 
