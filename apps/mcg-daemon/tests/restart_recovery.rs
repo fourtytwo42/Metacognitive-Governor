@@ -76,7 +76,7 @@ fn in_flight_schedule_reclaims_same_task_immediately_after_restart() {
     let recovered = AppRuntime::open(config).expect("recover runtime");
     assert_eq!(recovered.status().recovered_schedule_occurrences, 1);
     let replay = recovered
-        .claim_due_schedule(now + Duration::seconds(1), "second-daemon", 300)
+        .claim_due_schedule(Utc::now() + Duration::seconds(1), "second-daemon", 300)
         .expect("reclaim occurrence")
         .expect("recovered occurrence");
     assert_eq!(replay.task.id, original.task.id);
