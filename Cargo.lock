@@ -3435,6 +3435,7 @@ name = "mcg-domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mcg-plugin-protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3561,6 +3562,7 @@ dependencies = [
  "mcg-domain",
  "mcg-events",
  "mcg-mcp",
+ "mcg-plugin-protocol",
  "mcg-policy",
  "mcg-projects",
  "mcg-providers",
@@ -3597,6 +3599,7 @@ dependencies = [
  "mcg-domain",
  "mcg-events",
  "mcg-mcp",
+ "mcg-plugin-protocol",
  "mcg-projects",
  "mcg-providers",
  "mcg-tools",

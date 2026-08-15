@@ -29,6 +29,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
 tempfile.workspace = true
 
 [lints]

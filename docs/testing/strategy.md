@@ -266,6 +266,12 @@ The daemon-side dependency shape is also a release contract:
 Wasmtime, and WASI dependencies. The executable's required `executor` feature is
 tested separately with the full sandbox kernel.
 
+Catalog tests prove migration/reopen durability, atomic immutable revisions,
+optimistic enable-state conflicts, exact invocation replay, immutable start and
+terminal history, and crash conversion from `running` to `uncertain`. Diagnostic
+inventories expose only plugin/invocation counts. Verified-signature claims are
+negative-tested as unavailable until the cryptographic verifier boundary exists.
+
 ## Coverage and release policy
 
 Coverage is a diagnostic, not a substitute for outcomes. Critical policy, state

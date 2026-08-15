@@ -56,6 +56,26 @@ feature and links `mcg-plugins` plus Wasmtime. This split is structural: the
 daemon can launch and validate the sidecar without embedding the untrusted-module
 compiler/runtime in its own process.
 
+## Durable catalog and invocation evidence
+
+Storage migration 26 records each sandboxed module as an immutable revision
+bound to its validated manifest, exact lowercase SHA-256, byte size, provenance,
+and signature state. A separate optimistic-revision head controls which revision
+is active and enabled. Reusing a revision identity with different content,
+invoking a disabled or stale revision, mutating history, or deleting catalog
+evidence fails closed. Runtime installation accepts unsigned local/registry
+imports but refuses a `verified` signature claim until a trusted cryptographic
+verifier exists; consumer routing remains disabled regardless.
+
+Invocation projections retain identities, task linkage, input/result hashes,
+bounded error codes, and timestamps rather than prompt or output content. Start
+and terminal snapshots are appended to immutable history in the same transaction
+as their projection change. Exact retries are observation-only. Runtime startup
+turns every interrupted `running` invocation into terminal `uncertain` evidence,
+and it never retries that authority automatically. Content-addressed module/result
+bytes will use the existing artifact store when the installer and runtime binding
+are added.
+
 ## Remaining integration gates
 
 The execution kernel is only the first M10 boundary. Before plugins become a
@@ -63,8 +83,8 @@ consumer feature, MCG still must add:
 
 - daemon/runtime binding to the package-local parent client, including durable
   invocation identity and crash/timeout recording as non-replayable uncertainty;
-- content-addressed module installation, signature/provenance policy, immutable
-  manifest revisions, enable/disable state, and invocation audit in SQLite;
+- content-addressed module/result file installation and the trusted signature
+  verifier that feed the existing durable catalog/audit schemas;
 - explicit broker-issued capability adapters instead of ambient WASI grants;
 - REST, MCP, CLI, Tauri, and simple/advanced desktop management surfaces;
 - backup/restore, migration, crash-recovery, adversarial, package, and native UAT;

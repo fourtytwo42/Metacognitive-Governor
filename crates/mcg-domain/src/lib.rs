@@ -85,6 +85,8 @@ domain_id!(SupervisionObservationId);
 domain_id!(ExperimentId);
 domain_id!(ExperimentBenchmarkId);
 domain_id!(ExperimentDecisionId);
+domain_id!(PluginRevisionId);
+domain_id!(PluginInvocationId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.
@@ -923,6 +925,83 @@ pub struct ScheduleOccurrence {
     pub detail: Option<String>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+pub const PLUGIN_CATALOG_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginInstallSource {
+    LocalImport,
+    Registry { registry: String, package: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSignatureState {
+    Unsigned,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSignature {
+    pub state: PluginSignatureState,
+    pub scheme: Option<String>,
+    pub signer: Option<String>,
+    pub signature_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRevision {
+    pub schema_version: u16,
+    pub id: PluginRevisionId,
+    pub manifest: mcg_plugin_protocol::PluginManifest,
+    pub module_sha256: String,
+    pub module_size_bytes: u64,
+    pub source: PluginInstallSource,
+    pub signature: PluginSignature,
+    pub installed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInstallation {
+    pub schema_version: u16,
+    pub plugin_id: String,
+    pub active_revision_id: PluginRevisionId,
+    pub enabled: bool,
+    pub revision: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginInvocationState {
+    Running,
+    Succeeded,
+    Failed,
+    Uncertain,
+}
+
+impl PluginInvocationState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Uncertain)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInvocationRecord {
+    pub schema_version: u16,
+    pub id: PluginInvocationId,
+    pub plugin_id: String,
+    pub plugin_revision_id: PluginRevisionId,
+    pub task_id: Option<TaskId>,
+    pub input_sha256: String,
+    pub state: PluginInvocationState,
+    pub result_sha256: Option<String>,
+    pub error_code: Option<String>,
+    pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 

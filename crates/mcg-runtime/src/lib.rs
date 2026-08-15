@@ -126,6 +126,7 @@ pub struct RuntimeStatus {
     pub recovered_site_deployments: u64,
     pub recovered_ssh_operations: u64,
     pub recovered_shadow_workspaces: u64,
+    pub recovered_plugin_invocations: u64,
 }
 
 pub const DIAGNOSTICS_SCHEMA_VERSION: u16 = 1;
@@ -159,6 +160,8 @@ pub struct DiagnosticCounts {
     pub mcp_tools: u64,
     pub schedules: u64,
     pub pending_approvals: u64,
+    pub plugins: u64,
+    pub plugin_invocations: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -762,6 +765,7 @@ pub struct AppRuntime {
     recovered_site_deployments: u64,
     recovered_ssh_operations: u64,
     recovered_shadow_workspaces: u64,
+    recovered_plugin_invocations: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
     browser_sessions: Arc<PersistentBrowserManager>,
     computer_sessions: Arc<ComputerUseManager>,
@@ -812,6 +816,9 @@ impl AppRuntime {
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
         let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
+        let recovered_plugin_invocations = store
+            .recover_plugin_invocations(startup_now)?
+            .invocations_marked_uncertain;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -840,6 +847,7 @@ impl AppRuntime {
             recovered_site_deployments,
             recovered_ssh_operations,
             recovered_shadow_workspaces,
+            recovered_plugin_invocations,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -889,6 +897,9 @@ impl AppRuntime {
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
         let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
+        let recovered_plugin_invocations = store
+            .recover_plugin_invocations(startup_now)?
+            .invocations_marked_uncertain;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -919,6 +930,7 @@ impl AppRuntime {
             recovered_site_deployments,
             recovered_ssh_operations,
             recovered_shadow_workspaces,
+            recovered_plugin_invocations,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -946,6 +958,7 @@ impl AppRuntime {
         recovered_site_deployments: u64,
         recovered_ssh_operations: u64,
         recovered_shadow_workspaces: u64,
+        recovered_plugin_invocations: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
         browser_sessions: Arc<PersistentBrowserManager>,
         computer_sessions: Arc<ComputerUseManager>,
@@ -972,6 +985,7 @@ impl AppRuntime {
             recovered_site_deployments,
             recovered_ssh_operations,
             recovered_shadow_workspaces,
+            recovered_plugin_invocations,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -1020,6 +1034,7 @@ impl AppRuntime {
             recovered_site_deployments: self.recovered_site_deployments,
             recovered_ssh_operations: self.recovered_ssh_operations,
             recovered_shadow_workspaces: self.recovered_shadow_workspaces,
+            recovered_plugin_invocations: self.recovered_plugin_invocations,
         }
     }
 
@@ -1037,6 +1052,8 @@ impl AppRuntime {
             events: storage.event_count,
             tasks: storage.task_count,
             artifacts: storage.artifact_count,
+            plugins: storage.plugin_count,
+            plugin_invocations: storage.plugin_invocation_count,
             ..DiagnosticCounts::default()
         };
         let mut add_check = |code: &str,
@@ -9388,6 +9405,73 @@ mod tests {
         assert!(auth.verifies(TEST_TOKEN));
         assert!(!auth.verifies("wrong-token"));
         assert!(!format!("{auth:?}").contains(TEST_TOKEN));
+    }
+
+    #[test]
+    fn interrupted_plugin_invocation_becomes_uncertain_on_runtime_restart() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let config = AppConfig::default().with_data_directory(directory.path());
+        let installed_at = Utc::now();
+        let revision = mcg_domain::PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: mcg_plugin_protocol::PLUGIN_SCHEMA_VERSION,
+                id: "example.runtime-recovery".into(),
+                display_name: "Runtime recovery fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: "a".repeat(64),
+            module_size_bytes: 128,
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at,
+        };
+        let invocation = mcg_domain::PluginInvocationRecord {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginInvocationId::new(),
+            plugin_id: revision.manifest.id.clone(),
+            plugin_revision_id: revision.id,
+            task_id: None,
+            input_sha256: "b".repeat(64),
+            state: mcg_domain::PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at: installed_at + Duration::seconds(1),
+            completed_at: None,
+        };
+        {
+            let runtime = AppRuntime::open(config.clone()).expect("runtime");
+            let mut store = runtime.store().expect("store");
+            store
+                .install_plugin_revision(&revision, true)
+                .expect("install plugin");
+            store
+                .begin_plugin_invocation(&invocation)
+                .expect("begin invocation");
+        }
+
+        let reopened = AppRuntime::open(config).expect("reopen runtime");
+
+        assert_eq!(reopened.status().recovered_plugin_invocations, 1);
+        let recovered = reopened
+            .store()
+            .expect("store")
+            .plugin_invocation(invocation.id)
+            .expect("invocation")
+            .expect("stored invocation");
+        assert_eq!(
+            recovered.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(recovered.error_code.as_deref(), Some("runner_interrupted"));
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod backup;
 mod experiments;
 mod mcp;
 mod platform;
+mod plugins;
 mod providers;
 mod scheduler;
 mod settings;
@@ -42,11 +43,12 @@ pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
     CandidateRevisionMutation, ExperimentMutation,
 };
+pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 25;
+pub const STORAGE_SCHEMA_VERSION: i64 = 26;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -907,6 +909,96 @@ BEFORE DELETE ON user_settings_revisions BEGIN
 END;
 ";
 
+const MIGRATION_26: &str = r"
+CREATE TABLE IF NOT EXISTS plugin_revisions (
+    revision_id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL,
+    module_sha256 TEXT NOT NULL,
+    revision_json TEXT NOT NULL,
+    installed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plugin_revisions_history
+    ON plugin_revisions(plugin_id, installed_at, revision_id);
+CREATE TRIGGER IF NOT EXISTS plugin_revisions_no_update
+BEFORE UPDATE ON plugin_revisions BEGIN
+    SELECT RAISE(FAIL, 'plugin revisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS plugin_revisions_no_delete
+BEFORE DELETE ON plugin_revisions BEGIN
+    SELECT RAISE(FAIL, 'plugin revisions are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS plugin_installations (
+    plugin_id TEXT PRIMARY KEY,
+    active_revision_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    revision INTEGER NOT NULL,
+    installation_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(active_revision_id) REFERENCES plugin_revisions(revision_id)
+);
+CREATE TRIGGER IF NOT EXISTS plugin_installations_no_delete
+BEFORE DELETE ON plugin_installations BEGIN
+    SELECT RAISE(FAIL, 'plugin installations cannot be deleted');
+END;
+
+CREATE TABLE IF NOT EXISTS plugin_invocations (
+    invocation_id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL,
+    plugin_revision_id TEXT NOT NULL,
+    task_id TEXT,
+    input_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    invocation_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(plugin_revision_id) REFERENCES plugin_revisions(revision_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS plugin_invocations_plugin_time
+    ON plugin_invocations(plugin_id, started_at, invocation_id);
+CREATE INDEX IF NOT EXISTS plugin_invocations_task_time
+    ON plugin_invocations(task_id, started_at, invocation_id);
+CREATE TRIGGER IF NOT EXISTS plugin_invocations_no_delete
+BEFORE DELETE ON plugin_invocations BEGIN
+    SELECT RAISE(FAIL, 'plugin invocations cannot be deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS plugin_invocations_guard_update
+BEFORE UPDATE ON plugin_invocations
+WHEN OLD.state <> 'running'
+  OR NEW.state NOT IN ('succeeded', 'failed', 'uncertain')
+  OR NEW.invocation_id <> OLD.invocation_id
+  OR NEW.plugin_id <> OLD.plugin_id
+  OR NEW.plugin_revision_id <> OLD.plugin_revision_id
+  OR NEW.task_id IS NOT OLD.task_id
+  OR NEW.input_sha256 <> OLD.input_sha256
+  OR NEW.started_at <> OLD.started_at
+  OR NEW.completed_at IS NULL
+BEGIN
+    SELECT RAISE(FAIL, 'invalid plugin invocation transition');
+END;
+
+CREATE TABLE IF NOT EXISTS plugin_invocation_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    invocation_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    invocation_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    UNIQUE(invocation_id, state),
+    FOREIGN KEY(invocation_id) REFERENCES plugin_invocations(invocation_id)
+);
+CREATE INDEX IF NOT EXISTS plugin_invocation_events_history
+    ON plugin_invocation_events(invocation_id, sequence);
+CREATE TRIGGER IF NOT EXISTS plugin_invocation_events_no_update
+BEFORE UPDATE ON plugin_invocation_events BEGIN
+    SELECT RAISE(FAIL, 'plugin invocation history is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS plugin_invocation_events_no_delete
+BEFORE DELETE ON plugin_invocation_events BEGIN
+    SELECT RAISE(FAIL, 'plugin invocation history is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -941,6 +1033,10 @@ pub enum StorageError {
     SshHostNotFound(mcg_domain::SshHostId),
     #[error("backup {0} was not found")]
     BackupNotFound(Uuid),
+    #[error("plugin {0} was not found")]
+    PluginNotFound(String),
+    #[error("plugin revision {0} was not found")]
+    PluginRevisionNotFound(mcg_domain::PluginRevisionId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -961,6 +1057,8 @@ pub struct StorageDiagnostics {
     pub event_count: u64,
     pub task_count: u64,
     pub artifact_count: u64,
+    pub plugin_count: u64,
+    pub plugin_invocation_count: u64,
 }
 
 pub struct SqliteEventStore {
@@ -1046,6 +1144,7 @@ impl SqliteEventStore {
             (23_i64, MIGRATION_23),
             (24_i64, MIGRATION_24),
             (25_i64, MIGRATION_25),
+            (26_i64, MIGRATION_26),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -2216,6 +2315,8 @@ impl SqliteEventStore {
             event_count: count(&self.connection, "events")?,
             task_count: count(&self.connection, "tasks")?,
             artifact_count: count(&self.connection, "artifacts")?,
+            plugin_count: count(&self.connection, "plugin_installations")?,
+            plugin_invocation_count: count(&self.connection, "plugin_invocations")?,
         })
     }
 }
