@@ -8,7 +8,12 @@ fi
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_app="${1:-$repository_root/target/release/bundle/macos/MCG.app}"
-dmg="${2:-$repository_root/target/release/bundle/dmg/MCG_0.1.0_x64.dmg}"
+case "$(uname -m)" in
+  x86_64) bundle_arch=x64 ;;
+  arm64|aarch64) bundle_arch=aarch64 ;;
+  *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+dmg="${2:-$repository_root/target/release/bundle/dmg/MCG_0.1.0_${bundle_arch}.dmg}"
 
 [[ -d "$source_app" ]] || { echo "Missing app bundle: $source_app" >&2; exit 1; }
 [[ -f "$dmg" ]] || { echo "Missing disk image: $dmg" >&2; exit 1; }

@@ -54,7 +54,7 @@ macOS:
 ./scripts/build-release-macos.sh
 ```
 
-The owner-controlled macOS builder creates `MCG.app` and a DMG, then writes the same exact-commit SHA-256 manifest for the distributable disk image. It never substitutes Linux cross-compilation for Apple's native bundle, code-signing, LaunchServices, Keychain, or Gatekeeper behavior.
+The owner-controlled macOS builder creates `MCG.app`, stages it with an `/Applications` shortcut, and uses native `hdiutil` to create and verify a headless DMG before writing the same exact-commit SHA-256 manifest. It never depends on Finder automation or substitutes Linux cross-compilation for Apple's native bundle, code-signing, LaunchServices, Keychain, or Gatekeeper behavior.
 
 Run package UAT from the signed or explicitly owner-approved pre-release artifact:
 

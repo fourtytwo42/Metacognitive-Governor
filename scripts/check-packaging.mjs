@@ -59,10 +59,11 @@ if (config.bundle.windows?.nsis?.installMode !== "currentUser") {
   throw new Error("Windows installation must stay per-user until a privileged service design is approved.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, windowsPrepare, linuxPrepare, notices, apache, wasmtime] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, windowsPrepare, linuxPrepare, notices, apache, wasmtime] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
+  read("scripts/create-macos-dmg.sh"),
   read("scripts/prepare-sidecars.ps1"),
   read("scripts/prepare-sidecars.sh"),
   read("THIRD_PARTY_NOTICES.md"),
@@ -71,7 +72,11 @@ const [windowsBuilder, linuxBuilder, macosBuilder, windowsPrepare, linuxPrepare,
 ]);
 requireText(windowsBuilder, "--bundles nsis", "Windows release builder");
 requireText(linuxBuilder, "--bundles deb,appimage", "Linux release builder");
-requireText(macosBuilder, "--bundles app,dmg", "macOS release builder");
+requireText(macosBuilder, "--bundles app", "macOS release builder");
+requireText(macosBuilder, "create-macos-dmg.sh", "macOS release builder");
+for (const invariant of ["hdiutil create", "hdiutil verify", "staging/MCG.app", "staging/Applications", "Refusing to replace existing disk image", "macOS disk images must be created on macOS"]) {
+  requireText(macosDmgBuilder, invariant, "macOS disk-image builder");
+}
 requireText(windowsBuilder, "tauri.release.conf.json", "Windows release builder");
 requireText(linuxBuilder, "tauri.release.conf.json", "Linux release builder");
 requireText(macosBuilder, "tauri.release.conf.json", "macOS release builder");
@@ -95,7 +100,7 @@ if (wasmtimeLicenseDigest !== "23823edf263108ef7acbefde293225117b4784759c9c5bcd0
   throw new Error("Wasmtime 45.0.3 license payload does not match the reviewed upstream text.");
 }
 
-for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/build-release-macos.sh", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh"]) {
+for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/build-release-macos.sh", "scripts/create-macos-dmg.sh", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh"]) {
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
