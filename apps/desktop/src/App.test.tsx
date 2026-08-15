@@ -78,6 +78,7 @@ const client = vi.hoisted(() => ({
   ,listBackups: vi.fn()
   ,createBackup: vi.fn()
   ,verifyBackup: vi.fn()
+  ,runDiagnostics: vi.fn()
   ,localServiceStatus: vi.fn()
 }));
 
@@ -158,6 +159,7 @@ vi.mock("./desktop-client", () => ({
   listBackups: client.listBackups,
   createBackup: client.createBackup,
   verifyBackup: client.verifyBackup,
+  runDiagnostics: client.runDiagnostics,
   getLocalServiceStatus: client.localServiceStatus
 }));
 
@@ -241,6 +243,7 @@ beforeEach(() => {
   client.listBackups.mockReset();
   client.createBackup.mockReset();
   client.verifyBackup.mockReset();
+  client.runDiagnostics.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.proxyUsage.mockResolvedValue({
@@ -293,6 +296,20 @@ beforeEach(() => {
     revisions: [{ settings, reason: "initial settings", changed_at: settings.updated_at }]
   });
   client.listBackups.mockResolvedValue({ backups: [] });
+  client.runDiagnostics.mockResolvedValue({
+    schema_version: 1,
+    generated_at: "2026-08-15T00:00:00Z",
+    service: "mcg-daemon",
+    version: "0.1.0",
+    os: "windows",
+    architecture: "x86_64",
+    overall: "warning",
+    checks: [
+      { code: "database_integrity", label: "Database integrity", severity: "pass", detail: "SQLite quick-check completed successfully." },
+      { code: "portable_backups", label: "Portable backups", severity: "warning", detail: "No portable backup has been created yet.", remediation: "Create and retain a portable backup before relying on the installation." }
+    ],
+    counts: { events: 4, tasks: 1, artifacts: 0, backups: 0, providers: 0, models: 0, mcp_connections: 0, mcp_tools: 0, schedules: 0, pending_approvals: 0 }
+  });
   client.localServiceStatus.mockResolvedValue({
     ready: true,
     launched: true,
@@ -377,6 +394,22 @@ test("portable backup creation is explicit secret-free and verifiable", async ()
   expect(within(panel).getByText(/secrets excluded/)).toBeInTheDocument();
   fireEvent.click(within(panel).getByRole("button", { name: "Verify" }));
   await waitFor(() => expect(client.verifyBackup).toHaveBeenCalledWith(backup.backup_id));
+});
+
+test("system diagnostics are explicit concise and actionable", async () => {
+  render(<App />);
+  const panel = await screen.findByLabelText("System diagnostics");
+  expect(within(panel).getByText("Diagnostics have not been run in this session.")).toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Run diagnostics" }));
+  await waitFor(() => expect(client.runDiagnostics).toHaveBeenCalledOnce());
+  expect(await within(panel).findByText(/Overall: WARNING/)).toBeInTheDocument();
+  expect(within(panel).getByText(/Portable backups/)).toBeInTheDocument();
+  expect(within(panel).getByText(/Create and retain a portable backup/)).toBeInTheDocument();
+  expect(within(panel).queryByText(/Database integrity/)).not.toBeInTheDocument();
+
+  await enableAdvancedMode();
+  expect(within(panel).getByText(/Database integrity/)).toBeInTheDocument();
+  expect(within(panel).getByText(/4 events/)).toBeInTheDocument();
 });
 
 test("measured improvement stays simple by default and exposes controlled transitions in advanced mode", async () => {

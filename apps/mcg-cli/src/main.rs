@@ -49,11 +49,12 @@ use mcg_providers::{
     ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
-    AgentRunView, AgentTurnCommit, CandidateRevisionMutation, EvidenceMutation, ExperimentMutation,
-    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
-    PlatformComputerActionMutation, PlatformComputerMutation, ProjectMutation, ProviderMutation,
-    RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
-    SshHostMutation, SshOperationMutation, SupervisionMutation,
+    AgentRunView, AgentTurnCommit, CandidateRevisionMutation, DiagnosticReport, DiagnosticSeverity,
+    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
+    OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
+    SshOperationMutation, SupervisionMutation,
 };
 use mcg_storage::{restore_backup_bundle, verify_backup_bundle};
 use mcg_tools::{
@@ -115,6 +116,15 @@ enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Run secret-free local production-readiness checks.
+    Doctor {
+        /// Emit the versioned report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Return a non-zero exit status for warnings as well as errors.
+        #[arg(long)]
+        strict: bool,
     },
     /// Inspect or change restart-safe owner settings.
     Settings {
@@ -1196,6 +1206,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Status { json } => run_status(&client, host, token.trim(), json).await?,
+        Command::Doctor { json, strict } => {
+            run_doctor(&client, host, token.trim(), json, strict).await?;
+        }
         Command::Settings { command } => {
             run_settings(&client, host, token.trim(), command).await?;
         }
@@ -2607,6 +2620,60 @@ async fn run_status(
         );
     }
     Ok(())
+}
+
+async fn run_doctor(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report: DiagnosticReport = client
+        .get(format!("{host}/api/v1/system/diagnostics"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "MCG diagnostics: {}",
+            diagnostic_severity_name(report.overall)
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {} - {}",
+                diagnostic_severity_name(check.severity),
+                check.label,
+                check.detail
+            );
+            if let Some(remediation) = &check.remediation {
+                println!("  Remediation: {remediation}");
+            }
+        }
+    }
+    let failed = report.overall == DiagnosticSeverity::Error
+        || (strict && report.overall == DiagnosticSeverity::Warning);
+    if failed {
+        return Err(format!(
+            "diagnostics completed with {}",
+            diagnostic_severity_name(report.overall).to_ascii_lowercase()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+const fn diagnostic_severity_name(severity: DiagnosticSeverity) -> &'static str {
+    match severity {
+        DiagnosticSeverity::Pass => "PASS",
+        DiagnosticSeverity::Warning => "WARNING",
+        DiagnosticSeverity::Error => "ERROR",
+    }
 }
 
 async fn run_settings(
@@ -4440,6 +4507,19 @@ mod tests {
             restore.command,
             Command::Backup {
                 command: BackupCommand::Restore { confirm: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn doctor_supports_machine_readable_strict_health_gates() {
+        let cli =
+            Cli::try_parse_from(["mcg", "doctor", "--json", "--strict"]).expect("doctor command");
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                json: true,
+                strict: true
             }
         ));
     }

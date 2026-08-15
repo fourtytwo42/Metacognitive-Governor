@@ -11,6 +11,39 @@ export interface LocalServiceStatus {
   detail: string;
 }
 
+export type DiagnosticSeverity = "pass" | "warning" | "error";
+
+export interface DiagnosticCheck {
+  code: string;
+  label: string;
+  severity: DiagnosticSeverity;
+  detail: string;
+  remediation?: string;
+}
+
+export interface DiagnosticReport {
+  schema_version: number;
+  generated_at: string;
+  service: string;
+  version: string;
+  os: string;
+  architecture: string;
+  overall: DiagnosticSeverity;
+  checks: DiagnosticCheck[];
+  counts: {
+    events: number;
+    tasks: number;
+    artifacts: number;
+    backups: number;
+    providers: number;
+    models: number;
+    mcp_connections: number;
+    mcp_tools: number;
+    schedules: number;
+    pending_approvals: number;
+  };
+}
+
 export interface UserSettings {
   schema_version: number;
   revision: number;
@@ -649,6 +682,10 @@ export function listProviders(): Promise<ProviderListResponse> {
 
 export function getLocalServiceStatus(): Promise<LocalServiceStatus> {
   return invoke("local_service_status");
+}
+
+export function runDiagnostics(): Promise<DiagnosticReport> {
+  return invoke("run_diagnostics");
 }
 
 export function getUserSettings(): Promise<UserSettings> {

@@ -51,13 +51,14 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, BackupBundleManifest,
-    BackupBundleSummary, CandidateRevisionMutation, ConsumerEvaluationProgress, EvidenceMutation,
-    ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod,
-    PlatformBrowserMutation, PlatformComputerActionMutation, PlatformComputerMutation,
-    PlatformSessionRequest, ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus,
-    ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
-    SiteMonitorRequest, SiteMutation, SiteRegistrationRequest, SiteUpdateRequest, SshHostMutation,
-    SshHostRegistrationRequest, SshHostUpdateRequest, SshOperationMutation, SupervisionMutation,
+    BackupBundleSummary, CandidateRevisionMutation, ConsumerEvaluationProgress, DiagnosticReport,
+    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
+    OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, PlatformSessionRequest, ProjectMutation, ProviderMutation,
+    RuntimeError, RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
+    SiteMonitorMutation, SiteMonitorRequest, SiteMutation, SiteRegistrationRequest,
+    SiteUpdateRequest, SshHostMutation, SshHostRegistrationRequest, SshHostUpdateRequest,
+    SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
@@ -870,6 +871,7 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
     let state = ApiState { runtime };
     let protected = Router::new()
         .route("/api/v1/system/status", get(status))
+        .route("/api/v1/system/diagnostics", get(diagnostics))
         .route("/api/v1/platform/capabilities", get(platform_capabilities))
         .route(
             "/api/v1/platform/sessions",
@@ -1418,6 +1420,14 @@ async fn health() -> Json<HealthResponse> {
 
 async fn status(State(state): State<ApiState>) -> Json<RuntimeStatus> {
     Json(state.runtime.status())
+}
+
+async fn diagnostics(State(state): State<ApiState>) -> Result<Json<DiagnosticReport>, ApiError> {
+    state
+        .runtime
+        .diagnostics(Utc::now())
+        .map(Json)
+        .map_err(map_runtime_error)
 }
 
 async fn get_user_settings(State(state): State<ApiState>) -> Json<UserSettings> {
@@ -5233,6 +5243,43 @@ form.addEventListener('submit', (event) => {
 
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(status.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_require_authentication_and_never_include_local_secrets() {
+        let app = router(test_runtime());
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/system/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                authorized(Request::get("/api/v1/system/diagnostics"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["service"], "mcg-daemon");
+        assert!(
+            value["checks"]
+                .as_array()
+                .is_some_and(|checks| !checks.is_empty())
+        );
+        let serialized = serde_json::to_string(&value).expect("diagnostic JSON");
+        assert!(!serialized.contains(TEST_TOKEN));
+        assert!(!serialized.contains("auth_token"));
+        assert!(!serialized.contains("data_directory"));
     }
 
     #[tokio::test]

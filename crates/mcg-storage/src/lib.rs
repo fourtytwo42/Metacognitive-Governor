@@ -953,6 +953,16 @@ pub struct RecoveryReport {
     pub tasks_rebuilt: u64,
 }
 
+/// Secret-free, read-only evidence about the durable event store.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageDiagnostics {
+    pub integrity: String,
+    pub schema_version: i64,
+    pub event_count: u64,
+    pub task_count: u64,
+    pub artifact_count: u64,
+}
+
 pub struct SqliteEventStore {
     connection: Connection,
 }
@@ -2179,6 +2189,35 @@ impl SqliteEventStore {
         u64::try_from(count)
             .map_err(|_| StorageError::InvalidData("negative event count".to_owned()))
     }
+
+    /// Runs read-only integrity and inventory checks without exposing stored content.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] when `SQLite` cannot complete a diagnostic query.
+    pub fn diagnostics(&self) -> Result<StorageDiagnostics, StorageError> {
+        fn count(connection: &Connection, table: &str) -> Result<u64, StorageError> {
+            let sql = format!("SELECT COUNT(*) FROM {table}");
+            let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
+            u64::try_from(count)
+                .map_err(|_| StorageError::InvalidData(format!("negative {table} count")))
+        }
+
+        let integrity = self
+            .connection
+            .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
+        let schema_version = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM mcg_schema",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(StorageDiagnostics {
+            integrity,
+            schema_version,
+            event_count: count(&self.connection, "events")?,
+            task_count: count(&self.connection, "tasks")?,
+            artifact_count: count(&self.connection, "artifacts")?,
+        })
+    }
 }
 
 const fn approval_state_name(state: ApprovalState) -> &'static str {
@@ -2297,6 +2336,28 @@ mod tests {
         assert_eq!(
             store.load_task(task.id).expect("query should work"),
             Some(active)
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_read_only_and_report_content_free_counts() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        store
+            .create_task(&TaskEnvelope::new("private task content"))
+            .expect("task should persist");
+
+        let report = store.diagnostics().expect("diagnostics should run");
+
+        assert_eq!(report.integrity, "ok");
+        assert_eq!(report.schema_version, STORAGE_SCHEMA_VERSION);
+        assert_eq!(report.event_count, 1);
+        assert_eq!(report.task_count, 1);
+        assert_eq!(report.artifact_count, 0);
+        assert_eq!(store.event_count().expect("count after diagnostics"), 1);
+        assert!(
+            !serde_json::to_string(&report)
+                .expect("diagnostic JSON")
+                .contains("private task content")
         );
     }
 

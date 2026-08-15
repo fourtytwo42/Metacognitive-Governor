@@ -39,6 +39,7 @@ Implementation planning:
 - [M8 typed SSH remote execution](docs/architecture/typed-ssh.md)
 - [Durable owner settings](docs/architecture/settings.md)
 - [Portable backup and restore](docs/architecture/backups.md)
+- [Secret-free system diagnostics](docs/architecture/diagnostics.md)
 - [Native packaging, startup, upgrade, and removal](docs/architecture/packaging.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
@@ -72,6 +73,7 @@ Run the daemon and CLI in separate terminals:
 ```powershell
 cargo run -p mcg-daemon
 cargo run -p mcg-cli -- status
+cargo run -p mcg-cli -- doctor
 ```
 
 Owner-facing behavior is restart-safe and shared by every interface. Use the
@@ -90,6 +92,12 @@ explicit offline recovery operation: stop the daemon and run
 bearer token are never included; the destination machine retains its own token
 and credentials must be reconnected. The restore keeps the previous database in
 the data directory's `backups/` folder and never deletes it.
+
+Run the explicit read-only health surface from desktop Settings or with
+`mcg doctor`. `mcg doctor --json --strict` is the machine-readable qualification
+gate: it validates local storage, authentication, backups, provider discovery,
+and capability inventories without contacting providers or including secrets,
+paths, identifiers, prompts, or stored content.
 
 The authenticated organization and run-control surface is available through the
 same daemon. Create a consumer-default organization, list it, plan work for an

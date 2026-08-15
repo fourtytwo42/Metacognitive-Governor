@@ -102,11 +102,13 @@ import {
   recordSupervisionObservation,
   registerSshHost,
   runSshOperation,
+  runDiagnostics,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
   type ApprovalRequest,
   type BackupSummary,
+  type DiagnosticReport,
   type LocalServiceStatus,
   type TaskEventsResponse,
   type ToolAuditResponse,
@@ -266,6 +268,9 @@ export function App() {
   const [backups, setBackups] = useState<BackupSummary[]>([]);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupError, setBackupError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const [oauthMethod, setOauthMethod] = useState<OpenAiOAuthMethod>("browser");
   const [login, setLogin] = useState<OAuthLoginStart | null>(null);
   const [providerStatus, setProviderStatus] = useState("Not connected");
@@ -583,6 +588,18 @@ export function App() {
       setBackupError(errorMessage(error));
     } finally {
       setBackupBusy(false);
+    }
+  }
+
+  async function checkSystem() {
+    setDiagnosticsBusy(true);
+    setDiagnosticsError(null);
+    try {
+      setDiagnostics(await runDiagnostics());
+    } catch (error) {
+      setDiagnosticsError(errorMessage(error));
+    } finally {
+      setDiagnosticsBusy(false);
     }
   }
 
@@ -2629,6 +2646,35 @@ export function App() {
               </ul>
             </div>}
           </div> : <p className="empty-state">Loading durable settings…</p>}
+          <div className="provider-connections" aria-label="System diagnostics">
+            <div className="section-heading compact-heading">
+              <div>
+                <h3>System diagnostics</h3>
+                <p className="muted">Run read-only health checks and produce a secret-free support report.</p>
+              </div>
+              <button className="primary" type="button" disabled={diagnosticsBusy} onClick={checkSystem}>
+                {diagnosticsBusy ? "Checking…" : "Run diagnostics"}
+              </button>
+            </div>
+            {diagnosticsError && <p className="error-message" role="alert">{diagnosticsError}</p>}
+            {diagnostics && <div aria-label="Diagnostic results">
+              <p><strong>Overall: {diagnostics.overall.toUpperCase()}</strong> · MCG {diagnostics.version} · {diagnostics.os}</p>
+              <ul className="history-list">
+                {diagnostics.checks
+                  .filter((check) => advanced || check.severity !== "pass")
+                  .map((check) => <li key={check.code}>
+                    <strong>[{check.severity.toUpperCase()}] {check.label}</strong>
+                    <span>{check.detail}</span>
+                    {check.remediation && <small>{check.remediation}</small>}
+                  </li>)}
+              </ul>
+              {!advanced && diagnostics.checks.every((check) => check.severity === "pass") && <p className="empty-state">All checks passed.</p>}
+              {advanced && <p className="form-note">
+                Format {diagnostics.schema_version} · {diagnostics.architecture} · {diagnostics.counts.events} events · {diagnostics.counts.tasks} tasks · {diagnostics.counts.artifacts} artifacts · {diagnostics.counts.models} models
+              </p>}
+            </div>}
+            {!diagnostics && !diagnosticsError && <p className="empty-state">Diagnostics have not been run in this session.</p>}
+          </div>
           <div className="provider-connections" aria-label="Portable backups">
             <div className="section-heading compact-heading">
               <div>

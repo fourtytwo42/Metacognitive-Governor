@@ -70,8 +70,8 @@ use mcg_providers::{
 };
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
-    ConsumerEvaluationCheckpointState, DataDirectoryLock, RecoveryReport, SqliteEventStore,
-    StorageError, acquire_data_directory_lock,
+    ConsumerEvaluationCheckpointState, DataDirectoryLock, RecoveryReport, STORAGE_SCHEMA_VERSION,
+    SqliteEventStore, StorageError, acquire_data_directory_lock,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -126,6 +126,52 @@ pub struct RuntimeStatus {
     pub recovered_site_deployments: u64,
     pub recovered_ssh_operations: u64,
     pub recovered_shadow_workspaces: u64,
+}
+
+pub const DIAGNOSTICS_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Pass,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticCheck {
+    pub code: String,
+    pub label: String,
+    pub severity: DiagnosticSeverity,
+    pub detail: String,
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticCounts {
+    pub events: u64,
+    pub tasks: u64,
+    pub artifacts: u64,
+    pub backups: u64,
+    pub providers: u64,
+    pub models: u64,
+    pub mcp_connections: u64,
+    pub mcp_tools: u64,
+    pub schedules: u64,
+    pub pending_approvals: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticReport {
+    pub schema_version: u16,
+    pub generated_at: DateTime<Utc>,
+    pub service: String,
+    pub version: String,
+    pub os: String,
+    pub architecture: String,
+    pub overall: DiagnosticSeverity,
+    pub checks: Vec<DiagnosticCheck>,
+    pub counts: DiagnosticCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -701,7 +747,7 @@ impl LocalAuth {
 
 pub struct AppRuntime {
     config: AppConfig,
-    _data_lock: Option<DataDirectoryLock>,
+    data_lock: Option<DataDirectoryLock>,
     settings: Arc<RwLock<UserSettings>>,
     store: Arc<Mutex<SqliteEventStore>>,
     event_sender: broadcast::Sender<EventEnvelope>,
@@ -911,7 +957,7 @@ impl AppRuntime {
         let (event_sender, _) = broadcast::channel(256);
         Self {
             config,
-            _data_lock: data_lock,
+            data_lock,
             settings: Arc::new(RwLock::new(settings)),
             store: Arc::new(Mutex::new(store)),
             event_sender,
@@ -975,6 +1021,245 @@ impl AppRuntime {
             recovered_ssh_operations: self.recovered_ssh_operations,
             recovered_shadow_workspaces: self.recovered_shadow_workspaces,
         }
+    }
+
+    /// Produces a versioned, secret-free, read-only support report.
+    ///
+    /// This method never probes providers, runs tools, or mutates durable state.
+    ///
+    /// # Errors
+    /// Returns storage failures when the local inventory cannot be read safely.
+    #[allow(clippy::too_many_lines)] // Keeps the complete ordered support contract auditable.
+    pub fn diagnostics(&self, now: DateTime<Utc>) -> Result<DiagnosticReport, RuntimeError> {
+        let storage = self.store()?.diagnostics()?;
+        let mut checks = Vec::new();
+        let mut counts = DiagnosticCounts {
+            events: storage.event_count,
+            tasks: storage.task_count,
+            artifacts: storage.artifact_count,
+            ..DiagnosticCounts::default()
+        };
+        let mut add_check = |code: &str,
+                             label: &str,
+                             severity: DiagnosticSeverity,
+                             detail: String,
+                             remediation: Option<&str>| {
+            checks.push(DiagnosticCheck {
+                code: code.to_owned(),
+                label: label.to_owned(),
+                severity,
+                detail,
+                remediation: remediation.map(str::to_owned),
+            });
+        };
+
+        let integrity_ok = storage.integrity.eq_ignore_ascii_case("ok");
+        add_check(
+            "database_integrity",
+            "Database integrity",
+            if integrity_ok {
+                DiagnosticSeverity::Pass
+            } else {
+                DiagnosticSeverity::Error
+            },
+            if integrity_ok {
+                "SQLite quick-check completed successfully.".to_owned()
+            } else {
+                "SQLite reported an integrity problem.".to_owned()
+            },
+            (!integrity_ok).then_some(
+                "Stop the daemon, preserve the data directory, and restore a verified backup.",
+            ),
+        );
+        let schema_ok = storage.schema_version == STORAGE_SCHEMA_VERSION;
+        add_check(
+            "schema_compatibility",
+            "Schema compatibility",
+            if schema_ok {
+                DiagnosticSeverity::Pass
+            } else {
+                DiagnosticSeverity::Error
+            },
+            format!(
+                "Database schema {} of {} supported.",
+                storage.schema_version, STORAGE_SCHEMA_VERSION
+            ),
+            (!schema_ok).then_some("Install a compatible MCG version before continuing."),
+        );
+
+        let durable = self.data_lock.is_some();
+        let auth_is_regular = if durable {
+            fs::symlink_metadata(self.config.auth_token_path())
+                .map(|metadata| {
+                    metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+                })
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        add_check(
+            "loopback_authentication",
+            "Loopback authentication",
+            if auth_is_regular {
+                DiagnosticSeverity::Pass
+            } else {
+                DiagnosticSeverity::Error
+            },
+            if durable {
+                if auth_is_regular {
+                    "Bearer authentication is active and its token is stored in a regular private file."
+                } else {
+                    "Bearer authentication is active, but its token file is not a safe regular file."
+                }
+            } else {
+                "Bearer authentication is active in an isolated test runtime."
+            }
+            .to_owned(),
+            (!auth_is_regular).then_some(
+                "Stop the daemon, remove the unsafe token link, and restart MCG to create a private token file.",
+            ),
+        );
+
+        let backup_result = if durable {
+            self.backups()
+        } else {
+            Ok(Vec::new())
+        };
+        match backup_result {
+            Ok(backups) => {
+                counts.backups = backups.len().try_into().unwrap_or(u64::MAX);
+                add_check(
+                    "portable_backups",
+                    "Portable backups",
+                    if backups.is_empty() {
+                        DiagnosticSeverity::Warning
+                    } else {
+                        DiagnosticSeverity::Pass
+                    },
+                    if backups.is_empty() {
+                        "No portable backup has been created yet.".to_owned()
+                    } else {
+                        format!("{} portable backup(s) passed verification.", backups.len())
+                    },
+                    backups.is_empty().then_some(
+                        "Create and retain a portable backup before relying on the installation.",
+                    ),
+                );
+            }
+            Err(_) => add_check(
+                "portable_backups",
+                "Portable backups",
+                DiagnosticSeverity::Error,
+                "At least one portable backup could not be verified.".to_owned(),
+                Some("Inspect backups individually and replace any invalid bundle."),
+            ),
+        }
+
+        let providers = self.provider_connections()?;
+        counts.providers = providers.len().try_into().unwrap_or(u64::MAX);
+        for provider in &providers {
+            if let Some(catalog) = self.provider_catalog(&provider.id)? {
+                counts.models = counts
+                    .models
+                    .saturating_add(catalog.models.len().try_into().unwrap_or(u64::MAX));
+            }
+        }
+        let providers_ready = counts.providers > 0 && counts.models > 0;
+        add_check(
+            "provider_readiness",
+            "Model provider readiness",
+            if providers_ready {
+                DiagnosticSeverity::Pass
+            } else {
+                DiagnosticSeverity::Warning
+            },
+            format!(
+                "{} provider connection(s) with {} discovered model(s).",
+                counts.providers, counts.models
+            ),
+            (!providers_ready)
+                .then_some("Connect a provider and complete model discovery before running tasks."),
+        );
+
+        let mcp_connections = self.mcp_connections()?;
+        counts.mcp_connections = mcp_connections.len().try_into().unwrap_or(u64::MAX);
+        for connection in &mcp_connections {
+            if let Some(catalog) = self.mcp_catalog(&connection.id)? {
+                counts.mcp_tools = counts
+                    .mcp_tools
+                    .saturating_add(catalog.tools.len().try_into().unwrap_or(u64::MAX));
+            }
+        }
+        add_check(
+            "mcp_inventory",
+            "MCP inventory",
+            DiagnosticSeverity::Pass,
+            format!(
+                "{} optional MCP connection(s) with {} discovered tool(s).",
+                counts.mcp_connections, counts.mcp_tools
+            ),
+            None,
+        );
+
+        counts.schedules = self.schedules()?.len().try_into().unwrap_or(u64::MAX);
+        counts.pending_approvals = self
+            .approvals(Some(ApprovalState::Pending))?
+            .len()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        add_check(
+            "durable_work_inventory",
+            "Durable work inventory",
+            DiagnosticSeverity::Pass,
+            format!(
+                "{} task(s), {} schedule(s), and {} pending approval(s).",
+                counts.tasks, counts.schedules, counts.pending_approvals
+            ),
+            None,
+        );
+
+        let unavailable: Vec<_> = self
+            .platform_capabilities
+            .capabilities
+            .iter()
+            .filter(|capability| {
+                capability.availability != PlatformCapabilityAvailability::Available
+            })
+            .collect();
+        add_check(
+            "platform_capabilities",
+            "Platform capabilities",
+            if unavailable.is_empty() {
+                DiagnosticSeverity::Pass
+            } else {
+                DiagnosticSeverity::Warning
+            },
+            format!(
+                "{} of {} optional platform capability checks are unavailable or unsupported.",
+                unavailable.len(),
+                self.platform_capabilities.capabilities.len()
+            ),
+            (!unavailable.is_empty()).then_some(
+                "Open the advanced Platform panel to review unavailable host integrations.",
+            ),
+        );
+
+        let overall = checks
+            .iter()
+            .map(|check| check.severity)
+            .max()
+            .unwrap_or(DiagnosticSeverity::Pass);
+        Ok(DiagnosticReport {
+            schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+            generated_at: now,
+            service: "mcg-daemon".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            os: self.platform_capabilities.os.clone(),
+            architecture: self.platform_capabilities.architecture.clone(),
+            overall,
+            checks,
+            counts,
+        })
     }
 
     #[must_use]

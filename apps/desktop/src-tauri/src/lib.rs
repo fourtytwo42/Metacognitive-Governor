@@ -31,11 +31,11 @@ use mcg_providers::{
     ProviderConnection, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
-    CandidateRevisionMutation, EvidenceMutation, ExperimentMutation, McpMutation, OAuthLoginStart,
-    PlatformBrowserMutation, PlatformComputerActionMutation, PlatformComputerMutation,
-    ProjectMutation, ProviderMutation, ScheduleWakeMutation, SiteDeploymentMutation,
-    SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
-    SupervisionMutation,
+    CandidateRevisionMutation, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
+    OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
+    SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,23 @@ fn local_service_status() -> LocalServiceStatus {
     LOCAL_SERVICE_STATUS.get().cloned().unwrap_or_else(|| {
         LocalServiceStatus::failed("The local service bootstrap has not run yet.".into())
     })
+}
+
+#[tauri::command]
+async fn run_diagnostics() -> Result<DiagnosticReport, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/system/diagnostics"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Diagnostics could not be run: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Diagnostics").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Diagnostics response was invalid: {error}"))
 }
 
 fn daemon_token() -> Result<String, String> {
@@ -1592,6 +1609,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             runtime_label,
             local_service_status,
+            run_diagnostics,
             start_openai_oauth,
             complete_openai_oauth,
             cancel_openai_oauth,
