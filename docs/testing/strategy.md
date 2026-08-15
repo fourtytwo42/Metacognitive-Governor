@@ -130,7 +130,7 @@ UI tests operate in two modes:
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, retained
-external data, daemon restart, authenticated CLI/doctor/backup/MCP contracts, and
+external data, daemon restart, authenticated CLI/doctor/backup/MCP discovery, and
 both GUI formats under an owner-controlled X11 display with captured screenshots.
 
 Every major workflow is tested in simple and advanced mode. Accessibility checks

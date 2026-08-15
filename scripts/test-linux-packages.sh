@@ -122,6 +122,14 @@ endpoint, token_path, output_path = sys.argv[1:]
 token = pathlib.Path(token_path).read_text(encoding="utf-8").strip()
 
 def call(payload):
+    payload.setdefault("params", {})["_meta"] = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "mcg-linux-package-uat",
+            "version": "1.0.0",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(payload).encode(),
@@ -129,29 +137,27 @@ def call(payload):
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": payload["method"],
         },
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
 
-initialized = call({
+discovered = call({
     "jsonrpc": "2.0",
     "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": "2026-07-28",
-        "capabilities": {},
-        "clientInfo": {"name": "mcg-linux-package-uat", "version": "1.0.0"},
-    },
+    "method": "server/discover",
+    "params": {},
 })
-assert initialized["result"]["protocolVersion"] == "2026-07-28"
-assert initialized["result"]["serverInfo"]["name"] == "metacognitive-governor"
+assert discovered["result"]["supportedVersions"] == ["2026-07-28"]
+assert discovered["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "metacognitive-governor"
 tools = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
 names = [tool["name"] for tool in tools["result"]["tools"]]
 assert "mcg_run_task" in names and "mcg_system_status" in names
 pathlib.Path(output_path).write_text(
-    json.dumps({"protocolVersion": "2026-07-28", "toolCount": len(names)}),
+    json.dumps({"supportedVersion": "2026-07-28", "toolCount": len(names)}),
     encoding="utf-8",
 )
 PY
