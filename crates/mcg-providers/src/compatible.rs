@@ -15,6 +15,8 @@ use crate::{
 };
 
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const MAX_SSE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct OpenAiCompatibleProviderBuilder {
     connection: ProviderConnection,
@@ -297,16 +299,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| ProviderError::Request {
-                message: error.to_string(),
-                retriable: false,
-            })?;
         let value: Value = if content_type.starts_with("text/event-stream") {
-            completed_response_from_sse(&String::from_utf8_lossy(&bytes))?
+            completed_response_from_sse_response(response).await?
         } else {
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| ProviderError::Request {
+                    message: error.to_string(),
+                    retriable: false,
+                })?;
             serde_json::from_slice(&bytes)
                 .map_err(|error| ProviderError::Incompatible(error.to_string()))?
         };
@@ -723,41 +725,141 @@ fn parse_stream_event(event_name: &str, data: &str) -> Result<ModelStreamEvent, 
     }
 }
 
-fn completed_response_from_sse(body: &str) -> Result<Value, ProviderError> {
-    let mut last_event = None;
-    for line in body.lines().rev() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let value: Value = serde_json::from_str(data.trim())
-            .map_err(|error| ProviderError::Incompatible(error.to_string()))?;
-        if last_event.is_none() {
-            last_event = Some(value.clone());
-        }
-        if value.get("type").and_then(Value::as_str) == Some("response.completed") {
-            return value.get("response").cloned().ok_or_else(|| {
-                ProviderError::Incompatible("completed SSE event has no response".into())
-            });
+async fn completed_response_from_sse_response(response: Response) -> Result<Value, ProviderError> {
+    let mut decoder = SseCompletionDecoder::default();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(chunk) => {
+                if let Some(response) = decoder.push(&chunk)? {
+                    return Ok(response);
+                }
+            }
+            Err(error) => {
+                if let Ok(Some(response)) = decoder.finish_pending() {
+                    return Ok(response);
+                }
+                return Err(ProviderError::Request {
+                    message: error.to_string(),
+                    retriable: false,
+                });
+            }
         }
     }
-    let detail = last_event
-        .as_ref()
-        .and_then(|value| {
-            value
-                .pointer("/response/error/message")
-                .or_else(|| value.pointer("/error/message"))
-                .and_then(Value::as_str)
+    if let Some(response) = decoder.finish_pending()? {
+        return Ok(response);
+    }
+    Err(decoder.missing_terminal_error())
+}
+
+#[derive(Default)]
+struct SseCompletionDecoder {
+    pending: Vec<u8>,
+    total_bytes: usize,
+    last_event: Option<Value>,
+}
+
+impl SseCompletionDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Result<Option<Value>, ProviderError> {
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(chunk.len())
+            .ok_or_else(|| ProviderError::Incompatible("SSE response size overflowed".into()))?;
+        if self.total_bytes > MAX_SSE_RESPONSE_BYTES {
+            return Err(ProviderError::Incompatible(format!(
+                "SSE response exceeded {MAX_SSE_RESPONSE_BYTES} bytes"
+            )));
+        }
+        self.pending.extend_from_slice(chunk);
+        loop {
+            let Some((event_end, separator_len)) = sse_event_separator(&self.pending) else {
+                if self.pending.len() > MAX_SSE_EVENT_BYTES {
+                    return Err(ProviderError::Incompatible(format!(
+                        "SSE event exceeded {MAX_SSE_EVENT_BYTES} bytes"
+                    )));
+                }
+                return Ok(None);
+            };
+            let event = self.pending[..event_end].to_vec();
+            self.pending.drain(..event_end + separator_len);
+            if let Some(response) = self.ingest_event(&event)? {
+                return Ok(Some(response));
+            }
+        }
+    }
+
+    fn finish_pending(&mut self) -> Result<Option<Value>, ProviderError> {
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        if self.pending.len() > MAX_SSE_EVENT_BYTES {
+            return Err(ProviderError::Incompatible(format!(
+                "SSE event exceeded {MAX_SSE_EVENT_BYTES} bytes"
+            )));
+        }
+        let event = std::mem::take(&mut self.pending);
+        self.ingest_event(&event)
+    }
+
+    fn ingest_event(&mut self, event: &[u8]) -> Result<Option<Value>, ProviderError> {
+        let event = std::str::from_utf8(event)
+            .map_err(|error| ProviderError::Incompatible(error.to_string()))?;
+        let mut data = String::new();
+        for line in event.lines() {
+            let Some(part) = line.strip_prefix("data:") else {
+                continue;
+            };
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(part.strip_prefix(' ').unwrap_or(part));
+        }
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(None);
+        }
+        let value: Value = serde_json::from_str(&data)
+            .map_err(|error| ProviderError::Incompatible(error.to_string()))?;
+        self.last_event = Some(value.clone());
+        if value.get("type").and_then(Value::as_str) != Some("response.completed") {
+            return Ok(None);
+        }
+        value.get("response").cloned().map(Some).ok_or_else(|| {
+            ProviderError::Incompatible("completed SSE event has no response".into())
         })
-        .or_else(|| {
-            last_event
-                .as_ref()
-                .and_then(|value| value.get("type"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("no terminal event");
-    Err(ProviderError::Incompatible(format!(
-        "SSE response ended without response.completed: {detail}"
-    )))
+    }
+
+    fn missing_terminal_error(&self) -> ProviderError {
+        let detail = self
+            .last_event
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/response/error/message")
+                    .or_else(|| value.pointer("/error/message"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                self.last_event
+                    .as_ref()
+                    .and_then(|value| value.get("type"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("no terminal event");
+        ProviderError::Incompatible(format!(
+            "SSE response ended without response.completed: {detail}"
+        ))
+    }
+}
+
+fn sse_event_separator(bytes: &[u8]) -> Option<(usize, usize)> {
+    let lf = bytes.windows(2).position(|window| window == b"\n\n");
+    let crlf = bytes.windows(4).position(|window| window == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) if lf <= crlf => Some((lf, 2)),
+        (Some(_) | None, Some(crlf)) => Some((crlf, 4)),
+        (Some(lf), None) => Some((lf, 2)),
+        (None, None) => None,
+    }
 }
 
 fn parse_usage(usage: Option<&Value>) -> Usage {
@@ -912,6 +1014,40 @@ mod tests {
         format!("http://{address}/v1")
     }
 
+    async fn unclean_sse_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unclean fixture");
+        let address = listener.local_addr().expect("unclean fixture address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request_bytes = vec![0_u8; 16 * 1024];
+            let _ = socket.read(&mut request_bytes).await.expect("read request");
+            let completed = concat!(
+                "event: response.completed\r\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_unclean\",\"model\":\"fixture-model\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"settled\"}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\r\n\r\n"
+            );
+            let response_head = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/event-stream\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n"
+            );
+            socket
+                .write_all(response_head.as_bytes())
+                .await
+                .expect("write response head");
+            socket
+                .write_all(format!("{:X}\r\n{completed}\r\n", completed.len()).as_bytes())
+                .await
+                .expect("write terminal chunk");
+            socket.flush().await.expect("flush terminal chunk");
+        });
+        format!("http://{address}/v1")
+    }
+
     fn connection(base_url: String) -> ProviderConnection {
         ProviderConnection {
             contract_version: CONTRACT_VERSION,
@@ -1000,6 +1136,37 @@ mod tests {
         assert!(
             matches!(&response.output[0], OutputItem::Message { content, .. } if content[0] == ContentPart::Text { text: "hello".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn buffered_sse_returns_on_terminal_event_before_unclean_close() {
+        let provider = OpenAiCompatibleProviderBuilder::new(connection(unclean_sse_server().await))
+            .build()
+            .expect("provider");
+        let response = provider
+            .create_response(request())
+            .await
+            .expect("terminal event must settle before the later transport error");
+        assert_eq!(response.id, "resp_unclean");
+        assert_eq!(response.usage.total_tokens, 3);
+    }
+
+    #[test]
+    fn buffered_sse_enforces_total_and_per_event_bounds() {
+        let mut total_decoder = SseCompletionDecoder {
+            total_bytes: MAX_SSE_RESPONSE_BYTES,
+            ..SseCompletionDecoder::default()
+        };
+        assert!(matches!(
+            total_decoder.push(b"x"),
+            Err(ProviderError::Incompatible(message)) if message.contains("SSE response exceeded")
+        ));
+
+        let mut event_decoder = SseCompletionDecoder::default();
+        assert!(matches!(
+            event_decoder.push(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]),
+            Err(ProviderError::Incompatible(message)) if message.contains("SSE event exceeded")
+        ));
     }
 
     #[tokio::test]

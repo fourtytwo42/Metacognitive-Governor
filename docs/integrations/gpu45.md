@@ -46,7 +46,9 @@ key. On `401`, request a key from the owner; do not guess, scrape, or create one
   `POST /v1/responses`. As of the verification date it returns SSE even when a
   request explicitly sends `stream: false`; MCG's compatible adapter therefore
   accepts a terminal `response.completed` SSE event for buffered calls as a
-  documented conformance exception.
+  documented conformance exception. Buffered SSE is decoded incrementally with
+  explicit per-event and total-response limits, and a valid terminal event
+  settles immediately without depending on a later clean connection close.
 - The current llama.cpp-compatible backend accepts
   `reasoning: {"effort":"none"}` per request. An uncontrolled tool turn emitted
   reasoning for minutes without reaching a tool call; the same control produced
