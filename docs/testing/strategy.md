@@ -170,6 +170,10 @@ boundaries instead of automatic paid retries. The deterministic provider fixture
 then completes every dependency-ordered candidate item, proves all tool outcomes
 remain empty, verifies the content-addressed result artifact, and confirms the
 receipt prevents another model call.
+The same file-backed scenario simulates a crash after paired benchmark commit,
+then reopens storage and proves the stable automatic decision rejects
+inconclusive evidence, retains one evaluation/benchmark/decision history, and
+leaves the exact baseline organization head active.
 
 ### Local release candidate
 

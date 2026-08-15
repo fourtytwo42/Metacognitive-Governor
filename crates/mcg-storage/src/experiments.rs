@@ -52,6 +52,90 @@ pub struct AutomaticExperimentOutcome {
 }
 
 impl SqliteEventStore {
+    /// Lists automatic running experiments that have a shadow receipt but no benchmark.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds, malformed identities, or database failures.
+    pub fn assessable_automatic_experiment_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExperimentId>, StorageError> {
+        if limit == 0 || limit > 128 {
+            return Err(StorageError::InvalidData(
+                "automatic assessment batch must contain 1 to 128 experiments".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StorageError::InvalidData("assessment batch is too large".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT e.experiment_id
+             FROM automatic_experiment_outcomes a
+             JOIN experiments e ON e.experiment_id = a.experiment_id
+             JOIN shadow_execution_receipts r ON r.experiment_id = e.experiment_id
+             LEFT JOIN experiment_benchmarks b ON b.experiment_id = e.experiment_id
+             WHERE a.disposition = 'ready'
+               AND e.state = 'running'
+               AND b.experiment_id IS NULL
+             GROUP BY e.experiment_id
+             ORDER BY e.created_at, e.experiment_id LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row?.parse().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "experiment_id".into(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    /// Lists automatic experiments with benchmark evidence that still need a decision.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds, malformed identities, or database failures.
+    pub fn decidable_automatic_experiment_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExperimentId>, StorageError> {
+        if limit == 0 || limit > 128 {
+            return Err(StorageError::InvalidData(
+                "automatic decision batch must contain 1 to 128 experiments".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StorageError::InvalidData("decision batch is too large".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT e.experiment_id
+             FROM automatic_experiment_outcomes a
+             JOIN experiments e ON e.experiment_id = a.experiment_id
+             JOIN experiment_benchmarks b ON b.experiment_id = e.experiment_id
+             LEFT JOIN experiment_decisions d ON d.experiment_id = e.experiment_id
+             WHERE a.disposition = 'ready'
+               AND e.state IN ('running', 'awaiting_decision')
+               AND d.experiment_id IS NULL
+             GROUP BY e.experiment_id
+             ORDER BY e.created_at, e.experiment_id LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row?.parse().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "experiment_id".into(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
     /// Lists automatic experiments that are ready to start or running without a receipt.
     ///
     /// # Errors

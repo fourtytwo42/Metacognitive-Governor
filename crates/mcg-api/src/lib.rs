@@ -1183,6 +1183,9 @@ pub async fn run_scheduler_tick_at(
         tracing::warn!(%error, "automatic shadow execution paused for review or retry");
     }
     runtime
+        .assess_automatic_shadow_runs(8)
+        .map_err(|error| error.to_string())?;
+    runtime
         .poll_event_schedules(now)
         .map_err(|error| error.to_string())?;
     runtime

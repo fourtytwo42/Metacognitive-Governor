@@ -55,6 +55,17 @@ successful complete-plan output is retained in the local content-addressed
 artifact store before the immutable evaluation-only receipt commits. Missing
 routes are a no-spend no-op.
 
+Completed automatic receipts are assessed against the exact evaluation that
+produced their source supervision observation. The candidate's completed
+Evaluator instance is required. Until a separate isolated project sandbox can
+re-execute production objectives, zero-tool output is recorded honestly as an
+inconclusive evaluation rather than treating model self-report as success. The
+paired baseline/candidate reports are themselves content-addressed, the
+benchmark receives a stable identity, and the configured benchmark, regression,
+and confidence gates select promotion or rejection. Current zero-tool automatic
+shadows therefore reject while retaining evidence; they never weaken the gate
+to manufacture a promotion.
+
 ## Durable state
 
 SQLite migrations 20-22 retain:
@@ -91,6 +102,9 @@ opposite direction, requires a promotion decision in history, restores the
 recorded baseline, and moves the experiment to `reverted`. Startup never
 auto-promotes interrupted work. A measured regression may request automatic
 reversion, but the same evidence and transaction invariants still apply.
+Automatic assessment also recovers the crash window after a benchmark commits
+but before `awaiting_decision`: the next scheduler tick advances and decides the
+same stable evidence without recreating evaluation, benchmark, or decision IDs.
 
 ## Interfaces
 

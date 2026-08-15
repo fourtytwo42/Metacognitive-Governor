@@ -19,24 +19,25 @@ use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
     AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnCheckpoint,
     AgentTurnCheckpointSink, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
-    AgentUsageRecord, ConditionResult, ConfidenceEstimate, EXPERIMENT_SCHEMA_VERSION,
-    EvaluationEvidence, EvaluationOutcome, EvaluationReport, ExperimentBenchmark,
-    ExperimentDecision, ExperimentDefinition, ExperimentMode, ExperimentState, ExternalToolBinding,
-    LeaseBudget, MeasuredCandidateDesigner, OrganizationGenome, OrganizationalMetrics, PlannedWork,
-    PlanningRequest, RoleKind, RunSupervisionSnapshot, ShadowAuthority, ShadowExecutionReceipt,
-    SuccessCondition, SupervisionAnalyzer, SupervisionObservation, SupervisionSignal,
-    TaskComplexity, WorkPlan,
+    AgentUsageRecord, BenchmarkArmResult, ConditionResult, ConfidenceEstimate,
+    EXPERIMENT_SCHEMA_VERSION, EvaluationEvidence, EvaluationOutcome, EvaluationReport,
+    ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
+    ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
+    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, ProspectiveAnalysis,
+    RoleKind, RunSupervisionSnapshot, ShadowAuthority, ShadowExecutionReceipt, SuccessCondition,
+    SupervisionAnalyzer, SupervisionObservation, SupervisionSignal, TaskComplexity, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
-    ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, ExperimentId, LeaseId,
-    MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
-    PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
-    PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
-    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
-    PlatformSessionOwner, PlatformSessionState, ProjectId, RiskLevel, RunId, SITE_SCHEMA_VERSION,
-    SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, EvaluationId,
+    ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, LeaseId, MemoryClaimId,
+    NotificationSeverity, OrganizationId, OrganizationRevisionId, PLATFORM_SCHEMA_VERSION,
+    PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
+    PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
+    PlatformSessionState, ProjectId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
     SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
@@ -421,6 +422,13 @@ pub struct AutomaticShadowLaunch {
 pub struct AutomaticShadowExecution {
     pub launch: AutomaticShadowLaunch,
     pub receipt: ShadowExecutionReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomaticShadowAssessment {
+    pub evaluation: EvaluationReport,
+    pub benchmark: ExperimentBenchmark,
+    pub experiment: ExperimentDefinition,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3905,6 +3913,308 @@ impl AppRuntime {
         Ok(Some(receipt))
     }
 
+    /// Converts completed automatic shadow output into paired evidence and a durable decision.
+    ///
+    /// Current zero-tool shadows are scored honestly as inconclusive because copied production
+    /// objectives were not re-executed in an isolated project sandbox. They therefore produce a
+    /// benchmark regression and an automatic rejection while retaining all evidence for review.
+    ///
+    /// # Errors
+    /// Returns an error for missing source evidence, invalid independent authority, or conflicts.
+    pub fn assess_automatic_shadow_runs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AutomaticShadowAssessment>, RuntimeError> {
+        let experiment_ids = self.store()?.assessable_automatic_experiment_ids(limit)?;
+        let mut assessments = Vec::with_capacity(experiment_ids.len());
+        for experiment_id in experiment_ids {
+            assessments.push(self.assess_automatic_shadow_run(experiment_id)?);
+        }
+        self.decide_automatic_experiments(limit)?;
+        Ok(assessments)
+    }
+
+    fn assess_automatic_shadow_run(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<AutomaticShadowAssessment, RuntimeError> {
+        let experiment = self
+            .experiment(experiment_id)?
+            .ok_or_else(|| StorageError::Conflict("automatic experiment was not found".into()))?;
+        let receipt = self
+            .shadow_executions(experiment.id)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StorageError::Conflict("shadow receipt was not found".into()))?;
+        let observation_id = *experiment.observation_ids.first().ok_or_else(|| {
+            StorageError::InvalidData("automatic experiment has no source observation".into())
+        })?;
+        let observation = self
+            .store()?
+            .supervision_observation(observation_id)?
+            .ok_or_else(|| StorageError::Conflict("source observation was not found".into()))?;
+        let source_run_id = observation.run_id.ok_or_else(|| {
+            StorageError::InvalidData("automatic observation has no source run".into())
+        })?;
+        let source = self.agent_run_view(source_run_id)?;
+        let baseline = self.source_evaluation_for_observation(&source, observation_id)?;
+        let candidate = self.agent_run_view(receipt.candidate_run_id)?;
+        let evaluation = self.inconclusive_shadow_evaluation(&candidate, &receipt)?;
+        let benchmark = self.automatic_shadow_benchmark(
+            &experiment,
+            &source,
+            &baseline,
+            &candidate,
+            &evaluation,
+            receipt.completed_at,
+        )?;
+        self.record_experiment_benchmark(&benchmark)?;
+        Ok(AutomaticShadowAssessment {
+            evaluation,
+            benchmark,
+            experiment,
+        })
+    }
+
+    fn source_evaluation_for_observation(
+        &self,
+        source: &AgentRunView,
+        observation_id: SupervisionObservationId,
+    ) -> Result<EvaluationReport, RuntimeError> {
+        for evaluation in &source.evaluations {
+            if self
+                .store()?
+                .automatic_supervision(evaluation.id)?
+                .is_some_and(|mutation| {
+                    mutation
+                        .observations
+                        .iter()
+                        .any(|observation| observation.id == observation_id)
+                })
+            {
+                return Ok(evaluation.clone());
+            }
+        }
+        Err(StorageError::Conflict(
+            "automatic observation has no immutable source evaluation".into(),
+        )
+        .into())
+    }
+
+    fn inconclusive_shadow_evaluation(
+        &self,
+        candidate: &AgentRunView,
+        receipt: &ShadowExecutionReceipt,
+    ) -> Result<EvaluationReport, RuntimeError> {
+        let evaluation_id = EvaluationId::from_stable_bytes(automatic_shadow_evidence_id_bytes(
+            "evaluation",
+            receipt.experiment_id,
+        ));
+        if let Some(existing) = candidate
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.id == evaluation_id)
+        {
+            return Ok(existing.clone());
+        }
+        let organization = self
+            .organization_revision(candidate.run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                candidate.run.organization_revision_id,
+            ))?;
+        let evaluator_roles = organization
+            .roles
+            .iter()
+            .filter(|role| role.kind == RoleKind::Evaluator)
+            .map(|role| role.id)
+            .collect::<BTreeSet<_>>();
+        let evaluator_instance_id = candidate
+            .instances
+            .iter()
+            .find(|instance| {
+                instance.state == AgentState::Completed
+                    && evaluator_roles.contains(&instance.role_id)
+            })
+            .map(|instance| instance.id)
+            .ok_or_else(|| {
+                StorageError::Conflict("shadow run has no completed independent evaluator".into())
+            })?;
+        let mut conditions = Vec::new();
+        for condition in candidate
+            .plan
+            .items
+            .iter()
+            .flat_map(|item| item.success_conditions.iter())
+        {
+            if !conditions
+                .iter()
+                .any(|result: &ConditionResult| result.condition == *condition)
+            {
+                conditions.push(ConditionResult {
+                    condition: condition.clone(),
+                    passed: false,
+                    detail: "Shadow output was retained, but this production objective was not independently re-executed in an isolated project sandbox.".into(),
+                });
+            }
+        }
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: evaluation_id,
+            run_id: candidate.run.id,
+            task_id: candidate.run.task_id,
+            evaluator_instance_id: Some(evaluator_instance_id),
+            conditions,
+            outcome: EvaluationOutcome::Inconclusive,
+            confidence: ConfidenceEstimate::new(10_000, 1)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+            regressions: Vec::new(),
+            evidence: vec![EvaluationEvidence {
+                method: "evaluation_only_shadow_output".into(),
+                artifact_sha256: Some(receipt.output_artifact_sha256.clone()),
+                event_sequence: None,
+                detail: "Provider output exists under zero-tool authority; objective settlement is deliberately withheld.".into(),
+            }],
+            evaluated_at: receipt.completed_at,
+        };
+        self.record_evaluation(&report)?;
+        Ok(report)
+    }
+
+    fn automatic_shadow_benchmark(
+        &self,
+        experiment: &ExperimentDefinition,
+        source: &AgentRunView,
+        baseline: &EvaluationReport,
+        candidate: &AgentRunView,
+        evaluation: &EvaluationReport,
+        measured_at: DateTime<Utc>,
+    ) -> Result<ExperimentBenchmark, RuntimeError> {
+        let artifacts = ArtifactStore::open(self.config.data_directory.join("artifacts"))
+            .map_err(runtime_tool_error)?;
+        let baseline_bytes = serde_json::to_vec(baseline).map_err(StorageError::from)?;
+        let candidate_bytes = serde_json::to_vec(evaluation).map_err(StorageError::from)?;
+        let baseline_artifact = artifacts
+            .capture(&baseline_bytes, "application/vnd.mcg.evaluation+json")
+            .map_err(runtime_tool_error)?;
+        let candidate_artifact = artifacts
+            .capture(&candidate_bytes, "application/vnd.mcg.evaluation+json")
+            .map_err(runtime_tool_error)?;
+        Ok(ExperimentBenchmark {
+            schema_version: EXPERIMENT_SCHEMA_VERSION,
+            id: ExperimentBenchmarkId::from_stable_bytes(automatic_shadow_evidence_id_bytes(
+                "benchmark",
+                experiment.id,
+            )),
+            experiment_id: experiment.id,
+            scenario_key: format!("automatic/task/{}", source.run.task_id),
+            baseline: BenchmarkArmResult {
+                organization_revision_id: source.run.organization_revision_id,
+                run_id: source.run.id,
+                evaluation_id: baseline.id,
+                outcome: baseline.outcome,
+                confidence: baseline.confidence,
+                metrics: source.run.metrics.clone(),
+                evidence_sha256: vec![baseline_artifact.sha256],
+            },
+            candidate: BenchmarkArmResult {
+                organization_revision_id: candidate.run.organization_revision_id,
+                run_id: candidate.run.id,
+                evaluation_id: evaluation.id,
+                outcome: evaluation.outcome,
+                confidence: evaluation.confidence,
+                metrics: candidate.run.metrics.clone(),
+                evidence_sha256: vec![candidate_artifact.sha256],
+            },
+            regressions: vec![
+                "candidate objective evidence is inconclusive under zero-tool shadow authority"
+                    .into(),
+            ],
+            measured_at,
+        })
+    }
+
+    fn decide_automatic_experiments(&self, limit: usize) -> Result<(), RuntimeError> {
+        let experiment_ids = self.store()?.decidable_automatic_experiment_ids(limit)?;
+        for experiment_id in experiment_ids {
+            let mut experiment = self.experiment(experiment_id)?.ok_or_else(|| {
+                StorageError::Conflict("automatic experiment was not found".into())
+            })?;
+            let benchmarks = self.experiment_benchmarks(experiment.id)?;
+            if experiment.state == ExperimentState::Running {
+                experiment = self
+                    .transition_experiment(
+                        experiment.id,
+                        ExperimentState::Running,
+                        ExperimentState::AwaitingDecision,
+                    )?
+                    .experiment;
+            }
+            let regression_count = benchmarks
+                .iter()
+                .map(|benchmark| benchmark.regressions.len())
+                .sum::<usize>();
+            let promotable = benchmarks.len() >= usize::from(experiment.required_benchmarks)
+                && regression_count <= usize::from(experiment.maximum_regressions)
+                && benchmarks.iter().all(|benchmark| {
+                    benchmark.candidate.outcome == EvaluationOutcome::Passed
+                        && benchmark.candidate.confidence.basis_points
+                            >= experiment.minimum_confidence.basis_points
+                });
+            let kind = if promotable {
+                ExperimentDecisionKind::Promote
+            } else {
+                ExperimentDecisionKind::Reject
+            };
+            let (from_revision_id, to_revision_id) = if promotable {
+                (
+                    experiment.baseline_revision_id,
+                    experiment.candidate_revision_id,
+                )
+            } else {
+                (
+                    experiment.candidate_revision_id,
+                    experiment.baseline_revision_id,
+                )
+            };
+            self.decide_experiment(&ExperimentDecision {
+                schema_version: EXPERIMENT_SCHEMA_VERSION,
+                id: ExperimentDecisionId::from_stable_bytes(automatic_shadow_evidence_id_bytes(
+                    "decision",
+                    experiment.id,
+                )),
+                experiment_id: experiment.id,
+                kind,
+                from_revision_id,
+                to_revision_id,
+                benchmark_ids: benchmarks.iter().map(|benchmark| benchmark.id).collect(),
+                prospective_analysis: ProspectiveAnalysis {
+                    expected_benefits: vec![experiment.hypothesis.clone()],
+                    expected_risks: vec![
+                        "Candidate changes remain inactive until paired evidence satisfies policy."
+                            .into(),
+                    ],
+                    historical_evidence: experiment
+                        .observation_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                },
+                reason: if promotable {
+                    "Automatic paired evidence satisfies every configured promotion gate.".into()
+                } else {
+                    "Automatic paired evidence does not satisfy the configured promotion gates."
+                        .into()
+                },
+                decided_at: benchmarks
+                    .iter()
+                    .map(|benchmark| benchmark.measured_at)
+                    .max()
+                    .unwrap_or(experiment.updated_at),
+            })?;
+        }
+        Ok(())
+    }
+
     fn load_or_create_automatic_shadow_run(
         &self,
         experiment: &ExperimentDefinition,
@@ -5883,6 +6193,15 @@ fn automatic_experiment_id_bytes(
 
 fn automatic_shadow_run_id_bytes(experiment_id: ExperimentId) -> [u8; 16] {
     let digest = Sha256::digest(format!("mcg-auto-shadow-run\0{experiment_id}"));
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes
+}
+
+fn automatic_shadow_evidence_id_bytes(namespace: &str, experiment_id: ExperimentId) -> [u8; 16] {
+    let digest = Sha256::digest(format!(
+        "mcg-auto-shadow-evidence\0{namespace}\0{experiment_id}"
+    ));
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     bytes
@@ -7993,6 +8312,70 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(calls.load(Ordering::SeqCst), shadow_view.plan.items.len());
+        let assessments = [reopened
+            .assess_automatic_shadow_run(executions[0].launch.experiment.id)
+            .expect("assess retained shadow output")];
+        assert_eq!(
+            assessments[0].evaluation.outcome,
+            EvaluationOutcome::Inconclusive
+        );
+        assert_eq!(assessments[0].benchmark.regressions.len(), 1);
+        assert_eq!(
+            reopened
+                .experiment(assessments[0].experiment.id)
+                .expect("pre-decision experiment")
+                .expect("present")
+                .state,
+            ExperimentState::Running
+        );
+        drop(reopened);
+        let reopened = AppRuntime::open(config.clone()).expect("reopen after benchmark crash");
+        assert!(
+            reopened
+                .assess_automatic_shadow_runs(2)
+                .expect("resume automatic decision")
+                .is_empty()
+        );
+        let rejected = reopened
+            .experiment(assessments[0].experiment.id)
+            .expect("rejected experiment")
+            .expect("present");
+        assert_eq!(rejected.state, ExperimentState::Rejected);
+        assert_eq!(
+            reopened
+                .organization(rejected.organization_id)
+                .expect("active organization")
+                .expect("present")
+                .revision_id,
+            baseline_revision_id
+        );
+        let decisions = reopened
+            .experiment_decisions(rejected.id)
+            .expect("automatic decision");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].kind, ExperimentDecisionKind::Reject);
+        assert!(
+            reopened
+                .assess_automatic_shadow_runs(2)
+                .expect("assessment replay")
+                .is_empty()
+        );
+        drop(reopened);
+        let final_reopen = AppRuntime::open(config).expect("reopen rejected experiment");
+        assert_eq!(
+            final_reopen
+                .experiment(rejected.id)
+                .expect("durable rejection")
+                .expect("present")
+                .state,
+            ExperimentState::Rejected
+        );
+        assert!(
+            final_reopen
+                .assess_automatic_shadow_runs(2)
+                .expect("durable replay")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
