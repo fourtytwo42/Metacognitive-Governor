@@ -1729,7 +1729,7 @@ fn default_launch_request() -> LaunchTaskRequest {
         context_token_budget: 8_192,
         requested_tools: Vec::new(),
         estimated_output_tokens: 8_192,
-        max_model_calls: 8,
+        max_model_calls: 16,
     }
 }
 
@@ -3091,7 +3091,7 @@ async fn create_schedule_cli(
             context_token_budget: 16_384,
             requested_tools: Vec::new(),
             estimated_output_tokens: 8_192,
-            max_model_calls: 8,
+            max_model_calls: 16,
         })
         .send()
         .await?
@@ -4878,7 +4878,7 @@ mod tests {
         let request = default_launch_request();
         assert_eq!(request.context_token_budget, 8_192);
         assert_eq!(request.estimated_output_tokens, 8_192);
-        assert_eq!(request.max_model_calls, 8);
+        assert_eq!(request.max_model_calls, 16);
     }
 
     #[test]

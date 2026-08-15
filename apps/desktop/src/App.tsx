@@ -370,7 +370,7 @@ export function App() {
   const [scheduleMaxTokens, setScheduleMaxTokens] = useState("32768");
   const [scheduleMaxCost, setScheduleMaxCost] = useState("");
   const [scheduleMaxDuration, setScheduleMaxDuration] = useState("3600");
-  const [scheduleModelCalls, setScheduleModelCalls] = useState("8");
+  const [scheduleModelCalls, setScheduleModelCalls] = useState("16");
   const [scheduleBusy, setScheduleBusy] = useState(false);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [platformCapabilities, setPlatformCapabilities] = useState<PlatformCapabilitySnapshot | null>(null);

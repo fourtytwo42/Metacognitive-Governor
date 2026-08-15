@@ -982,7 +982,7 @@ export function launchTask(taskId: string): Promise<LaunchTaskResponse> {
       context_token_budget: 8192,
       requested_tools: [],
       estimated_output_tokens: 8192,
-      max_model_calls: 8
+      max_model_calls: 16
     }
   });
 }
@@ -994,7 +994,7 @@ export function retryTask(taskId: string): Promise<LaunchTaskResponse> {
       context_token_budget: 8192,
       requested_tools: [],
       estimated_output_tokens: 8192,
-      max_model_calls: 8
+      max_model_calls: 16
     }
   });
 }
@@ -1006,7 +1006,7 @@ export function resumeTask(taskId: string): Promise<LaunchTaskResponse> {
       context_token_budget: 8192,
       requested_tools: [],
       estimated_output_tokens: 8192,
-      max_model_calls: 8
+      max_model_calls: 16
     }
   });
 }

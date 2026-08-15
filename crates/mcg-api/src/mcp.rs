@@ -1153,7 +1153,7 @@ fn tool_definitions() -> Vec<Value> {
                     "context_token_budget": {"type": "integer", "minimum": 1, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
                     "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true, "maxItems": 128},
                     "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
-                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
                 },
                 "required": ["schedule_id", "project_id", "name", "goal", "trigger"],
                 "additionalProperties": false
@@ -1208,7 +1208,7 @@ fn tool_definitions() -> Vec<Value> {
                     "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "uniqueItems": true, "maxItems": 128},
                     "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
                     "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
-                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
                 },
                 "required": ["request_key", "project_id", "goal"],
                 "additionalProperties": false
@@ -1233,7 +1233,7 @@ fn tool_definitions() -> Vec<Value> {
                     "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "uniqueItems": true, "maxItems": 128},
                     "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
                     "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
-                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
                 },
                 "required": ["task_id", "action"],
                 "additionalProperties": false
@@ -1317,7 +1317,7 @@ fn tool_definitions() -> Vec<Value> {
                     },
                     "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
                     "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 8192},
-                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
                 },
                 "required": ["request_key", "project_id", "goal"],
                 "additionalProperties": false

@@ -657,7 +657,7 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
       max_cost_usd: undefined,
       max_duration_seconds: 3600
     },
-    max_model_calls: 8
+    max_model_calls: 16
   }));
 });
 
