@@ -350,10 +350,13 @@ Providers workspace exposes the same data.
 
 Modern MCP clients can use the authenticated stateless Streamable HTTP endpoint
 at `POST /mcp`. The server exposes deterministic status, project, context,
-memory, run-query, and idempotent governed agent-run tools under strict MCP
-2026-07-28 metadata, header, and loopback-Origin validation. See
+memory, task/run query, complete consumer-task execution/retry/resume/cancellation,
+evidence-validated evaluation, and atomic governed agent-run tools under strict
+MCP 2026-07-28 metadata, header, and loopback-Origin validation. Complete MCP
+tasks share the desktop/CLI decomposition, independent evaluation, objective
+verification, durable replay, and terminal settlement path. See
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
-the remaining interoperability and expanded run-control work.
+the remaining subscription and native interoperability work.
 
 MCG can also connect to Streamable HTTP or local stdio MCP servers. Use
 `mcg mcp add-http ID NAME URL`; select `--auth bearer-token` and pipe the secret

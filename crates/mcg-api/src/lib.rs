@@ -4493,6 +4493,52 @@ mod tests {
         format!("http://{address}/v1")
     }
 
+    async fn consumer_task_model_fixture() -> String {
+        async fn response(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "model": "consumer-task-model",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "fixture task turn complete"}]
+                }],
+                "usage": {"input_tokens": 32, "output_tokens": 4, "total_tokens": 36}
+            }))
+        }
+
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{
+                            "id": "consumer-task-model",
+                            "object": "model",
+                            "owned_by": "fixture",
+                            "context_window": 32768,
+                            "supported_parameters": ["tools"]
+                        }]
+                    }))
+                }),
+            )
+            .route("/v1/responses", post(response));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("consumer task fixture listener");
+        let address = listener
+            .local_addr()
+            .expect("consumer task fixture address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("consumer task fixture server");
+        });
+        format!("http://{address}/v1")
+    }
+
     async fn caller_tool_fixture() -> String {
         async fn response(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             let name = body
@@ -5641,6 +5687,7 @@ form.addEventListener('submit', (event) => {
                 "mcg_memory_search",
                 "mcg_project_context",
                 "mcg_query_project",
+                "mcg_query_task",
                 "mcg_query_run",
                 "mcg_scheduler_list",
                 "mcg_platform_capabilities",
@@ -5669,6 +5716,10 @@ form.addEventListener('submit', (event) => {
                 "mcg_ssh_run",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
+                "mcg_run_task",
+                "mcg_continue_task",
+                "mcg_cancel_task",
+                "mcg_record_evaluation",
                 "mcg_run_agent",
                 "mcg_system_status"
             ]
@@ -5900,6 +5951,260 @@ form.addEventListener('submit', (event) => {
             response_json(wrong_name).await.pointer("/error/code"),
             Some(&serde_json::json!(-32_020))
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full MCP consumer lifecycle proves execution, replay, evidence, inspection, and cancellation together.
+    async fn mcp_consumer_task_lifecycle_is_complete_replayable_and_cancellable() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("README.md"), "MCP task fixture")
+            .expect("project fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "mcp_task_provider".into(),
+                    display_name: "MCP Task Provider".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: consumer_task_model_fixture().await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+        let app = router(runtime.clone());
+        let arguments = serde_json::json!({
+            "request_key": "consumer-lifecycle-1",
+            "project_id": project_id,
+            "goal": "Verify the project readme",
+            "success_conditions": ["FILE EXISTS README.md"],
+            "context_token_budget": 512,
+            "estimated_output_tokens": 128,
+            "max_model_calls": 2
+        });
+
+        let completed =
+            mcp_tool_response(app.clone(), 300, "mcg_run_task", arguments.clone()).await;
+        assert_eq!(
+            completed.pointer("/result/isError"),
+            Some(&serde_json::json!(false)),
+            "{completed:#}"
+        );
+        assert_eq!(
+            completed.pointer("/result/structuredContent/execution/state"),
+            Some(&serde_json::json!("completed")),
+            "{completed:#}"
+        );
+        assert_eq!(
+            completed.pointer("/result/structuredContent/task/state"),
+            Some(&serde_json::json!("completed"))
+        );
+        assert_eq!(
+            completed["result"]["structuredContent"]["run"]["results"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        let task_id = completed["result"]["structuredContent"]["task"]["id"].clone();
+        let evaluation = completed["result"]["structuredContent"]["run"]["evaluations"][0].clone();
+
+        let replay = mcp_tool_response(app.clone(), 301, "mcg_run_task", arguments.clone()).await;
+        assert_eq!(
+            replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            replay["result"]["structuredContent"]["run"]["results"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(runtime.tasks().expect("one replayed task").len(), 1);
+
+        let queried = mcp_tool_response(
+            app.clone(),
+            302,
+            "mcg_query_task",
+            serde_json::json!({"task_id": task_id, "limit": 2}),
+        )
+        .await;
+        assert_eq!(
+            queried.pointer("/result/structuredContent/task/state"),
+            Some(&serde_json::json!("completed"))
+        );
+        assert_eq!(
+            queried["result"]["structuredContent"]["events"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            queried.pointer("/result/structuredContent/events_truncated"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            queried["result"]["structuredContent"]["run"]["evaluations"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let next_sequence = queried["result"]["structuredContent"]["next_after_sequence"].clone();
+        let next_page = mcp_tool_response(
+            app.clone(),
+            303,
+            "mcg_query_task",
+            serde_json::json!({
+                "task_id": task_id,
+                "after_sequence": next_sequence,
+                "limit": 2
+            }),
+        )
+        .await;
+        assert_eq!(
+            next_page["result"]["structuredContent"]["events"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+
+        let mut recorded_evaluation = evaluation;
+        recorded_evaluation["id"] = serde_json::json!(uuid::Uuid::new_v4());
+        recorded_evaluation["evaluated_at"] = serde_json::json!(Utc::now());
+        let evaluation_created = mcp_tool_response(
+            app.clone(),
+            304,
+            "mcg_record_evaluation",
+            serde_json::json!({"report": recorded_evaluation.clone()}),
+        )
+        .await;
+        assert_eq!(
+            evaluation_created.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(false))
+        );
+        assert!(
+            evaluation_created
+                .pointer("/result/structuredContent/event/sequence")
+                .is_some()
+        );
+        let evaluation_replay = mcp_tool_response(
+            app.clone(),
+            305,
+            "mcg_record_evaluation",
+            serde_json::json!({"report": recorded_evaluation.clone()}),
+        )
+        .await;
+        assert_eq!(
+            evaluation_replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        let mut conflicting_evaluation = recorded_evaluation.clone();
+        conflicting_evaluation["confidence"]["basis_points"] = serde_json::json!(1);
+        let evaluation_conflict = mcp_tool_response(
+            app.clone(),
+            306,
+            "mcg_record_evaluation",
+            serde_json::json!({"report": conflicting_evaluation}),
+        )
+        .await;
+        assert_eq!(
+            evaluation_conflict.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        let mut invalid_evaluation = recorded_evaluation;
+        invalid_evaluation["id"] = serde_json::json!(uuid::Uuid::new_v4());
+        invalid_evaluation["conditions"] = serde_json::json!([]);
+        let rejected_evaluation = mcp_tool_response(
+            app.clone(),
+            307,
+            "mcg_record_evaluation",
+            serde_json::json!({"report": invalid_evaluation}),
+        )
+        .await;
+        assert_eq!(
+            rejected_evaluation.pointer("/result/structuredContent/error"),
+            Some(&serde_json::json!("invalid_evaluation"))
+        );
+
+        let mut conflicting_request = arguments.clone();
+        conflicting_request["goal"] = serde_json::json!("Different work");
+        let key_conflict =
+            mcp_tool_response(app.clone(), 308, "mcg_run_task", conflicting_request).await;
+        assert_eq!(
+            key_conflict.pointer("/error/code"),
+            Some(&serde_json::json!(-32_602))
+        );
+
+        let cancellable = mcp_tool_response(
+            app.clone(),
+            309,
+            "mcg_run_task",
+            serde_json::json!({
+                "request_key": "consumer-lifecycle-2",
+                "project_id": project_id,
+                "goal": "Produce owner-reviewed release notes",
+                "success_conditions": ["Owner confirms the release notes"],
+                "context_token_budget": 512,
+                "estimated_output_tokens": 128,
+                "max_model_calls": 2
+            }),
+        )
+        .await;
+        assert_eq!(
+            cancellable.pointer("/result/structuredContent/execution/state"),
+            Some(&serde_json::json!("awaiting_evaluation"))
+        );
+        let cancellable_task = cancellable["result"]["structuredContent"]["task"]["id"].clone();
+        let cancelled = mcp_tool_response(
+            app.clone(),
+            310,
+            "mcg_cancel_task",
+            serde_json::json!({"task_id": cancellable_task}),
+        )
+        .await;
+        assert_eq!(
+            cancelled.pointer("/result/structuredContent/task/state"),
+            Some(&serde_json::json!("cancelled"))
+        );
+        assert_eq!(
+            cancelled.pointer("/result/structuredContent/run/run/state"),
+            Some(&serde_json::json!("cancelled"))
+        );
+        let cancel_replay = mcp_tool_response(
+            app.clone(),
+            311,
+            "mcg_cancel_task",
+            serde_json::json!({"task_id": cancellable_task}),
+        )
+        .await;
+        assert_eq!(
+            cancel_replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        let invalid_continue = mcp_tool_response(
+            app,
+            312,
+            "mcg_continue_task",
+            serde_json::json!({"task_id": cancellable_task, "action": "retry"}),
+        )
+        .await;
+        assert_eq!(
+            invalid_continue.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            invalid_continue.pointer("/result/structuredContent/error"),
+            Some(&serde_json::json!("conflict"))
+        );
+        assert_eq!(runtime.tasks().expect("two consumer tasks").len(), 2);
     }
 
     #[tokio::test]

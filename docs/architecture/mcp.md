@@ -51,19 +51,28 @@ identity metadata on every successful tool result.
 | `mcg_query_project` | Lists current project models or reads one exact project UUID. |
 | `mcg_project_context` | Assembles current target-aware context within a caller-selected, server-bounded token budget. |
 | `mcg_memory_search` | Searches current provenance-bearing claims by project, optional namespace, freshness, and bounded result count. |
+| `mcg_query_task` | Reads one task with cursor-bounded authoritative events, offset-bounded governed-tool audit, and its consumer run when present. |
 | `mcg_query_run` | Reads a complete durable plan, authority, usage, evaluation, and turn-result view. |
 | `mcg_scheduler_list` | Lists retained durable schedule definitions and current admission state. |
 | `mcg_scheduler_create` | Idempotently creates one bounded schedule from a caller-owned UUID and exact definition. |
 | `mcg_scheduler_remove` | Stops future admission for one schedule while retaining its definition and occurrence history. |
+| `mcg_run_task` | Idempotently creates, decomposes, executes, independently evaluates, and settles a complete consumer task. |
+| `mcg_continue_task` | Retries blocked work or resumes an exactly approved consumer checkpoint without repeating completed work. |
+| `mcg_cancel_task` | Atomically cancels a nonterminal task and its consumer run while retaining evidence; exact retries replay. |
+| `mcg_record_evaluation` | Validates and records a complete immutable evaluation report; exact evaluation-id retries replay. |
 | `mcg_run_agent` | Idempotently creates an active task/running one-work-item run and executes one bounded provider/tool turn. |
 
 The query tools, including scheduler listing, declare read-only, idempotent,
 non-destructive, closed-world behavior. Project context does not accept
 caller-supplied context items, so an MCP
 caller cannot inject material into MCG's canonical project or memory state through
-the read surface. `mcg_run_agent` declares its mutating/open-world behavior and
-requires a caller request key. Coder and Tool Worker calls must explicitly list
-every requested tool; omitting the list does not grant the role's full tool set.
+the read surface. `mcg_run_task` and `mcg_run_agent` declare mutating/open-world
+behavior and require caller request keys. The complete task form uses the same
+consumer organization, decomposition, independent Evaluator, objective verifier,
+approval, and terminal-settlement path as the desktop and CLI. The atomic agent
+form remains useful when another harness intentionally owns decomposition and
+evaluation. Coder and Tool Worker calls through `mcg_run_agent` must explicitly
+list every requested tool; omitting the list does not grant the role's full tool set.
 Scheduler creation is mutating, idempotent, and open-world because admitted work
 can later reach configured providers and governed tools. Scheduler removal is an
 idempotent closed-world state transition and never erases evidence.
@@ -77,7 +86,8 @@ SHA-256 input hash and unique task/run identities. One SQLite transaction writes
 2. the consumer organization revision;
 3. the immutable work plan and planned run;
 4. the active task and running run projections/events; and
-5. the interface request mapping.
+5. the interface request mapping; and
+6. for `mcg_run_task`, the unique task-to-consumer-run launch identity.
 
 Any validation or SQLite failure rolls back all five. Repeating the exact input
 returns the same task/run. Reusing a key with different input fails. If the first
@@ -89,10 +99,14 @@ boundary.
 
 `mcg_run_agent` deliberately creates one atomic work item. It does not claim that
 a model response proves the task complete: the task and run remain active with
-their turn evidence available through `mcg_query_run`. Broader decomposition,
-independent evaluation, completion settlement, cancellation, and approval-resume
-operations remain on the versioned REST/CLI surfaces until equivalent MCP
-contracts are implemented.
+their turn evidence available through `mcg_query_run`. `mcg_run_task` is the
+complete consumer counterpart. It creates the durable consumer-launch mapping in
+the same reservation transaction, executes the Coder and independent Evaluator,
+and settles only from objective evidence. Exact request replay is observation-only.
+`mcg_continue_task` delegates to the same retry/approval-resume boundary as REST,
+and `mcg_cancel_task` atomically cancels the task, run, and active leases. External
+evaluation reports remain subject to the same identity, independence, condition
+coverage, outcome-consistency, and evidence-policy validation as REST.
 
 ## Error behavior
 
@@ -196,17 +210,23 @@ executes exactly one read-only external MCP call through the broker, returns its
 result to the model, and verifies the durable lease alias plus succeeded tool
 evidence with no approval record.
 
+A complete MCP consumer lifecycle fixture creates a two-role task, executes both
+provider turns, independently verifies a typed file objective, settles task and
+run, replays the exact request without duplicate authority, queries retained
+events/evaluation, replays immutable evaluation evidence, rejects conflicting
+request/evaluation identities, and atomically cancels a second nonterminal task.
+The file-backed interface fixture proves the consumer-launch identity and request
+mapping survive reopen together.
+
 A second file-backed consumer fixture uses a destructive/open-world external MCP
 tool in guided mode. It proves the remote call remains at zero before approval,
 reopens the daemon while waiting, restores provider/catalog and agent authority,
 executes the remote side effect exactly once, and continues the pinned model turn
 without repeating the paid pre-approval inference.
 
-This is the MCP server plus HTTP/stdio client foundation, not the completed MCP feature family. Remaining
-M6 work includes:
+This is a broad MCP server plus HTTP/stdio client implementation, but native
+interoperability and subscription work remain. Remaining M6 work includes:
 
-- expanded MCP run decomposition, independent evaluation, completion, and
-  cancellation contracts beyond the qualified checkpointed consumer resume;
 - request-scoped SSE progress and opt-in subscription streams where useful;
 - interoperability fixtures against representative third-party MCP SDKs and
   both-platform native desktop UAT.

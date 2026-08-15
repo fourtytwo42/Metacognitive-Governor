@@ -138,6 +138,9 @@ async fn consumer_cli_supports_bare_piped_json_and_streaming_workflows() {
     assert!(String::from_utf8_lossy(&oversized.stderr).contains("1048576-byte limit"));
 
     assert_eq!(runtime.tasks().expect("all task projections").len(), 4);
-    assert_eq!(runtime.projects().expect("reused project projection").len(), 1);
+    assert_eq!(
+        runtime.projects().expect("reused project projection").len(),
+        1
+    );
     server.abort();
 }

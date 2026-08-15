@@ -3,25 +3,26 @@
 use std::{collections::HashSet, str::FromStr};
 
 use axum::{
+    Json,
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use mcg_agents::{
-    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, ExperimentBenchmark,
-    ExperimentDecision, ExperimentDefinition, ExperimentState, OrganizationGenome,
-    OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, ShadowExecutionReceipt,
-    SuccessCondition, SupervisionObservation, TaskComplexity,
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, EvaluationReport, ExecutivePlanner,
+    ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
+    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
+    ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
     ExperimentId, OrganizationId, PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel,
     RunId, ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
     SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, TaskBudget, TaskEnvelope,
-    TaskId,
+    TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
@@ -33,7 +34,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use super::{ApiState, CreateScheduleRequest, create_schedule_record};
+use super::{ApiState, CreateScheduleRequest, LaunchTaskRequest, create_schedule_record};
 
 const PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_NAME: &str = "metacognitive-governor";
@@ -460,6 +461,23 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "project_id": {"type": "string", "format": "uuid"}
                 },
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_query_task",
+            "title": "Query an MCG Consumer Task",
+            "description": "Read one durable task together with its authoritative event history, governed-tool audit, and consumer run when present.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "format": "uuid"},
+                    "after_sequence": {"type": "integer", "minimum": 0, "default": 0},
+                    "audit_offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200}
+                },
+                "required": ["task_id"],
                 "additionalProperties": false
             },
             "annotations": read_annotations,
@@ -916,6 +934,105 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mcg_run_task",
+            "title": "Run a Complete MCG Consumer Task",
+            "description": "Idempotently create, decompose, execute, independently evaluate, and settle one durable consumer task through the same workflow used by the desktop and CLI.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_key": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"},
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "goal": {"type": "string", "minLength": 1, "maxLength": 32768},
+                    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 8192}, "maxItems": 64},
+                    "success_conditions": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 8192}, "maxItems": 64},
+                    "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"], "default": "medium"},
+                    "budget": {
+                        "type": "object",
+                        "properties": {
+                            "max_tokens": {"type": "integer", "minimum": 1},
+                            "max_cost_usd": {"type": "number", "minimum": 0},
+                            "max_duration_seconds": {"type": "integer", "minimum": 1}
+                        },
+                        "additionalProperties": false
+                    },
+                    "target_path": {"type": "string", "maxLength": 4096},
+                    "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "uniqueItems": true, "maxItems": 128},
+                    "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                },
+                "required": ["request_key", "project_id", "goal"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "mcg_continue_task",
+            "title": "Continue an MCG Consumer Task",
+            "description": "Retry a blocked consumer task or resume one whose exact governed approval has been resolved, without repeating completed model or tool work.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "format": "uuid"},
+                    "action": {"type": "string", "enum": ["retry", "resume"]},
+                    "target_path": {"type": "string", "maxLength": 4096},
+                    "requested_tools": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "uniqueItems": true, "maxItems": 128},
+                    "context_token_budget": {"type": "integer", "minimum": 64, "maximum": MAX_CONTEXT_TOKENS, "default": DEFAULT_CONTEXT_TOKENS},
+                    "estimated_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100_000, "default": 4096},
+                    "max_model_calls": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8}
+                },
+                "required": ["task_id", "action"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "mcg_cancel_task",
+            "title": "Cancel an MCG Consumer Task",
+            "description": "Atomically cancel one nonterminal durable task and its consumer run while retaining all history and completed evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "format": "uuid"}},
+                "required": ["task_id"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "mcg_record_evaluation",
+            "title": "Record MCG Evaluation Evidence",
+            "description": "Record one complete immutable EvaluationReport. MCG validates run, task, evaluator independence, condition coverage, outcome consistency, and evidence policy before accepting it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "report": {"type": "object", "description": "A complete versioned MCG EvaluationReport contract."}
+                },
+                "required": ["report"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
             "name": "mcg_run_agent",
             "title": "Run a Governed MCG Agent",
             "description": "Idempotently create and start a durable task/run, then execute its one bounded agent turn through configured providers and MCG's policy broker. Coder and tool-worker tools must be explicitly listed.",
@@ -1041,6 +1158,7 @@ async fn call_tool(
             tool_success(serde_json::to_value(state.runtime.status()))
         }
         "mcg_query_project" => query_project(state, &arguments),
+        "mcg_query_task" => query_task(state, &arguments),
         "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
         "mcg_memory_search" => memory_search(state, &arguments),
@@ -1071,6 +1189,10 @@ async fn call_tool(
         "mcg_ssh_hosts" => ssh_hosts(state, &arguments),
         "mcg_ssh_register" => ssh_register(state, &arguments),
         "mcg_ssh_run" => ssh_run(state, &arguments).await,
+        "mcg_run_task" => run_task(state, &arguments).await,
+        "mcg_continue_task" => continue_task(state, &arguments).await,
+        "mcg_cancel_task" => cancel_task(state, &arguments),
+        "mcg_record_evaluation" => record_evaluation(state, &arguments),
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -2261,6 +2383,114 @@ fn query_run(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the task, bounded evidence pages, and optional run one consistent read response.
+fn query_task(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request: QueryTaskArguments = serde_json::from_value(Value::Object(arguments.clone()))
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Task query arguments do not match the advertised schema",
+            )
+        })?;
+    if request.limit == 0 || request.limit > 1_000 {
+        return Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            "Task query limit must be between 1 and 1000",
+        ));
+    }
+    let task_id = request.task_id;
+    let task = match state.runtime.task(task_id) {
+        Ok(Some(task)) => task,
+        Ok(None) => {
+            return Ok(tool_error(
+                "task_not_found",
+                "The requested consumer task is not known to MCG",
+            ));
+        }
+        Err(_) => {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the consumer task",
+            ));
+        }
+    };
+    let events = state.runtime.task_events(task_id).map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INTERNAL_ERROR,
+            "MCG could not read the task event history",
+        )
+    })?;
+    let mut events = events
+        .into_iter()
+        .filter(|event| event.sequence > request.after_sequence)
+        .take(request.limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let events_truncated = events.len() > request.limit;
+    events.truncate(request.limit);
+    let next_after_sequence = if events_truncated {
+        events.last().map(|event| event.sequence)
+    } else {
+        None
+    };
+    let tool_audit = state.runtime.tool_audit(task_id).map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INTERNAL_ERROR,
+            "MCG could not read the task tool audit",
+        )
+    })?;
+    let mut tool_audit = tool_audit
+        .into_iter()
+        .skip(request.audit_offset)
+        .take(request.limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let tool_audit_truncated = tool_audit.len() > request.limit;
+    tool_audit.truncate(request.limit);
+    let next_audit_offset =
+        tool_audit_truncated.then_some(request.audit_offset.saturating_add(tool_audit.len()));
+    let run = state
+        .runtime
+        .task_launch_run_id(task_id)
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG could not read the task launch identity",
+            )
+        })?
+        .map(|run_id| state.runtime.agent_run_view(run_id))
+        .transpose()
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG could not read the task run",
+            )
+        })?;
+    tool_success(Ok(json!({
+        "task": task,
+        "events": events,
+        "events_truncated": events_truncated,
+        "next_after_sequence": next_after_sequence,
+        "tool_audit": tool_audit,
+        "tool_audit_truncated": tool_audit_truncated,
+        "next_audit_offset": next_audit_offset,
+        "run": run,
+    })))
+}
+
 fn scheduler_list(
     state: &ApiState,
     arguments: &serde_json::Map<String, Value>,
@@ -2430,6 +2660,78 @@ const fn default_scheduler_model_calls() -> u16 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RunTaskArguments {
+    request_key: String,
+    project_id: ProjectId,
+    goal: String,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(default)]
+    success_conditions: Vec<String>,
+    #[serde(default = "default_run_risk")]
+    risk: RiskLevel,
+    #[serde(default = "default_run_budget")]
+    budget: TaskBudget,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default)]
+    requested_tools: Vec<String>,
+    #[serde(default = "default_context_tokens")]
+    context_token_budget: u32,
+    #[serde(default = "default_output_tokens")]
+    estimated_output_tokens: u64,
+    #[serde(default = "default_model_calls")]
+    max_model_calls: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContinueTaskAction {
+    Retry,
+    Resume,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinueTaskArguments {
+    task_id: TaskId,
+    action: ContinueTaskAction,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default)]
+    requested_tools: Vec<String>,
+    #[serde(default = "default_context_tokens")]
+    context_token_budget: u32,
+    #[serde(default = "default_output_tokens")]
+    estimated_output_tokens: u64,
+    #[serde(default = "default_model_calls")]
+    max_model_calls: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryTaskArguments {
+    task_id: TaskId,
+    #[serde(default)]
+    after_sequence: u64,
+    #[serde(default)]
+    audit_offset: usize,
+    #[serde(default = "default_task_query_limit")]
+    limit: usize,
+}
+
+const fn default_task_query_limit() -> usize {
+    200
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordEvaluationArguments {
+    report: EvaluationReport,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunAgentArguments {
     request_key: String,
     project_id: ProjectId,
@@ -2480,6 +2782,433 @@ const fn default_output_tokens() -> u64 {
 
 const fn default_model_calls() -> u16 {
     8
+}
+
+#[allow(clippy::too_many_lines)] // The atomic reservation and shared consumer advancement are one lifecycle boundary.
+async fn run_task(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request_hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(arguments).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG could not canonicalize the consumer task request",
+            )
+        })?)
+    );
+    let request: RunTaskArguments = serde_json::from_value(Value::Object(arguments.clone()))
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Consumer task arguments do not match the advertised schema",
+            )
+        })?;
+    validate_run_task_arguments(&request)?;
+    let project = match state.runtime.project(request.project_id) {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            return Ok(tool_error(
+                "project_not_found",
+                "The requested project is not known to MCG",
+            ));
+        }
+        Err(_) => {
+            return Err(RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG could not read the requested project",
+            ));
+        }
+    };
+
+    let mut task = TaskEnvelope::new(request.goal.trim());
+    task.project_id = Some(request.project_id);
+    task.constraints = request
+        .constraints
+        .iter()
+        .map(|value| value.trim().to_owned())
+        .collect();
+    task.success_conditions = request
+        .success_conditions
+        .iter()
+        .map(|value| value.trim().to_owned())
+        .collect();
+    task.risk = request.risk;
+    task.budget = request.budget.clone();
+    let conditions = super::consumer_success_conditions(&task, &project)
+        .map_err(|error| RpcFailure::new(StatusCode::OK, None, INVALID_PARAMS, error.message))?;
+    let now = Utc::now();
+    let organization = OrganizationGenome::consumer_default(now);
+    let run_id = RunId::new();
+    let planning = PlanningRequest {
+        run_id,
+        task: task.clone(),
+        complexity: TaskComplexity::Compound,
+        work: vec![PlannedWork {
+            id: WorkItemId::new(),
+            goal: task.goal.clone(),
+            role: RoleKind::Coder,
+            dependencies: Vec::new(),
+            success_conditions: conditions,
+            risk_notes: task.constraints.clone(),
+            budget_weight: 4,
+            estimated_useful_seconds: task.budget.max_duration_seconds.unwrap_or(900),
+        }],
+        require_independent_evaluation: true,
+    };
+    let plan = ExecutivePlanner::default()
+        .plan(&organization, &planning, now)
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "The requested consumer task cannot form a valid bounded plan",
+            )
+        })?;
+    let run = AgentRun {
+        schema_version: AGENT_RUN_SCHEMA_VERSION,
+        id: run_id,
+        task_id: task.id,
+        organization_revision_id: organization.revision_id,
+        state: AgentRunState::Planned,
+        metrics: OrganizationalMetrics::default(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    let reservation = state
+        .runtime
+        .create_interface_agent_run(
+            "mcp_task",
+            request.request_key.trim(),
+            &request_hash,
+            true,
+            &task,
+            &organization,
+            &run,
+            &plan,
+        )
+        .map_err(|error| {
+            let message = if error.is_conflict() {
+                "request_key was already used with different consumer task input"
+            } else if error.is_invalid_request() {
+                "The consumer task violates a durable runtime invariant"
+            } else {
+                "MCG could not reserve the durable consumer task"
+            };
+            RpcFailure::new(StatusCode::OK, None, INVALID_PARAMS, message)
+        })?;
+
+    let response = if reservation.replayed {
+        super::LaunchTaskResponse {
+            execution: super::observe_launched_run(&reservation.task, &reservation.view),
+            task: reservation.task,
+            run: reservation.view,
+            replayed: true,
+        }
+    } else {
+        super::advance_consumer_run(
+            state,
+            reservation.task.id,
+            request.project_id,
+            &organization,
+            &reservation.view,
+            &LaunchTaskRequest {
+                target_path: request.target_path,
+                context_token_budget: request.context_token_budget,
+                requested_tools: request.requested_tools,
+                estimated_output_tokens: request.estimated_output_tokens,
+                max_model_calls: request.max_model_calls,
+            },
+        )
+        .await
+        .map_err(|error| RpcFailure::new(StatusCode::OK, None, INVALID_PARAMS, error.message))?
+    };
+    tool_success(Ok(json!({
+        "request_key": request.request_key,
+        "task": response.task,
+        "run": response.run,
+        "replayed": response.replayed,
+        "execution": response.execution,
+    })))
+}
+
+async fn continue_task(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request: ContinueTaskArguments = serde_json::from_value(Value::Object(arguments.clone()))
+        .map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            "Consumer continuation arguments do not match the advertised schema",
+        )
+    })?;
+    validate_continue_task_arguments(&request)?;
+    let task_id = request.task_id;
+    let launch = LaunchTaskRequest {
+        target_path: request.target_path,
+        context_token_budget: request.context_token_budget,
+        requested_tools: request.requested_tools,
+        estimated_output_tokens: request.estimated_output_tokens,
+        max_model_calls: request.max_model_calls,
+    };
+    let response = match request.action {
+        ContinueTaskAction::Retry => {
+            super::retry_task(
+                State(state.clone()),
+                Path(task_id.to_string()),
+                Json(launch),
+            )
+            .await
+        }
+        ContinueTaskAction::Resume => {
+            super::resume_task(
+                State(state.clone()),
+                Path(task_id.to_string()),
+                Json(launch),
+            )
+            .await
+        }
+    };
+    match response {
+        Ok(Json(response)) => tool_success(serde_json::to_value(response)),
+        Err(error) => Ok(tool_error(error.code, &error.message)),
+    }
+}
+
+fn cancel_task(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &["task_id"])?;
+    let task_id = required_string(arguments, "task_id")?
+        .parse::<TaskId>()
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "task_id must be a UUID",
+            )
+        })?;
+    let existing = match state.runtime.task(task_id) {
+        Ok(Some(task)) => task,
+        Ok(None) => {
+            return Ok(tool_error(
+                "task_not_found",
+                "The requested consumer task is not known to MCG",
+            ));
+        }
+        Err(_) => {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the consumer task",
+            ));
+        }
+    };
+    let replayed = existing.state == TaskState::Cancelled;
+    let task = if replayed {
+        existing
+    } else {
+        match state.runtime.transition_task(task_id, TaskState::Cancelled) {
+            Ok(task) => task,
+            Err(error) if error.is_invalid_request() => {
+                return Ok(tool_error(
+                    "invalid_state",
+                    "Only a nonterminal consumer task can be cancelled",
+                ));
+            }
+            Err(_) => {
+                return Ok(tool_error(
+                    "runtime_error",
+                    "MCG could not cancel the consumer task",
+                ));
+            }
+        }
+    };
+    let run_id = state.runtime.task_launch_run_id(task_id).map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INTERNAL_ERROR,
+            "MCG cancelled the task but could not read its launch identity",
+        )
+    })?;
+    let run = run_id
+        .map(|run_id| state.runtime.agent_run_view(run_id))
+        .transpose()
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                "MCG cancelled the task but could not read its durable run",
+            )
+        })?;
+    tool_success(Ok(json!({"task": task, "run": run, "replayed": replayed})))
+}
+
+fn record_evaluation(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request: RecordEvaluationArguments =
+        serde_json::from_value(Value::Object(arguments.clone())).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Evaluation arguments do not contain a complete EvaluationReport",
+            )
+        })?;
+    let view = match state.runtime.agent_run_view(request.report.run_id) {
+        Ok(view) => view,
+        Err(error) if error.is_not_found() => {
+            return Ok(tool_error(
+                "run_not_found",
+                "The evaluation run is not known to MCG",
+            ));
+        }
+        Err(_) => {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not inspect the evaluation run",
+            ));
+        }
+    };
+    if let Some(existing) = view
+        .evaluations
+        .iter()
+        .find(|evaluation| evaluation.id == request.report.id)
+    {
+        if existing != &request.report {
+            return Ok(tool_error(
+                "conflict",
+                "evaluation id was already used with different evidence",
+            ));
+        }
+        return tool_success(Ok(json!({
+            "report": existing,
+            "replayed": true,
+        })));
+    }
+    match state.runtime.record_evaluation(&request.report) {
+        Ok(event) => tool_success(Ok(json!({
+            "report": request.report,
+            "event": event,
+            "replayed": false,
+        }))),
+        Err(error) if error.is_conflict() => Ok(tool_error(
+            "conflict",
+            "The evaluation conflicts with existing durable evidence",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_evaluation",
+            "The evaluation failed identity, independence, coverage, outcome, or evidence validation",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not record the evaluation",
+        )),
+    }
+}
+
+fn validate_run_task_arguments(request: &RunTaskArguments) -> Result<(), RpcFailure> {
+    if !valid_request_key(&request.request_key)
+        || request.goal.trim().is_empty()
+        || request.goal.chars().count() > 32_768
+        || !valid_bounded_strings(&request.constraints, 64, 8_192)
+        || !valid_bounded_strings(&request.success_conditions, 64, 8_192)
+        || request
+            .target_path
+            .as_ref()
+            .is_some_and(|path| path.len() > 4_096)
+        || !valid_execution_bounds(
+            request.context_token_budget,
+            request.estimated_output_tokens,
+            request.max_model_calls,
+            &request.requested_tools,
+        )
+        || request.budget.max_tokens == Some(0)
+        || request.budget.max_duration_seconds == Some(0)
+        || request
+            .budget
+            .max_cost_usd
+            .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+    {
+        return Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            "Consumer task values are outside the advertised bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_continue_task_arguments(request: &ContinueTaskArguments) -> Result<(), RpcFailure> {
+    if request
+        .target_path
+        .as_ref()
+        .is_some_and(|path| path.len() > 4_096)
+        || !valid_execution_bounds(
+            request.context_token_budget,
+            request.estimated_output_tokens,
+            request.max_model_calls,
+            &request.requested_tools,
+        )
+    {
+        return Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            "Consumer continuation values are outside the advertised bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_request_key(value: &str) -> bool {
+    value.trim() == value
+        && !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+fn valid_bounded_strings(values: &[String], max_items: usize, max_chars: usize) -> bool {
+    values.len() <= max_items
+        && values
+            .iter()
+            .all(|value| !value.trim().is_empty() && value.chars().count() <= max_chars)
+}
+
+fn valid_execution_bounds(
+    context_token_budget: u32,
+    estimated_output_tokens: u64,
+    max_model_calls: u16,
+    requested_tools: &[String],
+) -> bool {
+    (64..=MAX_CONTEXT_TOKENS).contains(&context_token_budget)
+        && (1..=100_000).contains(&estimated_output_tokens)
+        && (1..=32).contains(&max_model_calls)
+        && requested_tools.len() <= 128
+        && requested_tools.iter().collect::<HashSet<_>>().len() == requested_tools.len()
+        && requested_tools
+            .iter()
+            .all(|tool| !tool.trim().is_empty() && tool.len() <= 512)
 }
 
 #[allow(clippy::too_many_lines)] // Keeps validation, durable reservation, and execution together.
@@ -2590,6 +3319,7 @@ async fn run_agent(
             "mcp",
             request.request_key.trim(),
             &request_hash,
+            false,
             &task,
             &organization,
             &run,

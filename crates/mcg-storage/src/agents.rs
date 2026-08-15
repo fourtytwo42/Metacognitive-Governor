@@ -1233,7 +1233,8 @@ impl SqliteEventStore {
     }
 
     /// Atomically creates an idempotent interface-owned task, organization,
-    /// immutable plan, active task projection, and running agent run.
+    /// immutable plan, active task projection, and running agent run. A true
+    /// `consumer_launch` flag also commits the unique task launch mapping.
     ///
     /// # Errors
     ///
@@ -1246,6 +1247,7 @@ impl SqliteEventStore {
         interface: &str,
         request_key: &str,
         request_hash: &str,
+        consumer_launch: bool,
         task: &TaskEnvelope,
         genome: &OrganizationGenome,
         run: &AgentRun,
@@ -1289,6 +1291,11 @@ impl SqliteEventStore {
             let run_id = run_id.parse().map_err(|_| {
                 StorageError::InvalidData("stored interface run id is invalid".into())
             })?;
+            if consumer_launch && self.task_launch_run_id(task_id)? != Some(run_id) {
+                return Err(StorageError::Conflict(
+                    "interface consumer launch identity is missing or inconsistent".into(),
+                ));
+            }
             return Ok(InterfaceRunReceipt {
                 task: self
                     .load_task(task_id)?
@@ -1458,6 +1465,16 @@ impl SqliteEventStore {
                 running_run.updated_at.to_rfc3339(),
             ],
         )?;
+        if consumer_launch {
+            transaction.execute(
+                "INSERT INTO task_launches(task_id, run_id, created_at) VALUES (?1, ?2, ?3)",
+                params![
+                    task.id.to_string(),
+                    running_run.id.to_string(),
+                    running_run.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
         transaction.commit()?;
         Ok(InterfaceRunReceipt {
             task: active_task,
@@ -3591,7 +3608,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_run_creation_is_atomic_idempotent_and_restart_durable() {
+    fn interface_consumer_run_creation_is_atomic_idempotent_and_restart_durable() {
         let directory = tempdir().expect("temp directory");
         let database = directory.path().join("mcg.sqlite3");
         let now = Utc::now();
@@ -3636,6 +3653,7 @@ mod tests {
                 "mcp",
                 "fixture-request",
                 &hash,
+                true,
                 &task,
                 &genome,
                 &run,
@@ -3646,6 +3664,10 @@ mod tests {
         assert_eq!(created.task.state, TaskState::Active);
         assert_eq!(created.run.state, AgentRunState::Running);
         assert_eq!(created.events.len(), 5);
+        assert_eq!(
+            store.task_launch_run_id(task.id).expect("consumer launch"),
+            Some(run.id)
+        );
         let event_count = store.event_count().expect("event count");
         drop(store);
 
@@ -3655,6 +3677,7 @@ mod tests {
                 "mcp",
                 "fixture-request",
                 &hash,
+                true,
                 &task,
                 &genome,
                 &run,
@@ -3665,6 +3688,12 @@ mod tests {
         assert_eq!(replayed.task.id, task.id);
         assert_eq!(replayed.run.id, run.id);
         assert!(replayed.events.is_empty());
+        assert_eq!(
+            reopened
+                .task_launch_run_id(task.id)
+                .expect("reopened consumer launch"),
+            Some(run.id)
+        );
         assert_eq!(reopened.event_count().expect("event count"), event_count);
         assert!(
             reopened
@@ -3672,6 +3701,7 @@ mod tests {
                     "mcp",
                     "fixture-request",
                     &"b".repeat(64),
+                    true,
                     &task,
                     &genome,
                     &run,

@@ -5997,7 +5997,9 @@ impl AppRuntime {
     }
 
     /// Atomically reserves and starts an idempotent task/run requested through
-    /// an external interface, then returns its complete durable view.
+    /// an external interface, then returns its complete durable view. When
+    /// `consumer_launch` is true, the unique task-to-consumer-run identity is
+    /// committed in the same transaction.
     ///
     /// # Errors
     ///
@@ -6009,6 +6011,7 @@ impl AppRuntime {
         interface: &str,
         request_key: &str,
         request_hash: &str,
+        consumer_launch: bool,
         task: &TaskEnvelope,
         genome: &OrganizationGenome,
         run: &AgentRun,
@@ -6018,6 +6021,7 @@ impl AppRuntime {
             interface,
             request_key,
             request_hash,
+            consumer_launch,
             task,
             genome,
             run,
