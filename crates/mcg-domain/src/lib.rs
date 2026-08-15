@@ -64,6 +64,8 @@ domain_id!(AgentLeaseId);
 domain_id!(WorkItemId);
 domain_id!(EvaluationId);
 domain_id!(UsageRecordId);
+domain_id!(ProxyConversationId);
+domain_id!(ProxyCallId);
 domain_id!(ScheduleId);
 domain_id!(ScheduleOccurrenceId);
 domain_id!(WakeRequestId);

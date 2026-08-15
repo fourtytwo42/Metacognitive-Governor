@@ -1,11 +1,193 @@
 use chrono::{DateTime, Utc};
+use mcg_domain::ProxyConversationId;
 use mcg_events::{EventEnvelope, EventKind};
-use mcg_providers::{ProviderAuthMode, ProviderConnection, ProviderModelCatalog};
+use mcg_providers::{
+    PROXY_LEDGER_SCHEMA_VERSION, ProviderAuthMode, ProviderConnection, ProviderModelCatalog,
+    ProxyCallRecord, ProxyConversation, ProxyConversationView, ProxyUsageSummary, Usage,
+};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{SqliteEventStore, StorageError};
 
 impl SqliteEventStore {
+    /// Atomically creates or advances a privacy-preserving conversation projection and
+    /// appends one immutable completed-call record.
+    ///
+    /// Exact call retries are idempotent. Reusing either identity for different data,
+    /// or rebinding an existing conversation to different governed context, fails closed.
+    ///
+    /// # Errors
+    /// Returns validation, context, conflict, serialization, or `SQLite` failures.
+    pub fn record_proxy_call(
+        &mut self,
+        conversation: &ProxyConversation,
+        call: &ProxyCallRecord,
+    ) -> Result<(), StorageError> {
+        validate_proxy_record(conversation, call)?;
+        if let Some(project_id) = conversation.project_id {
+            let exists = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id = ?1)",
+                [project_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(StorageError::ProjectNotFound(project_id));
+            }
+        }
+        if let Some(task_id) = conversation.task_id {
+            let task = self
+                .load_task(task_id)?
+                .ok_or(StorageError::TaskNotFound(task_id))?;
+            if let Some(project_id) = conversation.project_id
+                && task.project_id != Some(project_id)
+            {
+                return Err(StorageError::Conflict(
+                    "provider proxy task does not belong to the requested project".into(),
+                ));
+            }
+        }
+
+        let transaction = self.connection.transaction()?;
+        let prior_conversation = transaction
+            .query_row(
+                "SELECT conversation_json FROM provider_proxy_conversations
+                 WHERE conversation_id = ?1",
+                [conversation.id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior_conversation {
+            let prior: ProxyConversation = serde_json::from_str(&prior)?;
+            if prior.project_id != conversation.project_id || prior.task_id != conversation.task_id
+            {
+                return Err(StorageError::Conflict(
+                    "provider proxy conversation context is immutable".into(),
+                ));
+            }
+        }
+
+        let prior_call = transaction
+            .query_row(
+                "SELECT call_json FROM provider_proxy_calls WHERE call_id = ?1",
+                [call.id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior_call {
+            let prior: ProxyCallRecord = serde_json::from_str(&prior)?;
+            if prior == *call {
+                return Ok(());
+            }
+            return Err(StorageError::Conflict(
+                "provider proxy call identity was reused with different data".into(),
+            ));
+        }
+
+        transaction.execute(
+            "INSERT INTO provider_proxy_conversations(
+                conversation_id, project_id, task_id, conversation_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+                conversation_json = excluded.conversation_json,
+                updated_at = excluded.updated_at",
+            params![
+                conversation.id.to_string(),
+                conversation.project_id.map(|id| id.to_string()),
+                conversation.task_id.map(|id| id.to_string()),
+                serde_json::to_string(conversation)?,
+                conversation.created_at.to_rfc3339(),
+                conversation.updated_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO provider_proxy_calls(call_id, conversation_id, call_json, completed_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                call.id.to_string(),
+                call.conversation_id.to_string(),
+                serde_json::to_string(call)?,
+                call.completed_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Lists durable proxy conversations without prompt or generated content.
+    ///
+    /// # Errors
+    /// Returns decoding or `SQLite` failures.
+    pub fn proxy_conversations(&self) -> Result<Vec<ProxyConversation>, StorageError> {
+        self.read_all_json(
+            "SELECT conversation_json FROM provider_proxy_conversations
+             ORDER BY updated_at DESC, conversation_id",
+        )
+    }
+
+    /// Loads one conversation and its immutable call history.
+    ///
+    /// # Errors
+    /// Returns decoding or `SQLite` failures.
+    pub fn proxy_conversation(
+        &self,
+        conversation_id: ProxyConversationId,
+    ) -> Result<Option<ProxyConversationView>, StorageError> {
+        let Some(conversation) = self.read_optional_json(
+            "SELECT conversation_json FROM provider_proxy_conversations
+             WHERE conversation_id = ?1",
+            &conversation_id.to_string(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let calls = self.read_json_rows(
+            "SELECT call_json FROM provider_proxy_calls WHERE conversation_id = ?1
+             ORDER BY completed_at, call_id",
+            &conversation_id.to_string(),
+        )?;
+        Ok(Some(ProxyConversationView {
+            conversation,
+            calls,
+        }))
+    }
+
+    /// Aggregates durable usage and only costs whose pricing was known at call time.
+    ///
+    /// # Errors
+    /// Returns decoding or `SQLite` failures.
+    pub fn proxy_usage_summary(&self) -> Result<ProxyUsageSummary, StorageError> {
+        let conversations = self.proxy_conversations()?;
+        let calls: Vec<ProxyCallRecord> = self.read_all_json(
+            "SELECT call_json FROM provider_proxy_calls ORDER BY completed_at, call_id",
+        )?;
+        let mut usage = Usage::default();
+        let mut known_actual_cost_usd = 0.0;
+        let mut unknown_cost_call_count = 0;
+        for call in &calls {
+            usage.input_tokens = usage.input_tokens.saturating_add(call.usage.input_tokens);
+            usage.cached_input_tokens = usage
+                .cached_input_tokens
+                .saturating_add(call.usage.cached_input_tokens);
+            usage.output_tokens = usage.output_tokens.saturating_add(call.usage.output_tokens);
+            usage.reasoning_tokens = usage
+                .reasoning_tokens
+                .saturating_add(call.usage.reasoning_tokens);
+            usage.total_tokens = usage.total_tokens.saturating_add(call.usage.total_tokens);
+            if let Some(cost) = call.actual_cost_usd {
+                known_actual_cost_usd += cost;
+            } else {
+                unknown_cost_call_count += 1;
+            }
+        }
+        Ok(ProxyUsageSummary {
+            conversation_count: conversations.len() as u64,
+            call_count: calls.len() as u64,
+            usage,
+            known_actual_cost_usd,
+            unknown_cost_call_count,
+        })
+    }
+
     /// Atomically records secret-free provider metadata, a discovered catalog,
     /// and both global configuration events.
     ///
@@ -205,6 +387,46 @@ impl SqliteEventStore {
     }
 }
 
+fn validate_proxy_record(
+    conversation: &ProxyConversation,
+    call: &ProxyCallRecord,
+) -> Result<(), StorageError> {
+    if conversation.schema_version != PROXY_LEDGER_SCHEMA_VERSION
+        || call.schema_version != PROXY_LEDGER_SCHEMA_VERSION
+    {
+        return Err(StorageError::InvalidData(
+            "unsupported provider proxy ledger schema version".into(),
+        ));
+    }
+    if call.conversation_id != conversation.id || conversation.updated_at != call.completed_at {
+        return Err(StorageError::InvalidData(
+            "provider proxy call does not match its conversation projection".into(),
+        ));
+    }
+    if conversation.created_at > conversation.updated_at
+        || call.alias.trim().is_empty()
+        || call.provider_id.trim().is_empty()
+        || call.model_id.trim().is_empty()
+        || call.response_id.trim().is_empty()
+        || call.request_sha256.len() != 64
+        || !call
+            .request_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || call
+            .estimated_cost_usd
+            .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        || call
+            .actual_cost_usd
+            .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+    {
+        return Err(StorageError::InvalidData(
+            "provider proxy ledger record is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_catalog(catalog: &ProviderModelCatalog) -> Result<(), StorageError> {
     if catalog
         .models
@@ -220,8 +442,10 @@ fn validate_catalog(catalog: &ProviderModelCatalog) -> Result<(), StorageError> 
 
 #[cfg(test)]
 mod tests {
+    use mcg_domain::{ProxyCallId, ProxyConversationId};
     use mcg_providers::{
-        CONTRACT_VERSION, ModelCapabilities, ModelDescriptor, ProviderAuthMode, ProviderKind,
+        CONTRACT_VERSION, ModelCapabilities, ModelDescriptor, PROXY_LEDGER_SCHEMA_VERSION,
+        ProviderAuthMode, ProviderKind, ProxyCallRecord, ProxyConversation, ProxyInterface, Usage,
     };
     use serde_json::Value;
 
@@ -275,5 +499,75 @@ mod tests {
         let encoded = serde_json::to_string(&events).expect("event JSON");
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("token"));
+    }
+
+    #[test]
+    fn proxy_ledger_survives_restart_without_retaining_content() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let database = temporary.path().join("proxy-ledger.sqlite3");
+        let now = Utc::now();
+        let conversation = ProxyConversation {
+            schema_version: PROXY_LEDGER_SCHEMA_VERSION,
+            id: ProxyConversationId::new(),
+            project_id: None,
+            task_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let call = ProxyCallRecord {
+            schema_version: PROXY_LEDGER_SCHEMA_VERSION,
+            id: ProxyCallId::new(),
+            conversation_id: conversation.id,
+            interface: ProxyInterface::Responses,
+            alias: "mcg:auto".into(),
+            provider_id: "fixture".into(),
+            model_id: "fixture-model".into(),
+            response_id: "response-1".into(),
+            request_sha256: "a".repeat(64),
+            streamed: false,
+            usage: Usage {
+                input_tokens: 10,
+                cached_input_tokens: 2,
+                output_tokens: 5,
+                reasoning_tokens: 1,
+                total_tokens: 15,
+            },
+            estimated_cost_usd: Some(0.02),
+            actual_cost_usd: Some(0.01),
+            completed_at: now,
+        };
+        let mut store = SqliteEventStore::open(&database).expect("store");
+        store
+            .record_proxy_call(&conversation, &call)
+            .expect("first record");
+        store
+            .record_proxy_call(&conversation, &call)
+            .expect("exact retry");
+        drop(store);
+
+        let reopened = SqliteEventStore::open(&database).expect("reopen");
+        let view = reopened
+            .proxy_conversation(conversation.id)
+            .expect("read")
+            .expect("conversation");
+        assert_eq!(view.conversation, conversation);
+        assert_eq!(view.calls, vec![call]);
+        let summary = reopened.proxy_usage_summary().expect("summary");
+        assert_eq!(summary.conversation_count, 1);
+        assert_eq!(summary.call_count, 1);
+        assert_eq!(summary.usage.total_tokens, 15);
+        assert!((summary.known_actual_cost_usd - 0.01).abs() < f64::EPSILON);
+
+        let persisted = std::fs::read(&database).expect("database bytes");
+        assert!(
+            !persisted
+                .windows(b"private prompt".len())
+                .any(|bytes| bytes == b"private prompt")
+        );
+        assert!(
+            !persisted
+                .windows(b"private output".len())
+                .any(|bytes| bytes == b"private output")
+        );
     }
 }

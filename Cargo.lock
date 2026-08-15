@@ -3152,6 +3152,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "keyring",
+ "mcg-domain",
  "rand 0.9.5",
  "reqwest",
  "serde",

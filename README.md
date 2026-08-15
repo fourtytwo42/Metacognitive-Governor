@@ -298,6 +298,10 @@ bearer token. Initial aliases are `mcg:auto`, `mcg:coder`, `mcg:reasoner`,
 `mcg:cheap`, and `mcg:local`; see
 [`docs/architecture/provider-proxy.md`](docs/architecture/provider-proxy.md) for
 routing, streaming, cost, and caller-owned tool semantics.
+Completed calls are recorded in a privacy-preserving local ledger without prompt
+or generated text. Use `mcg provider usage` and `mcg provider conversations` to
+inspect token/cost totals and durable conversation identities; the desktop
+Providers workspace exposes the same data.
 
 Modern MCP clients can use the authenticated stateless Streamable HTTP endpoint
 at `POST /mcp`. The server exposes deterministic status, project, context,

@@ -1026,6 +1026,15 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
             post(probe_provider_model),
         )
         .route(
+            "/api/v1/provider-proxy/conversations",
+            get(provider_proxy::conversations),
+        )
+        .route(
+            "/api/v1/provider-proxy/conversations/{conversation_id}",
+            get(provider_proxy::conversation),
+        )
+        .route("/api/v1/provider-proxy/usage", get(provider_proxy::usage))
+        .route(
             "/api/v1/mcp/connections",
             get(list_mcp_connections).post(configure_mcp_connection),
         )
@@ -10715,6 +10724,7 @@ form.addEventListener('submit', (event) => {
     #[allow(clippy::too_many_lines)] // Complete external provider compatibility contract.
     async fn openai_provider_proxy_is_authenticated_routed_and_streamable() {
         let runtime = test_runtime();
+        let proxy_conversation_id = mcg_domain::ProxyConversationId::new();
         runtime
             .configure_provider(
                 ProviderConnection {
@@ -10792,13 +10802,37 @@ form.addEventListener('submit', (event) => {
                 }))
         );
 
+        let unknown_context = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"mcg:auto",
+                            "input":"must not reach a provider",
+                            "metadata":{"mcg_project_id":ProjectId::new()}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("unknown context request"),
+            )
+            .await
+            .expect("unknown context response");
+        assert_eq!(unknown_context.status(), StatusCode::NOT_FOUND);
+
         let buffered = app
             .clone()
             .oneshot(
                 authorized(Request::post("/v1/responses"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"model":"mcg:auto","input":"hello"}).to_string(),
+                        serde_json::json!({
+                            "model":"mcg:auto",
+                            "input":"private prompt must not be retained",
+                            "metadata":{"mcg_conversation_id":proxy_conversation_id}
+                        })
+                        .to_string(),
                     ))
                     .expect("responses request"),
             )
@@ -10825,6 +10859,10 @@ form.addEventListener('submit', (event) => {
         assert_eq!(
             buffered.pointer("/usage/total_tokens"),
             Some(&serde_json::json!(36))
+        );
+        assert_eq!(
+            buffered.pointer("/mcg_ledger/conversation_id"),
+            Some(&serde_json::json!(proxy_conversation_id))
         );
 
         let chat = app
@@ -10871,7 +10909,8 @@ form.addEventListener('submit', (event) => {
                         serde_json::json!({
                             "model":"mcg:auto",
                             "input":"stream",
-                            "stream":true
+                            "stream":true,
+                            "metadata":{"mcg_conversation_id":proxy_conversation_id}
                         })
                         .to_string(),
                     ))
@@ -10900,6 +10939,60 @@ form.addEventListener('submit', (event) => {
         assert!(streaming.contains("event: response.output_text.delta"));
         assert!(streaming.contains("event: response.completed"));
         assert!(streaming.contains("mcg:auto"));
+
+        let ledger = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/provider-proxy/conversations/{proxy_conversation_id}"
+                )))
+                .body(Body::empty())
+                .expect("ledger request"),
+            )
+            .await
+            .expect("ledger response");
+        assert_eq!(ledger.status(), StatusCode::OK);
+        let ledger = String::from_utf8(
+            ledger
+                .into_body()
+                .collect()
+                .await
+                .expect("ledger body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("ledger utf8");
+        let ledger_json: serde_json::Value = serde_json::from_str(&ledger).expect("ledger json");
+        assert_eq!(
+            ledger_json
+                .get("calls")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(!ledger.contains("private prompt must not be retained"));
+        assert!(!ledger.contains("fixture complete"));
+
+        let usage = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/provider-proxy/usage"))
+                    .body(Body::empty())
+                    .expect("usage request"),
+            )
+            .await
+            .expect("usage response");
+        assert_eq!(usage.status(), StatusCode::OK);
+        let usage: serde_json::Value = serde_json::from_slice(
+            &usage
+                .into_body()
+                .collect()
+                .await
+                .expect("usage body")
+                .to_bytes(),
+        )
+        .expect("usage json");
+        assert_eq!(usage.get("call_count"), Some(&serde_json::json!(3)));
 
         let caller_tool = app
             .clone()

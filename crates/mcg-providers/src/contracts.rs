@@ -3,6 +3,7 @@ use std::{fmt, pin::Pin, time::Duration};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
+use mcg_domain::{ProjectId, ProxyCallId, ProxyConversationId, TaskId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -290,6 +291,62 @@ pub struct Usage {
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     pub total_tokens: u64,
+}
+
+pub const PROXY_LEDGER_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyInterface {
+    Responses,
+    ChatCompletions,
+}
+
+/// Secret-free grouping metadata for calls made through the local provider proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyConversation {
+    pub schema_version: u16,
+    pub id: ProxyConversationId,
+    pub project_id: Option<ProjectId>,
+    pub task_id: Option<TaskId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Immutable, privacy-preserving accounting evidence for one completed proxy call.
+/// Prompt text, generated output, credentials, and arbitrary provider metadata are
+/// deliberately excluded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyCallRecord {
+    pub schema_version: u16,
+    pub id: ProxyCallId,
+    pub conversation_id: ProxyConversationId,
+    pub interface: ProxyInterface,
+    pub alias: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub response_id: String,
+    pub request_sha256: String,
+    pub streamed: bool,
+    pub usage: Usage,
+    pub estimated_cost_usd: Option<f64>,
+    pub actual_cost_usd: Option<f64>,
+    pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyConversationView {
+    pub conversation: ProxyConversation,
+    pub calls: Vec<ProxyCallRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyUsageSummary {
+    pub conversation_count: u64,
+    pub call_count: u64,
+    pub usage: Usage,
+    pub known_actual_cost_usd: f64,
+    pub unknown_cost_call_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -27,6 +27,8 @@ import {
   listExperiments,
   listSupervisionObservations,
   listProviders,
+  providerProxyConversations,
+  providerProxyUsage,
   listApprovals,
   listSchedules,
   listSchedulerNotifications,
@@ -60,6 +62,8 @@ import {
   type ProviderKind,
   type ProviderListItem,
   type ProviderModel,
+  type ProxyConversation,
+  type ProxyUsageSummary,
   type PlatformCapabilitySnapshot,
   type PlatformSession,
   type PlatformSessionHistoryResponse,
@@ -249,6 +253,8 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderListItem[]>([]);
+  const [proxyUsage, setProxyUsage] = useState<ProxyUsageSummary | null>(null);
+  const [proxyConversations, setProxyConversations] = useState<ProxyConversation[]>([]);
   const [providerSetup, setProviderSetup] = useState(false);
   const [providerName, setProviderName] = useState("");
   const [providerId, setProviderId] = useState("");
@@ -367,6 +373,20 @@ export function App() {
     listProviders()
       .then((response) => {
         if (active) setProviders(response.providers);
+      })
+      .catch((error) => {
+        if (active) setProviderError(errorMessage(error));
+      });
+    providerProxyUsage()
+      .then((response) => {
+        if (active) setProxyUsage(response);
+      })
+      .catch((error) => {
+        if (active) setProviderError(errorMessage(error));
+      });
+    providerProxyConversations()
+      .then((response) => {
+        if (active) setProxyConversations(response.conversations);
       })
       .catch((error) => {
         if (active) setProviderError(errorMessage(error));
@@ -2263,6 +2283,26 @@ export function App() {
                 </ul>}
               </article>
             ))}
+            <div className="section-heading compact-heading">
+              <h3>Local proxy usage</h3>
+              <span className="count-badge">{proxyUsage?.call_count ?? 0} calls</span>
+            </div>
+            {proxyUsage ? <article className="provider-card" aria-label="Provider proxy usage">
+              <div>
+                <h3>{proxyUsage.usage.total_tokens.toLocaleString()} tokens</h3>
+                <p>
+                  {proxyUsage.conversation_count} conversations Â· ${proxyUsage.known_actual_cost_usd.toFixed(6)} known cost
+                  {proxyUsage.unknown_cost_call_count > 0 && ` Â· ${proxyUsage.unknown_cost_call_count} unknown-cost calls`}
+                </p>
+                <small>Conversation history retains usage and routing metadata, not prompts or generated text.</small>
+              </div>
+              {advanced && proxyConversations.length > 0 && <ul className="model-list" aria-label="Proxy conversations">
+                {proxyConversations.slice(0, 12).map((conversation) => <li key={conversation.id}>
+                  <span><strong>{conversation.task_id ? "Task conversation" : "Standalone conversation"}</strong><code>{conversation.id}</code></span>
+                  <small>{new Date(conversation.updated_at).toLocaleString()}</small>
+                </li>)}
+              </ul>}
+            </article> : <p className="empty-state">No local proxy usage recorded yet.</p>}
           </div>
         </section>
 

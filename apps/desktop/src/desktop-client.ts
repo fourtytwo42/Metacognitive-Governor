@@ -54,6 +54,33 @@ export interface ProviderListResponse {
   providers: ProviderListItem[];
 }
 
+export interface ProxyConversation {
+  schema_version: number;
+  id: string;
+  project_id?: string;
+  task_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyUsageSummary {
+  conversation_count: number;
+  call_count: number;
+  usage: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+    reasoning_tokens: number;
+    total_tokens: number;
+  };
+  known_actual_cost_usd: number;
+  unknown_cost_call_count: number;
+}
+
+export interface ProxyConversationListResponse {
+  conversations: ProxyConversation[];
+}
+
 export interface ProviderMutation {
   connection: ProviderConnection;
   catalog: ProviderModelCatalog;
@@ -558,6 +585,14 @@ export function openExternalUrl(url: string): Promise<void> {
 
 export function listProviders(): Promise<ProviderListResponse> {
   return invoke("list_providers");
+}
+
+export function providerProxyUsage(): Promise<ProxyUsageSummary> {
+  return invoke("provider_proxy_usage");
+}
+
+export function providerProxyConversations(): Promise<ProxyConversationListResponse> {
+  return invoke("provider_proxy_conversations");
 }
 
 export function configureProvider(

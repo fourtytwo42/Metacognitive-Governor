@@ -9,6 +9,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
+mcg-domain = { path = "../mcg-domain" }
 eventsource-stream.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true

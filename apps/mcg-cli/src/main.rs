@@ -44,7 +44,7 @@ use mcg_mcp::{
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
     CONTRACT_VERSION, ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderKind,
-    ProviderModelCatalog,
+    ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, CandidateRevisionMutation, EvidenceMutation, ExperimentMutation,
@@ -64,6 +64,11 @@ use zeroize::Zeroize;
 struct ProviderConfigurePayload {
     connection: ProviderConnection,
     credential: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ProxyConversationListResponse {
+    conversations: Vec<ProxyConversation>,
 }
 
 #[derive(Serialize)]
@@ -712,6 +717,16 @@ enum ProviderCommand {
     Refresh { id: String },
     /// Probe one model's live Responses, streaming, and tool-call capabilities.
     Probe { id: String, model: String },
+    /// Show durable token and known-cost totals for local proxy calls.
+    Usage {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List privacy-preserving local proxy conversation records.
+    Conversations {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -2837,6 +2852,7 @@ async fn run_agent(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the complete provider subcommand dispatch in one place.
 async fn run_provider(
     client: &reqwest::Client,
     host: &str,
@@ -2937,6 +2953,77 @@ async fn run_provider(
                 .json()
                 .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        ProviderCommand::Usage { json } => {
+            print_provider_proxy_usage(client, host, token, json).await?;
+        }
+        ProviderCommand::Conversations { json } => {
+            print_provider_proxy_conversations(client, host, token, json).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn print_provider_proxy_usage(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let usage: ProxyUsageSummary = client
+        .get(format!("{host}/api/v1/provider-proxy/usage"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&usage)?);
+    } else {
+        println!(
+            "{} call(s) across {} conversation(s): {} tokens, ${:.6} known cost, {} call(s) with unknown cost",
+            usage.call_count,
+            usage.conversation_count,
+            usage.usage.total_tokens,
+            usage.known_actual_cost_usd,
+            usage.unknown_cost_call_count
+        );
+    }
+    Ok(())
+}
+
+async fn print_provider_proxy_conversations(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response: ProxyConversationListResponse = client
+        .get(format!("{host}/api/v1/provider-proxy/conversations"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else if response.conversations.is_empty() {
+        println!("No provider proxy conversations recorded.");
+    } else {
+        for conversation in response.conversations {
+            println!(
+                "{}  updated {}  project={}  task={}",
+                conversation.id,
+                conversation.updated_at,
+                conversation
+                    .project_id
+                    .map_or_else(|| "-".into(), |id| id.to_string()),
+                conversation
+                    .task_id
+                    .map_or_else(|| "-".into(), |id| id.to_string())
+            );
         }
     }
     Ok(())

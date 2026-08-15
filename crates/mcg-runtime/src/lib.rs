@@ -38,8 +38,8 @@ use mcg_domain::{
     PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
     PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
     PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
-    PlatformSessionState, ProjectId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
-    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    PlatformSessionState, ProjectId, ProxyConversationId, RiskLevel, RunId, SITE_SCHEMA_VERSION,
+    SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
     SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
@@ -63,8 +63,9 @@ use mcg_projects::{
 use mcg_providers::{
     BrowserAuthorizationConfig, DeviceAuthorizationConfig, MemoryProviderCredentialStore,
     ModelProbeReport, ModelRequest, ModelResponse, OAuthTokenSet, OsProviderCredentialStore,
-    ProviderConnection, ProviderCredential, ProviderCredentialStore, ProviderError,
-    ProviderModelCatalog, ProviderModelRef, ProviderRegistry, RouteCandidate, RoutingPolicy,
+    PROXY_LEDGER_SCHEMA_VERSION, ProviderConnection, ProviderCredential, ProviderCredentialStore,
+    ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, ProxyCallRecord,
+    ProxyConversation, ProxyConversationView, ProxyUsageSummary, RouteCandidate, RoutingPolicy,
     ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
 use mcg_storage::{
@@ -3085,6 +3086,102 @@ impl AppRuntime {
         connection_id: &str,
     ) -> Result<Option<ProviderModelCatalog>, RuntimeError> {
         Ok(self.store()?.provider_catalog(connection_id)?)
+    }
+
+    /// Validates optional governed context before a proxy call can incur provider work.
+    /// Existing conversation context is immutable; a task-bound conversation inherits
+    /// the task's project when the caller omits it.
+    ///
+    /// # Errors
+    /// Returns missing-context, immutable-context conflict, or storage failures.
+    pub fn prepare_proxy_conversation(
+        &self,
+        id: ProxyConversationId,
+        mut project_id: Option<ProjectId>,
+        task_id: Option<TaskId>,
+        now: DateTime<Utc>,
+    ) -> Result<ProxyConversation, RuntimeError> {
+        if let Some(task_id) = task_id {
+            let task = self
+                .task(task_id)?
+                .ok_or(StorageError::TaskNotFound(task_id))?;
+            if let Some(requested) = project_id
+                && task.project_id != Some(requested)
+            {
+                return Err(StorageError::Conflict(
+                    "provider proxy task does not belong to the requested project".into(),
+                )
+                .into());
+            }
+            project_id = project_id.or(task.project_id);
+        }
+        if let Some(project_id) = project_id
+            && self.project(project_id)?.is_none()
+        {
+            return Err(StorageError::ProjectNotFound(project_id).into());
+        }
+        if let Some(existing) = self.store()?.proxy_conversation(id)? {
+            if existing.conversation.project_id != project_id
+                || existing.conversation.task_id != task_id
+            {
+                return Err(StorageError::Conflict(
+                    "provider proxy conversation context is immutable".into(),
+                )
+                .into());
+            }
+            return Ok(ProxyConversation {
+                updated_at: now,
+                ..existing.conversation
+            });
+        }
+        Ok(ProxyConversation {
+            schema_version: PROXY_LEDGER_SCHEMA_VERSION,
+            id,
+            project_id,
+            task_id,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Persists one completed proxy call and advances its conversation projection.
+    ///
+    /// # Errors
+    /// Returns validation, context, conflict, serialization, or storage failures.
+    pub fn record_proxy_call(
+        &self,
+        conversation: &ProxyConversation,
+        call: &ProxyCallRecord,
+    ) -> Result<(), RuntimeError> {
+        self.store()?.record_proxy_call(conversation, call)?;
+        Ok(())
+    }
+
+    /// Lists privacy-preserving proxy conversation projections.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn proxy_conversations(&self) -> Result<Vec<ProxyConversation>, RuntimeError> {
+        Ok(self.store()?.proxy_conversations()?)
+    }
+
+    /// Loads one proxy conversation with immutable call history.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn proxy_conversation(
+        &self,
+        id: ProxyConversationId,
+    ) -> Result<Option<ProxyConversationView>, RuntimeError> {
+        Ok(self.store()?.proxy_conversation(id)?)
+    }
+
+    /// Aggregates proxy token usage and known costs.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn proxy_usage_summary(&self) -> Result<ProxyUsageSummary, RuntimeError> {
+        Ok(self.store()?.proxy_usage_summary()?)
     }
 
     /// Lists persisted secret-free MCP client connections.

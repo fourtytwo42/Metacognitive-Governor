@@ -833,6 +833,43 @@ BEFORE DELETE ON shadow_workspaces BEGIN
 END;
 ";
 
+const MIGRATION_24: &str = r"
+CREATE TABLE IF NOT EXISTS provider_proxy_conversations (
+    conversation_id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    conversation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS provider_proxy_conversations_context
+    ON provider_proxy_conversations(project_id, task_id, updated_at, conversation_id);
+CREATE TRIGGER IF NOT EXISTS provider_proxy_conversations_no_delete
+BEFORE DELETE ON provider_proxy_conversations BEGIN
+    SELECT RAISE(FAIL, 'provider proxy conversation history cannot be deleted');
+END;
+
+CREATE TABLE IF NOT EXISTS provider_proxy_calls (
+    call_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    call_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES provider_proxy_conversations(conversation_id)
+);
+CREATE INDEX IF NOT EXISTS provider_proxy_calls_conversation_time
+    ON provider_proxy_calls(conversation_id, completed_at, call_id);
+CREATE TRIGGER IF NOT EXISTS provider_proxy_calls_no_update
+BEFORE UPDATE ON provider_proxy_calls BEGIN
+    SELECT RAISE(FAIL, 'provider proxy call history is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS provider_proxy_calls_no_delete
+BEFORE DELETE ON provider_proxy_calls BEGIN
+    SELECT RAISE(FAIL, 'provider proxy call history is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -946,6 +983,7 @@ impl SqliteEventStore {
             (21_i64, MIGRATION_21),
             (22_i64, MIGRATION_22),
             (23_i64, MIGRATION_23),
+            (24_i64, MIGRATION_24),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

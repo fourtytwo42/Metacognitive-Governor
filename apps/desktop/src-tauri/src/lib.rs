@@ -25,7 +25,9 @@ use mcg_domain::{
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
-use mcg_providers::{ProviderConnection, ProviderModelCatalog};
+use mcg_providers::{
+    ProviderConnection, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
+};
 use mcg_runtime::{
     CandidateRevisionMutation, EvidenceMutation, ExperimentMutation, McpMutation, OAuthLoginStart,
     PlatformBrowserMutation, PlatformComputerActionMutation, PlatformComputerMutation,
@@ -54,6 +56,11 @@ struct ConfigureMcpCommand {
 struct ConfigureProviderCommand {
     connection: ProviderConnection,
     credential: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ProxyConversationListResponse {
+    conversations: Vec<ProxyConversation>,
 }
 
 impl Drop for ConfigureProviderCommand {
@@ -213,6 +220,42 @@ async fn list_providers() -> Result<ProviderListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Provider list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn provider_proxy_usage() -> Result<ProxyUsageSummary, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/provider-proxy/usage"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Provider usage could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Provider usage").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Provider usage response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn provider_proxy_conversations() -> Result<ProxyConversationListResponse, String> {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{LOCAL_DAEMON}/api/v1/provider-proxy/conversations"
+        ))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Provider conversations could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Provider conversations").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Provider conversation response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -1423,6 +1466,8 @@ pub fn run() {
             cancel_openai_oauth,
             refresh_openai_oauth,
             list_providers,
+            provider_proxy_usage,
+            provider_proxy_conversations,
             configure_provider,
             discover_provider,
             list_mcp_connections,

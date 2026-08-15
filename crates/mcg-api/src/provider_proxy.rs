@@ -2,21 +2,25 @@ use std::{collections::BTreeSet, convert::Infallible};
 
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     response::{IntoResponse, Response, Sse, sse::Event},
 };
 use chrono::Utc;
 use mcg_agents::AgentModelGateway;
+use mcg_domain::{ProjectId, ProxyCallId, ProxyConversationId, TaskId};
 use mcg_providers::{
     CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelRequest, ModelResponse,
-    ModelStreamEvent, OutputItem, PlannedRoute, ProviderError, ProviderModelRef,
-    RequiredCapability, RoutePlan, RoutingPolicy, RoutingRequirements, StructuredOutput,
-    ToolChoice, ToolDefinition, Usage, plan_routes, should_fallback,
+    ModelStreamEvent, OutputItem, PROXY_LEDGER_SCHEMA_VERSION, PlannedRoute, ProviderError,
+    ProviderModelRef, ProxyCallRecord, ProxyConversation, ProxyInterface, RequiredCapability,
+    RoutePlan, RoutingPolicy, RoutingRequirements, StructuredOutput, ToolChoice, ToolDefinition,
+    Usage, actual_cost, plan_routes, should_fallback,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio_stream::StreamExt;
 
-use super::{ApiError, ApiState};
+use super::{ApiError, ApiState, map_runtime_error};
 
 const MODEL_ALIASES: &[(&str, &str)] = &[
     ("mcg:auto", "Automatic governed routing"),
@@ -29,11 +33,172 @@ const MODEL_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ProxyRequest {
     alias: String,
     request: ModelRequest,
     stream: bool,
+    interface: ProxyInterface,
+    conversation_id: ProxyConversationId,
+    project_id: Option<ProjectId>,
+    task_id: Option<TaskId>,
+    call_id: ProxyCallId,
+    request_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ProxyConversationListResponse {
+    conversations: Vec<ProxyConversation>,
+}
+
+pub(super) async fn conversations(
+    State(state): State<ApiState>,
+) -> Result<Json<ProxyConversationListResponse>, ApiError> {
+    Ok(Json(ProxyConversationListResponse {
+        conversations: state
+            .runtime
+            .proxy_conversations()
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+pub(super) async fn conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<ProxyConversationId>,
+) -> Result<Json<mcg_providers::ProxyConversationView>, ApiError> {
+    state
+        .runtime
+        .proxy_conversation(conversation_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("provider proxy conversation was not found"))
+}
+
+pub(super) async fn usage(
+    State(state): State<ApiState>,
+) -> Result<Json<mcg_providers::ProxyUsageSummary>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .proxy_usage_summary()
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+fn prepare_conversation(
+    state: &ApiState,
+    proxy: &ProxyRequest,
+) -> Result<ProxyConversation, ApiError> {
+    state
+        .runtime
+        .prepare_proxy_conversation(
+            proxy.conversation_id,
+            proxy.project_id,
+            proxy.task_id,
+            Utc::now(),
+        )
+        .map_err(map_runtime_error)
+}
+
+fn record_stream_completion(
+    state: &ApiState,
+    proxy: &ProxyRequest,
+    conversation: &ProxyConversation,
+    selected: &PlannedRoute,
+    event: &Result<ModelStreamEvent, ProviderError>,
+) -> Result<Option<ProxyCallRecord>, ApiError> {
+    match event {
+        Ok(ModelStreamEvent::Completed { response }) => {
+            record_completion(state, proxy, conversation, selected, response).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn record_completion(
+    state: &ApiState,
+    proxy: &ProxyRequest,
+    conversation: &ProxyConversation,
+    selected: &PlannedRoute,
+    response: &ModelResponse,
+) -> Result<ProxyCallRecord, ApiError> {
+    let completed_at = Utc::now();
+    let price = state
+        .runtime
+        .provider_catalog(&selected.target.provider_id)
+        .map_err(map_runtime_error)?
+        .and_then(|catalog| {
+            catalog
+                .models
+                .into_iter()
+                .find(|model| model.id == selected.target.model_id)
+                .and_then(|model| model.price)
+        });
+    let call = ProxyCallRecord {
+        schema_version: PROXY_LEDGER_SCHEMA_VERSION,
+        id: proxy.call_id,
+        conversation_id: conversation.id,
+        interface: proxy.interface,
+        alias: proxy.alias.clone(),
+        provider_id: selected.target.provider_id.clone(),
+        model_id: selected.target.model_id.clone(),
+        response_id: response.id.clone(),
+        request_sha256: proxy.request_sha256.clone(),
+        streamed: proxy.stream,
+        usage: response.usage.clone(),
+        estimated_cost_usd: selected.estimated_cost.amount_usd,
+        actual_cost_usd: actual_cost(price.as_ref(), &response.usage).amount_usd,
+        completed_at,
+    };
+    let conversation = ProxyConversation {
+        updated_at: completed_at,
+        ..conversation.clone()
+    };
+    state
+        .runtime
+        .record_proxy_call(&conversation, &call)
+        .map_err(map_runtime_error)?;
+    Ok(call)
+}
+
+fn extract_proxy_context(
+    metadata: &mut Value,
+) -> Result<(ProxyConversationId, Option<ProjectId>, Option<TaskId>), ApiError> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok((ProxyConversationId::new(), None, None));
+    };
+    let conversation_id =
+        take_id::<ProxyConversationId>(object, "mcg_conversation_id")?.unwrap_or_default();
+    let project_id = take_id::<ProjectId>(object, "mcg_project_id")?;
+    let task_id = take_id::<TaskId>(object, "mcg_task_id")?;
+    Ok((conversation_id, project_id, task_id))
+}
+
+fn take_id<T>(
+    metadata: &mut serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<Option<T>, ApiError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let Some(value) = metadata.remove(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request(format!("metadata.{name} must be a UUID string")))?;
+    value
+        .parse()
+        .map(Some)
+        .map_err(|error| ApiError::bad_request(format!("metadata.{name} must be a UUID: {error}")))
+}
+
+fn request_digest(request: &ModelRequest) -> Result<String, ApiError> {
+    let bytes =
+        serde_json::to_vec(request).map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 pub(super) async fn models(State(state): State<ApiState>) -> Json<Value> {
@@ -63,17 +228,36 @@ pub(super) async fn responses(
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
     let proxy = parse_responses(&body)?;
+    let conversation = prepare_conversation(&state, &proxy)?;
     let plan = route(&state, &proxy).await?;
     if proxy.stream {
         let (selected, stream) = open_stream(&state, &proxy, &plan).await?;
         let alias = proxy.alias.clone();
+        let state = state.clone();
+        let proxy = proxy.clone();
         let events = stream.map(move |event| {
-            Ok::<_, Infallible>(responses_stream_event(event, &alias, &selected.target))
+            let ledger = record_stream_completion(&state, &proxy, &conversation, &selected, &event);
+            Ok::<_, Infallible>(match ledger {
+                Ok(ledger) => {
+                    responses_stream_event(event, &alias, &selected.target, ledger.as_ref())
+                }
+                Err(error) => sse(
+                    "error",
+                    json!({"type":"error","error":{"message":error.message}}),
+                ),
+            })
         });
         Ok(Sse::new(events).into_response())
     } else {
         let (selected, response) = call_buffered(&state, &proxy, &plan).await?;
-        Ok(Json(responses_wire(&proxy.alias, &selected, response)).into_response())
+        let ledger = record_completion(&state, &proxy, &conversation, &selected, &response)?;
+        Ok(Json(responses_wire(
+            &proxy.alias,
+            &selected,
+            response,
+            Some(&ledger),
+        ))
+        .into_response())
     }
 }
 
@@ -82,13 +266,23 @@ pub(super) async fn chat_completions(
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
     let proxy = parse_chat(&body)?;
+    let conversation = prepare_conversation(&state, &proxy)?;
     let plan = route(&state, &proxy).await?;
     if proxy.stream {
         let (selected, stream) = open_stream(&state, &proxy, &plan).await?;
         let alias = proxy.alias.clone();
+        let state = state.clone();
+        let proxy = proxy.clone();
         let events = stream
             .map(move |event| {
-                Ok::<_, Infallible>(chat_stream_event(event, &alias, &selected.target))
+                let ledger =
+                    record_stream_completion(&state, &proxy, &conversation, &selected, &event);
+                Ok::<_, Infallible>(match ledger {
+                    Ok(ledger) => {
+                        chat_stream_event(event, &alias, &selected.target, ledger.as_ref())
+                    }
+                    Err(error) => sse("error", json!({"error":{"message":error.message}})),
+                })
             })
             .chain(tokio_stream::once(Ok::<_, Infallible>(
                 Event::default().data("[DONE]"),
@@ -96,7 +290,8 @@ pub(super) async fn chat_completions(
         Ok(Sse::new(events).into_response())
     } else {
         let (selected, response) = call_buffered(&state, &proxy, &plan).await?;
-        Ok(Json(chat_wire(&proxy.alias, &selected, &response)).into_response())
+        let ledger = record_completion(&state, &proxy, &conversation, &selected, &response)?;
+        Ok(Json(chat_wire(&proxy.alias, &selected, &response, Some(&ledger))).into_response())
     }
 }
 
@@ -111,12 +306,12 @@ async fn route(state: &ApiState, proxy: &ProxyRequest) -> Result<RoutePlan, ApiE
         .runtime
         .provider_route_candidates()
         .await
-        .map_err(ApiError::from)?;
+        .map_err(map_runtime_error)?;
     if proxy.alias == "mcg:local" {
         let local_ids = state
             .runtime
             .provider_connections()
-            .map_err(ApiError::from)?
+            .map_err(map_runtime_error)?
             .into_iter()
             .filter(|connection| is_local_endpoint(&connection.base_url))
             .map(|connection| connection.id)
@@ -206,23 +401,32 @@ fn parse_responses(body: &Value) -> Result<ProxyRequest, ApiError> {
         .pointer("/text/format")
         .map(parse_structured_output)
         .transpose()?;
+    let mut metadata = body.get("metadata").cloned().unwrap_or(Value::Null);
+    let context = extract_proxy_context(&mut metadata)?;
+    let request = ModelRequest {
+        contract_version: CONTRACT_VERSION,
+        model: alias.clone(),
+        instructions: optional_string(body, "instructions")?,
+        messages,
+        tools: parse_tools(body.get("tools"), false)?,
+        tool_choice: parse_tool_choice(body.get("tool_choice"))?,
+        structured_output,
+        reasoning: parse_reasoning(body.get("reasoning"))?,
+        temperature: optional_f64(body, "temperature")?,
+        top_p: optional_f64(body, "top_p")?,
+        max_output_tokens: optional_u64(body, "max_output_tokens")?,
+        metadata,
+    };
     Ok(ProxyRequest {
         alias: alias.clone(),
-        request: ModelRequest {
-            contract_version: CONTRACT_VERSION,
-            model: alias,
-            instructions: optional_string(body, "instructions")?,
-            messages,
-            tools: parse_tools(body.get("tools"), false)?,
-            tool_choice: parse_tool_choice(body.get("tool_choice"))?,
-            structured_output,
-            reasoning: parse_reasoning(body.get("reasoning"))?,
-            temperature: optional_f64(body, "temperature")?,
-            top_p: optional_f64(body, "top_p")?,
-            max_output_tokens: optional_u64(body, "max_output_tokens")?,
-            metadata: body.get("metadata").cloned().unwrap_or(Value::Null),
-        },
+        request_sha256: request_digest(&request)?,
+        request,
         stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        interface: ProxyInterface::Responses,
+        conversation_id: context.0,
+        project_id: context.1,
+        task_id: context.2,
+        call_id: ProxyCallId::new(),
     })
 }
 
@@ -244,24 +448,33 @@ fn parse_chat(body: &Value) -> Result<ProxyRequest, ApiError> {
         .and_then(|format| format.get("json_schema"))
         .map(parse_structured_output)
         .transpose()?;
+    let mut metadata = body.get("metadata").cloned().unwrap_or(Value::Null);
+    let context = extract_proxy_context(&mut metadata)?;
+    let request = ModelRequest {
+        contract_version: CONTRACT_VERSION,
+        model: alias.clone(),
+        instructions: None,
+        messages,
+        tools: parse_tools(body.get("tools"), true)?,
+        tool_choice: parse_tool_choice(body.get("tool_choice"))?,
+        structured_output,
+        reasoning: None,
+        temperature: optional_f64(body, "temperature")?,
+        top_p: optional_f64(body, "top_p")?,
+        max_output_tokens: optional_u64(body, "max_completion_tokens")?
+            .or(optional_u64(body, "max_tokens")?),
+        metadata,
+    };
     Ok(ProxyRequest {
         alias: alias.clone(),
-        request: ModelRequest {
-            contract_version: CONTRACT_VERSION,
-            model: alias,
-            instructions: None,
-            messages,
-            tools: parse_tools(body.get("tools"), true)?,
-            tool_choice: parse_tool_choice(body.get("tool_choice"))?,
-            structured_output,
-            reasoning: None,
-            temperature: optional_f64(body, "temperature")?,
-            top_p: optional_f64(body, "top_p")?,
-            max_output_tokens: optional_u64(body, "max_completion_tokens")?
-                .or(optional_u64(body, "max_tokens")?),
-            metadata: body.get("metadata").cloned().unwrap_or(Value::Null),
-        },
+        request_sha256: request_digest(&request)?,
+        request,
         stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        interface: ProxyInterface::ChatCompletions,
+        conversation_id: context.0,
+        project_id: context.1,
+        task_id: context.2,
+        call_id: ProxyCallId::new(),
     })
 }
 
@@ -492,7 +705,12 @@ fn parse_reasoning(
     }))
 }
 
-fn responses_wire(alias: &str, selected: &PlannedRoute, response: ModelResponse) -> Value {
+fn responses_wire(
+    alias: &str,
+    selected: &PlannedRoute,
+    response: ModelResponse,
+    ledger: Option<&ProxyCallRecord>,
+) -> Value {
     json!({
         "id": response.id,
         "object": "response",
@@ -501,11 +719,17 @@ fn responses_wire(alias: &str, selected: &PlannedRoute, response: ModelResponse)
         "model": alias,
         "output": response.output.iter().map(output_item_wire).collect::<Vec<_>>(),
         "usage": usage_wire(&response.usage),
-        "mcg_route": route_wire(selected)
+        "mcg_route": route_wire(selected),
+        "mcg_ledger": ledger.map(ledger_wire)
     })
 }
 
-fn chat_wire(alias: &str, selected: &PlannedRoute, response: &ModelResponse) -> Value {
+fn chat_wire(
+    alias: &str,
+    selected: &PlannedRoute,
+    response: &ModelResponse,
+    ledger: Option<&ProxyCallRecord>,
+) -> Value {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut refusal = None;
@@ -552,7 +776,8 @@ fn chat_wire(alias: &str, selected: &PlannedRoute, response: &ModelResponse) -> 
             "finish_reason": finish_reason
         }],
         "usage": chat_usage_wire(&response.usage),
-        "mcg_route": route_wire(selected)
+        "mcg_route": route_wire(selected),
+        "mcg_ledger": ledger.map(ledger_wire)
     })
 }
 
@@ -560,6 +785,7 @@ fn responses_stream_event(
     event: Result<ModelStreamEvent, ProviderError>,
     alias: &str,
     target: &ProviderModelRef,
+    ledger: Option<&ProxyCallRecord>,
 ) -> Event {
     match event {
         Ok(ModelStreamEvent::ResponseCreated { id, .. }) => sse(
@@ -582,7 +808,7 @@ fn responses_stream_event(
             response.model = alias.into();
             sse(
                 "response.completed",
-                json!({"type":"response.completed","response":responses_wire(alias, &PlannedRoute { target: target.clone(), estimated_cost: mcg_providers::CostEstimate { amount_usd: None, provenance: mcg_providers::PriceProvenance::Unknown } }, response)}),
+                json!({"type":"response.completed","response":responses_wire(alias, &PlannedRoute { target: target.clone(), estimated_cost: mcg_providers::CostEstimate { amount_usd: None, provenance: mcg_providers::PriceProvenance::Unknown } }, response, ledger)}),
             )
         }
         Ok(ModelStreamEvent::ProviderEvent { event_type, data }) => sse(&event_type, data),
@@ -597,6 +823,7 @@ fn chat_stream_event(
     event: Result<ModelStreamEvent, ProviderError>,
     alias: &str,
     target: &ProviderModelRef,
+    ledger: Option<&ProxyCallRecord>,
 ) -> Event {
     let (id, delta, finish_reason, usage) = match event {
         Ok(ModelStreamEvent::ResponseCreated { id, .. }) => (
@@ -658,7 +885,8 @@ fn chat_stream_event(
             "model": alias,
             "choices": [{"index":0,"delta":delta,"finish_reason":finish_reason}],
             "usage": usage,
-            "mcg_route": {"provider_id":target.provider_id,"model_id":target.model_id}
+            "mcg_route": {"provider_id":target.provider_id,"model_id":target.model_id},
+            "mcg_ledger": ledger.map(ledger_wire)
         }),
     )
 }
@@ -714,6 +942,14 @@ fn route_wire(route: &PlannedRoute) -> Value {
         "model_id": route.target.model_id,
         "estimated_cost_usd": route.estimated_cost.amount_usd,
         "cost_provenance": route.estimated_cost.provenance
+    })
+}
+
+fn ledger_wire(call: &ProxyCallRecord) -> Value {
+    json!({
+        "conversation_id": call.conversation_id,
+        "call_id": call.id,
+        "actual_cost_usd": call.actual_cost_usd
     })
 }
 

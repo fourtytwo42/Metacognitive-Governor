@@ -7,6 +7,8 @@ const client = vi.hoisted(() => ({
   cancel: vi.fn(),
   open: vi.fn(),
   listProviders: vi.fn(),
+  proxyUsage: vi.fn(),
+  proxyConversations: vi.fn(),
   configureProvider: vi.fn(),
   discoverProvider: vi.fn(),
   listMcp: vi.fn(),
@@ -78,6 +80,8 @@ vi.mock("./desktop-client", () => ({
   cancelOpenAiOAuth: client.cancel,
   openExternalUrl: client.open,
   listProviders: client.listProviders,
+  providerProxyUsage: client.proxyUsage,
+  providerProxyConversations: client.proxyConversations,
   configureProvider: client.configureProvider,
   discoverProvider: client.discoverProvider,
   listMcpConnections: client.listMcp,
@@ -151,6 +155,8 @@ beforeEach(() => {
   client.cancel.mockReset();
   client.open.mockReset();
   client.listProviders.mockReset();
+  client.proxyUsage.mockReset();
+  client.proxyConversations.mockReset();
   client.configureProvider.mockReset();
   client.discoverProvider.mockReset();
   client.listMcp.mockReset();
@@ -216,6 +222,14 @@ beforeEach(() => {
   client.decideExperiment.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
+  client.proxyUsage.mockResolvedValue({
+    conversation_count: 0,
+    call_count: 0,
+    usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
+    known_actual_cost_usd: 0,
+    unknown_cost_call_count: 0
+  });
+  client.proxyConversations.mockResolvedValue({ conversations: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
@@ -790,6 +804,31 @@ test("consumer provider setup discovers a local endpoint and advanced mode shows
   fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
   expect(screen.getByText("Local Model")).toBeInTheDocument();
   expect(screen.getByText("Cost unknown")).toBeInTheDocument();
+});
+
+test("provider workspace shows durable privacy-preserving proxy usage", async () => {
+  client.proxyUsage.mockResolvedValue({
+    conversation_count: 2,
+    call_count: 3,
+    usage: { input_tokens: 90, cached_input_tokens: 10, output_tokens: 30, reasoning_tokens: 5, total_tokens: 120 },
+    known_actual_cost_usd: 0.012345,
+    unknown_cost_call_count: 1
+  });
+  client.proxyConversations.mockResolvedValue({ conversations: [{
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000081",
+    created_at: "2026-08-15T00:00:00Z",
+    updated_at: "2026-08-15T00:01:00Z"
+  }] });
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "120 tokens" })).toBeInTheDocument();
+  expect(screen.getByText(/2 conversations/)).toHaveTextContent("$0.012345 known cost");
+  expect(screen.getByText(/not prompts or generated text/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("Proxy conversations")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  expect(screen.getByLabelText("Proxy conversations")).toHaveTextContent("Standalone conversation");
 });
 
 test("simple MCP setup discovers a server without exposing advanced credentials", async () => {
