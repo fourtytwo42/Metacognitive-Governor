@@ -23,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
@@ -30,7 +31,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 
 [lints]

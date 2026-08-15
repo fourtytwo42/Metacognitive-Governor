@@ -245,9 +245,16 @@ impl BrowserExecutor {
             ));
         }
         let origin = target.origin().ascii_serialization();
+        let browser_profile = tempfile::Builder::new()
+            .prefix("mcg-browser-render-")
+            .tempdir()
+            .map_err(|error| {
+                ToolError::Unavailable(format!("create isolated browser profile: {error}"))
+            })?;
         let mut builder = BrowserConfig::builder()
             .enable_request_intercept()
             .disable_cache()
+            .user_data_dir(browser_profile.path())
             .window_size(viewport_width, viewport_height)
             .request_timeout(Duration::from_secs(request.timeout_seconds))
             .launch_timeout(Duration::from_secs(request.timeout_seconds.min(30)));
@@ -539,9 +546,16 @@ impl BrowserExecutor {
         let target = self.validate_workflow(&parameters)?;
         validate_viewport(parameters.viewport_width, parameters.viewport_height)?;
         let origin = target.origin().ascii_serialization();
+        let browser_profile = tempfile::Builder::new()
+            .prefix("mcg-browser-workflow-")
+            .tempdir()
+            .map_err(|error| {
+                ToolError::Unavailable(format!("create isolated browser profile: {error}"))
+            })?;
         let mut builder = BrowserConfig::builder()
             .enable_request_intercept()
             .disable_cache()
+            .user_data_dir(browser_profile.path())
             .window_size(parameters.viewport_width, parameters.viewport_height)
             .request_timeout(Duration::from_secs(request.timeout_seconds))
             .launch_timeout(Duration::from_secs(request.timeout_seconds.min(30)));
