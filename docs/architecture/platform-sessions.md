@@ -166,3 +166,7 @@ audit, exact replay, handoff privacy, and crash-recovery boundaries.
 The Sites registry, deployment, and monitoring contract is defined separately in
 [`sites.md`](sites.md); it reuses durable approval, audit, lease, scheduler, and
 artifact primitives but is not modeled as a live desktop-custody session.
+
+Typed outbound SSH is defined in [`typed-ssh.md`](typed-ssh.md). It reuses policy,
+approval, leases, audit, artifacts, and crash uncertainty without exposing the MCG
+control API or treating a remote machine as a browser/computer custody session.

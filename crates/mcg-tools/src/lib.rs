@@ -14,6 +14,7 @@ mod persistent_browser;
 mod process;
 mod research;
 mod secrets;
+mod ssh;
 mod system;
 
 pub use broker::*;
@@ -30,4 +31,5 @@ pub use persistent_browser::*;
 pub use process::*;
 pub use research::*;
 pub use secrets::*;
+pub use ssh::*;
 pub use system::*;

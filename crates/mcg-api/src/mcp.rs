@@ -18,11 +18,12 @@ use mcg_agents::{
 use mcg_domain::{
     PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState,
     ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId,
-    SiteId, SiteState, TaskBudget, TaskEnvelope, TaskId,
+    SiteId, SiteState, SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId,
+    SshOperationKind, TaskBudget, TaskEnvelope, TaskId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
-    SiteUpdateRequest,
+    SiteUpdateRequest, SshHostRegistrationRequest,
 };
 use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
@@ -787,6 +788,35 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
         }),
         json!({
+            "name": "mcg_ssh_hosts",
+            "title": "List MCG SSH Hosts",
+            "description": "List durable pinned outbound SSH hosts and, for one host, retained operation history.",
+            "inputSchema": {"type":"object","properties":{"host_id":{"type":"string","format":"uuid"}},"additionalProperties":false},
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_ssh_register",
+            "title": "Register an MCG SSH Host",
+            "description": "Idempotently register a POSIX SSH-agent host with an owner-verified pinned known_hosts entry and fingerprint.",
+            "inputSchema": {"type":"object","properties":{
+                "host_id":{"type":"string","format":"uuid"},"display_name":{"type":"string"},
+                "hostname":{"type":"string"},"port":{"type":"integer","minimum":1,"maximum":65535,"default":22},
+                "username":{"type":"string"},"known_hosts_entry":{"type":"string"},"host_key_sha256":{"type":"string"}
+            },"required":["host_id","display_name","hostname","username","known_hosts_entry","host_key_sha256"],"additionalProperties":false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_ssh_run",
+            "title": "Run a Typed MCG SSH Operation",
+            "description": "Run an idempotent host-revision-bound inspect, structured POSIX argv execution, upload, or download through policy, approval, lease, audit, and retained evidence.",
+            "inputSchema": {"type":"object","properties":{
+                "host_id":{"type":"string","format":"uuid"},"operation_id":{"type":"string","format":"uuid"},
+                "task_id":{"type":"string","format":"uuid"},"operation":{"type":"object"},
+                "timeout_seconds":{"type":"integer","minimum":1,"maximum":3600,"default":60}
+            },"required":["host_id","operation_id","operation"],"additionalProperties":false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
+        }),
+        json!({
             "name": "mcg_scheduler_create",
             "title": "Create an MCG Schedule",
             "description": "Idempotently create one bounded durable schedule. Reuse the same schedule_id only for an exact retry of the same definition.",
@@ -1004,6 +1034,9 @@ async fn call_tool(
         "mcg_sites_monitor" => sites_monitor(state, &arguments),
         "mcg_sites_health" => sites_health(state, &arguments).await,
         "mcg_sites_deploy" => sites_deploy(state, &arguments).await,
+        "mcg_ssh_hosts" => ssh_hosts(state, &arguments),
+        "mcg_ssh_register" => ssh_register(state, &arguments),
+        "mcg_ssh_run" => ssh_run(state, &arguments).await,
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -1578,6 +1611,128 @@ async fn sites_deploy(
     }
 }
 
+fn ssh_hosts(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) = serde_json::from_value::<SshHostsArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "SSH host arguments are invalid",
+        ));
+    };
+    if let Some(host_id) = request.host_id {
+        let Some(host) = state.runtime.ssh_host(host_id).map_err(|error| {
+            RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+        })?
+        else {
+            return Ok(tool_error(
+                "ssh_host_not_found",
+                "The requested SSH host is not known to MCG",
+            ));
+        };
+        let revisions = state.runtime.ssh_host_revisions(host_id).map_err(|error| {
+            RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+        })?;
+        let operations = state.runtime.ssh_operations(host_id).map_err(|error| {
+            RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+        })?;
+        tool_success(Ok(
+            json!({"host": host, "revisions": revisions, "operations": operations}),
+        ))
+    } else {
+        let hosts = state.runtime.ssh_hosts().map_err(|error| {
+            RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+        })?;
+        tool_success(Ok(json!({"hosts": hosts})))
+    }
+}
+
+fn ssh_register(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SshRegisterArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "SSH registration arguments are invalid",
+        ));
+    };
+    match state
+        .runtime
+        .register_ssh_host(&SshHostRegistrationRequest {
+            id: request.host_id,
+            display_name: request.display_name,
+            hostname: request.hostname,
+            port: request.port,
+            username: request.username,
+            platform: SshHostPlatform::Posix,
+            authentication: SshAuthentication::Agent,
+            known_hosts_entry: request.known_hosts_entry,
+            host_key_sha256: request.host_key_sha256,
+            state: SshHostState::Active,
+        }) {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(ssh_error(&error, "register")),
+    }
+}
+
+async fn ssh_run(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) = serde_json::from_value::<SshRunArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "SSH operation arguments are invalid",
+        ));
+    };
+    match state
+        .runtime
+        .run_ssh_operation(
+            request.host_id,
+            request.operation_id,
+            request.task_id,
+            request.operation,
+            request.timeout_seconds,
+        )
+        .await
+    {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(ssh_error(&error, "run")),
+    }
+}
+
+fn ssh_error(error: &mcg_runtime::RuntimeError, operation: &str) -> Value {
+    if error.is_not_found() {
+        tool_error(
+            "ssh_host_not_found",
+            "The requested SSH host or task is not known to MCG",
+        )
+    } else if matches!(
+        error,
+        mcg_runtime::RuntimeError::Tool(mcg_tools::ToolError::ApprovalRequired { .. })
+    ) {
+        tool_error("approval_required", &error.to_string())
+    } else if error.is_conflict() {
+        tool_error(
+            "conflict",
+            &format!("MCG could not {operation} SSH due to an identity conflict"),
+        )
+    } else if error.is_invalid_request() {
+        tool_error(
+            "invalid_arguments",
+            &format!("MCG could not {operation} the SSH request"),
+        )
+    } else {
+        tool_error("runtime_error", &format!("MCG could not {operation} SSH"))
+    }
+}
+
 fn site_error(error: &mcg_runtime::RuntimeError, operation: &str) -> Value {
     if error.is_not_found() {
         tool_error(
@@ -1772,6 +1927,45 @@ struct SitesDeployArguments {
     deployment_id: SiteDeploymentId,
     #[serde(default)]
     task_id: Option<TaskId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshHostsArguments {
+    #[serde(default)]
+    host_id: Option<SshHostId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshRegisterArguments {
+    host_id: SshHostId,
+    display_name: String,
+    hostname: String,
+    #[serde(default = "default_ssh_port")]
+    port: u16,
+    username: String,
+    known_hosts_entry: String,
+    host_key_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshRunArguments {
+    host_id: SshHostId,
+    operation_id: SshOperationId,
+    #[serde(default)]
+    task_id: Option<TaskId>,
+    operation: SshOperationKind,
+    #[serde(default = "default_ssh_timeout")]
+    timeout_seconds: u64,
+}
+
+const fn default_ssh_port() -> u16 {
+    22
+}
+const fn default_ssh_timeout() -> u64 {
+    60
 }
 
 fn query_run(

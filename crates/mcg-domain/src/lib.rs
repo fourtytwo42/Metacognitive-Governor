@@ -76,6 +76,9 @@ domain_id!(SiteId);
 domain_id!(SiteRevisionId);
 domain_id!(SiteDeploymentId);
 domain_id!(SiteHealthCheckId);
+domain_id!(SshHostId);
+domain_id!(SshHostRevisionId);
+domain_id!(SshOperationId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.
@@ -343,6 +346,7 @@ pub struct PlatformSessionEvent {
 pub const SCHEDULE_SCHEMA_VERSION: u16 = 1;
 
 pub const SITE_SCHEMA_VERSION: u16 = 1;
+pub const SSH_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -455,6 +459,108 @@ pub struct SiteMonitor {
     pub interval_seconds: u64,
     pub expected_status: u16,
     pub last_state: Option<SiteHealthState>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshHostPlatform {
+    Posix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthentication {
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshHostState {
+    Active,
+    Disabled,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHost {
+    pub schema_version: u16,
+    pub id: SshHostId,
+    pub definition_hash: String,
+    pub revision: u32,
+    pub display_name: String,
+    pub hostname: String,
+    pub port: u16,
+    pub username: String,
+    pub platform: SshHostPlatform,
+    pub authentication: SshAuthentication,
+    pub known_hosts_entry: String,
+    pub host_key_sha256: String,
+    pub state: SshHostState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostRevision {
+    pub schema_version: u16,
+    pub id: SshHostRevisionId,
+    pub host_id: SshHostId,
+    pub revision: u32,
+    pub definition_hash: String,
+    pub host: SshHost,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SshOperationKind {
+    Inspect,
+    Execute {
+        executable: String,
+        #[serde(default)]
+        arguments: Vec<String>,
+        working_directory: Option<String>,
+    },
+    Upload {
+        local_path: String,
+        remote_path: String,
+        overwrite: bool,
+        expected_sha256: String,
+    },
+    Download {
+        remote_path: String,
+        local_path: String,
+        overwrite: bool,
+        expected_sha256: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshOperationState {
+    Executing,
+    Succeeded,
+    Failed,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshOperation {
+    pub schema_version: u16,
+    pub id: SshOperationId,
+    pub host_id: SshHostId,
+    pub host_revision: u32,
+    pub task_id: Option<TaskId>,
+    pub request_hash: String,
+    pub kind: SshOperationKind,
+    pub state: SshOperationState,
+    pub detail: String,
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub artifact_sha256: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

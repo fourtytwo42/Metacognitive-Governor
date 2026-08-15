@@ -62,6 +62,7 @@ pub enum ResourceKind {
     Credential,
     ComputerSession,
     Site,
+    SshHost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +103,8 @@ pub struct CapabilityPolicy {
     #[serde(default)]
     pub allowed_sites: Vec<String>,
     #[serde(default)]
+    pub allowed_ssh_hosts: Vec<String>,
+    #[serde(default)]
     pub memory_read_prefixes: Vec<String>,
     #[serde(default)]
     pub memory_write_prefixes: Vec<String>,
@@ -137,6 +140,7 @@ impl CapabilityPolicy {
             allowed_environment_variables: Vec::new(),
             allowed_computer_sessions: Vec::new(),
             allowed_sites: Vec::new(),
+            allowed_ssh_hosts: Vec::new(),
             memory_read_prefixes: vec!["project/".into(), "task/".into()],
             memory_write_prefixes: vec!["project/".into(), "task/".into()],
             allow_shell: false,
@@ -448,6 +452,10 @@ fn capability_contains(policy: &CapabilityPolicy, request: &CapabilityRequest) -
             .allowed_sites
             .iter()
             .any(|site| site == &request.resource),
+        ResourceKind::SshHost => policy
+            .allowed_ssh_hosts
+            .iter()
+            .any(|host| host == &request.resource),
         ResourceKind::Constitution | ResourceKind::Credential => false,
     }
 }

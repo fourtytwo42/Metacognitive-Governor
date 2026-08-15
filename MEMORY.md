@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Continue the production-readiness roadmap after the cross-platform-qualified M8 Sites revision and monitoring checkpoint.
-- Last meaningful change: Immutable Site updates/archive and one durable interval monitor per Site now share REST, CLI, MCP, Tauri, and desktop controls. Monitor occurrence settlement, observed state, and transition notification commit atomically; unchanged outages coalesce.
-- Next step: Continue remaining PRD execution-plane interfaces (typed SSH is the next dependency-ordered M8 surface), then broaden representative project and native UAT while preserving the restored visible Windows OAuth handoff.
+- Current task: Qualify and finish the typed outbound SSH execution surface for M8.
+- Last meaningful change: Typed pinned-host SSH inspect/execute/upload/download now flows through policy, approval, lease, audit, artifacts, durable replay/recovery, and REST/CLI/MCP/Tauri/desktop interfaces. Strict workspace Clippy, 50 tool tests, 28 storage tests, 10 runtime tests, 44 API tests, 17 Vitest tests, production frontend build, two Playwright flows, and docs are green on Windows.
+- Next step: Commit the coherent SSH checkpoint, run exact clean Windows and Ubuntu gates, run the live agent-backed Ubuntu SSH restart/replay fixture, and perform native UI UAT when the visible daemon can be upgraded safely.
 - Blockers: None documented.
 
 ## Current State
@@ -679,6 +679,15 @@ When sources conflict, use this order:
 - Commands/tests: Exact commit `045dc939831a6afc6179578ef58c7fa464e1d2c5` passed complete clean Windows `scripts/verify.ps1` in 339.8 seconds and complete Ubuntu `scripts/verify.sh` in 354.7 seconds. This includes strict workspace clippy, full Rust/restart/live GPU45/browser/computer suites, 44 API tests, 17 desktop Vitest tests, documentation/typecheck/build, native Tauri builds, and two Playwright E2E tests per OS. Ubuntu log: `/home/hendo420/mcg-worktree-045dc93/verify-linux.log` (last verified 2026-08-14).
 - Result: REST, MCP, CLI, Tauri, and desktop expose update/archive and monitor configuration. Restart persistence, exact monitor replay, healthy/outage/repeated-outage/recovery behavior, and transactional pause/archive schedule synchronization are cross-platform qualified. Computer-use inspection of the exact Windows binary confirmed all day-one navigation and the simple-mode Sites registration surface with accessible labels.
 - Follow-up: The exact native binary could not perform stateful Site UAT against the currently running older daemon without replacing its preserved OAuth handoff; stateful behavior is covered by exact-runtime integration/E2E tests. Repeat the complete native stateful journey when the live daemon can be upgraded safely, and continue typed SSH.
+
+### 2026-08-14 - Typed Outbound SSH Checkpoint
+
+- Context: M8 required useful remote execution without adding built-in remote access to the harness.
+- Decision: Use outbound OpenSSH only, immutable owner-pinned host revisions, SSH-agent authentication, four typed POSIX operations, exact capability resources, and the shared approval/lease/audit broker. A claimed crash becomes non-replayable uncertainty.
+- Files: `crates/mcg-{domain,policy,storage,tools,runtime,api}/`, `apps/{mcg-cli,desktop}/`, `docs/architecture/typed-ssh.md`.
+- Commands/tests: Windows strict workspace Clippy; 2 focused SSH tool tests, 2 storage recovery tests, 10 runtime tests, 44 API tests, 17 Vitest tests, production build, two Playwright flows, and documentation validation.
+- Result: REST, CLI, MCP, Tauri, and desktop share one credential-free pinned-host/operation contract. Real Windows-to-Ubuntu probing found that the local Windows `ssh-agent` service is disabled; MCG correctly did not fall back to a password/private-key option. The executor now uses a real isolated empty config, and Windows prefers native System32 OpenSSH to avoid Git/MSYS path-dialect ambiguity.
+- Follow-up: Run clean exact-commit Windows/Linux gates and live Linux-agent inspect/execute/transfer/restart/replay qualification. Windows live SSH UAT requires enabling the native OpenSSH Authentication Agent service and loading the owner key.
 
 ## Known Issues
 

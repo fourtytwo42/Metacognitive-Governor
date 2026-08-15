@@ -30,6 +30,7 @@ import {
   listProjects,
   listPlatformSessions,
   listSites,
+  listSshHosts,
   listTasks,
   launchTask,
   loadTaskAudit,
@@ -39,6 +40,7 @@ import {
   loadPlatformSessionHistory,
   loadSiteDeployments,
   loadSiteHealth,
+  loadSshOperations,
   getSiteMonitor,
   navigateBrowserSession,
   type McpAuthMode,
@@ -69,12 +71,17 @@ import {
   type SiteDeploymentListResponse,
   type SiteHealthListResponse,
   type SiteMonitor,
+  type SshHost,
+  type SshOperationKind,
+  type SshOperationListResponse,
   retryTask,
   resumeTask,
   requestPlatformSession,
   reclaimBrowserSession,
   reclaimComputerSession,
   registerSite,
+  registerSshHost,
+  runSshOperation,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
@@ -301,6 +308,17 @@ export function App() {
   const [siteDeploymentIds, setSiteDeploymentIds] = useState<Record<string, string | undefined>>({});
   const [siteMonitors, setSiteMonitors] = useState<Record<string, SiteMonitor | undefined>>({});
   const [siteMonitorIntervals, setSiteMonitorIntervals] = useState<Record<string, string>>({});
+  const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
+  const [sshHostId, setSshHostId] = useState(() => crypto.randomUUID());
+  const [sshName, setSshName] = useState("");
+  const [sshHostname, setSshHostname] = useState("");
+  const [sshUsername, setSshUsername] = useState("");
+  const [sshKnownHosts, setSshKnownHosts] = useState("");
+  const [sshFingerprint, setSshFingerprint] = useState("");
+  const [sshOperationJson, setSshOperationJson] = useState<Record<string, string>>({});
+  const [sshOperations, setSshOperations] = useState<Record<string, SshOperationListResponse | undefined>>({});
+  const [sshBusy, setSshBusy] = useState(false);
+  const [sshError, setSshError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -379,6 +397,9 @@ export function App() {
       .catch((error) => {
         if (active) setSiteError(errorMessage(error));
       });
+    listSshHosts()
+      .then((response) => { if (active) setSshHosts(response.hosts); })
+      .catch((error) => { if (active) setSshError(errorMessage(error)); });
     return () => {
       active = false;
     };
@@ -1178,6 +1199,34 @@ export function App() {
     }
   }
 
+  async function addSshHost() {
+    if (!sshName.trim() || !sshHostname.trim() || !sshUsername.trim() || !sshKnownHosts.trim() || !sshFingerprint.trim()) {
+      setSshError("Enter the name, host, user, pinned known_hosts line, and verified SHA256 fingerprint.");
+      return;
+    }
+    setSshBusy(true); setSshError(null);
+    try {
+      const host = await registerSshHost({
+        host_id: sshHostId, display_name: sshName.trim(), hostname: sshHostname.trim(), port: 22,
+        username: sshUsername.trim(), platform: "posix", authentication: "agent",
+        known_hosts_entry: sshKnownHosts.trim(), host_key_sha256: sshFingerprint.trim(), state: "active"
+      });
+      setSshHosts((current) => [host, ...current.filter((item) => item.id !== host.id)]);
+      setSshHostId(crypto.randomUUID()); setSshName(""); setSshHostname(""); setSshUsername("");
+      setSshKnownHosts(""); setSshFingerprint("");
+    } catch (error) { setSshError(errorMessage(error)); } finally { setSshBusy(false); }
+  }
+
+  async function executeSsh(host: SshHost, operation?: SshOperationKind) {
+    setSshBusy(true); setSshError(null);
+    try {
+      const selected = operation ?? JSON.parse(sshOperationJson[host.id] || "") as SshOperationKind;
+      await runSshOperation(host.id, { operation_id: crypto.randomUUID(), operation: selected, timeout_seconds: 60 });
+      const history = await loadSshOperations(host.id);
+      setSshOperations((current) => ({ ...current, [host.id]: history }));
+    } catch (error) { setSshError(errorMessage(error)); } finally { setSshBusy(false); }
+  }
+
   async function inspectSite(siteId: string) {
     setSiteBusy(true);
     setSiteError(null);
@@ -1305,6 +1354,7 @@ export function App() {
           <a className="nav-item" href="#threads">Threads</a>
           <a className="nav-item" href="#scheduler">Scheduler</a>
           <a className="nav-item" href="#sites">Sites</a>
+          <a className="nav-item" href="#ssh">SSH</a>
           <a className="nav-item" href="#platform">Computer & browser</a>
           <a className="nav-item" href="#providers">Providers</a>
           <a className="nav-item" href="#mcp">Tools</a>
@@ -1559,6 +1609,51 @@ export function App() {
                     <span>{siteHealth[site.id]?.checks.length ?? 0} health checks</span>
                     <span>{siteDeployments[site.id]?.deployments.length ?? 0} deployments</span>
                   </div>}
+                </article>;
+              })}
+            </div>
+          </div>
+        </section>
+
+        <section className="panel scheduler-panel" id="ssh" aria-label="SSH hosts">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">SSH</p>
+              <h2>Remote Linux hosts</h2>
+              <p className="muted">Connect outbound with your SSH agent and an explicitly pinned host key. MCG never opens a remote control listener.</p>
+            </div>
+            <span className="count-badge">{sshHosts.filter((host) => host.state === "active").length} active</span>
+          </div>
+          <div className="scheduler-layout">
+            <div className="schedule-composer">
+              <label>Host name<input value={sshName} onChange={(event) => setSshName(event.target.value)} placeholder="Build VM" /></label>
+              <label>Hostname or IP<input value={sshHostname} onChange={(event) => setSshHostname(event.target.value)} placeholder="192.168.50.109" /></label>
+              <label>SSH username<input value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="user" /></label>
+              <label>Pinned known_hosts line<textarea value={sshKnownHosts} onChange={(event) => setSshKnownHosts(event.target.value)} placeholder="host ssh-ed25519 AAAA..." /></label>
+              <label>Verified host fingerprint<input value={sshFingerprint} onChange={(event) => setSshFingerprint(event.target.value)} placeholder="SHA256:..." /></label>
+              {advanced && <code>Retry identity: {sshHostId}</code>}
+              <button className="primary" type="button" disabled={sshBusy} onClick={addSshHost}>{sshBusy ? "Saving..." : "Register pinned host"}</button>
+              {sshError && <p className="error-message" role="alert">{sshError}</p>}
+            </div>
+            <div className="schedule-list">
+              {sshHosts.length === 0 ? <p className="empty-state">No SSH hosts registered yet.</p> : sshHosts.map((host) => {
+                const latest = sshOperations[host.id]?.operations[0];
+                return <article className="schedule-card" key={host.id}>
+                  <div>
+                    <span className={`task-state state-${host.state}`}>{host.state}</span>
+                    <h3>{host.display_name}</h3>
+                    <small>{host.username}@{host.hostname}:{host.port}</small>
+                    {latest && <small>Last operation: {latest.kind.kind} · {latest.state}</small>}
+                    {advanced && <><code>{host.id}</code><code>revision {host.revision} · {host.host_key_sha256}</code></>}
+                  </div>
+                  <div className="task-actions">
+                    <button className="primary" type="button" disabled={sshBusy || host.state !== "active"} onClick={() => executeSsh(host, { kind: "inspect" })}>Inspect host</button>
+                    {advanced && <>
+                      <label>Typed operation JSON<textarea aria-label={`Typed SSH operation for ${host.display_name}`} value={sshOperationJson[host.id] ?? ""} onChange={(event) => setSshOperationJson((current) => ({ ...current, [host.id]: event.target.value }))} placeholder={'{"kind":"execute","executable":"uname","arguments":["-a"]}'} /></label>
+                      <button className="secondary" type="button" disabled={sshBusy || !sshOperationJson[host.id]?.trim()} onClick={() => executeSsh(host)}>Run typed operation</button>
+                    </>}
+                  </div>
+                  {advanced && sshOperations[host.id] && <div className="evidence-details"><span>{sshOperations[host.id]?.operations.length} retained operations</span></div>}
                 </article>;
               })}
             </div>

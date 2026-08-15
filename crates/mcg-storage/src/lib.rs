@@ -22,6 +22,7 @@ mod platform;
 mod providers;
 mod scheduler;
 mod sites;
+mod ssh;
 
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
@@ -615,6 +616,55 @@ CREATE TABLE IF NOT EXISTS site_monitors (
 );
 ";
 
+const MIGRATION_19: &str = r"
+CREATE TABLE IF NOT EXISTS ssh_hosts (
+    host_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    definition_hash TEXT NOT NULL,
+    host_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ssh_hosts_state ON ssh_hosts(state, updated_at, host_id);
+
+CREATE TABLE IF NOT EXISTS ssh_host_revisions (
+    revision_id TEXT PRIMARY KEY,
+    host_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    definition_hash TEXT NOT NULL,
+    revision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(host_id, revision),
+    FOREIGN KEY(host_id) REFERENCES ssh_hosts(host_id)
+);
+CREATE TRIGGER IF NOT EXISTS ssh_host_revisions_no_update
+BEFORE UPDATE ON ssh_host_revisions BEGIN
+    SELECT RAISE(FAIL, 'SSH host revisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS ssh_host_revisions_no_delete
+BEFORE DELETE ON ssh_host_revisions BEGIN
+    SELECT RAISE(FAIL, 'SSH host revisions are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS ssh_operations (
+    operation_id TEXT PRIMARY KEY,
+    host_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(host_id) REFERENCES ssh_hosts(host_id)
+);
+CREATE INDEX IF NOT EXISTS ssh_operations_history
+    ON ssh_operations(host_id, created_at, operation_id);
+CREATE TRIGGER IF NOT EXISTS ssh_operations_no_delete
+BEFORE DELETE ON ssh_operations BEGIN
+    SELECT RAISE(FAIL, 'SSH operation history is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -643,6 +693,8 @@ pub enum StorageError {
     PlatformSessionNotFound(mcg_domain::PlatformSessionId),
     #[error("site {0} was not found")]
     SiteNotFound(mcg_domain::SiteId),
+    #[error("SSH host {0} was not found")]
+    SshHostNotFound(mcg_domain::SshHostId),
     #[error("storage conflict: {0}")]
     Conflict(String),
     #[error(transparent)]
@@ -721,6 +773,7 @@ impl SqliteEventStore {
             (16_i64, MIGRATION_16),
             (17_i64, MIGRATION_17),
             (18_i64, MIGRATION_18),
+            (19_i64, MIGRATION_19),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

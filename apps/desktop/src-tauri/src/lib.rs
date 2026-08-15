@@ -1,20 +1,22 @@
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
     CheckSiteHealthRequest, ClosePlatformSessionRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateTaskRequest,
-    DeploySiteRequest, DiscoverProjectRequest, LaunchTaskRequest, LaunchTaskResponse,
-    McpListResponse, NavigateBrowserSessionRequest, PlatformSessionHistoryResponse,
-    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
-    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
-    SetScheduleStateRequest, SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse,
-    SiteRevisionListResponse, StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse,
-    TaskMutationResponse, ToolAuditResponse, TransitionTaskRequest, UpdateSiteRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
+    CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, LaunchTaskRequest,
+    LaunchTaskResponse, McpListResponse, NavigateBrowserSessionRequest,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectListResponse,
+    ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
     WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
     PlatformCapabilitySnapshot, PlatformSession, ScheduleDefinition, SchedulerNotification, Site,
-    SiteMonitor, TaskEnvelope,
+    SiteMonitor, SshHost, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -22,7 +24,8 @@ use mcg_providers::{ProviderConnection, ProviderModelCatalog};
 use mcg_runtime::{
     McpMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
+    SshOperationMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -461,6 +464,126 @@ where
         .send()
         .await
         .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_ssh_hosts() -> Result<SshHostListResponse, String> {
+    ssh_get("", "SSH host listing").await
+}
+
+#[tauri::command]
+async fn get_ssh_host(host_id: String) -> Result<SshHost, String> {
+    ssh_get(&format!("/{host_id}"), "SSH host loading").await
+}
+
+#[tauri::command]
+async fn register_ssh_host(request: CreateSshHostRequest) -> Result<SshHost, String> {
+    ssh_post("", &request, "SSH host registration").await
+}
+
+#[tauri::command]
+async fn update_ssh_host(
+    host_id: String,
+    request: UpdateSshHostRequest,
+) -> Result<SshHostMutation, String> {
+    ssh_put(&format!("/{host_id}"), &request, "SSH host update").await
+}
+
+#[tauri::command]
+async fn ssh_host_revisions(host_id: String) -> Result<SshHostRevisionListResponse, String> {
+    ssh_get(&format!("/{host_id}/revisions"), "SSH revision loading").await
+}
+
+#[tauri::command]
+async fn ssh_operation_history(host_id: String) -> Result<SshOperationListResponse, String> {
+    ssh_get(
+        &format!("/{host_id}/operations"),
+        "SSH operation history loading",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn run_ssh_operation(
+    host_id: String,
+    request: RunSshOperationRequest,
+) -> Result<SshOperationMutation, String> {
+    ssh_post(&format!("/{host_id}/operations"), &request, "SSH operation").await
+}
+
+async fn ssh_get<T>(suffix: &str, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/ssh/hosts{suffix}")),
+        None::<&()>,
+        label,
+    )
+    .await
+}
+
+async fn ssh_post<T, B>(suffix: &str, body: &B, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/ssh/hosts{suffix}"))
+        .bearer_auth(daemon_token()?)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("{label} failed: {error}"))?;
+    parse_daemon_json(response, label).await
+}
+
+async fn ssh_put<T, B>(suffix: &str, body: &B, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let response = reqwest::Client::new()
+        .put(format!("{LOCAL_DAEMON}/api/v1/ssh/hosts{suffix}"))
+        .bearer_auth(daemon_token()?)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("{label} failed: {error}"))?;
+    parse_daemon_json(response, label).await
+}
+
+async fn daemon_json<T, B>(
+    builder: reqwest::RequestBuilder,
+    body: Option<&B>,
+    label: &str,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let mut builder = builder.bearer_auth(daemon_token()?);
+    if let Some(body) = body {
+        builder = builder.json(body);
+    }
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| format!("{label} failed: {error}"))?;
+    parse_daemon_json(response, label).await
+}
+
+async fn parse_daemon_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<T, String> {
     if !response.status().is_success() {
         return Err(response_error(response, label).await);
     }
@@ -1134,6 +1257,13 @@ pub fn run() {
             create_site_monitor,
             site_deployment_history,
             deploy_site,
+            list_ssh_hosts,
+            get_ssh_host,
+            register_ssh_host,
+            update_ssh_host,
+            ssh_host_revisions,
+            ssh_operation_history,
+            run_ssh_operation,
             platform_capabilities,
             list_platform_sessions,
             request_platform_session,

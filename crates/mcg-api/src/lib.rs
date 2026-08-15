@@ -34,7 +34,9 @@ use mcg_domain::{
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor, SiteRevision,
-    SiteState, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
+    SshHostState, SshOperation, SshOperationId, SshOperationKind, TaskBudget, TaskEnvelope, TaskId,
+    TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -51,7 +53,8 @@ use mcg_runtime::{
     PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
     ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
     SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMonitorRequest,
-    SiteMutation, SiteRegistrationRequest, SiteUpdateRequest,
+    SiteMutation, SiteRegistrationRequest, SiteUpdateRequest, SshHostMutation,
+    SshHostRegistrationRequest, SshHostUpdateRequest, SshOperationMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
@@ -486,6 +489,80 @@ const fn default_site_health_status() -> u16 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSshHostRequest {
+    pub host_id: SshHostId,
+    pub display_name: String,
+    pub hostname: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub username: String,
+    #[serde(default = "default_ssh_platform")]
+    pub platform: SshHostPlatform,
+    #[serde(default = "default_ssh_authentication")]
+    pub authentication: SshAuthentication,
+    pub known_hosts_entry: String,
+    pub host_key_sha256: String,
+    #[serde(default = "default_ssh_host_state")]
+    pub state: SshHostState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSshHostRequest {
+    pub expected_revision: u32,
+    pub display_name: String,
+    pub hostname: String,
+    pub port: u16,
+    pub username: String,
+    pub platform: SshHostPlatform,
+    pub authentication: SshAuthentication,
+    pub known_hosts_entry: String,
+    pub host_key_sha256: String,
+    pub state: SshHostState,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSshOperationRequest {
+    pub operation_id: SshOperationId,
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+    pub operation: SshOperationKind,
+    #[serde(default = "default_ssh_timeout")]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostListResponse {
+    pub hosts: Vec<SshHost>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostRevisionListResponse {
+    pub revisions: Vec<SshHostRevision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshOperationListResponse {
+    pub operations: Vec<SshOperation>,
+}
+
+const fn default_ssh_port() -> u16 {
+    22
+}
+const fn default_ssh_platform() -> SshHostPlatform {
+    SshHostPlatform::Posix
+}
+const fn default_ssh_authentication() -> SshAuthentication {
+    SshAuthentication::Agent
+}
+const fn default_ssh_host_state() -> SshHostState {
+    SshHostState::Active
+}
+const fn default_ssh_timeout() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LaunchExecution {
     NotStarted { detail: String },
@@ -798,6 +875,22 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/sites/{site_id}/monitor",
             get(get_site_monitor).post(create_site_monitor),
+        )
+        .route(
+            "/api/v1/ssh/hosts",
+            get(list_ssh_hosts).post(create_ssh_host),
+        )
+        .route(
+            "/api/v1/ssh/hosts/{host_id}",
+            get(get_ssh_host).put(update_ssh_host),
+        )
+        .route(
+            "/api/v1/ssh/hosts/{host_id}/revisions",
+            get(ssh_host_revisions),
+        )
+        .route(
+            "/api/v1/ssh/hosts/{host_id}/operations",
+            get(ssh_operation_history).post(run_ssh_operation),
         )
         .route(
             "/api/v1/schedules",
@@ -1604,6 +1697,132 @@ async fn get_site_monitor(
         .map_err(map_runtime_error)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("Site {site_id} has no monitor")))
+}
+
+async fn create_ssh_host(
+    State(state): State<ApiState>,
+    Json(request): Json<CreateSshHostRequest>,
+) -> Result<(StatusCode, Json<SshHost>), ApiError> {
+    let mutation = state
+        .runtime
+        .register_ssh_host(&SshHostRegistrationRequest {
+            id: request.host_id,
+            display_name: request.display_name,
+            hostname: request.hostname,
+            port: request.port,
+            username: request.username,
+            platform: request.platform,
+            authentication: request.authentication,
+            known_hosts_entry: request.known_hosts_entry,
+            host_key_sha256: request.host_key_sha256,
+            state: request.state,
+        })
+        .map_err(map_runtime_error)?;
+    Ok((
+        if mutation.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(mutation.host),
+    ))
+}
+
+async fn list_ssh_hosts(
+    State(state): State<ApiState>,
+) -> Result<Json<SshHostListResponse>, ApiError> {
+    Ok(Json(SshHostListResponse {
+        hosts: state.runtime.ssh_hosts().map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_ssh_host(
+    State(state): State<ApiState>,
+    Path(host_id): Path<String>,
+) -> Result<Json<SshHost>, ApiError> {
+    let host_id = parse_ssh_host_id(&host_id)?;
+    state
+        .runtime
+        .ssh_host(host_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("SSH host {host_id} was not found")))
+}
+
+async fn update_ssh_host(
+    State(state): State<ApiState>,
+    Path(host_id): Path<String>,
+    Json(request): Json<UpdateSshHostRequest>,
+) -> Result<Json<SshHostMutation>, ApiError> {
+    let host_id = parse_ssh_host_id(&host_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .update_ssh_host(
+                host_id,
+                &SshHostUpdateRequest {
+                    expected_revision: request.expected_revision,
+                    display_name: request.display_name,
+                    hostname: request.hostname,
+                    port: request.port,
+                    username: request.username,
+                    platform: request.platform,
+                    authentication: request.authentication,
+                    known_hosts_entry: request.known_hosts_entry,
+                    host_key_sha256: request.host_key_sha256,
+                    state: request.state,
+                    reason: request.reason,
+                },
+            )
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn ssh_host_revisions(
+    State(state): State<ApiState>,
+    Path(host_id): Path<String>,
+) -> Result<Json<SshHostRevisionListResponse>, ApiError> {
+    let host_id = parse_ssh_host_id(&host_id)?;
+    Ok(Json(SshHostRevisionListResponse {
+        revisions: state
+            .runtime
+            .ssh_host_revisions(host_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn run_ssh_operation(
+    State(state): State<ApiState>,
+    Path(host_id): Path<String>,
+    Json(request): Json<RunSshOperationRequest>,
+) -> Result<Json<SshOperationMutation>, ApiError> {
+    let host_id = parse_ssh_host_id(&host_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .run_ssh_operation(
+                host_id,
+                request.operation_id,
+                request.task_id,
+                request.operation,
+                request.timeout_seconds,
+            )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn ssh_operation_history(
+    State(state): State<ApiState>,
+    Path(host_id): Path<String>,
+) -> Result<Json<SshOperationListResponse>, ApiError> {
+    let host_id = parse_ssh_host_id(&host_id)?;
+    Ok(Json(SshOperationListResponse {
+        operations: state
+            .runtime
+            .ssh_operations(host_id)
+            .map_err(map_runtime_error)?,
+    }))
 }
 
 async fn create_schedule(
@@ -3407,6 +3626,12 @@ fn parse_site_id(value: &str) -> Result<SiteId, ApiError> {
         .map_err(|_| ApiError::bad_request("site id must be a UUID"))
 }
 
+fn parse_ssh_host_id(value: &str) -> Result<SshHostId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("SSH host id must be a UUID"))
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn map_runtime_error(error: RuntimeError) -> ApiError {
     let provider_error = match &error {
@@ -4640,6 +4865,9 @@ form.addEventListener('submit', (event) => {
                 "mcg_sites_update",
                 "mcg_sites_monitor",
                 "mcg_sites_deploy",
+                "mcg_ssh_hosts",
+                "mcg_ssh_register",
+                "mcg_ssh_run",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
                 "mcg_run_agent",

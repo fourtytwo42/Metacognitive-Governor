@@ -400,6 +400,17 @@ pub enum ToolRequestKind {
         task_id: Option<TaskId>,
         options: ProcessOptions,
     },
+    SshOperation {
+        operation_id: mcg_domain::SshOperationId,
+        host_id: mcg_domain::SshHostId,
+        host_revision: u32,
+        hostname: String,
+        port: u16,
+        username: String,
+        known_hosts_entry: String,
+        host_key_sha256: String,
+        kind: mcg_domain::SshOperationKind,
+    },
     McpCall {
         connection_id: String,
         tool_name: String,
@@ -451,6 +462,12 @@ impl ToolRequestKind {
             Self::MemoryWrite { .. } => "memory.write".into(),
             Self::ComputerActions { .. } => "computer.actions".into(),
             Self::SiteDeploy { .. } => "sites.deploy".into(),
+            Self::SshOperation { kind, .. } => match kind {
+                mcg_domain::SshOperationKind::Inspect => "ssh.inspect".into(),
+                mcg_domain::SshOperationKind::Execute { .. } => "ssh.execute".into(),
+                mcg_domain::SshOperationKind::Upload { .. } => "ssh.upload".into(),
+                mcg_domain::SshOperationKind::Download { .. } => "ssh.download".into(),
+            },
             Self::McpCall {
                 connection_id,
                 tool_name,
@@ -501,6 +518,11 @@ impl ToolRequestKind {
                 | Self::MemoryWrite { .. }
                 | Self::ComputerActions { .. }
                 | Self::SiteDeploy { .. }
+                | Self::SshOperation {
+                    kind: mcg_domain::SshOperationKind::Execute { .. }
+                        | mcg_domain::SshOperationKind::Upload { .. },
+                    ..
+                }
         )
     }
 }

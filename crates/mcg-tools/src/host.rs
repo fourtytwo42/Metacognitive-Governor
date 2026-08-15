@@ -72,6 +72,11 @@ impl ToolExecutor for HostExecutor {
                     "Site deployments require the runtime-bound deployment executor".into(),
                 ));
             }
+            ToolRequestKind::SshOperation { .. } => {
+                return Err(ToolError::Unavailable(
+                    "SSH operations require the runtime-bound SSH executor".into(),
+                ));
+            }
             ToolRequestKind::McpCall { .. } => &self.external,
         };
         executor.execute(execution_id, request).await

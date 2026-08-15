@@ -7,18 +7,20 @@ use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
     AttachBrowserSessionRequest, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateTaskRequest,
-    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
-    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
-    ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest, UpdateSiteRequest, WakeScheduleRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
+    CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
+    ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    NavigateBrowserSessionRequest, OrganizationListResponse, OrganizationMutationResponse,
+    PlanAgentRunRequest, PlanWorkRequest, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
+    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    UpdateSiteRequest, UpdateSshHostRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -26,8 +28,8 @@ use mcg_domain::{
     NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
     PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId, ScheduleState,
     ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState,
-    TaskEnvelope, TaskId, TaskState, WorkItemId,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
+    SshHostId, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
@@ -42,7 +44,8 @@ use mcg_runtime::{
     AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
+    SshOperationMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
@@ -149,6 +152,25 @@ enum Command {
         #[command(subcommand)]
         command: SiteCommand,
     },
+    /// Manage pinned outbound SSH hosts and typed operations.
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SshCommand {
+    /// List all durable SSH hosts.
+    List,
+    /// Show one host, immutable revisions, and operation history.
+    Show { id: String },
+    /// Register a host from a JSON request file.
+    Register { request: PathBuf },
+    /// Update a host from a complete revision-checked JSON request file.
+    Update { id: String, request: PathBuf },
+    /// Run a typed operation from a JSON request file.
+    Run { id: String, request: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1012,8 +1034,108 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Site { command } => {
             run_site(&client, host, token.trim(), command).await?;
         }
+        Command::Ssh { command } => {
+            run_ssh(&client, host, token.trim(), command).await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn run_ssh(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: SshCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        SshCommand::List => {
+            let response: SshHostListResponse = client
+                .get(format!("{host}/api/v1/ssh/hosts"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::Show { id } => {
+            let id = SshHostId::from_str(&id)?;
+            let host_record: SshHost = client
+                .get(format!("{host}/api/v1/ssh/hosts/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let revisions: SshHostRevisionListResponse = client
+                .get(format!("{host}/api/v1/ssh/hosts/{id}/revisions"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let operations: SshOperationListResponse = client
+                .get(format!("{host}/api/v1/ssh/hosts/{id}/operations"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&(host_record, revisions, operations))?
+            );
+        }
+        SshCommand::Register { request } => {
+            let request: CreateSshHostRequest =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: SshHost = client
+                .post(format!("{host}/api/v1/ssh/hosts"))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::Update { id, request } => {
+            let id = SshHostId::from_str(&id)?;
+            let request: UpdateSshHostRequest =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: SshHostMutation = client
+                .put(format!("{host}/api/v1/ssh/hosts/{id}"))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::Run { id, request } => {
+            let id = SshHostId::from_str(&id)?;
+            let request: RunSshOperationRequest =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: SshOperationMutation = client
+                .post(format!("{host}/api/v1/ssh/hosts/{id}/operations"))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+    }
     Ok(())
 }
 

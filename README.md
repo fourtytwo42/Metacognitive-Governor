@@ -36,6 +36,7 @@ Implementation planning:
 - [M6 MCP boundary](docs/architecture/mcp.md)
 - [M8 platform capabilities and sessions](docs/architecture/platform-sessions.md)
 - [M8 Sites, deployment, and monitoring](docs/architecture/sites.md)
+- [M8 typed SSH remote execution](docs/architecture/typed-ssh.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 

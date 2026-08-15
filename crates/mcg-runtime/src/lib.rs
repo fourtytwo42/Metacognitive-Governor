@@ -31,12 +31,14 @@ use mcg_domain::{
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, ProjectId, RiskLevel, RunId,
-    SITE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
-    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, TaskBudget, TaskEnvelope, TaskId,
-    TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
+    SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
+    SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState,
+    SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId,
+    SshHostState, SshOperation, SshOperationId, SshOperationKind, SshOperationState, TaskBudget,
+    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -70,7 +72,7 @@ use mcg_tools::{
     GitExecutor, HostExecutor, HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor,
     OutputRedactor, PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation,
     ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver,
-    ResearchEvidenceDocument, ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION,
+    ResearchEvidenceDocument, ResearchExecutor, SshExecutor, SystemExecutor, TOOL_SCHEMA_VERSION,
     ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
     ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
     browser_runtime_available, computer_use_runtime_available,
@@ -99,6 +101,7 @@ pub struct RuntimeStatus {
     pub expired_platform_sessions: u64,
     pub recovered_computer_action_batches: u64,
     pub recovered_site_deployments: u64,
+    pub recovered_ssh_operations: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +180,48 @@ pub struct SiteMonitorMutation {
     pub monitor: SiteMonitor,
     pub schedule: ScheduleDefinition,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostRegistrationRequest {
+    pub id: SshHostId,
+    pub display_name: String,
+    pub hostname: String,
+    pub port: u16,
+    pub username: String,
+    pub platform: SshHostPlatform,
+    pub authentication: SshAuthentication,
+    pub known_hosts_entry: String,
+    pub host_key_sha256: String,
+    pub state: SshHostState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostUpdateRequest {
+    pub expected_revision: u32,
+    pub display_name: String,
+    pub hostname: String,
+    pub port: u16,
+    pub username: String,
+    pub platform: SshHostPlatform,
+    pub authentication: SshAuthentication,
+    pub known_hosts_entry: String,
+    pub host_key_sha256: String,
+    pub state: SshHostState,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostMutation {
+    pub host: SshHost,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SshOperationMutation {
+    pub operation: SshOperation,
+    pub replayed: bool,
+    pub outcome: Option<ToolOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,6 +646,7 @@ pub struct AppRuntime {
     expired_platform_sessions: u64,
     recovered_computer_action_batches: u64,
     recovered_site_deployments: u64,
+    recovered_ssh_operations: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
     browser_sessions: Arc<PersistentBrowserManager>,
     computer_sessions: Arc<ComputerUseManager>,
@@ -647,6 +693,7 @@ impl AppRuntime {
         let recovered_computer_action_batches =
             store.recover_computer_action_batches(startup_now)?;
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
+        let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -670,6 +717,7 @@ impl AppRuntime {
             expired_platform_sessions,
             recovered_computer_action_batches,
             recovered_site_deployments,
+            recovered_ssh_operations,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -717,6 +765,7 @@ impl AppRuntime {
         let recovered_computer_action_batches =
             store.recover_computer_action_batches(startup_now)?;
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
+        let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
         let platform_capabilities = detect_platform_capabilities(&config, startup_now);
         let platform_capabilities =
             store.record_platform_capability_snapshot(&platform_capabilities)?;
@@ -742,6 +791,7 @@ impl AppRuntime {
             expired_platform_sessions,
             recovered_computer_action_batches,
             recovered_site_deployments,
+            recovered_ssh_operations,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -765,6 +815,7 @@ impl AppRuntime {
         expired_platform_sessions: u64,
         recovered_computer_action_batches: u64,
         recovered_site_deployments: u64,
+        recovered_ssh_operations: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
         browser_sessions: Arc<PersistentBrowserManager>,
         computer_sessions: Arc<ComputerUseManager>,
@@ -787,6 +838,7 @@ impl AppRuntime {
             expired_platform_sessions,
             recovered_computer_action_batches,
             recovered_site_deployments,
+            recovered_ssh_operations,
             platform_capabilities,
             browser_sessions,
             computer_sessions,
@@ -829,6 +881,7 @@ impl AppRuntime {
             expired_platform_sessions: self.expired_platform_sessions,
             recovered_computer_action_batches: self.recovered_computer_action_batches,
             recovered_site_deployments: self.recovered_site_deployments,
+            recovered_ssh_operations: self.recovered_ssh_operations,
         }
     }
 
@@ -2229,6 +2282,309 @@ impl AppRuntime {
     /// Returns not-found for an unknown Site or an error when storage cannot be read.
     pub fn site_deployments(&self, site_id: SiteId) -> Result<Vec<SiteDeployment>, RuntimeError> {
         Ok(self.store()?.site_deployments(site_id)?)
+    }
+
+    /// Registers one host with explicit pinned OpenSSH host-key material.
+    /// Exact caller identity replay returns the existing definition.
+    ///
+    /// # Errors
+    /// Returns an error for invalid definitions or identity conflicts.
+    pub fn register_ssh_host(
+        &self,
+        request: &SshHostRegistrationRequest,
+    ) -> Result<SshHostMutation, RuntimeError> {
+        if request.state == SshHostState::Archived {
+            return Err(StorageError::InvalidData(
+                "new SSH hosts cannot be registered as archived".into(),
+            )
+            .into());
+        }
+        let now = Utc::now();
+        let definition_hash = ssh_host_definition_hash(request)?;
+        let host = SshHost {
+            schema_version: SSH_SCHEMA_VERSION,
+            id: request.id,
+            definition_hash: definition_hash.clone(),
+            revision: 1,
+            display_name: request.display_name.trim().into(),
+            hostname: request.hostname.trim().into(),
+            port: request.port,
+            username: request.username.trim().into(),
+            platform: request.platform,
+            authentication: request.authentication,
+            known_hosts_entry: request.known_hosts_entry.trim().into(),
+            host_key_sha256: request.host_key_sha256.trim().into(),
+            state: request.state,
+            created_at: now,
+            updated_at: now,
+        };
+        let revision = SshHostRevision {
+            schema_version: SSH_SCHEMA_VERSION,
+            id: SshHostRevisionId::new(),
+            host_id: host.id,
+            revision: 1,
+            definition_hash,
+            host: host.clone(),
+            reason: "owner registered SSH host".into(),
+            created_at: now,
+        };
+        let (host, created) = self.store()?.create_ssh_host(&host, &revision)?;
+        Ok(SshHostMutation {
+            host,
+            replayed: !created,
+        })
+    }
+
+    /// Lists current SSH host projections.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn ssh_hosts(&self) -> Result<Vec<SshHost>, RuntimeError> {
+        Ok(self.store()?.ssh_hosts()?)
+    }
+
+    /// Loads one current SSH host projection.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn ssh_host(&self, host_id: SshHostId) -> Result<Option<SshHost>, RuntimeError> {
+        Ok(self.store()?.ssh_host(host_id)?)
+    }
+
+    /// Advances a pinned host definition with optimistic revision authority.
+    /// Exact lost-response retry is observation-only; archive is terminal.
+    ///
+    /// # Errors
+    /// Returns an error for stale revisions, invalid keys, or archived hosts.
+    pub fn update_ssh_host(
+        &self,
+        host_id: SshHostId,
+        request: &SshHostUpdateRequest,
+    ) -> Result<SshHostMutation, RuntimeError> {
+        let current = self
+            .ssh_host(host_id)?
+            .ok_or(StorageError::SshHostNotFound(host_id))?;
+        if current.state == SshHostState::Archived
+            || request.expected_revision == 0
+            || request.reason.trim().is_empty()
+        {
+            return Err(StorageError::InvalidData(
+                "SSH host update requires live authority, a revision, and a reason".into(),
+            )
+            .into());
+        }
+        let definition = SshHostRegistrationRequest {
+            id: host_id,
+            display_name: request.display_name.clone(),
+            hostname: request.hostname.clone(),
+            port: request.port,
+            username: request.username.clone(),
+            platform: request.platform,
+            authentication: request.authentication,
+            known_hosts_entry: request.known_hosts_entry.clone(),
+            host_key_sha256: request.host_key_sha256.clone(),
+            state: request.state,
+        };
+        let definition_hash = ssh_host_definition_hash(&definition)?;
+        if current.revision == request.expected_revision.saturating_add(1)
+            && current.definition_hash == definition_hash
+        {
+            return Ok(SshHostMutation {
+                host: current,
+                replayed: true,
+            });
+        }
+        if current.revision != request.expected_revision {
+            return Err(StorageError::Conflict(format!(
+                "SSH host {host_id} changed from expected revision {}",
+                request.expected_revision
+            ))
+            .into());
+        }
+        let now = Utc::now();
+        let host = SshHost {
+            schema_version: SSH_SCHEMA_VERSION,
+            id: host_id,
+            definition_hash: definition_hash.clone(),
+            revision: current.revision.saturating_add(1),
+            display_name: request.display_name.trim().into(),
+            hostname: request.hostname.trim().into(),
+            port: request.port,
+            username: request.username.trim().into(),
+            platform: request.platform,
+            authentication: request.authentication,
+            known_hosts_entry: request.known_hosts_entry.trim().into(),
+            host_key_sha256: request.host_key_sha256.trim().into(),
+            state: request.state,
+            created_at: current.created_at,
+            updated_at: now,
+        };
+        let revision = SshHostRevision {
+            schema_version: SSH_SCHEMA_VERSION,
+            id: SshHostRevisionId::new(),
+            host_id,
+            revision: host.revision,
+            definition_hash,
+            host: host.clone(),
+            reason: request.reason.trim().into(),
+            created_at: now,
+        };
+        let host = self
+            .store()?
+            .update_ssh_host(request.expected_revision, &host, &revision)?;
+        Ok(SshHostMutation {
+            host,
+            replayed: false,
+        })
+    }
+
+    /// Loads immutable definition history for one SSH host.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn ssh_host_revisions(
+        &self,
+        host_id: SshHostId,
+    ) -> Result<Vec<SshHostRevision>, RuntimeError> {
+        Ok(self.store()?.ssh_host_revisions(host_id)?)
+    }
+
+    /// Executes one caller-owned typed SSH operation through policy, approval, lease, and audit.
+    /// Exact terminal retries are observation-only; uncertain work is never repeated.
+    ///
+    /// # Errors
+    /// Returns an error for missing authority, approval, unavailable OpenSSH, or execution failure.
+    #[allow(clippy::too_many_lines)] // Keeps remote authority, local roots, and broker setup together.
+    pub async fn run_ssh_operation(
+        &self,
+        host_id: SshHostId,
+        operation_id: SshOperationId,
+        task_id: Option<TaskId>,
+        kind: SshOperationKind,
+        timeout_seconds: u64,
+    ) -> Result<SshOperationMutation, RuntimeError> {
+        let host = self
+            .ssh_host(host_id)?
+            .ok_or(StorageError::SshHostNotFound(host_id))?;
+        let request_hash = ssh_operation_request_hash(&host, task_id, &kind, timeout_seconds)?;
+        if let Some(existing) = self.store()?.ssh_operation(operation_id)? {
+            if existing.host_id != host_id
+                || existing.host_revision != host.revision
+                || existing.task_id != task_id
+                || existing.request_hash != request_hash
+            {
+                return Err(StorageError::Conflict(
+                    "SSH operation identity was reused with a different request".into(),
+                )
+                .into());
+            }
+            return settled_ssh_operation_replay(existing);
+        }
+        if host.state != SshHostState::Active {
+            return Err(ToolError::Denied("only active SSH hosts can execute work".into()).into());
+        }
+        if !(1..=3_600).contains(&timeout_seconds) {
+            return Err(ToolError::Invalid("SSH timeout must be 1 to 3600 seconds".into()).into());
+        }
+        let task = if let Some(id) = task_id {
+            Some(self.task(id)?.ok_or(StorageError::TaskNotFound(id))?)
+        } else {
+            None
+        };
+        let project_root = task
+            .as_ref()
+            .and_then(|task| task.project_id)
+            .map(|project_id| self.project(project_id))
+            .transpose()?
+            .flatten()
+            .map(|project| std::path::PathBuf::from(project.root));
+        if matches!(
+            kind,
+            SshOperationKind::Upload { .. } | SshOperationKind::Download { .. }
+        ) && project_root.is_none()
+        {
+            return Err(ToolError::Denied(
+                "SSH file transfer requires a task bound to a durable project".into(),
+            )
+            .into());
+        }
+        let local_root = project_root
+            .clone()
+            .unwrap_or_else(|| self.config.data_directory.clone());
+        let ssh = find_path_executable("ssh")
+            .ok_or_else(|| ToolError::Unavailable("OpenSSH ssh executable was not found".into()))?;
+        let scp = find_path_executable("scp")
+            .ok_or_else(|| ToolError::Unavailable("OpenSSH scp executable was not found".into()))?;
+        let scratch = self.config.data_directory.join("ssh-scratch");
+        let artifacts_path = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts_path)?;
+        let result = Arc::new(Mutex::new(None));
+        let executor = SshOperationExecutor {
+            store: self.store.clone(),
+            ssh: Arc::new(
+                SshExecutor::new(ssh, scp, scratch, [local_root.clone()])
+                    .map_err(runtime_tool_error)?,
+            ),
+            artifacts: Arc::new(ArtifactStore::open(&artifacts_path).map_err(runtime_tool_error)?),
+            request_hash,
+            task_id,
+            result: result.clone(),
+        };
+        let authority_task_id = task_id.unwrap_or_else(|| ssh_authority_task_id(host_id));
+        let mut request = ToolRequest::new(
+            authority_task_id,
+            format!(
+                "{} on pinned SSH host {}",
+                ssh_kind_label(&kind),
+                host.display_name
+            ),
+            ToolRequestKind::SshOperation {
+                operation_id,
+                host_id,
+                host_revision: host.revision,
+                hostname: host.hostname.clone(),
+                port: host.port,
+                username: host.username.clone(),
+                known_hosts_entry: host.known_hosts_entry.clone(),
+                host_key_sha256: host.host_key_sha256.clone(),
+                kind: kind.clone(),
+            },
+        );
+        request.id = ssh_operation_tool_request_id(operation_id);
+        request.timeout_seconds = timeout_seconds;
+        let mut capabilities = CapabilityPolicy::project(&local_root);
+        capabilities
+            .allowed_ssh_hosts
+            .push(ssh_revision_resource(host_id, host.revision));
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            executor,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        broker.execute(&request).await?;
+        result
+            .lock()
+            .map_err(|_| RuntimeError::StorageLock)?
+            .take()
+            .ok_or_else(|| {
+                ToolError::Execution("SSH executor returned no durable mutation".into()).into()
+            })
+    }
+
+    /// Lists retained SSH operation history for one host.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn ssh_operations(&self, host_id: SshHostId) -> Result<Vec<SshOperation>, RuntimeError> {
+        Ok(self.store()?.ssh_operations(host_id)?)
     }
 
     /// Creates and durably records a validated project-scoped memory claim.
@@ -4616,6 +4972,75 @@ fn site_revision_resource(site_id: SiteId, revision: u32) -> String {
     format!("site://{site_id}/revision/{revision}")
 }
 
+fn ssh_authority_task_id(host_id: SshHostId) -> TaskId {
+    TaskId::from_stable_bytes(stable_authority_bytes("mcg:ssh-host-authority:v1", host_id))
+}
+
+fn ssh_operation_tool_request_id(operation_id: SshOperationId) -> ToolRequestId {
+    ToolRequestId::from_stable_bytes(stable_authority_bytes(
+        "mcg:ssh-operation-request:v1",
+        operation_id,
+    ))
+}
+
+fn ssh_revision_resource(host_id: SshHostId, revision: u32) -> String {
+    format!("ssh://host/{host_id}/revision/{revision}")
+}
+
+const fn ssh_kind_label(kind: &SshOperationKind) -> &'static str {
+    match kind {
+        SshOperationKind::Inspect => "Inspect",
+        SshOperationKind::Execute { .. } => "Execute",
+        SshOperationKind::Upload { .. } => "Upload",
+        SshOperationKind::Download { .. } => "Download",
+    }
+}
+
+fn ssh_host_definition_hash(request: &SshHostRegistrationRequest) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                SSH_SCHEMA_VERSION,
+                request.id,
+                request.display_name.trim(),
+                request.hostname.trim(),
+                request.port,
+                request.username.trim(),
+                request.platform,
+                request.authentication,
+                request.known_hosts_entry.trim(),
+                request.host_key_sha256.trim(),
+                request.state,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn ssh_operation_request_hash(
+    host: &SshHost,
+    task_id: Option<TaskId>,
+    kind: &SshOperationKind,
+    timeout_seconds: u64,
+) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                SSH_SCHEMA_VERSION,
+                host.id,
+                host.revision,
+                &host.definition_hash,
+                task_id,
+                kind,
+                timeout_seconds,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
 const fn site_environment_label(environment: SiteEnvironment) -> &'static str {
     match environment {
         SiteEnvironment::Development => "development",
@@ -5103,6 +5528,207 @@ fn site_deployment_replay_outcome(
             method: "site.deployment_replay".into(),
             passed: true,
             detail: "no deployment process was repeated".into(),
+        }],
+        started_at,
+        finished_at: Utc::now(),
+    }
+}
+
+fn settled_ssh_operation_replay(
+    operation: SshOperation,
+) -> Result<SshOperationMutation, RuntimeError> {
+    match operation.state {
+        SshOperationState::Succeeded => Ok(SshOperationMutation {
+            operation,
+            replayed: true,
+            outcome: None,
+        }),
+        SshOperationState::Executing => {
+            Err(ToolError::Denied("SSH operation is already executing".into()).into())
+        }
+        SshOperationState::Failed | SshOperationState::Uncertain => Err(ToolError::Denied(
+            format!("SSH operation will not be replayed: {}", operation.detail),
+        )
+        .into()),
+    }
+}
+
+#[derive(Clone)]
+struct SshOperationExecutor {
+    store: Arc<Mutex<SqliteEventStore>>,
+    ssh: Arc<SshExecutor>,
+    artifacts: Arc<ArtifactStore>,
+    request_hash: String,
+    task_id: Option<TaskId>,
+    result: Arc<Mutex<Option<SshOperationMutation>>>,
+}
+
+impl SshOperationExecutor {
+    fn store(&self) -> Result<MutexGuard<'_, SqliteEventStore>, ToolError> {
+        self.store
+            .lock()
+            .map_err(|_| ToolError::Execution("runtime storage lock was poisoned".into()))
+    }
+
+    fn save_result(&self, result: SshOperationMutation) -> Result<(), ToolError> {
+        *self
+            .result
+            .lock()
+            .map_err(|_| ToolError::Execution("SSH operation result lock was poisoned".into()))? =
+            Some(result);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SshOperationExecutor {
+    async fn execute(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+    ) -> Result<ToolOutcome, ToolError> {
+        let ToolRequestKind::SshOperation {
+            operation_id,
+            host_id,
+            host_revision,
+            kind,
+            ..
+        } = &request.kind
+        else {
+            return Err(ToolError::Invalid(
+                "SSH operation executor received a different tool kind".into(),
+            ));
+        };
+        let started_at = Utc::now();
+        let claimed = SshOperation {
+            schema_version: SSH_SCHEMA_VERSION,
+            id: *operation_id,
+            host_id: *host_id,
+            host_revision: *host_revision,
+            task_id: self.task_id,
+            request_hash: self.request_hash.clone(),
+            kind: kind.clone(),
+            state: SshOperationState::Executing,
+            detail: String::new(),
+            exit_code: None,
+            artifact_sha256: Vec::new(),
+            created_at: started_at,
+            updated_at: started_at,
+        };
+        let (operation, created) = self
+            .store()?
+            .claim_ssh_operation(&claimed)
+            .map_err(tool_storage_error)?;
+        if !created {
+            let replay = settled_ssh_operation_replay(operation)
+                .map_err(|error| ToolError::Denied(error.to_string()))?;
+            self.save_result(replay)?;
+            return Ok(ssh_operation_replay_outcome(
+                execution_id,
+                request,
+                started_at,
+            ));
+        }
+
+        match self.ssh.execute(execution_id, request).await {
+            Ok(mut outcome) => {
+                let mut evidence = capture_ssh_evidence(self.artifacts.as_ref(), kind, &outcome)?;
+                let artifact_sha256 = evidence
+                    .iter()
+                    .map(|artifact| artifact.sha256.clone())
+                    .collect();
+                outcome.artifacts.append(&mut evidence);
+                let state = if outcome.status == ToolOutcomeStatus::Succeeded {
+                    SshOperationState::Succeeded
+                } else {
+                    SshOperationState::Failed
+                };
+                let operation = self
+                    .store()?
+                    .finish_ssh_operation(
+                        *operation_id,
+                        state,
+                        &bounded_site_detail(&outcome.summary),
+                        outcome.exit_code,
+                        artifact_sha256,
+                        Utc::now(),
+                    )
+                    .map_err(tool_storage_error)?;
+                self.save_result(SshOperationMutation {
+                    operation,
+                    replayed: false,
+                    outcome: Some(outcome.clone()),
+                })?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                self.store()?
+                    .finish_ssh_operation(
+                        *operation_id,
+                        SshOperationState::Failed,
+                        "OpenSSH failed before verified completion",
+                        None,
+                        Vec::new(),
+                        Utc::now(),
+                    )
+                    .map_err(tool_storage_error)?;
+                Err(error)
+            }
+        }
+    }
+}
+
+fn capture_ssh_evidence(
+    artifacts: &ArtifactStore,
+    kind: &SshOperationKind,
+    outcome: &ToolOutcome,
+) -> Result<Vec<mcg_tools::ArtifactReference>, ToolError> {
+    let mut evidence = Vec::new();
+    if let Some(log) = capture_site_process_log(artifacts, outcome)? {
+        evidence.push(log);
+    }
+    let local_path = match kind {
+        SshOperationKind::Upload { local_path, .. } => Some(local_path),
+        SshOperationKind::Download { local_path, .. }
+            if outcome.status == ToolOutcomeStatus::Succeeded =>
+        {
+            Some(local_path)
+        }
+        SshOperationKind::Inspect
+        | SshOperationKind::Execute { .. }
+        | SshOperationKind::Download { .. } => None,
+    };
+    if let Some(local_path) = local_path {
+        let file = fs::File::open(local_path)
+            .map_err(|error| ToolError::Execution(format!("open SSH file evidence: {error}")))?;
+        evidence.push(artifacts.capture_reader(
+            file,
+            1024 * 1024 * 1024,
+            "application/octet-stream",
+        )?);
+    }
+    Ok(evidence)
+}
+
+fn ssh_operation_replay_outcome(
+    execution_id: ToolExecutionId,
+    request: &ToolRequest,
+    started_at: DateTime<Utc>,
+) -> ToolOutcome {
+    ToolOutcome {
+        schema_version: TOOL_SCHEMA_VERSION,
+        execution_id,
+        request_id: request.id,
+        status: ToolOutcomeStatus::Succeeded,
+        summary: "SSH operation was already durably settled".into(),
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        artifacts: Vec::new(),
+        verification: vec![VerificationEvidence {
+            method: "ssh.operation_replay".into(),
+            passed: true,
+            detail: "no SSH process or transfer was repeated".into(),
         }],
         started_at,
         finished_at: Utc::now(),
@@ -5855,6 +6481,8 @@ fn detect_platform_capabilities(
 ) -> PlatformCapabilitySnapshot {
     let browser_available = browser_runtime_available(config.browser_executable.as_deref());
     let computer_available = computer_use_runtime_available();
+    let ssh_available =
+        find_path_executable("ssh").is_some() && find_path_executable("scp").is_some();
     let desktop_supported = matches!(std::env::consts::OS, "windows" | "linux");
     PlatformCapabilitySnapshot {
         schema_version: PLATFORM_SCHEMA_VERSION,
@@ -5908,17 +6536,56 @@ fn detect_platform_capabilities(
             },
             PlatformCapability {
                 kind: PlatformCapabilityKind::SshClient,
-                availability: PlatformCapabilityAvailability::Unavailable,
-                detail: "typed SSH executor is not installed".into(),
+                availability: if ssh_available {
+                    PlatformCapabilityAvailability::Available
+                } else {
+                    PlatformCapabilityAvailability::Unavailable
+                },
+                detail: if ssh_available {
+                    "OpenSSH command and transfer clients verified".into()
+                } else {
+                    "OpenSSH ssh/scp executables were not found".into()
+                },
             },
             PlatformCapability {
                 kind: PlatformCapabilityKind::Sites,
-                availability: PlatformCapabilityAvailability::Unavailable,
-                detail: "Sites deployment registry is not installed".into(),
+                availability: PlatformCapabilityAvailability::Available,
+                detail: "durable Sites registry, deployment, and monitoring are available".into(),
             },
         ],
         observed_at,
     }
+}
+
+fn find_path_executable(name: &str) -> Option<std::path::PathBuf> {
+    if cfg!(windows)
+        && matches!(name, "ssh" | "scp")
+        && let Some(system_root) = std::env::var_os("SystemRoot")
+    {
+        let native = Path::new(&system_root)
+            .join("System32")
+            .join("OpenSSH")
+            .join(format!("{name}.exe"));
+        if let Ok(native) = native.canonicalize()
+            && native.is_file()
+        {
+            return Some(native);
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    let candidates = if cfg!(windows) {
+        vec![format!("{name}.exe"), name.to_owned()]
+    } else {
+        vec![name.to_owned()]
+    };
+    std::env::split_paths(&path)
+        .flat_map(|directory| {
+            candidates
+                .iter()
+                .map(move |candidate| directory.join(candidate))
+        })
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| candidate.canonicalize().ok())
 }
 
 #[cfg(unix)]
@@ -6030,6 +6697,67 @@ mod tests {
         runtime.create_task(&task).expect("task should persist");
 
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
+    }
+
+    #[tokio::test]
+    async fn live_ssh_inspect_survives_runtime_restart_without_reexecution() {
+        if std::env::var("MCG_LIVE_SSH").as_deref() != Ok("1") {
+            eprintln!(
+                "skipped: set MCG_LIVE_SSH=1 with the documented non-secret host metadata and an SSH agent"
+            );
+            return;
+        }
+        let hostname = std::env::var("MCG_LIVE_SSH_HOST").expect("live SSH hostname");
+        let username = std::env::var("MCG_LIVE_SSH_USER").expect("live SSH username");
+        let known_hosts_entry =
+            std::env::var("MCG_LIVE_SSH_KNOWN_HOSTS").expect("pinned host line");
+        let host_key_sha256 = std::env::var("MCG_LIVE_SSH_FINGERPRINT").expect("host fingerprint");
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let config = AppConfig::default().with_data_directory(directory.path());
+        let host_id = SshHostId::new();
+        let operation_id = SshOperationId::new();
+        {
+            let runtime = AppRuntime::open(config.clone()).expect("durable runtime");
+            runtime
+                .register_ssh_host(&SshHostRegistrationRequest {
+                    id: host_id,
+                    display_name: "Live Ubuntu qualification".into(),
+                    hostname,
+                    port: 22,
+                    username,
+                    platform: SshHostPlatform::Posix,
+                    authentication: SshAuthentication::Agent,
+                    known_hosts_entry,
+                    host_key_sha256,
+                    state: SshHostState::Active,
+                })
+                .expect("register pinned live host");
+            let mutation = runtime
+                .run_ssh_operation(host_id, operation_id, None, SshOperationKind::Inspect, 30)
+                .await
+                .expect("live inspect");
+            assert_eq!(
+                mutation.operation.state,
+                SshOperationState::Succeeded,
+                "live SSH outcome: {:?}",
+                mutation.outcome
+            );
+            assert!(
+                mutation
+                    .outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.stdout.as_deref())
+                    .is_some_and(|stdout| stdout.contains("Linux"))
+            );
+        }
+        let reopened = AppRuntime::open(config).expect("reopen runtime");
+        let replay = reopened
+            .run_ssh_operation(host_id, operation_id, None, SshOperationKind::Inspect, 30)
+            .await
+            .expect("settled replay");
+        assert!(replay.replayed);
+        assert!(replay.outcome.is_none());
+        assert_eq!(reopened.status().recovered_ssh_operations, 0);
     }
 
     #[tokio::test]

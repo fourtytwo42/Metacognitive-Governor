@@ -56,6 +56,10 @@ const client = vi.hoisted(() => ({
   updateSite: vi.fn(),
   getSiteMonitor: vi.fn(),
   createSiteMonitor: vi.fn()
+  ,listSshHosts: vi.fn()
+  ,registerSshHost: vi.fn()
+  ,loadSshOperations: vi.fn()
+  ,runSshOperation: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -112,7 +116,11 @@ vi.mock("./desktop-client", () => ({
   deploySite: client.deploySite,
   updateSite: client.updateSite,
   getSiteMonitor: client.getSiteMonitor,
-  createSiteMonitor: client.createSiteMonitor
+  createSiteMonitor: client.createSiteMonitor,
+  listSshHosts: client.listSshHosts,
+  registerSshHost: client.registerSshHost,
+  loadSshOperations: client.loadSshOperations,
+  runSshOperation: client.runSshOperation
 }));
 
 import { App } from "./App";
@@ -172,6 +180,10 @@ beforeEach(() => {
   client.updateSite.mockReset();
   client.getSiteMonitor.mockReset();
   client.createSiteMonitor.mockReset();
+  client.listSshHosts.mockReset();
+  client.registerSshHost.mockReset();
+  client.loadSshOperations.mockReset();
+  client.runSshOperation.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -194,6 +206,7 @@ beforeEach(() => {
   });
   client.listPlatformSessions.mockResolvedValue({ sessions: [] });
   client.listSites.mockResolvedValue({ sites: [] });
+  client.listSshHosts.mockResolvedValue({ hosts: [] });
   client.getSiteMonitor.mockRejectedValue(new Error("Site has no monitor"));
 });
 

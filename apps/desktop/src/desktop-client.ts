@@ -286,6 +286,22 @@ export interface SiteMutation { site: Site; replayed: boolean; }
 export interface SiteMonitorMutation { monitor: SiteMonitor; schedule: ScheduleDefinition; replayed: boolean; }
 export interface CreateSiteMonitorRequest { schedule_id: string; interval_seconds: number; expected_status: number; first_run_at?: string; }
 
+export type SshHostState = "active" | "disabled" | "archived";
+export type SshOperationKind =
+  | { kind: "inspect" }
+  | { kind: "execute"; executable: string; arguments: string[]; working_directory?: string }
+  | { kind: "upload"; local_path: string; remote_path: string; overwrite: boolean; expected_sha256: string }
+  | { kind: "download"; remote_path: string; local_path: string; overwrite: boolean; expected_sha256?: string };
+export interface SshHost { id: string; revision: number; definition_hash: string; display_name: string; hostname: string; port: number; username: string; known_hosts_entry: string; host_key_sha256: string; state: SshHostState; created_at: string; updated_at: string; }
+export interface SshOperation { id: string; host_id: string; host_revision: number; state: "executing" | "succeeded" | "failed" | "uncertain"; kind: SshOperationKind; detail: string; exit_code?: number; artifact_sha256: string[]; created_at: string; updated_at: string; }
+export interface CreateSshHostRequest { host_id: string; display_name: string; hostname: string; port: number; username: string; platform: "posix"; authentication: "agent"; known_hosts_entry: string; host_key_sha256: string; state: SshHostState; }
+export interface UpdateSshHostRequest extends Omit<CreateSshHostRequest, "host_id"> { expected_revision: number; reason: string; }
+export interface RunSshOperationRequest { operation_id: string; task_id?: string; operation: SshOperationKind; timeout_seconds: number; }
+export interface SshHostListResponse { hosts: SshHost[]; }
+export interface SshOperationListResponse { operations: SshOperation[]; }
+export interface SshHostMutation { host: SshHost; replayed: boolean; }
+export interface SshOperationMutation { operation: SshOperation; replayed: boolean; }
+
 export type PlatformCapabilityKind = "browser_automation" | "computer_use" | "native_desktop" | "ssh_client" | "sites";
 export type PlatformCapabilityAvailability = "available" | "unavailable" | "unsupported";
 export interface PlatformCapabilitySnapshot {
@@ -551,6 +567,11 @@ export function getSiteMonitor(siteId: string): Promise<SiteMonitor> { return in
 export function createSiteMonitor(siteId: string, request: CreateSiteMonitorRequest): Promise<SiteMonitorMutation> { return invoke("create_site_monitor", { siteId, request }); }
 export function loadSiteDeployments(siteId: string): Promise<SiteDeploymentListResponse> { return invoke("site_deployment_history", { siteId }); }
 export function deploySite(siteId: string, deploymentId: string): Promise<SiteDeploymentMutation> { return invoke("deploy_site", { siteId, request: { deployment_id: deploymentId } }); }
+export function listSshHosts(): Promise<SshHostListResponse> { return invoke("list_ssh_hosts"); }
+export function registerSshHost(request: CreateSshHostRequest): Promise<SshHost> { return invoke("register_ssh_host", { request }); }
+export function updateSshHost(hostId: string, request: UpdateSshHostRequest): Promise<SshHostMutation> { return invoke("update_ssh_host", { hostId, request }); }
+export function loadSshOperations(hostId: string): Promise<SshOperationListResponse> { return invoke("ssh_operation_history", { hostId }); }
+export function runSshOperation(hostId: string, request: RunSshOperationRequest): Promise<SshOperationMutation> { return invoke("run_ssh_operation", { hostId, request }); }
 
 export function loadPlatformCapabilities(): Promise<PlatformCapabilitySnapshot> {
   return invoke("platform_capabilities");

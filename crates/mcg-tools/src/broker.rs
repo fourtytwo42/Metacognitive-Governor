@@ -614,6 +614,46 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ),
             read_path(&options.cwd),
         ],
+        ToolRequestKind::SshOperation {
+            host_id,
+            host_revision,
+            kind,
+            ..
+        } => {
+            let host = ssh_host_resource(*host_id, *host_revision);
+            match kind {
+                mcg_domain::SshOperationKind::Inspect => vec![make(
+                    ActionClass::ProjectRead,
+                    CapabilityEffect::Read,
+                    ResourceKind::SshHost,
+                    host,
+                )],
+                mcg_domain::SshOperationKind::Execute { .. } => vec![make(
+                    ActionClass::ExternalPublication,
+                    CapabilityEffect::Publish,
+                    ResourceKind::SshHost,
+                    host,
+                )],
+                mcg_domain::SshOperationKind::Upload { local_path, .. } => vec![
+                    read_path(local_path),
+                    make(
+                        ActionClass::ExternalPublication,
+                        CapabilityEffect::Publish,
+                        ResourceKind::SshHost,
+                        host,
+                    ),
+                ],
+                mcg_domain::SshOperationKind::Download { local_path, .. } => vec![
+                    make(
+                        ActionClass::ProjectRead,
+                        CapabilityEffect::Read,
+                        ResourceKind::SshHost,
+                        host,
+                    ),
+                    write_path(local_path),
+                ],
+            }
+        }
         ToolRequestKind::McpCall {
             connection_id,
             tool_name,
@@ -719,6 +759,21 @@ fn primary_resource(request: &ToolRequest) -> String {
             options,
             ..
         } => site_deployment_approval_resource(*site_id, *site_revision, options),
+        ToolRequestKind::SshOperation {
+            host_id,
+            host_revision,
+            kind,
+            ..
+        } => format!(
+            "{} {}",
+            ssh_host_resource(*host_id, *host_revision),
+            match kind {
+                mcg_domain::SshOperationKind::Inspect => "inspect",
+                mcg_domain::SshOperationKind::Execute { .. } => "execute",
+                mcg_domain::SshOperationKind::Upload { .. } => "upload",
+                mcg_domain::SshOperationKind::Download { .. } => "download",
+            }
+        ),
         ToolRequestKind::GitStatus { repository }
         | ToolRequestKind::GitDiff { repository, .. }
         | ToolRequestKind::GitCommit { repository, .. }
@@ -736,6 +791,10 @@ fn computer_session_resource(session_id: mcg_domain::PlatformSessionId) -> Strin
 
 fn site_resource(site_id: mcg_domain::SiteId, revision: u32) -> String {
     format!("site://{site_id}/revision/{revision}")
+}
+
+fn ssh_host_resource(host_id: mcg_domain::SshHostId, revision: u32) -> String {
+    format!("ssh://host/{host_id}/revision/{revision}")
 }
 
 fn site_deployment_approval_resource(
