@@ -12,9 +12,16 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{SqliteEventStore, StorageError};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExperimentMutation {
     pub experiment: ExperimentDefinition,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CandidateRevisionMutation {
+    pub candidate: mcg_agents::OrganizationGenome,
     pub replayed: bool,
     pub events: Vec<EventEnvelope>,
 }
@@ -29,10 +36,22 @@ impl SqliteEventStore {
     pub fn record_candidate_organization_revision(
         &mut self,
         candidate: &mcg_agents::OrganizationGenome,
-    ) -> Result<EventEnvelope, StorageError> {
+    ) -> Result<CandidateRevisionMutation, StorageError> {
         candidate
             .validate()
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if let Some(existing) = self.organization_revision(candidate.revision_id)? {
+            if existing == *candidate {
+                return Ok(CandidateRevisionMutation {
+                    candidate: existing,
+                    replayed: true,
+                    events: Vec::new(),
+                });
+            }
+            return Err(StorageError::Conflict(
+                "candidate revision identity was reused with different content".into(),
+            ));
+        }
         let current = self
             .organization(candidate.organization_id)?
             .ok_or_else(|| StorageError::Conflict("candidate organization was not found".into()))?;
@@ -78,7 +97,11 @@ impl SqliteEventStore {
         )?;
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
-        Ok(event)
+        Ok(CandidateRevisionMutation {
+            candidate: candidate.clone(),
+            replayed: false,
+            events: vec![event],
+        })
     }
 
     /// Records one immutable, evidence-bearing supervision observation.
@@ -138,6 +161,18 @@ impl SqliteEventStore {
         self.read_optional_json(
             "SELECT observation_json FROM supervision_observations WHERE observation_id = ?1",
             &id.to_string(),
+        )
+    }
+
+    /// Lists immutable supervision observations in observation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted JSON is invalid.
+    pub fn supervision_observations(&self) -> Result<Vec<SupervisionObservation>, StorageError> {
+        self.read_all_json(
+            "SELECT observation_json FROM supervision_observations
+             ORDER BY observed_at, observation_id",
         )
     }
 
@@ -373,6 +408,21 @@ impl SqliteEventStore {
         Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(false)
+    }
+
+    /// Lists immutable shadow execution receipts for one experiment.
+    ///
+    /// # Errors
+    /// Returns an error when persisted evidence cannot be decoded.
+    pub fn shadow_executions(
+        &self,
+        id: ExperimentId,
+    ) -> Result<Vec<ShadowExecutionReceipt>, StorageError> {
+        self.read_json_rows(
+            "SELECT receipt_json FROM shadow_execution_receipts
+             WHERE experiment_id = ?1 ORDER BY completed_at, candidate_run_id",
+            &id.to_string(),
+        )
     }
 
     /// Records one immutable paired benchmark.

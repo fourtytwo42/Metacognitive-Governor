@@ -35,7 +35,7 @@ becomes benchmark evidence for a separately promoted revision.
 
 ## Durable state
 
-The storage boundary will retain:
+SQLite migration 20 retains:
 
 - immutable supervision observations;
 - one mutable experiment projection whose definition hash and revision pairing
@@ -67,6 +67,28 @@ opposite direction, requires a promotion decision in history, restores the
 recorded baseline, and moves the experiment to `reverted`. Startup never
 auto-promotes interrupted work. A measured regression may request automatic
 reversion, but the same evidence and transaction invariants still apply.
+
+## Interfaces
+
+All callers use the same runtime and SQLite invariants:
+
+- authenticated REST exposes candidate and observation recording, experiment
+  creation/list/detail, compare-and-set transitions, shadow receipts, paired
+  benchmarks, and decisions;
+- CLI `mcg experiment` accepts complete versioned JSON for evidence-bearing
+  writes and provides list/show/transition commands for automation;
+- MCP exposes `mcg_experiments_inspect` and `mcg_experiments_mutate`; the latter
+  requires an explicit action plus its complete versioned payload and cannot
+  bypass evidence or transition checks;
+- Tauri provides typed bindings for the same routes; and
+- the desktop Improvement workspace summarizes observations, protected
+  baselines, experiment state, and evidence counts in simple mode, with
+  versioned JSON controls and legal state advances in advanced mode.
+
+Caller-owned candidate, observation, experiment, shadow-run, benchmark, and
+decision identities make exact lost-response retries observation-only. Every
+newly committed experiment event is also published to the existing resumable
+SSE stream.
 
 ## Exit evidence
 

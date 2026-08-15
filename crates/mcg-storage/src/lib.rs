@@ -29,7 +29,7 @@ pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
 };
-pub use experiments::ExperimentMutation;
+pub use experiments::{CandidateRevisionMutation, ExperimentMutation};
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);

@@ -3060,6 +3060,7 @@ dependencies = [
 name = "mcg-desktop"
 version = "0.1.0"
 dependencies = [
+ "mcg-agents",
  "mcg-api",
  "mcg-config",
  "mcg-domain",

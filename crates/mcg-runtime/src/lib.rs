@@ -20,25 +20,27 @@ use mcg_agents::{
     AgentRun, AgentRunState, AgentState, AgentToolGateway, AgentTurnCheckpoint,
     AgentTurnCheckpointSink, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
     AgentUsageRecord, ConditionResult, ConfidenceEstimate, EvaluationEvidence, EvaluationOutcome,
-    EvaluationReport, ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics,
-    RoleKind, SuccessCondition, WorkPlan,
+    EvaluationReport, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
+    ExperimentState, ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics,
+    RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
-    ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, LeaseId, MemoryClaimId,
-    NotificationSeverity, PLATFORM_SCHEMA_VERSION, PlatformCapability,
-    PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
-    PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, ProjectId, RiskLevel, RunId,
-    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
-    SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState,
-    SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId,
-    SshHostState, SshOperation, SshOperationId, SshOperationKind, SshOperationState, TaskBudget,
-    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, ExperimentId, LeaseId,
+    MemoryClaimId, NotificationSeverity, OrganizationId, PLATFORM_SCHEMA_VERSION,
+    PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
+    PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
+    PlatformSessionState, ProjectId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
+    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
+    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
+    SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
+    SshOperationId, SshOperationKind, SshOperationState, TaskBudget, TaskEnvelope, TaskId,
+    TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -63,7 +65,10 @@ use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
 };
-pub use mcg_storage::{AgentTurnCommit, ScheduleClaim, ScheduleWakeMutation};
+pub use mcg_storage::{
+    AgentTurnCommit, CandidateRevisionMutation, ExperimentMutation, ScheduleClaim,
+    ScheduleWakeMutation,
+};
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
     BrokerControls, BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep,
@@ -339,6 +344,20 @@ pub struct ProjectMutation {
     pub project: ProjectModel,
     pub event: EventEnvelope,
     pub invalidation: Option<SnapshotInvalidationDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SupervisionMutation {
+    pub observation: SupervisionObservation,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceMutation<T> {
+    pub evidence: T,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1725,6 +1744,216 @@ impl AppRuntime {
         project_id: ProjectId,
     ) -> Result<Vec<ProjectModel>, RuntimeError> {
         Ok(self.store()?.project_history(project_id)?)
+    }
+
+    /// Records an immutable candidate organization revision without activating it.
+    ///
+    /// # Errors
+    /// Returns an error for stale parents, invalid revisions, or identity conflicts.
+    pub fn record_candidate_revision(
+        &self,
+        candidate: &OrganizationGenome,
+    ) -> Result<CandidateRevisionMutation, RuntimeError> {
+        let mutation = self
+            .store()?
+            .record_candidate_organization_revision(candidate)?;
+        for event in &mutation.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(mutation)
+    }
+
+    /// Records one immutable supervision observation.
+    ///
+    /// # Errors
+    /// Returns an error for malformed evidence or conflicting identity reuse.
+    pub fn record_supervision_observation(
+        &self,
+        observation: &SupervisionObservation,
+    ) -> Result<SupervisionMutation, RuntimeError> {
+        let mut store = self.store()?;
+        let cursor = store.latest_event_sequence()?;
+        let replayed = store.record_supervision_observation(observation)?;
+        let events = if replayed {
+            Vec::new()
+        } else {
+            store.events_after(cursor)?
+        };
+        drop(store);
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(SupervisionMutation {
+            observation: observation.clone(),
+            replayed,
+            events,
+        })
+    }
+
+    /// Lists immutable supervision observations.
+    ///
+    /// # Errors
+    /// Returns an error when durable evidence cannot be decoded.
+    pub fn supervision_observations(&self) -> Result<Vec<SupervisionObservation>, RuntimeError> {
+        Ok(self.store()?.supervision_observations()?)
+    }
+
+    /// Creates an experiment over an inactive candidate revision.
+    ///
+    /// # Errors
+    /// Returns an error for stale baselines, unknown evidence, or invalid policy.
+    pub fn create_experiment(
+        &self,
+        experiment: &ExperimentDefinition,
+    ) -> Result<ExperimentMutation, RuntimeError> {
+        let mutation = self.store()?.create_experiment(experiment)?;
+        for event in &mutation.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(mutation)
+    }
+
+    /// Lists experiments for one organization.
+    ///
+    /// # Errors
+    /// Returns an error when durable projections cannot be decoded.
+    pub fn experiments(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Vec<ExperimentDefinition>, RuntimeError> {
+        Ok(self.store()?.experiments(organization_id)?)
+    }
+
+    /// Loads one experiment.
+    ///
+    /// # Errors
+    /// Returns an error when durable projections cannot be decoded.
+    pub fn experiment(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<Option<ExperimentDefinition>, RuntimeError> {
+        Ok(self.store()?.experiment(experiment_id)?)
+    }
+
+    /// Applies one compare-and-set experiment transition.
+    ///
+    /// # Errors
+    /// Returns an error for stale or illegal transitions.
+    pub fn transition_experiment(
+        &self,
+        experiment_id: ExperimentId,
+        expected: ExperimentState,
+        next: ExperimentState,
+    ) -> Result<ExperimentMutation, RuntimeError> {
+        let mutation =
+            self.store()?
+                .transition_experiment(experiment_id, expected, next, Utc::now())?;
+        for event in &mutation.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(mutation)
+    }
+
+    /// Records evaluation-only shadow execution evidence.
+    ///
+    /// # Errors
+    /// Returns an error unless the matching shadow experiment is running.
+    pub fn record_shadow_execution(
+        &self,
+        receipt: &ShadowExecutionReceipt,
+    ) -> Result<EvidenceMutation<ShadowExecutionReceipt>, RuntimeError> {
+        let mut store = self.store()?;
+        let cursor = store.latest_event_sequence()?;
+        let replayed = store.record_shadow_execution(receipt)?;
+        let events = if replayed {
+            Vec::new()
+        } else {
+            store.events_after(cursor)?
+        };
+        drop(store);
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(EvidenceMutation {
+            evidence: receipt.clone(),
+            replayed,
+            events,
+        })
+    }
+
+    /// Lists evaluation-only shadow receipts for an experiment.
+    ///
+    /// # Errors
+    /// Returns an error when durable evidence cannot be decoded.
+    pub fn shadow_executions(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<Vec<ShadowExecutionReceipt>, RuntimeError> {
+        Ok(self.store()?.shadow_executions(experiment_id)?)
+    }
+
+    /// Records an immutable paired benchmark.
+    ///
+    /// # Errors
+    /// Returns an error unless both arms match the running experiment.
+    pub fn record_experiment_benchmark(
+        &self,
+        benchmark: &ExperimentBenchmark,
+    ) -> Result<EvidenceMutation<ExperimentBenchmark>, RuntimeError> {
+        let mut store = self.store()?;
+        let cursor = store.latest_event_sequence()?;
+        let replayed = store.record_experiment_benchmark(benchmark)?;
+        let events = if replayed {
+            Vec::new()
+        } else {
+            store.events_after(cursor)?
+        };
+        drop(store);
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(EvidenceMutation {
+            evidence: benchmark.clone(),
+            replayed,
+            events,
+        })
+    }
+
+    /// Lists paired benchmark evidence for an experiment.
+    ///
+    /// # Errors
+    /// Returns an error when durable evidence cannot be decoded.
+    pub fn experiment_benchmarks(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<Vec<ExperimentBenchmark>, RuntimeError> {
+        Ok(self.store()?.experiment_benchmarks(experiment_id)?)
+    }
+
+    /// Atomically records a measured experiment decision and any head change.
+    ///
+    /// # Errors
+    /// Returns an error for stale direction, insufficient evidence, or policy failure.
+    pub fn decide_experiment(
+        &self,
+        decision: &ExperimentDecision,
+    ) -> Result<ExperimentMutation, RuntimeError> {
+        let mutation = self.store()?.decide_experiment(decision)?;
+        for event in &mutation.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(mutation)
+    }
+
+    /// Lists immutable decisions for an experiment.
+    ///
+    /// # Errors
+    /// Returns an error when durable evidence cannot be decoded.
+    pub fn experiment_decisions(
+        &self,
+        experiment_id: ExperimentId,
+    ) -> Result<Vec<ExperimentDecision>, RuntimeError> {
+        Ok(self.store()?.experiment_decisions(experiment_id)?)
     }
 
     /// Registers one durable project-bound Site with an immutable first revision.

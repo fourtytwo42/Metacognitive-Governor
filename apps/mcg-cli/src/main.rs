@@ -2,24 +2,30 @@ use std::{io::Read, path::PathBuf, str::FromStr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
-use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
+use mcg_agents::{
+    AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
+    OrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation,
+    TaskComplexity,
+};
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
     AttachBrowserSessionRequest, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
     CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
     CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
-    ExecuteAgentWorkRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
+    ExperimentListResponse, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
     McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     NavigateBrowserSessionRequest, OrganizationListResponse, OrganizationMutationResponse,
     PlanAgentRunRequest, PlanWorkRequest, PlatformSessionHistoryResponse,
     PlatformSessionListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
     ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetScheduleStateRequest, SiteDeploymentListResponse,
-    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionAgentRunRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, ShadowExecutionListResponse,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
+    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionAgentRunRequest,
+    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
     UpdateSiteRequest, UpdateSshHostRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
@@ -41,11 +47,11 @@ use mcg_providers::{
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
-    SshOperationMutation,
+    AgentRunView, AgentTurnCommit, CandidateRevisionMutation, EvidenceMutation, ExperimentMutation,
+    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
+    PlatformComputerActionMutation, PlatformComputerMutation, ProjectMutation, ProviderMutation,
+    RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
+    SshHostMutation, SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
@@ -157,6 +163,66 @@ enum Command {
         #[command(subcommand)]
         command: SshCommand,
     },
+    /// Inspect and control measured metacognitive experiments.
+    Experiment {
+        #[command(subcommand)]
+        command: ExperimentCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExperimentCommand {
+    /// List experiments for an organization.
+    List { organization_id: String },
+    /// Show an experiment and all shadow, benchmark, and decision evidence.
+    Show { id: String },
+    /// Record an inactive candidate organization revision from JSON.
+    Candidate { request: PathBuf },
+    /// Record an immutable supervision observation from JSON.
+    Observe { request: PathBuf },
+    /// List all immutable supervision observations.
+    Observations,
+    /// Create an experiment from JSON.
+    Create { request: PathBuf },
+    /// Apply a compare-and-set experiment state transition.
+    Transition {
+        id: String,
+        #[arg(value_enum)]
+        expected: ExperimentStateArg,
+        #[arg(value_enum)]
+        next: ExperimentStateArg,
+    },
+    /// Record an evaluation-only shadow receipt from JSON.
+    Shadow { id: String, request: PathBuf },
+    /// Record paired benchmark evidence from JSON.
+    Benchmark { id: String, request: PathBuf },
+    /// Record a measured promotion, rejection, or reversion decision from JSON.
+    Decide { id: String, request: PathBuf },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExperimentStateArg {
+    Draft,
+    Ready,
+    Running,
+    AwaitingDecision,
+    Promoted,
+    Rejected,
+    Reverted,
+}
+
+impl From<ExperimentStateArg> for ExperimentState {
+    fn from(value: ExperimentStateArg) -> Self {
+        match value {
+            ExperimentStateArg::Draft => Self::Draft,
+            ExperimentStateArg::Ready => Self::Ready,
+            ExperimentStateArg::Running => Self::Running,
+            ExperimentStateArg::AwaitingDecision => Self::AwaitingDecision,
+            ExperimentStateArg::Promoted => Self::Promoted,
+            ExperimentStateArg::Rejected => Self::Rejected,
+            ExperimentStateArg::Reverted => Self::Reverted,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1037,6 +1103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Ssh { command } => {
             run_ssh(&client, host, token.trim(), command).await?;
         }
+        Command::Experiment { command } => {
+            run_experiment(&client, host, token.trim(), command).await?;
+        }
     }
 
     Ok(())
@@ -1136,6 +1205,179 @@ async fn run_ssh(
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keeps the complete experiment HTTP contract auditable together.
+async fn run_experiment(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ExperimentCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = match command {
+        ExperimentCommand::List { organization_id } => {
+            let response: ExperimentListResponse = client
+                .get(format!(
+                    "{host}/api/v1/organizations/{organization_id}/experiments"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Show { id } => {
+            let experiment: ExperimentDefinition = client
+                .get(format!("{host}/api/v1/experiments/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let shadow: ShadowExecutionListResponse = client
+                .get(format!("{host}/api/v1/experiments/{id}/shadow-executions"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let benchmarks: ExperimentBenchmarkListResponse = client
+                .get(format!("{host}/api/v1/experiments/{id}/benchmarks"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let decisions: ExperimentDecisionListResponse = client
+                .get(format!("{host}/api/v1/experiments/{id}/decisions"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::json!({
+                "experiment": experiment,
+                "shadow_executions": shadow.receipts,
+                "benchmarks": benchmarks.benchmarks,
+                "decisions": decisions.decisions,
+            })
+        }
+        ExperimentCommand::Candidate { request } => {
+            let body: OrganizationGenome = serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: CandidateRevisionMutation = client
+                .post(format!("{host}/api/v1/metacognition/candidates"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Observe { request } => {
+            let body: SupervisionObservation =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: SupervisionMutation = client
+                .post(format!("{host}/api/v1/metacognition/observations"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Observations => {
+            let response: SupervisionObservationListResponse = client
+                .get(format!("{host}/api/v1/metacognition/observations"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Create { request } => {
+            let body: ExperimentDefinition =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: ExperimentMutation = client
+                .post(format!("{host}/api/v1/experiments"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Transition { id, expected, next } => {
+            let response: ExperimentMutation = client
+                .post(format!("{host}/api/v1/experiments/{id}/transition"))
+                .bearer_auth(token)
+                .json(&TransitionExperimentRequest {
+                    expected: expected.into(),
+                    next: next.into(),
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Shadow { id, request } => {
+            let body: ShadowExecutionReceipt =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: EvidenceMutation<ShadowExecutionReceipt> = client
+                .post(format!("{host}/api/v1/experiments/{id}/shadow-executions"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Benchmark { id, request } => {
+            let body: ExperimentBenchmark = serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: EvidenceMutation<ExperimentBenchmark> = client
+                .post(format!("{host}/api/v1/experiments/{id}/benchmarks"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+        ExperimentCommand::Decide { id, request } => {
+            let body: ExperimentDecision = serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: ExperimentMutation = client
+                .post(format!("{host}/api/v1/experiments/{id}/decisions"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            serde_json::to_value(response)?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
@@ -3703,6 +3945,37 @@ mod tests {
                 command: SiteCommand::Monitor {
                     interval_seconds: 60,
                     expected_status: 204,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn experiment_commands_keep_versioned_json_and_compare_and_set_state_explicit() {
+        let candidate = Cli::try_parse_from(["mcg", "experiment", "candidate", "candidate.json"])
+            .expect("candidate command");
+        assert!(matches!(
+            candidate.command,
+            Command::Experiment {
+                command: ExperimentCommand::Candidate { request }
+            } if request == std::path::Path::new("candidate.json")
+        ));
+        let transition = Cli::try_parse_from([
+            "mcg",
+            "experiment",
+            "transition",
+            "00000000-0000-4000-8000-000000000001",
+            "running",
+            "awaiting-decision",
+        ])
+        .expect("transition command");
+        assert!(matches!(
+            transition.command,
+            Command::Experiment {
+                command: ExperimentCommand::Transition {
+                    expected: ExperimentStateArg::Running,
+                    next: ExperimentStateArg::AwaitingDecision,
                     ..
                 }
             }

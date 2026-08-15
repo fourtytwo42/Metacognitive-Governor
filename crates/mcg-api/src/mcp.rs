@@ -11,15 +11,17 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use mcg_agents::{
-    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, OrganizationGenome,
-    OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, SuccessCondition,
-    TaskComplexity,
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, ExecutivePlanner, ExperimentBenchmark,
+    ExperimentDecision, ExperimentDefinition, ExperimentState, OrganizationGenome,
+    OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind, ShadowExecutionReceipt,
+    SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
-    PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId,
-    SiteId, SiteState, SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId,
-    SshOperationKind, TaskBudget, TaskEnvelope, TaskId,
+    ExperimentId, OrganizationId, PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel,
+    RunId, ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
+    SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, TaskBudget, TaskEnvelope,
+    TaskId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
@@ -663,6 +665,36 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
         }),
         json!({
+            "name": "mcg_experiments_inspect",
+            "title": "Inspect MCG Measured Improvement",
+            "description": "Inspect immutable supervision observations, experiments for one organization, or one experiment with shadow, benchmark, and decision evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["observations", "organization", "experiment"]},
+                    "id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["scope"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_experiments_mutate",
+            "title": "Apply an MCG Measured Experiment Action",
+            "description": "Idempotently record a candidate, observation, experiment, shadow receipt, paired benchmark, state transition, or measured decision. Promotion and reversion remain evidence-gated and atomic.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["candidate", "observation", "create", "transition", "shadow", "benchmark", "decision"]},
+                    "payload": {"type": "object", "description": "The complete versioned contract for the selected action."}
+                },
+                "required": ["action", "payload"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
             "name": "mcg_sites_list",
             "title": "List MCG Sites",
             "description": "List durable Site definitions, optionally with immutable revision, deployment, and health history for one Site.",
@@ -1028,6 +1060,8 @@ async fn call_tool(
         "mcg_computer_actions" => computer_actions(state, &arguments).await,
         "mcg_computer_handoff" => computer_handoff(state, &arguments).await,
         "mcg_computer_reclaim" => computer_reclaim(state, &arguments).await,
+        "mcg_experiments_inspect" => experiments_inspect(state, &arguments),
+        "mcg_experiments_mutate" => experiments_mutate(state, &arguments),
         "mcg_sites_list" => sites_list(state, &arguments),
         "mcg_sites_register" => sites_register(state, &arguments),
         "mcg_sites_update" => sites_update(state, &arguments),
@@ -1055,6 +1089,194 @@ fn platform_capabilities(
     tool_success(Ok(json!({
         "capabilities": state.runtime.platform_capabilities()
     })))
+}
+
+fn experiments_inspect(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<ExperimentInspectArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Measured improvement inspection arguments are invalid",
+        ));
+    };
+    let result = match request.scope {
+        ExperimentInspectScope::Observations => {
+            if request.id.is_some() {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "Observation listing does not accept an id",
+                ));
+            }
+            state
+                .runtime
+                .supervision_observations()
+                .map(|observations| json!({"observations": observations}))
+        }
+        ExperimentInspectScope::Organization => {
+            let Some(id) = request.id else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "Organization id is required",
+                ));
+            };
+            let Ok(id) = OrganizationId::from_str(&id) else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "Organization id is invalid",
+                ));
+            };
+            state
+                .runtime
+                .experiments(id)
+                .map(|experiments| json!({"experiments": experiments}))
+        }
+        ExperimentInspectScope::Experiment => {
+            let Some(id) = request.id else {
+                return Ok(tool_error("invalid_arguments", "Experiment id is required"));
+            };
+            let Ok(id) = ExperimentId::from_str(&id) else {
+                return Ok(tool_error("invalid_arguments", "Experiment id is invalid"));
+            };
+            let experiment = state.runtime.experiment(id);
+            let shadow = state.runtime.shadow_executions(id);
+            let benchmarks = state.runtime.experiment_benchmarks(id);
+            let decisions = state.runtime.experiment_decisions(id);
+            match (experiment, shadow, benchmarks, decisions) {
+                (Ok(Some(experiment)), Ok(shadow), Ok(benchmarks), Ok(decisions)) => Ok(json!({
+                    "experiment": experiment,
+                    "shadow_executions": shadow,
+                    "benchmarks": benchmarks,
+                    "decisions": decisions,
+                })),
+                (Ok(None), _, _, _) => {
+                    return Ok(tool_error(
+                        "experiment_not_found",
+                        "Experiment was not found",
+                    ));
+                }
+                (Err(error), _, _, _)
+                | (_, Err(error), _, _)
+                | (_, _, Err(error), _)
+                | (_, _, _, Err(error)) => Err(error),
+            }
+        }
+    };
+    match result {
+        Ok(value) => tool_success(Ok(value)),
+        Err(error) => Ok(experiment_error(&error)),
+    }
+}
+
+fn experiments_mutate(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<ExperimentMutationArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Measured experiment action arguments are invalid",
+        ));
+    };
+    let result = match request.action {
+        ExperimentMutationAction::Candidate => {
+            decode_experiment_action::<OrganizationGenome, _, _>(request.payload, |value| {
+                state.runtime.record_candidate_revision(&value)
+            })
+        }
+        ExperimentMutationAction::Observation => {
+            decode_experiment_action::<SupervisionObservation, _, _>(request.payload, |value| {
+                state.runtime.record_supervision_observation(&value)
+            })
+        }
+        ExperimentMutationAction::Create => {
+            decode_experiment_action::<ExperimentDefinition, _, _>(request.payload, |value| {
+                state.runtime.create_experiment(&value)
+            })
+        }
+        ExperimentMutationAction::Transition => decode_experiment_action::<
+            ExperimentTransitionPayload,
+            _,
+            _,
+        >(request.payload, |value| {
+            state
+                .runtime
+                .transition_experiment(value.experiment_id, value.expected, value.next)
+        }),
+        ExperimentMutationAction::Shadow => {
+            decode_experiment_action::<ShadowExecutionReceipt, _, _>(request.payload, |value| {
+                state.runtime.record_shadow_execution(&value)
+            })
+        }
+        ExperimentMutationAction::Benchmark => {
+            decode_experiment_action::<ExperimentBenchmark, _, _>(request.payload, |value| {
+                state.runtime.record_experiment_benchmark(&value)
+            })
+        }
+        ExperimentMutationAction::Decision => {
+            decode_experiment_action::<ExperimentDecision, _, _>(request.payload, |value| {
+                state.runtime.decide_experiment(&value)
+            })
+        }
+    };
+    match result {
+        Ok(value) => tool_success(Ok(value)),
+        Err(ExperimentActionFailure::InvalidPayload) => Ok(tool_error(
+            "invalid_or_rejected_experiment_action",
+            "The versioned action payload was invalid",
+        )),
+        Err(ExperimentActionFailure::Runtime(error)) => Ok(experiment_error(&error)),
+        Err(ExperimentActionFailure::Serialization) => Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INTERNAL_ERROR,
+            "MCG could not serialize the experiment action result",
+        )),
+    }
+}
+
+enum ExperimentActionFailure {
+    InvalidPayload,
+    Runtime(mcg_runtime::RuntimeError),
+    Serialization,
+}
+
+fn decode_experiment_action<T, R, F>(
+    payload: Value,
+    action: F,
+) -> Result<Value, ExperimentActionFailure>
+where
+    T: serde::de::DeserializeOwned,
+    R: serde::Serialize,
+    F: FnOnce(T) -> Result<R, mcg_runtime::RuntimeError>,
+{
+    let value =
+        serde_json::from_value(payload).map_err(|_| ExperimentActionFailure::InvalidPayload)?;
+    let result = action(value).map_err(ExperimentActionFailure::Runtime)?;
+    serde_json::to_value(result).map_err(|_| ExperimentActionFailure::Serialization)
+}
+
+fn experiment_error(error: &mcg_runtime::RuntimeError) -> Value {
+    if error.is_not_found() {
+        tool_error("experiment_not_found", "Experiment was not found")
+    } else if error.is_conflict() {
+        tool_error("conflict", "Measured experiment state or evidence is stale")
+    } else if error.is_invalid_request() {
+        tool_error(
+            "invalid_arguments",
+            "Measured experiment evidence is invalid",
+        )
+    } else {
+        tool_error(
+            "runtime_error",
+            "MCG could not inspect measured improvement",
+        )
+    }
 }
 
 async fn platform_sessions(
@@ -1792,6 +2014,49 @@ fn computer_frame_success(
         "structuredContent": structured_content,
         "isError": false,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExperimentInspectScope {
+    Observations,
+    Organization,
+    Experiment,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperimentInspectArguments {
+    scope: ExperimentInspectScope,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExperimentMutationAction {
+    Candidate,
+    Observation,
+    Create,
+    Transition,
+    Shadow,
+    Benchmark,
+    Decision,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperimentMutationArguments {
+    action: ExperimentMutationAction,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperimentTransitionPayload {
+    experiment_id: ExperimentId,
+    expected: ExperimentState,
+    next: ExperimentState,
 }
 
 #[derive(Debug, Deserialize)]

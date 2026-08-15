@@ -23,20 +23,21 @@ use axum::{
 use chrono::Utc;
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationReport,
-    ExecutivePlanner, OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
-    RoleKind, SuccessCondition, TaskComplexity,
+    ExecutivePlanner, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
+    ExperimentState, OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
+    RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
-    ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, MemoryClaimId,
-    NotificationSeverity, OrganizationId, OrganizationRevisionId, PlatformCapabilitySnapshot,
-    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, ProjectId,
-    RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor, SiteRevision,
-    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
-    SshHostState, SshOperation, SshOperationId, SshOperationKind, TaskBudget, TaskEnvelope, TaskId,
-    TaskState, ThreadId, WorkItemId,
+    ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, ExperimentId,
+    MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, ProjectId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
+    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
+    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, TaskBudget,
+    TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -48,13 +49,14 @@ use mcg_providers::{
     ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, ConsumerEvaluationProgress,
-    McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
+    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, CandidateRevisionMutation,
+    ConsumerEvaluationProgress, EvidenceMutation, ExperimentMutation, McpMutation,
+    MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
     PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
     ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
     SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMonitorRequest,
     SiteMutation, SiteRegistrationRequest, SiteUpdateRequest, SshHostMutation,
-    SshHostRegistrationRequest, SshHostUpdateRequest, SshOperationMutation,
+    SshHostRegistrationRequest, SshHostUpdateRequest, SshOperationMutation, SupervisionMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
@@ -403,6 +405,37 @@ pub struct ApplyComputerActionsRequest {
     pub batch_id: ComputerActionBatchId,
     pub expected_frame_sha256: String,
     pub actions: Vec<ComputerUseAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SupervisionObservationListResponse {
+    pub observations: Vec<SupervisionObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentListResponse {
+    pub experiments: Vec<ExperimentDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionExperimentRequest {
+    pub expected: ExperimentState,
+    pub next: ExperimentState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShadowExecutionListResponse {
+    pub receipts: Vec<ShadowExecutionReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentBenchmarkListResponse {
+    pub benchmarks: Vec<ExperimentBenchmark>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentDecisionListResponse {
+    pub decisions: Vec<ExperimentDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -860,6 +893,36 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/platform/sessions/{session_id}/computer/reclaim",
             post(reclaim_computer_session),
+        )
+        .route(
+            "/api/v1/metacognition/candidates",
+            post(record_candidate_revision),
+        )
+        .route(
+            "/api/v1/metacognition/observations",
+            get(list_supervision_observations).post(record_supervision_observation),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/experiments",
+            get(list_experiments),
+        )
+        .route("/api/v1/experiments", post(create_experiment))
+        .route("/api/v1/experiments/{experiment_id}", get(get_experiment))
+        .route(
+            "/api/v1/experiments/{experiment_id}/transition",
+            post(transition_experiment),
+        )
+        .route(
+            "/api/v1/experiments/{experiment_id}/shadow-executions",
+            get(list_shadow_executions).post(record_shadow_execution),
+        )
+        .route(
+            "/api/v1/experiments/{experiment_id}/benchmarks",
+            get(list_experiment_benchmarks).post(record_experiment_benchmark),
+        )
+        .route(
+            "/api/v1/experiments/{experiment_id}/decisions",
+            get(list_experiment_decisions).post(decide_experiment),
         )
         .route("/api/v1/sites", get(list_sites).post(create_site))
         .route("/api/v1/sites/{site_id}", get(get_site).put(update_site))
@@ -1517,6 +1580,209 @@ async fn reclaim_computer_session(
             .await
             .map_err(map_runtime_error)?,
     ))
+}
+
+async fn record_candidate_revision(
+    State(state): State<ApiState>,
+    Json(candidate): Json<OrganizationGenome>,
+) -> Result<(StatusCode, Json<CandidateRevisionMutation>), ApiError> {
+    let mutation = state
+        .runtime
+        .record_candidate_revision(&candidate)
+        .map_err(map_runtime_error)?;
+    let status = if mutation.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(mutation)))
+}
+
+async fn record_supervision_observation(
+    State(state): State<ApiState>,
+    Json(observation): Json<SupervisionObservation>,
+) -> Result<(StatusCode, Json<SupervisionMutation>), ApiError> {
+    let mutation = state
+        .runtime
+        .record_supervision_observation(&observation)
+        .map_err(map_runtime_error)?;
+    let status = if mutation.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(mutation)))
+}
+
+async fn list_supervision_observations(
+    State(state): State<ApiState>,
+) -> Result<Json<SupervisionObservationListResponse>, ApiError> {
+    Ok(Json(SupervisionObservationListResponse {
+        observations: state
+            .runtime
+            .supervision_observations()
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn create_experiment(
+    State(state): State<ApiState>,
+    Json(experiment): Json<ExperimentDefinition>,
+) -> Result<(StatusCode, Json<ExperimentMutation>), ApiError> {
+    let mutation = state
+        .runtime
+        .create_experiment(&experiment)
+        .map_err(map_runtime_error)?;
+    let status = if mutation.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(mutation)))
+}
+
+async fn list_experiments(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+) -> Result<Json<ExperimentListResponse>, ApiError> {
+    let organization_id = parse_organization_id(&organization_id)?;
+    Ok(Json(ExperimentListResponse {
+        experiments: state
+            .runtime
+            .experiments(organization_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_experiment(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+) -> Result<Json<ExperimentDefinition>, ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    state
+        .runtime
+        .experiment(experiment_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("experiment {experiment_id} was not found")))
+}
+
+async fn transition_experiment(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+    Json(request): Json<TransitionExperimentRequest>,
+) -> Result<Json<ExperimentMutation>, ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .transition_experiment(experiment_id, request.expected, request.next)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn record_shadow_execution(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+    Json(receipt): Json<ShadowExecutionReceipt>,
+) -> Result<(StatusCode, Json<EvidenceMutation<ShadowExecutionReceipt>>), ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    require_matching_experiment(experiment_id, receipt.experiment_id)?;
+    let mutation = state
+        .runtime
+        .record_shadow_execution(&receipt)
+        .map_err(map_runtime_error)?;
+    let status = replay_status(mutation.replayed);
+    Ok((status, Json(mutation)))
+}
+
+async fn list_shadow_executions(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+) -> Result<Json<ShadowExecutionListResponse>, ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    Ok(Json(ShadowExecutionListResponse {
+        receipts: state
+            .runtime
+            .shadow_executions(experiment_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn record_experiment_benchmark(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+    Json(benchmark): Json<ExperimentBenchmark>,
+) -> Result<(StatusCode, Json<EvidenceMutation<ExperimentBenchmark>>), ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    require_matching_experiment(experiment_id, benchmark.experiment_id)?;
+    let mutation = state
+        .runtime
+        .record_experiment_benchmark(&benchmark)
+        .map_err(map_runtime_error)?;
+    let status = replay_status(mutation.replayed);
+    Ok((status, Json(mutation)))
+}
+
+async fn list_experiment_benchmarks(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+) -> Result<Json<ExperimentBenchmarkListResponse>, ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    Ok(Json(ExperimentBenchmarkListResponse {
+        benchmarks: state
+            .runtime
+            .experiment_benchmarks(experiment_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn decide_experiment(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+    Json(decision): Json<ExperimentDecision>,
+) -> Result<Json<ExperimentMutation>, ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    require_matching_experiment(experiment_id, decision.experiment_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .decide_experiment(&decision)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn list_experiment_decisions(
+    State(state): State<ApiState>,
+    Path(experiment_id): Path<String>,
+) -> Result<Json<ExperimentDecisionListResponse>, ApiError> {
+    let experiment_id = parse_experiment_id(&experiment_id)?;
+    Ok(Json(ExperimentDecisionListResponse {
+        decisions: state
+            .runtime
+            .experiment_decisions(experiment_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+const fn replay_status(replayed: bool) -> StatusCode {
+    if replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    }
+}
+
+fn require_matching_experiment(
+    path_id: ExperimentId,
+    body_id: ExperimentId,
+) -> Result<(), ApiError> {
+    if path_id != body_id {
+        return Err(ApiError::bad_request(
+            "experiment id in the path and request body must match",
+        ));
+    }
+    Ok(())
 }
 
 async fn create_site(
@@ -3584,6 +3850,12 @@ fn parse_organization_id(value: &str) -> Result<OrganizationId, ApiError> {
         .map_err(|_| ApiError::bad_request("organization id must be a UUID"))
 }
 
+fn parse_experiment_id(value: &str) -> Result<ExperimentId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("experiment id must be a UUID"))
+}
+
 fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
     value
         .parse()
@@ -3696,7 +3968,8 @@ mod tests {
     use mcg_agents::{AgentState, ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::{AppConfig, AutonomyPreset};
     use mcg_domain::{
-        ArtifactId, EvaluationId, PLATFORM_SCHEMA_VERSION, ToolExecutionId, ToolRequestId,
+        ArtifactId, EvaluationId, ExperimentBenchmarkId, ExperimentDecisionId,
+        PLATFORM_SCHEMA_VERSION, RunId, SupervisionObservationId, ToolExecutionId, ToolRequestId,
     };
     use mcg_mcp::{
         MCP_CONNECTION_CONTRACT_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpProtocolMode,
@@ -4859,6 +5132,8 @@ form.addEventListener('submit', (event) => {
                 "mcg_computer_actions",
                 "mcg_computer_handoff",
                 "mcg_computer_reclaim",
+                "mcg_experiments_inspect",
+                "mcg_experiments_mutate",
                 "mcg_sites_list",
                 "mcg_sites_register",
                 "mcg_sites_health",
@@ -9153,6 +9428,312 @@ form.addEventListener('submit', (event) => {
             .expect("durable run view");
         assert_eq!(durable.run.state, AgentRunState::Running);
         assert_eq!(durable.plan, view.plan);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One end-to-end contract proves every REST experiment boundary.
+    async fn metacognitive_rest_lifecycle_is_idempotent_measured_and_atomic() {
+        let runtime = test_runtime();
+        let app = router(runtime.clone());
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/metacognition/observations")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let organization_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/organizations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Measured Fixture"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("organization");
+        let organization: OrganizationMutationResponse =
+            serde_json::from_value(response_json(organization_response).await)
+                .expect("organization body");
+        let baseline = organization.organization;
+        let mut candidate = baseline.clone();
+        candidate.revision_id = OrganizationRevisionId::new();
+        candidate.revision = baseline.revision + 1;
+        candidate.parent_revision_id = Some(baseline.revision_id);
+        candidate.name = "Measured Fixture candidate".into();
+        candidate.created_at = Utc::now();
+        let candidate_body = serde_json::to_vec(&candidate).expect("candidate body");
+        for expected in [StatusCode::CREATED, StatusCode::OK] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Request::post("/api/v1/metacognition/candidates"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(candidate_body.clone()))
+                        .expect("request"),
+                )
+                .await
+                .expect("candidate");
+            assert_eq!(response.status(), expected);
+        }
+        assert_eq!(
+            runtime
+                .organization(baseline.organization_id)
+                .expect("organization")
+                .expect("present")
+                .revision_id,
+            baseline.revision_id
+        );
+
+        let task = TaskEnvelope::new("Measure candidate behavior");
+        runtime.create_task(&task).expect("task");
+        let observation = SupervisionObservation {
+            schema_version: mcg_agents::SUPERVISION_SCHEMA_VERSION,
+            id: SupervisionObservationId::new(),
+            loop_kind: mcg_agents::SupervisionLoop::Medium,
+            signal: mcg_agents::SupervisionSignal::RepeatedFailure,
+            severity_basis_points: 7_000,
+            recommended_intervention: mcg_agents::InterventionLevel::Reframe,
+            task_id: Some(task.id),
+            run_id: None,
+            organization_revision_id: Some(baseline.revision_id),
+            summary: "Fixture repeated a bounded failure".into(),
+            evidence: vec![mcg_agents::SupervisionEvidence {
+                method: "integration_fixture".into(),
+                artifact_sha256: Some("a".repeat(64)),
+                event_sequence: None,
+                detail: "objective fixture evidence".into(),
+            }],
+            observed_at: Utc::now(),
+        };
+        let observation_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/metacognition/observations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&observation).expect("observation body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("observation");
+        assert_eq!(observation_response.status(), StatusCode::CREATED);
+        let mcp_observations = mcp_tool_response(
+            app.clone(),
+            301,
+            "mcg_experiments_inspect",
+            serde_json::json!({"scope": "observations"}),
+        )
+        .await;
+        assert_eq!(
+            mcp_observations.pointer("/result/structuredContent/observations/0/id"),
+            Some(&serde_json::json!(observation.id))
+        );
+        let mcp_replay = mcp_tool_response(
+            app.clone(),
+            302,
+            "mcg_experiments_mutate",
+            serde_json::json!({"action": "observation", "payload": observation}),
+        )
+        .await;
+        assert_eq!(
+            mcp_replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+
+        let now = Utc::now();
+        let experiment = ExperimentDefinition {
+            schema_version: mcg_agents::EXPERIMENT_SCHEMA_VERSION,
+            id: ExperimentId::new(),
+            organization_id: baseline.organization_id,
+            baseline_revision_id: baseline.revision_id,
+            candidate_revision_id: candidate.revision_id,
+            mode: mcg_agents::ExperimentMode::Shadow,
+            state: ExperimentState::Draft,
+            hypothesis: "The candidate reduces repeated failures".into(),
+            task_classes: vec!["coding/build".into()],
+            required_benchmarks: 1,
+            maximum_regressions: 0,
+            minimum_confidence: mcg_agents::ConfidenceEstimate::new(8_000, 10).expect("confidence"),
+            observation_ids: vec![observation.id],
+            created_at: now,
+            updated_at: now,
+        };
+        let create_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/experiments"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&experiment).expect("experiment body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("experiment");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        for (expected, next) in [
+            (ExperimentState::Draft, ExperimentState::Ready),
+            (ExperimentState::Ready, ExperimentState::Running),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Request::post(format!(
+                        "/api/v1/experiments/{}/transition",
+                        experiment.id
+                    )))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&TransitionExperimentRequest { expected, next })
+                            .expect("transition body"),
+                    ))
+                    .expect("request"),
+                )
+                .await
+                .expect("transition");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let receipt = ShadowExecutionReceipt {
+            schema_version: mcg_agents::EXPERIMENT_SCHEMA_VERSION,
+            experiment_id: experiment.id,
+            source_task_id: task.id,
+            candidate_run_id: RunId::new(),
+            authority: mcg_agents::ShadowAuthority::EvaluationOnly,
+            output_artifact_sha256: "b".repeat(64),
+            completed_at: Utc::now(),
+        };
+        let shadow_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/experiments/{}/shadow-executions",
+                    experiment.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&receipt).expect("receipt body"),
+                ))
+                .expect("request"),
+            )
+            .await
+            .expect("shadow");
+        assert_eq!(shadow_response.status(), StatusCode::CREATED);
+
+        let arm = |revision_id| mcg_agents::BenchmarkArmResult {
+            organization_revision_id: revision_id,
+            run_id: RunId::new(),
+            evaluation_id: EvaluationId::new(),
+            outcome: EvaluationOutcome::Passed,
+            confidence: mcg_agents::ConfidenceEstimate::new(9_000, 10).expect("confidence"),
+            metrics: OrganizationalMetrics::default(),
+            evidence_sha256: vec!["c".repeat(64)],
+        };
+        let benchmark = ExperimentBenchmark {
+            schema_version: mcg_agents::EXPERIMENT_SCHEMA_VERSION,
+            id: ExperimentBenchmarkId::new(),
+            experiment_id: experiment.id,
+            scenario_key: "coding/build".into(),
+            baseline: arm(baseline.revision_id),
+            candidate: arm(candidate.revision_id),
+            regressions: Vec::new(),
+            measured_at: Utc::now(),
+        };
+        let benchmark_response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/experiments/{}/benchmarks",
+                    experiment.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&benchmark).expect("benchmark body"),
+                ))
+                .expect("request"),
+            )
+            .await
+            .expect("benchmark");
+        assert_eq!(benchmark_response.status(), StatusCode::CREATED);
+        runtime
+            .transition_experiment(
+                experiment.id,
+                ExperimentState::Running,
+                ExperimentState::AwaitingDecision,
+            )
+            .expect("awaiting decision");
+        let decision = ExperimentDecision {
+            schema_version: mcg_agents::EXPERIMENT_SCHEMA_VERSION,
+            id: ExperimentDecisionId::new(),
+            experiment_id: experiment.id,
+            kind: mcg_agents::ExperimentDecisionKind::Promote,
+            from_revision_id: baseline.revision_id,
+            to_revision_id: candidate.revision_id,
+            benchmark_ids: vec![benchmark.id],
+            prospective_analysis: mcg_agents::ProspectiveAnalysis {
+                expected_benefits: vec!["fewer repeated failures".into()],
+                expected_risks: vec!["fixture regression".into()],
+                historical_evidence: vec![observation.id.to_string()],
+            },
+            reason: "Measured candidate passed the bounded fixture".into(),
+            decided_at: Utc::now(),
+        };
+        for expected in [false, true] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Request::post(format!(
+                        "/api/v1/experiments/{}/decisions",
+                        experiment.id
+                    )))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&decision).expect("decision body"),
+                    ))
+                    .expect("request"),
+                )
+                .await
+                .expect("decision");
+            assert_eq!(response.status(), StatusCode::OK);
+            let mutation: ExperimentMutation =
+                serde_json::from_value(response_json(response).await).expect("decision mutation");
+            assert_eq!(mutation.replayed, expected);
+        }
+        assert_eq!(
+            runtime
+                .organization(baseline.organization_id)
+                .expect("organization")
+                .expect("present")
+                .revision_id,
+            candidate.revision_id
+        );
+
+        for endpoint in [
+            format!(
+                "/api/v1/organizations/{}/experiments",
+                baseline.organization_id
+            ),
+            format!("/api/v1/experiments/{}/shadow-executions", experiment.id),
+            format!("/api/v1/experiments/{}/benchmarks", experiment.id),
+            format!("/api/v1/experiments/{}/decisions", experiment.id),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Request::get(endpoint))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("list evidence");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 
     #[tokio::test]

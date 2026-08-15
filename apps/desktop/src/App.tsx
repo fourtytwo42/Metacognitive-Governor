@@ -14,6 +14,7 @@ import {
   configureProvider,
   captureComputerSession,
   createSchedule,
+  createExperiment,
   createTask,
   deploySite,
   denyRequest,
@@ -23,6 +24,8 @@ import {
   handoffBrowserSession,
   handoffComputerSession,
   listMcpConnections,
+  listExperiments,
+  listSupervisionObservations,
   listProviders,
   listApprovals,
   listSchedules,
@@ -35,6 +38,7 @@ import {
   launchTask,
   loadTaskAudit,
   loadTaskEvents,
+  loadExperimentEvidence,
   loadScheduleHistory,
   loadPlatformCapabilities,
   loadPlatformSessionHistory,
@@ -44,6 +48,8 @@ import {
   getSiteMonitor,
   navigateBrowserSession,
   type McpAuthMode,
+  type ExperimentDefinition,
+  type ExperimentState,
   type McpListItem,
   type McpProtocolMode,
   type McpTransportKind,
@@ -67,6 +73,7 @@ import {
   type ScheduleHistoryResponse,
   type ScheduleTrigger,
   type SchedulerNotification,
+  type SupervisionObservation,
   type Site,
   type SiteDeploymentListResponse,
   type SiteHealthListResponse,
@@ -80,6 +87,10 @@ import {
   reclaimBrowserSession,
   reclaimComputerSession,
   registerSite,
+  recordCandidateRevision,
+  recordExperimentBenchmark,
+  recordShadowExecution,
+  recordSupervisionObservation,
   registerSshHost,
   runSshOperation,
   startOpenAiOAuth,
@@ -89,8 +100,10 @@ import {
   type TaskEventsResponse,
   type ToolAuditResponse,
   transitionTask,
+  transitionExperiment,
   updateSite,
   acknowledgeSchedulerNotification,
+  decideExperiment,
   wakeSchedule
 } from "./desktop-client";
 
@@ -332,6 +345,15 @@ export function App() {
   const [sshOperations, setSshOperations] = useState<Record<string, SshOperationListResponse | undefined>>({});
   const [sshBusy, setSshBusy] = useState(false);
   const [sshError, setSshError] = useState<string | null>(null);
+  const [observations, setObservations] = useState<SupervisionObservation[]>([]);
+  const [experiments, setExperiments] = useState<ExperimentDefinition[]>([]);
+  const [experimentOrganizationId, setExperimentOrganizationId] = useState("");
+  const [experimentJson, setExperimentJson] = useState("");
+  const [experimentAction, setExperimentAction] = useState<"candidate" | "observation" | "experiment" | "shadow" | "benchmark" | "decision">("observation");
+  const [experimentTargetId, setExperimentTargetId] = useState("");
+  const [experimentEvidence, setExperimentEvidence] = useState<Record<string, { shadow: number; benchmarks: number; decisions: number }>>({});
+  const [experimentBusy, setExperimentBusy] = useState(false);
+  const [experimentError, setExperimentError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -413,6 +435,9 @@ export function App() {
     listSshHosts()
       .then((response) => { if (active) setSshHosts(response.hosts); })
       .catch((error) => { if (active) setSshError(errorMessage(error)); });
+    listSupervisionObservations()
+      .then((response) => { if (active) setObservations(response.observations); })
+      .catch((error) => { if (active) setExperimentError(errorMessage(error)); });
     return () => {
       active = false;
     };
@@ -1355,6 +1380,67 @@ export function App() {
     }
   }
 
+  async function refreshExperiments() {
+    if (!experimentOrganizationId.trim()) {
+      setExperimentError("Enter an organization ID to load its experiments.");
+      return;
+    }
+    setExperimentBusy(true);
+    setExperimentError(null);
+    try {
+      const response = await listExperiments(experimentOrganizationId.trim());
+      setExperiments(response.experiments);
+      const evidence = await Promise.all(response.experiments.map(async (experiment) => {
+        const detail = await loadExperimentEvidence(experiment.id);
+        return [experiment.id, {
+          shadow: detail.shadow.receipts.length,
+          benchmarks: detail.benchmarks.benchmarks.length,
+          decisions: detail.decisions.decisions.length
+        }] as const;
+      }));
+      setExperimentEvidence(Object.fromEntries(evidence));
+    } catch (error) {
+      setExperimentError(errorMessage(error));
+    } finally {
+      setExperimentBusy(false);
+    }
+  }
+
+  async function submitExperimentJson() {
+    setExperimentBusy(true);
+    setExperimentError(null);
+    try {
+      const value = JSON.parse(experimentJson) as Record<string, unknown>;
+      if (experimentAction === "candidate") await recordCandidateRevision(value);
+      if (experimentAction === "observation") await recordSupervisionObservation(value as unknown as SupervisionObservation);
+      if (experimentAction === "experiment") await createExperiment(value as unknown as ExperimentDefinition);
+      if (experimentAction === "shadow") await recordShadowExecution(experimentTargetId.trim(), value);
+      if (experimentAction === "benchmark") await recordExperimentBenchmark(experimentTargetId.trim(), value);
+      if (experimentAction === "decision") await decideExperiment(experimentTargetId.trim(), value);
+      setExperimentJson("");
+      const response = await listSupervisionObservations();
+      setObservations(response.observations);
+      if (experimentOrganizationId.trim()) await refreshExperiments();
+    } catch (error) {
+      setExperimentError(errorMessage(error));
+    } finally {
+      setExperimentBusy(false);
+    }
+  }
+
+  async function advanceExperiment(experiment: ExperimentDefinition, next: ExperimentState) {
+    setExperimentBusy(true);
+    setExperimentError(null);
+    try {
+      await transitionExperiment(experiment.id, experiment.state, next);
+      await refreshExperiments();
+    } catch (error) {
+      setExperimentError(errorMessage(error));
+    } finally {
+      setExperimentBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -1367,6 +1453,7 @@ export function App() {
           <a className="nav-item" href="#projects">Projects</a>
           <a className="nav-item" href="#threads">Threads</a>
           <a className="nav-item" href="#scheduler">Scheduler</a>
+          <a className="nav-item" href="#improvement">Improvement</a>
           <a className="nav-item" href="#sites">Sites</a>
           <a className="nav-item" href="#ssh">SSH</a>
           <a className="nav-item" href="#platform">Computer & browser</a>
@@ -1557,6 +1644,60 @@ export function App() {
               </>
             )}
           </article>
+        </section>
+
+        <section className="panel scheduler-panel" id="improvement" aria-label="Measured improvement">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">IMPROVEMENT</p>
+              <h2>Measured changes, safe rollback</h2>
+              <p className="muted">Candidates stay inactive until benchmark evidence supports promotion. Shadow work can evaluate, but cannot change a real task.</p>
+            </div>
+            <span className="count-badge">{experiments.filter((item) => item.state === "running").length} running</span>
+          </div>
+          <div className="scheduler-layout">
+            <div className="schedule-composer">
+              <label>Organization ID<input value={experimentOrganizationId} onChange={(event) => setExperimentOrganizationId(event.target.value)} placeholder="Organization UUID" /></label>
+              <button className="primary" type="button" disabled={experimentBusy} onClick={refreshExperiments}>{experimentBusy ? "Loading..." : "Load experiments"}</button>
+              <div className="evidence-overview">
+                <div><span>Observations</span><strong>{observations.length}</strong></div>
+                <div><span>Experiments</span><strong>{experiments.length}</strong></div>
+                <div><span>Promoted</span><strong>{experiments.filter((item) => item.state === "promoted").length}</strong></div>
+                <div><span>Reverted</span><strong>{experiments.filter((item) => item.state === "reverted").length}</strong></div>
+              </div>
+              {observations.slice(-3).reverse().map((observation) => <article className="schedule-card" key={observation.id}>
+                <div><strong>{observation.signal.replaceAll("_", " ")}</strong><span>{observation.loop_kind} loop · {(observation.severity_basis_points / 100).toFixed(0)}%</span></div>
+                <p>{observation.summary}</p>
+              </article>)}
+              {advanced && <div className="advanced-fields">
+                <label>Advanced action<select value={experimentAction} onChange={(event) => setExperimentAction(event.target.value as typeof experimentAction)}>
+                  <option value="observation">Record observation</option>
+                  <option value="candidate">Record candidate revision</option>
+                  <option value="experiment">Create experiment</option>
+                  <option value="shadow">Record shadow receipt</option>
+                  <option value="benchmark">Record benchmark</option>
+                  <option value="decision">Promote, reject, or revert</option>
+                </select></label>
+                {(experimentAction === "shadow" || experimentAction === "benchmark" || experimentAction === "decision") && <label>Experiment ID<input value={experimentTargetId} onChange={(event) => setExperimentTargetId(event.target.value)} placeholder="Experiment UUID" /></label>}
+                <label>Versioned JSON<textarea aria-label="Measured improvement JSON" value={experimentJson} onChange={(event) => setExperimentJson(event.target.value)} placeholder="Paste the complete versioned contract" /></label>
+                <button className="secondary" type="button" disabled={experimentBusy || !experimentJson.trim()} onClick={submitExperimentJson}>Apply measured action</button>
+              </div>}
+              {experimentError && <p className="error-message" role="alert">{experimentError}</p>}
+            </div>
+            <div className="schedule-list">
+              {experiments.length === 0 ? <p className="empty-state">Load an organization to inspect its measured experiments.</p> : experiments.map((experiment) => {
+                const evidence = experimentEvidence[experiment.id] ?? { shadow: 0, benchmarks: 0, decisions: 0 };
+                const next = experiment.state === "draft" ? "ready" : experiment.state === "ready" ? "running" : experiment.state === "running" ? "awaiting_decision" : null;
+                return <article className="schedule-card" key={experiment.id}>
+                  <div><strong>{experiment.hypothesis}</strong><span>{experiment.mode} · {experiment.state.replaceAll("_", " ")}</span></div>
+                  <p>{experiment.task_classes.join(", ")}</p>
+                  <small>{evidence.shadow} shadow · {evidence.benchmarks}/{experiment.required_benchmarks} benchmarks · {evidence.decisions} decisions</small>
+                  <small>Active baseline remains protected until an atomic measured decision.</small>
+                  {advanced && <><code>{experiment.id}</code><code>candidate {experiment.candidate_revision_id}</code>{next && <button className="secondary" type="button" disabled={experimentBusy} onClick={() => advanceExperiment(experiment, next)}>Move to {next.replaceAll("_", " ")}</button>}</>}
+                </article>;
+              })}
+            </div>
+          </div>
         </section>
 
         <section className="panel scheduler-panel" id="sites" aria-label="Sites">

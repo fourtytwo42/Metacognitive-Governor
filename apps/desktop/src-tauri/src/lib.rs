@@ -1,17 +1,22 @@
+use mcg_agents::{
+    ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, OrganizationGenome,
+    ShadowExecutionReceipt, SupervisionObservation,
+};
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
     CheckSiteHealthRequest, ClosePlatformSessionRequest, CreatePlatformSessionRequest,
     CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
-    CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, LaunchTaskRequest,
-    LaunchTaskResponse, McpListResponse, NavigateBrowserSessionRequest,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectListResponse,
-    ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
+    CreateTaskRequest, DeploySiteRequest, DiscoverProjectRequest, ExperimentBenchmarkListResponse,
+    ExperimentDecisionListResponse, ExperimentListResponse, LaunchTaskRequest, LaunchTaskResponse,
+    McpListResponse, NavigateBrowserSessionRequest, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, ProjectListResponse, ProviderListResponse, ResolveApprovalRequest,
+    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetScheduleStateRequest, ShadowExecutionListResponse,
     SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
     SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
-    WakeScheduleRequest,
+    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
+    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionExperimentRequest,
+    TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest, WakeScheduleRequest,
 };
 use mcg_config::AppConfig;
 use mcg_domain::{
@@ -22,10 +27,11 @@ use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
 use mcg_providers::{ProviderConnection, ProviderModelCatalog};
 use mcg_runtime::{
-    McpMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, ProjectMutation, ProviderMutation, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
-    SshOperationMutation,
+    CandidateRevisionMutation, EvidenceMutation, ExperimentMutation, McpMutation, OAuthLoginStart,
+    PlatformBrowserMutation, PlatformComputerActionMutation, PlatformComputerMutation,
+    ProjectMutation, ProviderMutation, ScheduleWakeMutation, SiteDeploymentMutation,
+    SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
+    SupervisionMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -332,6 +338,183 @@ async fn list_schedules() -> Result<ScheduleListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Schedule list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_supervision_observations() -> Result<SupervisionObservationListResponse, String> {
+    experiment_get("/api/v1/metacognition/observations", "Observation listing").await
+}
+
+#[tauri::command]
+async fn record_supervision_observation(
+    observation: SupervisionObservation,
+) -> Result<SupervisionMutation, String> {
+    experiment_post(
+        "/api/v1/metacognition/observations",
+        &observation,
+        "Observation recording",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn record_candidate_revision(
+    candidate: OrganizationGenome,
+) -> Result<CandidateRevisionMutation, String> {
+    experiment_post(
+        "/api/v1/metacognition/candidates",
+        &candidate,
+        "Candidate recording",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_experiments(organization_id: String) -> Result<ExperimentListResponse, String> {
+    experiment_get(
+        &format!("/api/v1/organizations/{organization_id}/experiments"),
+        "Experiment listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_experiment(experiment_id: String) -> Result<ExperimentDefinition, String> {
+    experiment_get(
+        &format!("/api/v1/experiments/{experiment_id}"),
+        "Experiment loading",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_experiment(experiment: ExperimentDefinition) -> Result<ExperimentMutation, String> {
+    experiment_post("/api/v1/experiments", &experiment, "Experiment creation").await
+}
+
+#[tauri::command]
+async fn transition_experiment(
+    experiment_id: String,
+    request: TransitionExperimentRequest,
+) -> Result<ExperimentMutation, String> {
+    experiment_post(
+        &format!("/api/v1/experiments/{experiment_id}/transition"),
+        &request,
+        "Experiment transition",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_shadow_executions(
+    experiment_id: String,
+) -> Result<ShadowExecutionListResponse, String> {
+    experiment_get(
+        &format!("/api/v1/experiments/{experiment_id}/shadow-executions"),
+        "Shadow evidence loading",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn record_shadow_execution(
+    experiment_id: String,
+    receipt: ShadowExecutionReceipt,
+) -> Result<EvidenceMutation<ShadowExecutionReceipt>, String> {
+    experiment_post(
+        &format!("/api/v1/experiments/{experiment_id}/shadow-executions"),
+        &receipt,
+        "Shadow evidence recording",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_experiment_benchmarks(
+    experiment_id: String,
+) -> Result<ExperimentBenchmarkListResponse, String> {
+    experiment_get(
+        &format!("/api/v1/experiments/{experiment_id}/benchmarks"),
+        "Benchmark loading",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn record_experiment_benchmark(
+    experiment_id: String,
+    benchmark: ExperimentBenchmark,
+) -> Result<EvidenceMutation<ExperimentBenchmark>, String> {
+    experiment_post(
+        &format!("/api/v1/experiments/{experiment_id}/benchmarks"),
+        &benchmark,
+        "Benchmark recording",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_experiment_decisions(
+    experiment_id: String,
+) -> Result<ExperimentDecisionListResponse, String> {
+    experiment_get(
+        &format!("/api/v1/experiments/{experiment_id}/decisions"),
+        "Decision loading",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn decide_experiment(
+    experiment_id: String,
+    decision: ExperimentDecision,
+) -> Result<ExperimentMutation, String> {
+    experiment_post(
+        &format!("/api/v1/experiments/{experiment_id}/decisions"),
+        &decision,
+        "Experiment decision",
+    )
+    .await
+}
+
+async fn experiment_get<T>(path: &str, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}{path}"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
+}
+
+async fn experiment_post<T, B>(path: &str, body: &B, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize,
+{
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}{path}"))
+        .bearer_auth(daemon_token()?)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
 }
 
 #[tauri::command]
@@ -1246,6 +1429,19 @@ pub fn run() {
             configure_mcp_connection,
             discover_mcp_connection,
             list_schedules,
+            list_supervision_observations,
+            record_supervision_observation,
+            record_candidate_revision,
+            list_experiments,
+            get_experiment,
+            create_experiment,
+            transition_experiment,
+            list_shadow_executions,
+            record_shadow_execution,
+            list_experiment_benchmarks,
+            record_experiment_benchmark,
+            list_experiment_decisions,
+            decide_experiment,
             list_sites,
             get_site,
             register_site,

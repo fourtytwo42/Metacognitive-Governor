@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Complete M9 measured metacognitive improvement after establishing its durable supervision/experiment foundation.
-- Last meaningful change: M9 contracts and SQLite migration 20 now represent measured fast/medium/slow observations, graduated intervention levels, immutable candidate revisions, evaluation-only shadow receipts, paired benchmarks, prospective decisions, and atomic promotion/rejection/reversion to a known-good organization head. Focused storage/contract tests and strict Clippy pass on Windows.
-- Next step: Expose the M9 experiment lifecycle through the runtime, authenticated REST, CLI, MCP, Tauri, and simple/advanced desktop surfaces, then run adversarial exit scenarios and cross-platform qualification.
+- Last meaningful change: The full M9 experiment lifecycle now shares one runtime/storage boundary across authenticated REST, CLI, MCP, Tauri, resumable events, and the desktop Improvement workspace. The simple UI summarizes protected baselines and evidence; advanced mode exposes versioned JSON actions and legal compare-and-set transitions. A real REST/MCP scenario proves exact replay through atomic promotion.
+- Next step: Add automatic fast/medium/slow observation production and candidate/shadow/benchmark orchestration over real runs, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
 - Blockers: None documented.
 
 ## Current State
@@ -22,6 +22,7 @@ Durable project context lives here. Update this file whenever information should
 - The desktop task view loads authoritative event history and immutable governed-tool audit together. Simple mode summarizes outcomes, checks, tool runs, artifacts, and condition results; advanced mode adds ordered events, resources, verification records, and artifact hashes.
 - The desktop provider workspace supports OpenAI subscription OAuth, OpenAI API keys, OpenRouter, and arbitrary OpenAI-compatible/local endpoints. It discovers before saving, stores credentials through the existing OS credential service, labels billing explicitly, and displays known price metadata or `Cost unknown`.
 - The desktop Projects panel lists durable discovered workspaces with language/build/test/Git context and exposes paths, branches, and instruction-conflict counts only in advanced mode.
+- The desktop Improvement workspace shows immutable supervision signals, candidate experiment state, evidence counts, protected baseline language, and promotion/reversion outcomes in simple mode. Advanced mode exposes complete versioned contracts and legal state advances; REST, `mcg experiment`, MCP, and Tauri use the same evidence gates and caller identities.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
 - M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. Its client supports current/legacy HTTP and stdio configuration/discovery/calls through API, CLI, and desktop; expanded run-control/evaluation contracts remain in scope.
@@ -141,6 +142,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-14: M9 every-interface checkpoint passed 45 API tests, 31 storage tests, 10 runtime tests, 8 CLI tests, and 21 desktop Vitest flows; focused strict Clippy for all changed Rust packages, formatting, frontend typecheck/production build, documentation validation, and diff hygiene are green. The integrated authenticated REST/MCP fixture records and exactly replays a candidate and observation, runs a shadow experiment, records paired evidence, promotes atomically, and proves the active organization head changes only at the measured decision. Exact full Windows/Ubuntu qualification and automated supervision/orchestration remain pending.
 
 - 2026-08-14: M9 durable foundation passed 16 `mcg-agents` and 31 `mcg-storage` tests plus strict Clippy for agents/events/storage, formatting, documentation validation, and diff hygiene. Evidence covers explicit loop/intervention and experiment transition contracts, observation exact replay and immutable-delete rejection across reopen, atomic promotion/reversion of the active organization revision, insufficient/regressing candidate rejection, and shadow receipts that cannot settle a real task. Full interface integration and cross-platform qualification remain pending.
 

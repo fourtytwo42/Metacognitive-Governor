@@ -60,6 +60,16 @@ const client = vi.hoisted(() => ({
   ,registerSshHost: vi.fn()
   ,loadSshOperations: vi.fn()
   ,runSshOperation: vi.fn()
+  ,listSupervisionObservations: vi.fn()
+  ,recordSupervisionObservation: vi.fn()
+  ,recordCandidateRevision: vi.fn()
+  ,listExperiments: vi.fn()
+  ,loadExperimentEvidence: vi.fn()
+  ,createExperiment: vi.fn()
+  ,transitionExperiment: vi.fn()
+  ,recordShadowExecution: vi.fn()
+  ,recordExperimentBenchmark: vi.fn()
+  ,decideExperiment: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -120,7 +130,17 @@ vi.mock("./desktop-client", () => ({
   listSshHosts: client.listSshHosts,
   registerSshHost: client.registerSshHost,
   loadSshOperations: client.loadSshOperations,
-  runSshOperation: client.runSshOperation
+  runSshOperation: client.runSshOperation,
+  listSupervisionObservations: client.listSupervisionObservations,
+  recordSupervisionObservation: client.recordSupervisionObservation,
+  recordCandidateRevision: client.recordCandidateRevision,
+  listExperiments: client.listExperiments,
+  loadExperimentEvidence: client.loadExperimentEvidence,
+  createExperiment: client.createExperiment,
+  transitionExperiment: client.transitionExperiment,
+  recordShadowExecution: client.recordShadowExecution,
+  recordExperimentBenchmark: client.recordExperimentBenchmark,
+  decideExperiment: client.decideExperiment
 }));
 
 import { App } from "./App";
@@ -184,6 +204,16 @@ beforeEach(() => {
   client.registerSshHost.mockReset();
   client.loadSshOperations.mockReset();
   client.runSshOperation.mockReset();
+  client.listSupervisionObservations.mockReset();
+  client.recordSupervisionObservation.mockReset();
+  client.recordCandidateRevision.mockReset();
+  client.listExperiments.mockReset();
+  client.loadExperimentEvidence.mockReset();
+  client.createExperiment.mockReset();
+  client.transitionExperiment.mockReset();
+  client.recordShadowExecution.mockReset();
+  client.recordExperimentBenchmark.mockReset();
+  client.decideExperiment.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -207,7 +237,57 @@ beforeEach(() => {
   client.listPlatformSessions.mockResolvedValue({ sessions: [] });
   client.listSites.mockResolvedValue({ sites: [] });
   client.listSshHosts.mockResolvedValue({ hosts: [] });
+  client.listSupervisionObservations.mockResolvedValue({ observations: [] });
+  client.listExperiments.mockResolvedValue({ experiments: [] });
+  client.loadExperimentEvidence.mockResolvedValue({
+    shadow: { receipts: [] },
+    benchmarks: { benchmarks: [] },
+    decisions: { decisions: [] }
+  });
   client.getSiteMonitor.mockRejectedValue(new Error("Site has no monitor"));
+});
+
+test("measured improvement stays simple by default and exposes controlled transitions in advanced mode", async () => {
+  const experiment = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000301",
+    organization_id: "00000000-0000-4000-8000-000000000302",
+    baseline_revision_id: "00000000-0000-4000-8000-000000000303",
+    candidate_revision_id: "00000000-0000-4000-8000-000000000304",
+    mode: "shadow" as const,
+    state: "draft" as const,
+    hypothesis: "Reduce repeated build failures",
+    task_classes: ["coding/build"],
+    required_benchmarks: 2,
+    maximum_regressions: 0,
+    minimum_confidence: { basis_points: 8000, sample_size: 10 },
+    observation_ids: [],
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.listExperiments.mockResolvedValue({ experiments: [experiment] });
+  client.loadExperimentEvidence.mockResolvedValue({
+    shadow: { receipts: [{}] },
+    benchmarks: { benchmarks: [{}] },
+    decisions: { decisions: [] }
+  });
+  client.transitionExperiment.mockResolvedValue({});
+  render(<App />);
+  const panel = await screen.findByRole("region", { name: "Measured improvement" });
+  expect(within(panel).getByText("Candidates stay inactive until benchmark evidence supports promotion. Shadow work can evaluate, but cannot change a real task.")).toBeTruthy();
+  fireEvent.change(within(panel).getByLabelText("Organization ID"), { target: { value: experiment.organization_id } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Load experiments" }));
+  await within(panel).findByText(experiment.hypothesis);
+  expect(within(panel).getByText("1 shadow · 1/2 benchmarks · 0 decisions")).toBeTruthy();
+  expect(within(panel).queryByLabelText("Measured improvement JSON")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Advanced mode" }));
+  expect(within(panel).getByLabelText("Measured improvement JSON")).toBeTruthy();
+  fireEvent.click(within(panel).getByRole("button", { name: "Move to ready" }));
+  await waitFor(() => expect(client.transitionExperiment).toHaveBeenCalledWith(
+    experiment.id,
+    "draft",
+    "ready"
+  ));
 });
 
 test("simple SSH flow registers a pinned host and performs read-only inspection", async () => {

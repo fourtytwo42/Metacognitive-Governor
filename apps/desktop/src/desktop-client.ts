@@ -100,6 +100,47 @@ export interface McpMutation {
   catalog: McpToolCatalog;
 }
 
+export type ExperimentState = "draft" | "ready" | "running" | "awaiting_decision" | "promoted" | "rejected" | "reverted";
+
+export interface SupervisionObservation {
+  schema_version: number;
+  id: string;
+  loop_kind: "fast" | "medium" | "slow";
+  signal: string;
+  severity_basis_points: number;
+  recommended_intervention: string;
+  task_id?: string;
+  run_id?: string;
+  organization_revision_id?: string;
+  summary: string;
+  evidence: Array<{ method: string; artifact_sha256?: string; event_sequence?: number; detail: string }>;
+  observed_at: string;
+}
+
+export interface ExperimentDefinition {
+  schema_version: number;
+  id: string;
+  organization_id: string;
+  baseline_revision_id: string;
+  candidate_revision_id: string;
+  mode: "shadow" | "scenario";
+  state: ExperimentState;
+  hypothesis: string;
+  task_classes: string[];
+  required_benchmarks: number;
+  maximum_regressions: number;
+  minimum_confidence: { basis_points: number; sample_size: number };
+  observation_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupervisionObservationListResponse { observations: SupervisionObservation[] }
+export interface ExperimentListResponse { experiments: ExperimentDefinition[] }
+export interface ShadowExecutionListResponse { receipts: Array<Record<string, unknown>> }
+export interface ExperimentBenchmarkListResponse { benchmarks: Array<Record<string, unknown>> }
+export interface ExperimentDecisionListResponse { decisions: Array<Record<string, unknown>> }
+
 export type TaskState =
   | "pending"
   | "active"
@@ -736,4 +777,57 @@ export function discoverProject(root: string): Promise<ProjectMutation> {
 
 export function listProjects(): Promise<ProjectListResponse> {
   return invoke("list_projects");
+}
+
+export function listSupervisionObservations(): Promise<SupervisionObservationListResponse> {
+  return invoke("list_supervision_observations");
+}
+
+export function recordSupervisionObservation(observation: SupervisionObservation): Promise<unknown> {
+  return invoke("record_supervision_observation", { observation });
+}
+
+export function recordCandidateRevision(candidate: Record<string, unknown>): Promise<unknown> {
+  return invoke("record_candidate_revision", { candidate });
+}
+
+export function listExperiments(organizationId: string): Promise<ExperimentListResponse> {
+  return invoke("list_experiments", { organizationId });
+}
+
+export function getExperiment(experimentId: string): Promise<ExperimentDefinition> {
+  return invoke("get_experiment", { experimentId });
+}
+
+export function createExperiment(experiment: ExperimentDefinition): Promise<unknown> {
+  return invoke("create_experiment", { experiment });
+}
+
+export function transitionExperiment(experimentId: string, expected: ExperimentState, next: ExperimentState): Promise<unknown> {
+  return invoke("transition_experiment", { experimentId, request: { expected, next } });
+}
+
+export async function loadExperimentEvidence(experimentId: string): Promise<{
+  shadow: ShadowExecutionListResponse;
+  benchmarks: ExperimentBenchmarkListResponse;
+  decisions: ExperimentDecisionListResponse;
+}> {
+  const [shadow, benchmarks, decisions] = await Promise.all([
+    invoke<ShadowExecutionListResponse>("list_shadow_executions", { experimentId }),
+    invoke<ExperimentBenchmarkListResponse>("list_experiment_benchmarks", { experimentId }),
+    invoke<ExperimentDecisionListResponse>("list_experiment_decisions", { experimentId })
+  ]);
+  return { shadow, benchmarks, decisions };
+}
+
+export function recordShadowExecution(experimentId: string, receipt: Record<string, unknown>): Promise<unknown> {
+  return invoke("record_shadow_execution", { experimentId, receipt });
+}
+
+export function recordExperimentBenchmark(experimentId: string, benchmark: Record<string, unknown>): Promise<unknown> {
+  return invoke("record_experiment_benchmark", { experimentId, benchmark });
+}
+
+export function decideExperiment(experimentId: string, decision: Record<string, unknown>): Promise<unknown> {
+  return invoke("decide_experiment", { experimentId, decision });
 }
