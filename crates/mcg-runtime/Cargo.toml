@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 mcg-agents = { path = "../mcg-agents" }
 mcg-config = { path = "../mcg-config" }
@@ -14,6 +15,8 @@ mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
 mcg-mcp = { path = "../mcg-mcp" }
 mcg-policy = { path = "../mcg-policy" }
+mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
+mcg-plugin-runner = { path = "../../apps/mcg-plugin-runner", default-features = false }
 mcg-projects = { path = "../mcg-projects" }
 mcg-providers = { path = "../mcg-providers" }
 mcg-storage = { path = "../mcg-storage" }
@@ -29,7 +32,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
 tempfile.workspace = true
 
 [lints]

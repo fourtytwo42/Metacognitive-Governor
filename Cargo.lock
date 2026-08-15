@@ -3556,6 +3556,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "mcg-agents",
  "mcg-config",
@@ -3563,6 +3564,7 @@ dependencies = [
  "mcg-events",
  "mcg-mcp",
  "mcg-plugin-protocol",
+ "mcg-plugin-runner",
  "mcg-policy",
  "mcg-projects",
  "mcg-providers",

@@ -14,7 +14,7 @@ if [[ -z "$target_triple" ]]; then
   exit 1
 fi
 
-cargo_arguments=(build -p mcg-cli -p mcg-shadow-runner)
+cargo_arguments=(build -p mcg-cli -p mcg-plugin-runner -p mcg-shadow-runner)
 if [[ "$profile" == "release" || ! -f "$repository_root/target/debug/mcg-daemon" ]]; then
   cargo_arguments+=(-p mcg-daemon)
 fi
@@ -26,7 +26,7 @@ cargo "${cargo_arguments[@]}"
 source_directory="$repository_root/target/$profile"
 sidecar_directory="$repository_root/apps/desktop/src-tauri/binaries"
 mkdir -p "$sidecar_directory"
-for mapping in mcg:mcg mcg-daemon:mcg-service mcg-shadow-runner:mcg-shadow-runner; do
+for mapping in mcg:mcg mcg-daemon:mcg-service mcg-plugin-runner:mcg-plugin-runner mcg-shadow-runner:mcg-shadow-runner; do
   binary="${mapping%%:*}"
   sidecar="${mapping##*:}"
   source="$source_directory/$binary"

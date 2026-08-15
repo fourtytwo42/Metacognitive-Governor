@@ -363,20 +363,33 @@ fn validate_response(
     let response: PluginRunnerResponse =
         serde_json::from_slice(stdout).map_err(|_| PluginRunnerClientError::InvalidResponse)?;
     let response_succeeded = response.state == PluginRunnerState::Succeeded;
+    let result_matches = response.result.as_ref().is_some_and(|result| {
+        result.schema_version == PLUGIN_SCHEMA_VERSION && result.plugin_id == expected_plugin_id
+    });
     if status_success != response_succeeded
         || response.schema_version != PLUGIN_SCHEMA_VERSION
         || response.plugin_id.as_deref() != Some(expected_plugin_id)
         || (response_succeeded
-            && (response.result.is_none()
-                || response.error_code.is_some()
-                || response.detail.is_some()))
+            && (!result_matches || response.error_code.is_some() || response.detail.is_some()))
         || (!response_succeeded
             && (response.result.is_some()
-                || response.error_code.as_deref().is_none_or(str::is_empty)))
+                || !response.error_code.as_deref().is_some_and(valid_error_code)
+                || response
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.len() > RUNNER_DETAIL_MAX_BYTES)))
     {
         return Err(PluginRunnerClientError::InvalidResponse);
     }
     Ok(response)
+}
+
+fn valid_error_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 const fn runner_file_name() -> &'static str {
@@ -459,6 +472,17 @@ mod tests {
         ));
         assert!(matches!(
             validate_response(true, "another.plugin", &encoded),
+            Err(PluginRunnerClientError::InvalidResponse)
+        ));
+
+        let mut mismatched_result = valid.clone();
+        mismatched_result.result.as_mut().expect("result").plugin_id = "another.plugin".into();
+        assert!(matches!(
+            validate_response(
+                true,
+                "example.runner",
+                &serde_json::to_vec(&mismatched_result).expect("response")
+            ),
             Err(PluginRunnerClientError::InvalidResponse)
         ));
 

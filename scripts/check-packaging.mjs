@@ -17,7 +17,7 @@ const config = JSON.parse(await read("apps/desktop/src-tauri/tauri.release.conf.
 if (config.bundle?.active !== true || config.bundle?.targets !== "all") {
   throw new Error("Tauri production bundling must remain active for every native platform target.");
 }
-const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-shadow-runner"];
+const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-plugin-runner", "binaries/mcg-shadow-runner"];
 if (JSON.stringify(config.bundle.externalBin) !== JSON.stringify(expectedSidecars)) {
   throw new Error("The installer sidecar contract changed or is incomplete.");
 }
@@ -67,7 +67,7 @@ requireText(linuxBuilder, "--bundles deb,appimage", "Linux release builder");
 requireText(windowsBuilder, "tauri.release.conf.json", "Windows release builder");
 requireText(linuxBuilder, "tauri.release.conf.json", "Linux release builder");
 for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [linuxPrepare, "Linux sidecar preparer"]]) {
-  for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-shadow-runner"]) requireText(source, binary, label);
+  for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-plugin-runner", "mcg-shadow-runner"]) requireText(source, binary, label);
   requireText(source, "rustc -vV", label);
 }
 requireText(notices, "OpenAI Codex", "third-party notices");
@@ -80,11 +80,11 @@ for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "sc
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner.exe", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");

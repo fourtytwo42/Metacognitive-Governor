@@ -49,14 +49,16 @@ impl ArtifactStore {
         if !destination.exists() {
             Self::write_new(&destination, bytes, &sha256)?;
         }
-        Ok(ArtifactReference {
+        let artifact = ArtifactReference {
             id: ArtifactId::new(),
             sha256: sha256.clone(),
             media_type: media_type.into(),
             size_bytes: u64::try_from(bytes.len())
                 .map_err(|_| ToolError::Execution("artifact is too large".into()))?,
             relative_path: format!("{shard}/{sha256}"),
-        })
+        };
+        self.verify_reference(&artifact, artifact.size_bytes)?;
+        Ok(artifact)
     }
 
     /// Streams immutable evidence into the content-addressed store.
@@ -138,7 +140,10 @@ impl ArtifactStore {
             })
         })();
         match result {
-            Ok(artifact) => Ok(artifact),
+            Ok(artifact) => {
+                self.verify_reference(&artifact, max_bytes)?;
+                Ok(artifact)
+            }
             Err(error) => {
                 let _ = fs::remove_file(&temporary);
                 Err(match error {
@@ -247,6 +252,45 @@ impl ArtifactStore {
             ));
         }
         Ok(bytes)
+    }
+
+    /// Reads content-addressed bytes by their exact lowercase SHA-256 identity.
+    ///
+    /// This is used when durable metadata intentionally retains only a digest,
+    /// such as plugin result replay. The file size is re-derived from a non-link
+    /// regular file and then the complete reference verifier is applied.
+    ///
+    /// # Errors
+    /// Returns an error for malformed identities, links, missing or oversized
+    /// files, changed size, or digest mismatch.
+    pub fn read_verified_digest(&self, digest: &str, max_bytes: u64) -> Result<Vec<u8>, ToolError> {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ToolError::Invalid(
+                "artifact digest must be lowercase SHA-256".into(),
+            ));
+        }
+        let path = self.root.join(&digest[..2]).join(digest);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| ToolError::Execution(format!("inspect artifact: {error}")))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ToolError::Denied(
+                "artifact evidence must be a regular file".into(),
+            ));
+        }
+        self.read_verified_reference(
+            &ArtifactReference {
+                id: ArtifactId::new(),
+                sha256: digest.into(),
+                media_type: "application/octet-stream".into(),
+                size_bytes: metadata.len(),
+                relative_path: format!("{}/{digest}", &digest[..2]),
+            },
+            max_bytes,
+        )
     }
 
     fn write_new(destination: &Path, bytes: &[u8], digest: &str) -> Result<(), ToolError> {
@@ -393,6 +437,16 @@ mod tests {
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.relative_path, second.relative_path);
         assert!(root.path().join(first.relative_path).is_file());
+        assert_eq!(
+            store
+                .read_verified_digest(&first.sha256, first.size_bytes)
+                .expect("digest replay"),
+            b"evidence"
+        );
+        assert!(matches!(
+            store.read_verified_digest(&first.sha256.to_ascii_uppercase(), first.size_bytes),
+            Err(ToolError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -424,6 +478,10 @@ mod tests {
         .expect("tamper fixture");
         assert!(matches!(
             store.verify_reference(&artifact, artifact.size_bytes),
+            Err(ToolError::Execution(_))
+        ));
+        assert!(matches!(
+            store.capture(b"immutable evidence", "text/plain"),
             Err(ToolError::Execution(_))
         ));
     }

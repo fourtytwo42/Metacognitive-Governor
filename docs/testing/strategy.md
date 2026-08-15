@@ -272,6 +272,14 @@ terminal history, and crash conversion from `running` to `uncertain`. Diagnostic
 inventories expose only plugin/invocation counts. Verified-signature claims are
 negative-tested as unavailable until the cryptographic verifier boundary exists.
 
+Runtime tests prove module-byte digest binding, disabled-by-default installation,
+explicit optimistic enablement, durable start-before-dispatch, result-artifact
+replay across restart, changed-input identity rejection, timeout uncertainty, and
+content-free diagnostic counts. Artifact tests reject lowercase-identity forgery,
+tampering, and deduplication over changed bytes. Packaging contracts require the
+runner adjacent to the service in NSIS, `.deb`, and AppImage payloads while the
+daemon dependency tree remains free of Wasmtime/WASI.
+
 ## Coverage and release policy
 
 Coverage is a diagnostic, not a substitute for outcomes. Critical policy, state

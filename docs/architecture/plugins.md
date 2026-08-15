@@ -37,8 +37,8 @@ the in-memory pipes prevent unbounded output.
 at most 32 MiB from stdin, accepts only one versioned JSON document, requires
 canonical base64 and the exact lowercase SHA-256 of the module bytes, executes
 once, writes one bounded structured response, and exits nonzero on failure. It
-does not use stderr as a data channel. This gives the future daemon launcher an
-OS-killable boundary around module validation, compilation, and guest execution.
+does not use stderr as a data channel. This gives the daemon an OS-killable
+boundary around module validation, compilation, and guest execution.
 
 The same crate exposes the package-local parent client used by the daemon
 integration. It accepts only a non-symlink regular file with the fixed platform
@@ -72,22 +72,34 @@ bounded error codes, and timestamps rather than prompt or output content. Start
 and terminal snapshots are appended to immutable history in the same transaction
 as their projection change. Exact retries are observation-only. Runtime startup
 turns every interrupted `running` invocation into terminal `uncertain` evidence,
-and it never retries that authority automatically. Content-addressed module/result
-bytes will use the existing artifact store when the installer and runtime binding
-are added.
+and it never retries that authority automatically.
+
+The runtime captures module bytes in the existing content-addressed artifact
+store, re-verifies an existing digest before catalog commit, and installs every
+new revision disabled. Only an explicit optimistic enable transition makes the
+head invocable. It durably records `running` before calling the adjacent runner.
+Successful result JSON is captured and replayed by verified digest; guest failure
+stores only a bounded code. Missing/tampered modules fail deterministically,
+whereas timeout, malformed process output, or failure to persist an executed
+result settles as `uncertain`. Input/output content never enters SQLite. A reused
+invocation identity must match plugin, task, and input digest exactly.
+
+Release packaging builds and installs `mcg-plugin-runner` adjacent to
+`mcg-service` on Windows and Linux. The daemon's dependency tree still excludes
+the executor and Wasmtime; only the sidecar contains them. Development builds do
+not depend on generated sidecars, and no consumer interface routes plugin work yet.
 
 ## Remaining integration gates
 
 The execution kernel is only the first M10 boundary. Before plugins become a
 consumer feature, MCG still must add:
 
-- daemon/runtime binding to the package-local parent client, including durable
-  invocation identity and crash/timeout recording as non-replayable uncertainty;
-- content-addressed module/result file installation and the trusted signature
-  verifier that feed the existing durable catalog/audit schemas;
+- the trusted signature verifier and install policy for registry/community
+  packages; unsigned local imports must remain explicit and disabled by default;
 - explicit broker-issued capability adapters instead of ambient WASI grants;
 - REST, MCP, CLI, Tauri, and simple/advanced desktop management surfaces;
-- backup/restore, migration, crash-recovery, adversarial, package, and native UAT;
+- plugin-aware backup/restore, migration, additional adversarial package tests,
+  and native Windows/Linux UAT;
 - the complete Wasmtime Apache-2.0-with-LLVM-exceptions license in packages that
   contain the runtime.
 

@@ -87,7 +87,7 @@ run_cli() {
 
 dpkg -i "$deb" >"$uat_root/deb-install.log"
 package_installed=true
-for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-shadow-runner \
+for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner \
   /usr/share/applications/MCG.desktop; do
   [[ -f "$file" ]] || { echo "Installed payload is missing $file." >&2; exit 1; }
 done
@@ -236,7 +236,7 @@ appimage_root="$uat_root/appimage"
 mkdir "$appimage_root"
 chown "$uat_user":"$(id -gn "$uat_user")" "$appimage_root"
 runuser -u "$uat_user" -- sh -c 'cd "$1" && "$2" --appimage-extract >/dev/null' sh "$appimage_root" "$appimage"
-for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-shadow-runner \
+for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner \
   usr/share/applications/MCG.desktop; do
   [[ -f "$appimage_root/squashfs-root/$file" ]] || { echo "AppImage is missing $file." >&2; exit 1; }
 done

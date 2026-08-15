@@ -15,6 +15,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentModelGateway,
@@ -38,21 +39,28 @@ use mcg_domain::{
     PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
     PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
     PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
-    PlatformSessionState, ProjectId, ProxyConversationId, RiskLevel, RunId, SITE_SCHEMA_VERSION,
-    SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
-    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
-    SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
-    SshOperationId, SshOperationKind, SshOperationState, SupervisionObservationId, TaskBudget,
-    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    PlatformSessionState, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
+    PluginInvocationState, PluginRevision, ProjectId, ProxyConversationId, RiskLevel, RunId,
+    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
+    SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
+    SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState,
+    SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId,
+    SshHostState, SshOperation, SshOperationId, SshOperationKind, SshOperationState,
+    SupervisionObservationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
+    ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
     LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpClient, McpConnection,
     McpCredential, McpCredentialStore, McpError, McpProtocolMode, McpToolCatalog,
     MemoryMcpCredentialStore, OsMcpCredentialStore,
+};
+use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginResult, WasiPluginLimits};
+use mcg_plugin_runner::{
+    PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest, PluginRunnerResponse,
+    PluginRunnerState,
 };
 use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
@@ -378,6 +386,8 @@ impl RuntimeError {
                     | StorageError::PlatformSessionNotFound(_)
                     | StorageError::SiteNotFound(_)
                     | StorageError::BackupNotFound(_)
+                    | StorageError::PluginNotFound(_)
+                    | StorageError::PluginRevisionNotFound(_)
             )
         )
     }
@@ -427,6 +437,13 @@ pub struct EvidenceMutation<T> {
     pub evidence: T,
     pub replayed: bool,
     pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginInvocationMutation {
+    pub invocation: PluginInvocationRecord,
+    pub result: Option<PluginResult>,
+    pub replayed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +765,50 @@ impl LocalAuth {
     }
 }
 
+#[async_trait]
+trait PluginRunnerGateway: Send + Sync {
+    async fn invoke(
+        &self,
+        request: &PluginRunnerRequest,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError>;
+}
+
+struct ProcessPluginRunnerGateway(PluginRunnerClient);
+
+#[async_trait]
+impl PluginRunnerGateway for ProcessPluginRunnerGateway {
+    async fn invoke(
+        &self,
+        request: &PluginRunnerRequest,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+        self.0.invoke(request).await
+    }
+}
+
+fn package_plugin_runner() -> Option<Arc<dyn PluginRunnerGateway>> {
+    let application = std::env::current_exe().ok()?;
+    let client = PluginRunnerClient::adjacent_to(application).ok()?;
+    Some(Arc::new(ProcessPluginRunnerGateway(client)))
+}
+
+fn validate_plugin_invocation_replay(
+    invocation: &PluginInvocationRecord,
+    plugin_id: &str,
+    task_id: Option<TaskId>,
+    input_sha256: &str,
+) -> Result<(), StorageError> {
+    if invocation.plugin_id != plugin_id
+        || invocation.task_id != task_id
+        || invocation.input_sha256 != input_sha256
+    {
+        return Err(StorageError::Conflict(format!(
+            "plugin invocation {} was reused with different input",
+            invocation.id
+        )));
+    }
+    Ok(())
+}
+
 pub struct AppRuntime {
     config: AppConfig,
     data_lock: Option<DataDirectoryLock>,
@@ -774,6 +835,7 @@ pub struct AppRuntime {
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     oauth_state: OAuthRuntimeState,
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
+    plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -994,6 +1056,7 @@ impl AppRuntime {
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
             shadow_command_verifier: default_shadow_command_verifier(),
+            plugin_runner: package_plugin_runner(),
         }
     }
 
@@ -1036,6 +1099,278 @@ impl AppRuntime {
             recovered_shadow_workspaces: self.recovered_shadow_workspaces,
             recovered_plugin_invocations: self.recovered_plugin_invocations,
         }
+    }
+
+    /// Captures and registers one digest-bound sandboxed plugin revision in the
+    /// local content-addressed store. New revisions are always disabled.
+    ///
+    /// # Errors
+    /// Returns validation, digest, artifact, conflict, or storage failures. A
+    /// module file captured before a later database conflict is an inert
+    /// content-addressed orphan and is never routable.
+    pub fn install_sandboxed_plugin(
+        &self,
+        revision: &PluginRevision,
+        module: &[u8],
+    ) -> Result<PluginInstallation, RuntimeError> {
+        let module_size = u64::try_from(module.len())
+            .map_err(|_| StorageError::InvalidData("plugin module is too large".into()))?;
+        let module_sha256 = format!("{:x}", Sha256::digest(module));
+        if module_size != revision.module_size_bytes || module_sha256 != revision.module_sha256 {
+            return Err(StorageError::InvalidData(
+                "plugin module bytes do not match the revision identity".into(),
+            )
+            .into());
+        }
+        let artifact_store = ArtifactStore::open(self.config.data_directory.join("artifacts"))?;
+        let artifact = artifact_store.capture(module, "application/wasm")?;
+        artifact_store.verify_reference(&artifact, revision.module_size_bytes)?;
+        if artifact.sha256 != revision.module_sha256
+            || artifact.size_bytes != revision.module_size_bytes
+        {
+            return Err(StorageError::Conflict(
+                "captured plugin module changed before catalog commit".into(),
+            )
+            .into());
+        }
+        self.store()?
+            .install_plugin_revision(revision, false)
+            .map_err(Into::into)
+    }
+
+    /// Lists stable plugin installation heads without module or invocation content.
+    ///
+    /// # Errors
+    /// Returns storage failures.
+    pub fn plugin_installations(&self) -> Result<Vec<PluginInstallation>, RuntimeError> {
+        self.store()?.plugin_installations().map_err(Into::into)
+    }
+
+    /// Enables or disables one plugin head with optimistic revision control.
+    ///
+    /// # Errors
+    /// Returns not-found, stale-revision, or storage failures.
+    pub fn set_plugin_enabled(
+        &self,
+        plugin_id: &str,
+        expected_revision: u64,
+        enabled: bool,
+    ) -> Result<PluginInstallation, RuntimeError> {
+        self.store()?
+            .set_plugin_enabled(plugin_id, expected_revision, enabled, Utc::now())
+            .map_err(Into::into)
+    }
+
+    /// Invokes one active sandboxed plugin through the isolated package-local
+    /// runner and durably settles hash-only evidence.
+    ///
+    /// Exact terminal identities replay without executing. Process/contract
+    /// failures after launch settle as `uncertain` and are never retried.
+    ///
+    /// # Errors
+    /// Returns invalid input, missing/tampered artifact, catalog, or durable
+    /// settlement failures. Guest failures are returned as successful mutations
+    /// whose invocation state is `failed` or `uncertain`.
+    pub async fn invoke_sandboxed_plugin(
+        &self,
+        invocation_id: PluginInvocationId,
+        plugin_id: &str,
+        task_id: Option<TaskId>,
+        input: serde_json::Value,
+    ) -> Result<PluginInvocationMutation, RuntimeError> {
+        let limits = WasiPluginLimits::default();
+        let input_bytes = serde_json::to_vec(&input).map_err(StorageError::from)?;
+        if input_bytes.len() > limits.maximum_input_bytes {
+            return Err(StorageError::InvalidData("plugin input is too large".into()).into());
+        }
+        let input_sha256 = format!("{:x}", Sha256::digest(&input_bytes));
+        if let Some(existing) = self.store()?.plugin_invocation(invocation_id)? {
+            validate_plugin_invocation_replay(&existing, plugin_id, task_id, &input_sha256)?;
+            return self.replay_plugin_invocation(existing);
+        }
+        let (installation, revision) = {
+            let store = self.store()?;
+            let installation = store
+                .plugin_installation(plugin_id)?
+                .ok_or_else(|| StorageError::PluginNotFound(plugin_id.into()))?;
+            let revision = store
+                .plugin_revision(installation.active_revision_id)?
+                .ok_or(StorageError::PluginRevisionNotFound(
+                    installation.active_revision_id,
+                ))?;
+            (installation, revision)
+        };
+        if !installation.enabled {
+            return Err(StorageError::Conflict("plugin is disabled".into()).into());
+        }
+        let started_at = Utc::now();
+        let running = PluginInvocationRecord {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: invocation_id,
+            plugin_id: plugin_id.into(),
+            plugin_revision_id: revision.id,
+            task_id,
+            input_sha256,
+            state: PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at,
+            completed_at: None,
+        };
+        if let Err(error) = self.store()?.begin_plugin_invocation(&running) {
+            if matches!(error, StorageError::Conflict(_))
+                && let Some(existing) = self.store()?.plugin_invocation(invocation_id)?
+            {
+                validate_plugin_invocation_replay(
+                    &existing,
+                    plugin_id,
+                    task_id,
+                    &running.input_sha256,
+                )?;
+                return self.replay_plugin_invocation(existing);
+            }
+            return Err(error.into());
+        }
+
+        self.execute_plugin_invocation(running, revision, input, limits)
+            .await
+    }
+
+    async fn execute_plugin_invocation(
+        &self,
+        running: PluginInvocationRecord,
+        revision: PluginRevision,
+        input: serde_json::Value,
+        limits: WasiPluginLimits,
+    ) -> Result<PluginInvocationMutation, RuntimeError> {
+        let artifact_store = ArtifactStore::open(self.config.data_directory.join("artifacts"))?;
+        let module = match artifact_store
+            .read_verified_digest(&revision.module_sha256, revision.module_size_bytes)
+        {
+            Ok(module) if u64::try_from(module.len()).ok() == Some(revision.module_size_bytes) => {
+                module
+            }
+            _ => {
+                return self.settle_plugin_invocation(
+                    running,
+                    PluginInvocationState::Failed,
+                    None,
+                    Some("module_unavailable"),
+                );
+            }
+        };
+        let Some(runner) = self.plugin_runner.clone() else {
+            return self.settle_plugin_invocation(
+                running,
+                PluginInvocationState::Failed,
+                None,
+                Some("runner_unavailable"),
+            );
+        };
+        let request = PluginRunnerRequest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            manifest: revision.manifest,
+            module_sha256: revision.module_sha256,
+            module_base64: STANDARD.encode(module),
+            input,
+            limits,
+        };
+        match runner.invoke(&request).await {
+            Ok(response) if response.state == PluginRunnerState::Succeeded => {
+                let result = response.result.ok_or_else(|| {
+                    StorageError::InvalidData("runner success omitted its result".into())
+                })?;
+                let result_bytes = serde_json::to_vec(&result).map_err(StorageError::from)?;
+                match artifact_store
+                    .capture(&result_bytes, "application/vnd.mcg.plugin-result+json")
+                {
+                    Ok(artifact) => self.settle_plugin_invocation(
+                        running,
+                        PluginInvocationState::Succeeded,
+                        Some((artifact.sha256, result)),
+                        None,
+                    ),
+                    Err(_) => self.settle_plugin_invocation(
+                        running,
+                        PluginInvocationState::Uncertain,
+                        None,
+                        Some("result_persistence_failed"),
+                    ),
+                }
+            }
+            Ok(response) => self.settle_plugin_invocation(
+                running,
+                PluginInvocationState::Failed,
+                None,
+                response.error_code.as_deref().or(Some("runner_failed")),
+            ),
+            Err(error) => {
+                let (state, code) = match error {
+                    PluginRunnerClientError::Unavailable
+                    | PluginRunnerClientError::RequestTooLarge => {
+                        (PluginInvocationState::Failed, "runner_unavailable")
+                    }
+                    PluginRunnerClientError::Timeout
+                    | PluginRunnerClientError::ResponseTooLarge
+                    | PluginRunnerClientError::DiagnosticOutput
+                    | PluginRunnerClientError::InvalidResponse
+                    | PluginRunnerClientError::Process => {
+                        (PluginInvocationState::Uncertain, "runner_uncertain")
+                    }
+                };
+                self.settle_plugin_invocation(running, state, None, Some(code))
+            }
+        }
+    }
+
+    fn settle_plugin_invocation(
+        &self,
+        mut invocation: PluginInvocationRecord,
+        state: PluginInvocationState,
+        result: Option<(String, PluginResult)>,
+        error_code: Option<&str>,
+    ) -> Result<PluginInvocationMutation, RuntimeError> {
+        invocation.state = state;
+        invocation.result_sha256 = result.as_ref().map(|(sha256, _)| sha256.clone());
+        invocation.error_code = error_code.map(str::to_owned);
+        invocation.completed_at = Some(Utc::now().max(invocation.started_at));
+        let invocation = self.store()?.complete_plugin_invocation(&invocation)?;
+        Ok(PluginInvocationMutation {
+            invocation,
+            result: result.map(|(_, result)| result),
+            replayed: false,
+        })
+    }
+
+    fn replay_plugin_invocation(
+        &self,
+        invocation: PluginInvocationRecord,
+    ) -> Result<PluginInvocationMutation, RuntimeError> {
+        let result = if invocation.state == PluginInvocationState::Succeeded {
+            let digest = invocation.result_sha256.as_deref().ok_or_else(|| {
+                StorageError::InvalidData("successful plugin invocation lacks result hash".into())
+            })?;
+            let artifacts = ArtifactStore::open(self.config.data_directory.join("artifacts"))?;
+            let bytes = artifacts.read_verified_digest(digest, 8 * 1_024 * 1_024)?;
+            let result: PluginResult =
+                serde_json::from_slice(&bytes).map_err(StorageError::from)?;
+            if result.schema_version != PLUGIN_SCHEMA_VERSION
+                || result.plugin_id != invocation.plugin_id
+            {
+                return Err(StorageError::InvalidData(
+                    "stored plugin result does not match its invocation".into(),
+                )
+                .into());
+            }
+            Some(result)
+        } else {
+            None
+        };
+        Ok(PluginInvocationMutation {
+            invocation,
+            result,
+            replayed: true,
+        })
     }
 
     /// Produces a versioned, secret-free, read-only support report.
@@ -9347,6 +9682,42 @@ mod tests {
 
     struct FixtureShadowCommandVerifier(FixtureShadowCommandResult);
 
+    struct SuccessfulPluginRunner(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl PluginRunnerGateway for SuccessfulPluginRunner {
+        async fn invoke(
+            &self,
+            request: &PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(PluginRunnerResponse {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                plugin_id: Some(request.manifest.id.clone()),
+                state: PluginRunnerState::Succeeded,
+                result: Some(PluginResult {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    plugin_id: request.manifest.id.clone(),
+                    output: request.input.clone(),
+                }),
+                error_code: None,
+                detail: None,
+            })
+        }
+    }
+
+    struct TimeoutPluginRunner;
+
+    #[async_trait]
+    impl PluginRunnerGateway for TimeoutPluginRunner {
+        async fn invoke(
+            &self,
+            _request: &PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            Err(PluginRunnerClientError::Timeout)
+        }
+    }
+
     #[async_trait]
     impl ShadowCommandVerifier for FixtureShadowCommandVerifier {
         async fn verify(
@@ -9472,6 +9843,147 @@ mod tests {
             mcg_domain::PluginInvocationState::Uncertain
         );
         assert_eq!(recovered.error_code.as_deref(), Some("runner_interrupted"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Proves install, opt-in, execution, replay, restart, and uncertainty together.
+    async fn plugin_runtime_is_content_addressed_opt_in_and_replay_safe() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let config = AppConfig::default().with_data_directory(directory.path());
+        let module = br#"(module (func (export "_start")))"#;
+        let installed_at = Utc::now();
+        let revision = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.runtime".into(),
+                display_name: "Runtime fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at,
+        };
+        let invocation_id = PluginInvocationId::new();
+        let timeout_id = PluginInvocationId::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let mut runtime = AppRuntime::open(config.clone()).expect("runtime");
+            runtime.plugin_runner = Some(Arc::new(SuccessfulPluginRunner(calls.clone())));
+            let installed = runtime
+                .install_sandboxed_plugin(&revision, module)
+                .expect("install module");
+            assert!(!installed.enabled);
+            assert!(matches!(
+                runtime
+                    .invoke_sandboxed_plugin(
+                        invocation_id,
+                        &revision.manifest.id,
+                        None,
+                        serde_json::json!({"message": "hello"}),
+                    )
+                    .await,
+                Err(RuntimeError::Storage(StorageError::Conflict(_)))
+            ));
+            let enabled = runtime
+                .set_plugin_enabled(&revision.manifest.id, installed.revision, true)
+                .expect("explicit enable");
+            assert!(enabled.enabled);
+
+            let invoked = runtime
+                .invoke_sandboxed_plugin(
+                    invocation_id,
+                    &revision.manifest.id,
+                    None,
+                    serde_json::json!({"message": "hello"}),
+                )
+                .await
+                .expect("invoke");
+            assert_eq!(invoked.invocation.state, PluginInvocationState::Succeeded);
+            assert_eq!(
+                invoked.result.expect("result").output,
+                serde_json::json!({"message": "hello"})
+            );
+            assert!(!invoked.replayed);
+            let replay = runtime
+                .invoke_sandboxed_plugin(
+                    invocation_id,
+                    &revision.manifest.id,
+                    None,
+                    serde_json::json!({"message": "hello"}),
+                )
+                .await
+                .expect("replay");
+            assert!(replay.replayed);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                runtime
+                    .invoke_sandboxed_plugin(
+                        invocation_id,
+                        &revision.manifest.id,
+                        None,
+                        serde_json::json!({"message": "changed"}),
+                    )
+                    .await,
+                Err(RuntimeError::Storage(StorageError::Conflict(_)))
+            ));
+
+            runtime.plugin_runner = Some(Arc::new(TimeoutPluginRunner));
+            let uncertain = runtime
+                .invoke_sandboxed_plugin(
+                    timeout_id,
+                    &revision.manifest.id,
+                    None,
+                    serde_json::json!({"message": "timeout"}),
+                )
+                .await
+                .expect("uncertain outcome");
+            assert_eq!(uncertain.invocation.state, PluginInvocationState::Uncertain);
+            assert_eq!(
+                uncertain.invocation.error_code.as_deref(),
+                Some("runner_uncertain")
+            );
+        }
+
+        let reopened = AppRuntime::open(config).expect("reopen runtime");
+        let replay = reopened
+            .invoke_sandboxed_plugin(
+                invocation_id,
+                &revision.manifest.id,
+                None,
+                serde_json::json!({"message": "hello"}),
+            )
+            .await
+            .expect("restart replay");
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.result.expect("stored result").output,
+            serde_json::json!({"message": "hello"})
+        );
+        let uncertain = reopened
+            .invoke_sandboxed_plugin(
+                timeout_id,
+                &revision.manifest.id,
+                None,
+                serde_json::json!({"message": "timeout"}),
+            )
+            .await
+            .expect("uncertain replay");
+        assert!(uncertain.replayed);
+        assert_eq!(uncertain.invocation.state, PluginInvocationState::Uncertain);
+        let diagnostics = reopened.diagnostics(Utc::now()).expect("diagnostics");
+        assert_eq!(diagnostics.counts.plugins, 1);
+        assert_eq!(diagnostics.counts.plugin_invocations, 2);
     }
 
     #[test]
