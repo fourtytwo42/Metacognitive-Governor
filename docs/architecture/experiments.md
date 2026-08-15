@@ -80,6 +80,18 @@ store, and compares declared minimum bytes and optional SHA-256. A missing,
 oversized, mismatched, traversal, or symlink-escape target fails closed. If all
 conditions are supported, all passes produce `passed` and any failure produces
 `failed`; the presence of any unsupported condition produces `inconclusive`.
+Build, test, static-analysis, and exact `COMMAND SUCCEEDS` conditions now cross
+an explicit shadow-command-verifier boundary. A conforming backend must enforce
+filesystem, child-process, credential, and network isolation at the operating
+system boundary and return a bounded content-addressed transcript. The default
+backend is deliberately unavailable on every host: it launches no process and
+keeps those conditions inconclusive. Constraining only the child working
+directory is explicitly insufficient. This contract prevents later Linux,
+Windows, container, or VM backends from weakening shadow authority while host
+qualification is still pending. The trusted runtime reopens and hashes the
+versioned transcript, requires it to bind the exact condition, validates any
+output digests, and derives pass/fail from timeout and exit status rather than
+trusting a backend-supplied verdict.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and

@@ -149,6 +149,106 @@ impl ArtifactStore {
         }
     }
 
+    /// Reopens and verifies one content-addressed artifact reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reference is malformed, escapes the store,
+    /// traverses a symbolic link, exceeds `max_bytes`, or no longer matches its
+    /// recorded size and SHA-256 digest.
+    pub fn verify_reference(
+        &self,
+        artifact: &ArtifactReference,
+        max_bytes: u64,
+    ) -> Result<(), ToolError> {
+        self.read_verified_reference(artifact, max_bytes).map(drop)
+    }
+
+    /// Reads one artifact only after validating its content-addressed reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::verify_reference`].
+    pub fn read_verified_reference(
+        &self,
+        artifact: &ArtifactReference,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, ToolError> {
+        let digest = artifact.sha256.to_ascii_lowercase();
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ToolError::Invalid(
+                "artifact digest must contain exactly 64 hexadecimal characters".into(),
+            ));
+        }
+        let expected_relative = format!("{}/{digest}", &digest[..2]);
+        if artifact.relative_path != expected_relative {
+            return Err(ToolError::Invalid(
+                "artifact path does not match its content digest".into(),
+            ));
+        }
+        if artifact.size_bytes > max_bytes {
+            return Err(ToolError::Unavailable(format!(
+                "artifact exceeds the {max_bytes}-byte verification limit"
+            )));
+        }
+        let shard = self.root.join(&digest[..2]);
+        let shard_metadata = fs::symlink_metadata(&shard)
+            .map_err(|error| ToolError::Execution(format!("inspect artifact shard: {error}")))?;
+        if shard_metadata.file_type().is_symlink() || !shard_metadata.is_dir() {
+            return Err(ToolError::Denied(
+                "artifact shard must be a real directory".into(),
+            ));
+        }
+        let path = shard.join(&digest);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| ToolError::Execution(format!("inspect artifact: {error}")))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ToolError::Denied(
+                "artifact evidence must be a regular file".into(),
+            ));
+        }
+        if metadata.len() != artifact.size_bytes || metadata.len() > max_bytes {
+            return Err(ToolError::Execution(
+                "artifact size no longer matches its immutable reference".into(),
+            ));
+        }
+        let mut file = fs::File::open(&path)
+            .map_err(|error| ToolError::Execution(format!("open artifact: {error}")))?;
+        let mut observed = Sha256::new();
+        let mut read_bytes = 0_u64;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(artifact.size_bytes)
+                .map_err(|error| ToolError::Execution(error.to_string()))?,
+        );
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| ToolError::Execution(format!("read artifact: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            read_bytes = read_bytes
+                .checked_add(
+                    u64::try_from(read).map_err(|error| ToolError::Execution(error.to_string()))?,
+                )
+                .ok_or_else(|| ToolError::Execution("artifact size overflow".into()))?;
+            if read_bytes > max_bytes {
+                return Err(ToolError::Unavailable(format!(
+                    "artifact exceeds the {max_bytes}-byte verification limit"
+                )));
+            }
+            observed.update(&buffer[..read]);
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        if format!("{:x}", observed.finalize()) != digest {
+            return Err(ToolError::Execution(
+                "artifact content no longer matches its immutable digest".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     fn write_new(destination: &Path, bytes: &[u8], digest: &str) -> Result<(), ToolError> {
         let parent = destination
             .parent()
@@ -293,6 +393,39 @@ mod tests {
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.relative_path, second.relative_path);
         assert!(root.path().join(first.relative_path).is_file());
+    }
+
+    #[test]
+    fn artifact_reference_verification_rejects_forgery_tampering_and_size_overflow() {
+        let root = tempdir().expect("tempdir");
+        let store = ArtifactStore::open(root.path()).expect("store");
+        let artifact = store
+            .capture(b"immutable evidence", "text/plain")
+            .expect("artifact");
+        store
+            .verify_reference(&artifact, artifact.size_bytes)
+            .expect("valid reference");
+        assert!(matches!(
+            store.verify_reference(&artifact, artifact.size_bytes - 1),
+            Err(ToolError::Unavailable(_))
+        ));
+
+        let mut forged = artifact.clone();
+        forged.relative_path = "../outside".into();
+        assert!(matches!(
+            store.verify_reference(&forged, artifact.size_bytes),
+            Err(ToolError::Invalid(_))
+        ));
+
+        std::fs::write(
+            root.path().join(&artifact.relative_path),
+            b"tampered evidence",
+        )
+        .expect("tamper fixture");
+        assert!(matches!(
+            store.verify_reference(&artifact, artifact.size_bytes),
+            Err(ToolError::Execution(_))
+        ));
     }
 
     #[test]

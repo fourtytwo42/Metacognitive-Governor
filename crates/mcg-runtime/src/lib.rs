@@ -1,6 +1,7 @@
 //! Dependency wiring, durable task orchestration, and local authentication.
 
 mod oauth;
+mod shadow_verification;
 
 pub use oauth::*;
 
@@ -90,6 +91,10 @@ use mcg_tools::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use shadow_verification::{
+    SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION, ShadowCommandTranscript, ShadowCommandVerification,
+    ShadowCommandVerifier, UnavailableShadowCommandVerifier,
+};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -709,6 +714,7 @@ pub struct AppRuntime {
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     oauth_state: OAuthRuntimeState,
+    shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -907,6 +913,7 @@ impl AppRuntime {
             mcp_credentials,
             provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
+            shadow_command_verifier: Arc::new(UnavailableShadowCommandVerifier),
         }
     }
 
@@ -4249,11 +4256,10 @@ impl AppRuntime {
             )
             .into());
         }
-        let verifier = FilesystemExecutor::open(
-            [workspace_root.clone()],
-            self.config.data_directory.join("artifacts"),
-        )
-        .map_err(runtime_tool_error)?;
+        let artifact_root = self.config.data_directory.join("artifacts");
+        let verifier = FilesystemExecutor::open([workspace_root.clone()], &artifact_root)
+            .map_err(runtime_tool_error)?;
+        let artifacts = ArtifactStore::open(&artifact_root).map_err(runtime_tool_error)?;
         let mut conditions = Vec::new();
         let mut evidence = vec![EvaluationEvidence {
             method: "isolated_shadow_execution".into(),
@@ -4261,7 +4267,7 @@ impl AppRuntime {
             event_sequence: None,
             detail: "Provider and bounded filesystem-tool evidence was retained under durable private-workspace authority.".into(),
         }];
-        let mut unsupported = 0_u32;
+        let mut condition_support = Vec::new();
         let mut supported = 0_u32;
         for condition in candidate
             .plan
@@ -4273,8 +4279,10 @@ impl AppRuntime {
                 .iter()
                 .any(|result: &ConditionResult| result.condition == *condition)
             {
-                if matches!(condition, SuccessCondition::FileExists { .. }) {
-                    supported = supported.saturating_add(1);
+                let condition_is_supported = if matches!(
+                    condition,
+                    SuccessCondition::FileExists { .. }
+                ) {
                     let (result, verification) = verify_isolated_file_condition(
                         &verifier,
                         candidate.run.task_id,
@@ -4284,18 +4292,34 @@ impl AppRuntime {
                     .await?;
                     conditions.push(result);
                     evidence.push(verification);
+                    true
+                } else if objective_command(condition).is_some() {
+                    let (result, verification, is_supported) = verify_isolated_command_condition(
+                        self.shadow_command_verifier.as_ref(),
+                        &artifacts,
+                        &workspace_root,
+                        condition,
+                    )
+                    .await;
+                    conditions.push(result);
+                    evidence.push(verification);
+                    is_supported
                 } else {
-                    unsupported = unsupported.saturating_add(1);
                     conditions.push(ConditionResult {
                         condition: condition.clone(),
                         passed: false,
                         detail: "This condition has no condition-specific verifier inside the private shadow workspace.".into(),
                     });
+                    false
+                };
+                if condition_is_supported {
+                    supported = supported.saturating_add(1);
                 }
+                condition_support.push(condition_is_supported);
             }
         }
-        let outcome = isolated_evaluation_outcome(&conditions, unsupported);
-        let regressions = isolated_evaluation_regressions(&conditions, unsupported);
+        let outcome = isolated_evaluation_outcome(&conditions, &condition_support);
+        let regressions = isolated_evaluation_regressions(&conditions, &condition_support);
         let report = EvaluationReport {
             schema_version: AGENT_RUN_SCHEMA_VERSION,
             id: evaluation_id,
@@ -6670,6 +6694,7 @@ fn automatic_shadow_evidence_id_bytes(namespace: &str, experiment_id: Experiment
 const SHADOW_MAX_FILES: u64 = 50_000;
 const SHADOW_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SHADOW_MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+const SHADOW_MAX_COMMAND_TRANSCRIPT_BYTES: u64 = 1024 * 1024;
 const SHADOW_MAX_DEPTH: usize = 32;
 
 struct ShadowWorkspaceManifest {
@@ -8132,11 +8157,108 @@ async fn verify_isolated_file_condition(
     }
 }
 
+async fn verify_isolated_command_condition(
+    verifier: &dyn ShadowCommandVerifier,
+    artifacts: &ArtifactStore,
+    workspace_root: &Path,
+    condition: &SuccessCondition,
+) -> (ConditionResult, EvaluationEvidence, bool) {
+    if objective_command(condition).is_none() {
+        return (
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "The isolated command verifier rejected a non-command condition.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_command_sandbox".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "No command was executed because the condition kind was invalid.".into(),
+            },
+            false,
+        );
+    }
+    match verifier.verify(workspace_root, condition, artifacts).await {
+        ShadowCommandVerification::Unavailable => (
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "No qualified operating-system command sandbox is available; the condition remains inconclusive.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_command_sandbox".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "The verifier failed closed without launching a host process. A working-directory boundary alone is not accepted as isolation.".into(),
+            },
+            false,
+        ),
+        ShadowCommandVerification::Completed { transcript } => {
+            let parsed = artifacts
+                .read_verified_reference(&transcript, SHADOW_MAX_COMMAND_TRANSCRIPT_BYTES)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<ShadowCommandTranscript>(&bytes).ok())
+                .filter(|record| {
+                    record.schema_version == SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION
+                        && record.condition == *condition
+                        && valid_optional_sha256(record.stdout_sha256.as_deref())
+                        && valid_optional_sha256(record.stderr_sha256.as_deref())
+                });
+            let Some(record) = parsed else {
+                return (
+                    ConditionResult {
+                        condition: condition.clone(),
+                        passed: false,
+                        detail: "The command sandbox returned invalid immutable evidence; the condition remains inconclusive.".into(),
+                    },
+                    EvaluationEvidence {
+                        method: "isolated_command_sandbox".into(),
+                        artifact_sha256: None,
+                        event_sequence: None,
+                        detail: "Malformed command-transcript evidence was rejected.".into(),
+                    },
+                    false,
+                );
+            };
+            let condition_passed = !record.timed_out && record.exit_code == Some(0);
+            (
+                ConditionResult {
+                    condition: condition.clone(),
+                    passed: condition_passed,
+                    detail: if condition_passed {
+                        "The command passed inside a qualified operating-system shadow sandbox."
+                    } else {
+                        "The command failed inside a qualified operating-system shadow sandbox."
+                    }
+                    .into(),
+                },
+                EvaluationEvidence {
+                    method: "isolated_command_sandbox".into(),
+                    artifact_sha256: Some(transcript.sha256),
+                    event_sequence: None,
+                    detail: "A bounded command transcript was captured without granting the candidate host process, credential, or network authority.".into(),
+                },
+                true,
+            )
+        }
+    }
+}
+
+fn valid_optional_sha256(value: Option<&str>) -> bool {
+    value.is_none_or(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 fn isolated_evaluation_outcome(
     conditions: &[ConditionResult],
-    unsupported: u32,
+    condition_support: &[bool],
 ) -> EvaluationOutcome {
-    if conditions.is_empty() || unsupported > 0 {
+    if conditions.is_empty()
+        || conditions.len() != condition_support.len()
+        || condition_support.iter().any(|supported| !supported)
+    {
         EvaluationOutcome::Inconclusive
     } else if conditions.iter().all(|condition| condition.passed) {
         EvaluationOutcome::Passed
@@ -8147,16 +8269,18 @@ fn isolated_evaluation_outcome(
 
 fn isolated_evaluation_regressions(
     conditions: &[ConditionResult],
-    unsupported: u32,
+    condition_support: &[bool],
 ) -> Vec<String> {
     conditions
         .iter()
-        .filter(|condition| !condition.passed)
-        .map(|condition| {
-            if unsupported > 0
-                && !matches!(condition.condition, SuccessCondition::FileExists { .. })
-            {
+        .enumerate()
+        .filter(|(_, condition)| !condition.passed)
+        .map(|(index, condition)| {
+            let supported = condition_support.get(index).copied().unwrap_or(false);
+            if !supported {
                 "candidate condition lacks an isolated verifier".into()
+            } else if objective_command(&condition.condition).is_some() {
+                "candidate failed an isolated command objective".into()
             } else {
                 "candidate failed an isolated file objective".into()
             }
@@ -8609,6 +8733,60 @@ mod tests {
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+    #[derive(Clone, Copy)]
+    enum FixtureShadowCommandResult {
+        Pass,
+        Fail,
+        MismatchedCondition,
+        InvalidEvidence,
+    }
+
+    struct FixtureShadowCommandVerifier(FixtureShadowCommandResult);
+
+    #[async_trait]
+    impl ShadowCommandVerifier for FixtureShadowCommandVerifier {
+        async fn verify(
+            &self,
+            workspace_root: &Path,
+            condition: &SuccessCondition,
+            artifacts: &ArtifactStore,
+        ) -> ShadowCommandVerification {
+            assert!(workspace_root.is_dir());
+            assert!(objective_command(condition).is_some());
+            if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
+                return ShadowCommandVerification::Completed {
+                    transcript: mcg_tools::ArtifactReference {
+                        id: mcg_domain::ArtifactId::new(),
+                        sha256: "not-a-digest".into(),
+                        media_type: "application/vnd.mcg.shadow-command+json".into(),
+                        size_bytes: 0,
+                        relative_path: "outside".into(),
+                    },
+                };
+            }
+            let passed = matches!(self.0, FixtureShadowCommandResult::Pass);
+            let transcript_bytes = serde_json::to_vec(&ShadowCommandTranscript {
+                schema_version: SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION,
+                condition: if matches!(self.0, FixtureShadowCommandResult::MismatchedCondition) {
+                    SuccessCondition::Build {
+                        command: "different command".into(),
+                    }
+                } else {
+                    condition.clone()
+                },
+                exit_code: Some(i32::from(!passed)),
+                timed_out: false,
+                stdout_sha256: None,
+                stderr_sha256: None,
+            })
+            .expect("serialize fixture transcript");
+            let transcript = artifacts
+                .capture(&transcript_bytes, "application/vnd.mcg.shadow-command+json")
+                .expect("capture fixture transcript");
+            ShadowCommandVerification::Completed { transcript }
+        }
+    }
+
     #[test]
     fn local_auth_verifies_without_exposing_token_in_debug() {
         let auth = LocalAuth::from_token(TEST_TOKEN.to_owned()).expect("valid token");
@@ -8676,7 +8854,7 @@ mod tests {
             detail: "verified".into(),
         }];
         assert_eq!(
-            isolated_evaluation_outcome(&passing, 0),
+            isolated_evaluation_outcome(&passing, &[true]),
             EvaluationOutcome::Passed
         );
         let failing = vec![ConditionResult {
@@ -8685,10 +8863,13 @@ mod tests {
             detail: "missing".into(),
         }];
         assert_eq!(
-            isolated_evaluation_outcome(&failing, 0),
+            isolated_evaluation_outcome(&failing, &[true]),
             EvaluationOutcome::Failed
         );
-        assert_eq!(isolated_evaluation_regressions(&failing, 0).len(), 1);
+        assert_eq!(
+            isolated_evaluation_regressions(&failing, &[true]),
+            vec!["candidate failed an isolated file objective"]
+        );
         let unsupported = vec![ConditionResult {
             condition: SuccessCondition::ServiceHealthy {
                 endpoint: "local-service".into(),
@@ -8697,11 +8878,11 @@ mod tests {
             detail: "unsupported".into(),
         }];
         assert_eq!(
-            isolated_evaluation_outcome(&unsupported, 1),
+            isolated_evaluation_outcome(&unsupported, &[false]),
             EvaluationOutcome::Inconclusive
         );
         assert_eq!(
-            isolated_evaluation_regressions(&unsupported, 1),
+            isolated_evaluation_regressions(&unsupported, &[false]),
             vec!["candidate condition lacks an isolated verifier"]
         );
     }
@@ -8784,6 +8965,72 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn isolated_command_verification_distinguishes_pass_failure_and_unavailability() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let artifacts = ArtifactStore::open(artifact_root.path()).expect("artifact store");
+        let condition = SuccessCondition::Test {
+            command: "cargo test --workspace".into(),
+        };
+
+        let (result, evidence, supported) = verify_isolated_command_condition(
+            &UnavailableShadowCommandVerifier,
+            &artifacts,
+            workspace.path(),
+            &condition,
+        )
+        .await;
+        assert!(!supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+        assert!(result.detail.contains("inconclusive"));
+
+        let (result, evidence, supported) = verify_isolated_command_condition(
+            &FixtureShadowCommandVerifier(FixtureShadowCommandResult::Pass),
+            &artifacts,
+            workspace.path(),
+            &condition,
+        )
+        .await;
+        assert!(supported);
+        assert!(result.passed);
+        assert!(evidence.artifact_sha256.is_some());
+
+        let (result, evidence, supported) = verify_isolated_command_condition(
+            &FixtureShadowCommandVerifier(FixtureShadowCommandResult::MismatchedCondition),
+            &artifacts,
+            workspace.path(),
+            &condition,
+        )
+        .await;
+        assert!(!supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+
+        let (result, evidence, supported) = verify_isolated_command_condition(
+            &FixtureShadowCommandVerifier(FixtureShadowCommandResult::Fail),
+            &artifacts,
+            workspace.path(),
+            &condition,
+        )
+        .await;
+        assert!(supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_some());
+
+        let (result, evidence, supported) = verify_isolated_command_condition(
+            &FixtureShadowCommandVerifier(FixtureShadowCommandResult::InvalidEvidence),
+            &artifacts,
+            workspace.path(),
+            &condition,
+        )
+        .await;
+        assert!(!supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+    }
+
     #[test]
     fn committed_task_is_immediately_readable() {
         let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
@@ -8847,6 +9094,9 @@ mod tests {
                 min_bytes: 2,
                 expected_sha256: Some(format!("{:x}", Sha256::digest(b"{}"))),
             };
+            let command_condition = SuccessCondition::Test {
+                command: "npm test".into(),
+            };
             let planning = PlanningRequest {
                 run_id,
                 task: task.clone(),
@@ -8854,7 +9104,7 @@ mod tests {
                 work: vec![PlannedWork::atomic(
                     "exercise supervision",
                     RoleKind::Coder,
-                    vec![condition.clone()],
+                    vec![condition.clone(), command_condition.clone()],
                 )],
                 require_independent_evaluation: false,
             };
@@ -8886,11 +9136,18 @@ mod tests {
                 run_id: run.id,
                 task_id: task.id,
                 evaluator_instance_id: None,
-                conditions: vec![ConditionResult {
-                    condition: condition.clone(),
-                    passed: outcome == EvaluationOutcome::Passed,
-                    detail: "durable fixture evidence".into(),
-                }],
+                conditions: vec![
+                    ConditionResult {
+                        condition: condition.clone(),
+                        passed: outcome == EvaluationOutcome::Passed,
+                        detail: "durable fixture evidence".into(),
+                    },
+                    ConditionResult {
+                        condition: command_condition.clone(),
+                        passed: outcome == EvaluationOutcome::Passed,
+                        detail: "durable command fixture evidence".into(),
+                    },
+                ],
                 outcome,
                 confidence: ConfidenceEstimate::new(confidence, 1).expect("confidence"),
                 regressions: if outcome == EvaluationOutcome::Failed {
@@ -9077,7 +9334,7 @@ mod tests {
         );
         drop(runtime);
 
-        let reopened = AppRuntime::open(config.clone()).expect("second reopen");
+        let mut reopened = AppRuntime::open(config.clone()).expect("second reopen");
         assert_eq!(
             reopened
                 .supervision_observations()
@@ -9284,6 +9541,9 @@ mod tests {
             calls.load(Ordering::SeqCst),
             shadow_view.plan.items.len() * 2
         );
+        reopened.shadow_command_verifier = Arc::new(FixtureShadowCommandVerifier(
+            FixtureShadowCommandResult::Pass,
+        ));
         let assessments = [reopened
             .assess_automatic_shadow_run(executions[0].launch.experiment.id)
             .await
@@ -9301,6 +9561,9 @@ mod tests {
             evidence.method == "isolated_file_verification"
                 && evidence.artifact_sha256.as_deref()
                     == Some(format!("{:x}", Sha256::digest(b"{}")).as_str())
+        }));
+        assert!(assessments[0].evaluation.evidence.iter().any(|evidence| {
+            evidence.method == "isolated_command_sandbox" && evidence.artifact_sha256.is_some()
         }));
         assert_eq!(
             reopened

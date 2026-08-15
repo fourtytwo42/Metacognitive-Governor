@@ -167,13 +167,21 @@ independent evaluator, never acquire host tools, and resume the same running
 identity after durable storage is reopened. A missing provider route creates no
 lease or model spend; crash-interrupted and failed leases remain explicit review
 boundaries instead of automatic paid retries. The deterministic provider fixture
-then completes every dependency-ordered candidate item, proves all tool outcomes
-remain empty, verifies the content-addressed result artifact, and confirms the
-receipt prevents another model call.
+then completes every dependency-ordered candidate item using only the private
+workspace filesystem plane, verifies the content-addressed result artifact, and
+confirms the receipt prevents another model call.
+Command-verifier tests separately prove unavailable isolation launches no host
+process, qualified pass/fail results require a bounded content-addressed
+transcript, malformed references remain inconclusive, and transcript bytes are
+independently re-hashed and matched to the exact condition before trusted code
+derives pass/fail from timeout and exit status. The automatic
+promotion/restart scenario combines real private-file evidence with an injected
+qualified command fixture; production still uses the unavailable backend until
+a platform implementation passes equivalent Windows and Linux adversarial gates.
 The same file-backed scenario simulates a crash after paired benchmark commit,
-then reopens storage and proves the stable automatic decision rejects
-inconclusive evidence, retains one evaluation/benchmark/decision history, and
-leaves the exact baseline organization head active.
+then reopens storage and proves the stable automatic decision promotes only the
+independently verified candidate while retaining one evaluation, benchmark, and
+decision history. A later durable seeded regression restores the exact baseline.
 Seeded promotion/reversion evidence additionally proves automatic promotion
 accepts only benchmark arms matching their durable run/evaluation records,
 moves the head only for matching passing evidence, detects a later candidate
