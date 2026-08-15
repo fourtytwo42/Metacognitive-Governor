@@ -10,6 +10,7 @@
     "check:packaging": "node scripts/check-packaging.mjs",
     "check": "npm run typecheck --workspace @mcg/desktop",
     "test": "npm run test --workspace @mcg/desktop",
+    "test:release-soak": "node scripts/test-release-soak.mjs",
     "build": "npm run build --workspace @mcg/desktop",
     "dev": "npm run dev --workspace @mcg/desktop",
     "test:e2e": "playwright test"

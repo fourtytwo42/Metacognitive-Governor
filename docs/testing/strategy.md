@@ -219,6 +219,18 @@ reversion scans observation-only.
 - macOS package build with an explicit best-effort support label until qualified;
 - reproducibility, SBOM, provenance, and artifact signature checks.
 
+`npm run test:release-soak` drives the optimized `mcg-daemon` through its real
+authenticated loopback API. The default 60-second lane admits 2,000 tasks with
+bounded concurrency, enforces cold-start, p95 latency, throughput, absolute-RSS,
+and RSS-growth limits, continuously probes health, force-terminates the daemon,
+then reopens the same SQLite data. It requires every task to survive, samples
+ordered event history, and requires post-crash database/schema diagnostics and
+exact durable counts. `npm run test:release-soak -- --quick` is the 10-second,
+300-task developer lane; release evidence must use the default lane or stricter
+explicit arguments on both Windows and Linux. Final release qualification also
+runs the same harness for an owner-controlled multi-hour window; the one-minute
+lane is a fast release regression gate, not a substitute for long-duration proof.
+
 ### Typed SSH live qualification
 
 `mcg-runtime::live_ssh_inspect_survives_runtime_restart_without_reexecution`
