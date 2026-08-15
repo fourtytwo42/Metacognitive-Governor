@@ -9,11 +9,13 @@ use async_trait::async_trait;
 use mcg_agents::SuccessCondition;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use mcg_domain::{TaskId, ToolExecutionId};
+#[cfg(any(target_os = "windows", test))]
+use mcg_tools::ToolOutcome;
 use mcg_tools::{ArtifactReference, ArtifactStore};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use mcg_tools::{
     ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver, ToolError,
-    ToolExecutor, ToolOutcome, ToolRequest, ToolRequestKind,
+    ToolExecutor, ToolRequest, ToolRequestKind,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
