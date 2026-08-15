@@ -67,6 +67,11 @@ impl ToolExecutor for HostExecutor {
                     "computer actions require the runtime-bound computer executor".into(),
                 ));
             }
+            ToolRequestKind::SiteDeploy { .. } => {
+                return Err(ToolError::Unavailable(
+                    "Site deployments require the runtime-bound deployment executor".into(),
+                ));
+            }
             ToolRequestKind::McpCall { .. } => &self.external,
         };
         executor.execute(execution_id, request).await

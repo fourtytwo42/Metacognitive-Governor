@@ -32,7 +32,9 @@ use mcg_domain::{
     PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, ProjectId,
     RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteRevision, SiteState,
+    TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -48,6 +50,7 @@ use mcg_runtime::{
     McpMutation, MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, PlatformBrowserMutation,
     PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
     ProjectMutation, ProviderMutation, RuntimeError, RuntimeStatus, ScheduleWakeMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteRegistrationRequest,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
@@ -399,6 +402,59 @@ pub struct ApplyComputerActionsRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSiteRequest {
+    pub site_id: SiteId,
+    pub project_id: ProjectId,
+    pub display_name: String,
+    pub environment: SiteEnvironment,
+    pub public_url: String,
+    pub health_url: String,
+    pub hosting_provider: String,
+    #[serde(default)]
+    pub deployment_command: Option<SiteDeploymentCommand>,
+    #[serde(default)]
+    pub credential_reference: Option<String>,
+    #[serde(default = "default_site_state")]
+    pub state: SiteState,
+}
+
+const fn default_site_state() -> SiteState {
+    SiteState::Active
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteListResponse {
+    pub sites: Vec<Site>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteRevisionListResponse {
+    pub revisions: Vec<SiteRevision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckSiteHealthRequest {
+    pub check_id: SiteHealthCheckId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteHealthListResponse {
+    pub checks: Vec<SiteHealthCheck>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploySiteRequest {
+    pub deployment_id: SiteDeploymentId,
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteDeploymentListResponse {
+    pub deployments: Vec<SiteDeployment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LaunchExecution {
     NotStarted { detail: String },
@@ -696,6 +752,17 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/platform/sessions/{session_id}/computer/reclaim",
             post(reclaim_computer_session),
+        )
+        .route("/api/v1/sites", get(list_sites).post(create_site))
+        .route("/api/v1/sites/{site_id}", get(get_site))
+        .route("/api/v1/sites/{site_id}/revisions", get(site_revisions))
+        .route(
+            "/api/v1/sites/{site_id}/health",
+            get(site_health_history).post(check_site_health),
+        )
+        .route(
+            "/api/v1/sites/{site_id}/deployments",
+            get(site_deployment_history).post(deploy_site),
         )
         .route(
             "/api/v1/schedules",
@@ -1244,6 +1311,123 @@ async fn reclaim_computer_session(
             .await
             .map_err(map_runtime_error)?,
     ))
+}
+
+async fn create_site(
+    State(state): State<ApiState>,
+    Json(request): Json<CreateSiteRequest>,
+) -> Result<(StatusCode, Json<Site>), ApiError> {
+    let mutation = state
+        .runtime
+        .register_site(&SiteRegistrationRequest {
+            id: request.site_id,
+            project_id: request.project_id,
+            display_name: request.display_name,
+            environment: request.environment,
+            public_url: request.public_url,
+            health_url: request.health_url,
+            hosting_provider: request.hosting_provider,
+            deployment_command: request.deployment_command,
+            credential_reference: request.credential_reference,
+            state: request.state,
+        })
+        .map_err(map_runtime_error)?;
+    Ok((
+        if mutation.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(mutation.site),
+    ))
+}
+
+async fn list_sites(State(state): State<ApiState>) -> Result<Json<SiteListResponse>, ApiError> {
+    Ok(Json(SiteListResponse {
+        sites: state.runtime.sites().map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_site(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+) -> Result<Json<Site>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    state
+        .runtime
+        .site(site_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("site {site_id} was not found")))
+}
+
+async fn site_revisions(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+) -> Result<Json<SiteRevisionListResponse>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(SiteRevisionListResponse {
+        revisions: state
+            .runtime
+            .site_revisions(site_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn check_site_health(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+    Json(request): Json<CheckSiteHealthRequest>,
+) -> Result<Json<SiteHealthMutation>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .check_site_health(site_id, request.check_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn site_health_history(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+) -> Result<Json<SiteHealthListResponse>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(SiteHealthListResponse {
+        checks: state
+            .runtime
+            .site_health_checks(site_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn deploy_site(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+    Json(request): Json<DeploySiteRequest>,
+) -> Result<Json<SiteDeploymentMutation>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .deploy_site(site_id, request.deployment_id, request.task_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn site_deployment_history(
+    State(state): State<ApiState>,
+    Path(site_id): Path<String>,
+) -> Result<Json<SiteDeploymentListResponse>, ApiError> {
+    let site_id = parse_site_id(&site_id)?;
+    Ok(Json(SiteDeploymentListResponse {
+        deployments: state
+            .runtime
+            .site_deployments(site_id)
+            .map_err(map_runtime_error)?,
+    }))
 }
 
 async fn create_schedule(
@@ -3041,6 +3225,12 @@ fn parse_platform_session_id(value: &str) -> Result<PlatformSessionId, ApiError>
         .map_err(|_| ApiError::bad_request("platform session id must be a UUID"))
 }
 
+fn parse_site_id(value: &str) -> Result<SiteId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("site id must be a UUID"))
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn map_runtime_error(error: RuntimeError) -> ApiError {
     let provider_error = match &error {
@@ -4268,6 +4458,10 @@ form.addEventListener('submit', (event) => {
                 "mcg_computer_actions",
                 "mcg_computer_handoff",
                 "mcg_computer_reclaim",
+                "mcg_sites_list",
+                "mcg_sites_register",
+                "mcg_sites_health",
+                "mcg_sites_deploy",
                 "mcg_scheduler_create",
                 "mcg_scheduler_remove",
                 "mcg_run_agent",
@@ -4745,6 +4939,203 @@ form.addEventListener('submit', (event) => {
         .expect("close request");
         let closed = response_json(app.oneshot(close).await.expect("close")).await;
         assert_eq!(closed.pointer("/state"), Some(&serde_json::json!("closed")));
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Proves one Site identity and its side effects across both public protocols.
+    async fn authenticated_rest_and_mcp_sites_share_health_deployment_and_replay_state() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture_calls = calls.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("site fixture listener");
+        let address = listener.local_addr().expect("site fixture address");
+        let fixture = Router::new().route(
+            "/health",
+            get(move || {
+                let calls = fixture_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, fixture)
+                .await
+                .expect("site fixture server");
+        });
+
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("package.json"), "{}").expect("project manifest");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
+        );
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(&project_root, project_id)
+            .expect("discover project");
+        let app = router(runtime.clone());
+        let site_id = SiteId::new();
+        let origin = format!("http://{address}");
+        let registration = serde_json::json!({
+            "site_id": site_id,
+            "project_id": project_id,
+            "display_name": "Interface Site",
+            "environment": "production",
+            "public_url": origin,
+            "health_url": format!("{origin}/health"),
+            "hosting_provider": "fixture",
+            "deployment_command": {
+                "executable": "node",
+                "arguments": [
+                    "-e",
+                    "console.log('deploy-ok');require('fs').appendFileSync('deploy-count.txt','x')"
+                ],
+                "working_directory": ""
+            }
+        });
+        let register = || {
+            authorized(Request::post("/api/v1/sites"))
+                .header("content-type", "application/json")
+                .body(Body::from(registration.to_string()))
+                .expect("register request")
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(register())
+                .await
+                .expect("register")
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(register())
+                .await
+                .expect("register replay")
+                .status(),
+            StatusCode::OK
+        );
+        let listed = mcp_tool_response(
+            app.clone(),
+            213,
+            "mcg_sites_list",
+            serde_json::json!({"site_id": site_id}),
+        )
+        .await;
+        assert_eq!(
+            listed.pointer("/result/structuredContent/site/id"),
+            Some(&serde_json::json!(site_id))
+        );
+        assert_eq!(
+            listed
+                .pointer("/result/structuredContent/revisions")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let check_id = SiteHealthCheckId::new();
+        let checked = mcp_tool_response(
+            app.clone(),
+            214,
+            "mcg_sites_health",
+            serde_json::json!({"site_id": site_id, "check_id": check_id}),
+        )
+        .await;
+        assert_eq!(
+            checked.pointer("/result/structuredContent/check/state"),
+            Some(&serde_json::json!("healthy"))
+        );
+        let health_replay = authorized(Request::post(format!("/api/v1/sites/{site_id}/health")))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"check_id": check_id}).to_string(),
+            ))
+            .expect("health replay request");
+        let health_replay = response_json(
+            app.clone()
+                .oneshot(health_replay)
+                .await
+                .expect("health replay"),
+        )
+        .await;
+        assert_eq!(health_replay["replayed"], true);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let deployment_id = SiteDeploymentId::new();
+        let deploy_request = || {
+            authorized(Request::post(format!(
+                "/api/v1/sites/{site_id}/deployments"
+            )))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"deployment_id": deployment_id}).to_string(),
+            ))
+            .expect("deployment request")
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(deploy_request())
+                .await
+                .expect("approval request")
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(
+            runtime
+                .site_deployments(site_id)
+                .expect("pre-approval history")
+                .is_empty()
+        );
+        let approvals = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("pending Site approval");
+        assert_eq!(approvals.len(), 1);
+        runtime
+            .resolve_approval(&ApprovalResolution {
+                approval_id: approvals[0].id,
+                state: ApprovalState::Approved,
+                resolved_by: "interface fixture".into(),
+                reason: Some("exercise exact Site deployment".into()),
+                resolved_at: Utc::now(),
+            })
+            .expect("approve Site deployment");
+        let deployed = mcp_tool_response(
+            app.clone(),
+            215,
+            "mcg_sites_deploy",
+            serde_json::json!({"site_id": site_id, "deployment_id": deployment_id}),
+        )
+        .await;
+        assert_eq!(
+            deployed.pointer("/result/structuredContent/deployment/state"),
+            Some(&serde_json::json!("succeeded")),
+            "unexpected deployment response: {deployed}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("deploy-count.txt"))
+                .expect("deployment marker"),
+            "x"
+        );
+        let replayed = response_json(
+            app.clone()
+                .oneshot(deploy_request())
+                .await
+                .expect("deployment replay"),
+        )
+        .await;
+        assert_eq!(replayed["replayed"], true);
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("deploy-count.txt"))
+                .expect("unchanged deployment marker"),
+            "x"
+        );
         server.abort();
     }
 

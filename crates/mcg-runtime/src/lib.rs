@@ -10,6 +10,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -30,10 +31,12 @@ use mcg_domain::{
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, ProjectId, RunId,
-    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    SITE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
-    WorkItemId,
+    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
+    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
+    SiteId, SiteRevision, SiteRevisionId, SiteState, TaskEnvelope, TaskId, TaskState,
+    ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -60,17 +63,17 @@ use mcg_storage::{
 };
 pub use mcg_storage::{AgentTurnCommit, ScheduleClaim, ScheduleWakeMutation};
 use mcg_tools::{
-    ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, BrokerControls,
-    BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep, ComputerUseAction,
-    ComputerUseBatchResult, ComputerUseFrame, ComputerUseManager, ComputerUseObservation,
-    ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HostExecutor,
-    HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor, OutputRedactor,
-    PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation, ProcessExecutor,
-    ProcessOptions, ProcessStream, RejectingCredentialResolver, ResearchEvidenceDocument,
-    ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink,
-    ToolBroker, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest,
-    ToolRequestKind, VerificationEvidence, browser_runtime_available,
-    computer_use_runtime_available,
+    ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
+    BrokerControls, BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep,
+    ComputerUseAction, ComputerUseBatchResult, ComputerUseFrame, ComputerUseManager,
+    ComputerUseObservation, ExecutionLease, ExecutionLeaseRepository, FilesystemExecutor,
+    GitExecutor, HostExecutor, HttpExecutor, InMemoryMemoryRepository, LeaseState, MemoryExecutor,
+    OutputRedactor, PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation,
+    ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver,
+    ResearchEvidenceDocument, ResearchExecutor, SystemExecutor, TOOL_SCHEMA_VERSION,
+    ToolAuditRecord, ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome,
+    ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
+    browser_runtime_available, computer_use_runtime_available,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -112,6 +115,39 @@ pub struct PlatformSessionRequest {
     #[serde(default)]
     pub computer_target: Option<ComputerUseTarget>,
     pub lifetime_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteRegistrationRequest {
+    pub id: SiteId,
+    pub project_id: ProjectId,
+    pub display_name: String,
+    pub environment: SiteEnvironment,
+    pub public_url: String,
+    pub health_url: String,
+    pub hosting_provider: String,
+    pub deployment_command: Option<SiteDeploymentCommand>,
+    pub credential_reference: Option<String>,
+    pub state: SiteState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteMutation {
+    pub site: Site,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteHealthMutation {
+    pub check: SiteHealthCheck,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SiteDeploymentMutation {
+    pub deployment: SiteDeployment,
+    pub replayed: bool,
+    pub outcome: Option<ToolOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +229,7 @@ impl RuntimeError {
                     | StorageError::AgentLeaseNotFound(_)
                     | StorageError::ScheduleNotFound(_)
                     | StorageError::PlatformSessionNotFound(_)
+                    | StorageError::SiteNotFound(_)
             )
         )
     }
@@ -1583,6 +1620,372 @@ impl AppRuntime {
         project_id: ProjectId,
     ) -> Result<Vec<ProjectModel>, RuntimeError> {
         Ok(self.store()?.project_history(project_id)?)
+    }
+
+    /// Registers one durable project-bound Site with an immutable first revision.
+    /// Exact caller identity replay returns the existing definition.
+    ///
+    /// # Errors
+    /// Returns an error for missing projects, unsafe definitions, or identity conflicts.
+    pub fn register_site(
+        &self,
+        request: &SiteRegistrationRequest,
+    ) -> Result<SiteMutation, RuntimeError> {
+        if request.state == SiteState::Archived {
+            return Err(StorageError::InvalidData(
+                "new Sites cannot be registered as archived".into(),
+            )
+            .into());
+        }
+        let now = Utc::now();
+        let public_url = normalized_site_url(&request.public_url)?;
+        let health_url = normalized_site_url(&request.health_url)?;
+        let definition_hash = site_definition_hash(request, &public_url, &health_url)?;
+        let site = Site {
+            schema_version: SITE_SCHEMA_VERSION,
+            id: request.id,
+            definition_hash: definition_hash.clone(),
+            revision: 1,
+            project_id: request.project_id,
+            display_name: request.display_name.trim().into(),
+            environment: request.environment,
+            public_url,
+            health_url,
+            hosting_provider: request.hosting_provider.trim().into(),
+            deployment_command: request.deployment_command.clone(),
+            credential_reference: request
+                .credential_reference
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            state: request.state,
+            created_at: now,
+            updated_at: now,
+        };
+        let revision = SiteRevision {
+            schema_version: SITE_SCHEMA_VERSION,
+            id: SiteRevisionId::new(),
+            site_id: site.id,
+            revision: site.revision,
+            definition_hash,
+            site: site.clone(),
+            reason: "owner registered site".into(),
+            created_at: now,
+        };
+        let (site, created) = self.store()?.create_site(&site, &revision)?;
+        Ok(SiteMutation {
+            site,
+            replayed: !created,
+        })
+    }
+
+    /// Lists current Site projections.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn sites(&self) -> Result<Vec<Site>, RuntimeError> {
+        Ok(self.store()?.sites()?)
+    }
+
+    /// Loads one current Site projection.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn site(&self, site_id: SiteId) -> Result<Option<Site>, RuntimeError> {
+        Ok(self.store()?.site(site_id)?)
+    }
+
+    /// Loads immutable definition history for one Site.
+    ///
+    /// # Errors
+    /// Returns not-found for an unknown Site or an error when storage cannot be read.
+    pub fn site_revisions(&self, site_id: SiteId) -> Result<Vec<SiteRevision>, RuntimeError> {
+        Ok(self.store()?.site_revisions(site_id)?)
+    }
+
+    /// Runs and durably records one bounded same-origin Site health check.
+    /// Exact check identity replay performs no network work.
+    ///
+    /// # Errors
+    /// Returns an error for unknown/archived Sites, conflicting identity, or authority failure.
+    #[allow(clippy::too_many_lines)] // Keeps one fail-closed health authority and evidence transaction.
+    pub async fn check_site_health(
+        &self,
+        site_id: SiteId,
+        check_id: SiteHealthCheckId,
+    ) -> Result<SiteHealthMutation, RuntimeError> {
+        let site = self
+            .site(site_id)?
+            .ok_or(StorageError::SiteNotFound(site_id))?;
+        if site.state == SiteState::Archived {
+            return Err(ToolError::Denied("archived sites cannot be checked".into()).into());
+        }
+        let request_hash = site_health_request_hash(&site)?;
+        if let Some(existing) = self.store()?.site_health_check(check_id)? {
+            if existing.site_id != site_id || existing.request_hash != request_hash {
+                return Err(StorageError::Conflict(
+                    "site health identity was reused with a different request".into(),
+                )
+                .into());
+            }
+            return Ok(SiteHealthMutation {
+                check: existing,
+                replayed: true,
+            });
+        }
+        let project = self
+            .project(site.project_id)?
+            .ok_or(StorageError::ProjectNotFound(site.project_id))?;
+        let root = std::path::PathBuf::from(project.root);
+        let artifacts = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts)?;
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([root.clone()], &artifacts).map_err(runtime_tool_error)?,
+        );
+        let http = HttpExecutor::new(
+            Arc::new(RejectingCredentialResolver),
+            filesystem,
+            &artifacts,
+        )
+        .map_err(runtime_tool_error)?;
+        let task_id = site_authority_task_id(site_id);
+        let mut tool_request = ToolRequest::new(
+            task_id,
+            format!("Check Site health: {}", site.display_name),
+            ToolRequestKind::HttpRequest {
+                method: "GET".into(),
+                url: site.health_url.clone(),
+                headers: Vec::new(),
+                body: None,
+                max_response_bytes: 1_048_576,
+            },
+        );
+        tool_request.id = site_health_tool_request_id(check_id);
+        tool_request.timeout_seconds = 30;
+        let mut capabilities = CapabilityPolicy::project(&root);
+        capabilities
+            .allowed_network_origins
+            .push(objective_network_origin(&site.health_url)?);
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            http,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let started = Instant::now();
+        let execution = broker.execute(&tool_request).await;
+        let latency_milliseconds = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let checked_at = Utc::now();
+        let check = match execution {
+            Ok(outcome) => {
+                let status_code = outcome
+                    .verification
+                    .iter()
+                    .find(|evidence| evidence.method == "http.status")
+                    .and_then(|evidence| evidence.detail.parse::<u16>().ok());
+                let state = if status_code.is_some_and(|status| (200..400).contains(&status)) {
+                    SiteHealthState::Healthy
+                } else {
+                    SiteHealthState::Degraded
+                };
+                SiteHealthCheck {
+                    schema_version: SITE_SCHEMA_VERSION,
+                    id: check_id,
+                    site_id,
+                    request_hash,
+                    state,
+                    status_code,
+                    latency_milliseconds,
+                    detail: bounded_site_detail(&outcome.summary),
+                    response_artifact_sha256: outcome
+                        .artifacts
+                        .first()
+                        .map(|artifact| artifact.sha256.clone()),
+                    checked_at,
+                }
+            }
+            Err(error) => SiteHealthCheck {
+                schema_version: SITE_SCHEMA_VERSION,
+                id: check_id,
+                site_id,
+                request_hash,
+                state: SiteHealthState::Unavailable,
+                status_code: None,
+                latency_milliseconds,
+                detail: bounded_site_detail(&format!("health request failed: {error}")),
+                response_artifact_sha256: None,
+                checked_at,
+            },
+        };
+        let (check, created) = self.store()?.record_site_health_check(&check)?;
+        Ok(SiteHealthMutation {
+            check,
+            replayed: !created,
+        })
+    }
+
+    /// Lists immutable health observations for one Site.
+    ///
+    /// # Errors
+    /// Returns not-found for an unknown Site or an error when storage cannot be read.
+    pub fn site_health_checks(
+        &self,
+        site_id: SiteId,
+    ) -> Result<Vec<SiteHealthCheck>, RuntimeError> {
+        Ok(self.store()?.site_health_checks(site_id)?)
+    }
+
+    /// Executes one exact revision-bound Site deployment through publication policy.
+    /// Exact terminal retries are observation-only.
+    ///
+    /// # Errors
+    /// Returns an error for missing authority, approval, unsupported credentials,
+    /// conflicting identity, process failure, or uncertain prior execution.
+    #[allow(clippy::too_many_lines)] // Keeps deployment preflight and broker construction together.
+    pub async fn deploy_site(
+        &self,
+        site_id: SiteId,
+        deployment_id: SiteDeploymentId,
+        task_id: Option<TaskId>,
+    ) -> Result<SiteDeploymentMutation, RuntimeError> {
+        let site = self
+            .site(site_id)?
+            .ok_or(StorageError::SiteNotFound(site_id))?;
+        let request_hash = site_deployment_request_hash(&site, task_id)?;
+        if let Some(existing) = self.store()?.site_deployment(deployment_id)? {
+            if existing.site_id != site_id
+                || existing.site_revision != site.revision
+                || existing.task_id != task_id
+                || existing.request_hash != request_hash
+            {
+                return Err(StorageError::Conflict(
+                    "site deployment identity was reused with a different request".into(),
+                )
+                .into());
+            }
+            return settled_site_deployment_replay(existing);
+        }
+        if site.state != SiteState::Active {
+            return Err(ToolError::Denied("only active sites can be deployed".into()).into());
+        }
+        if site.credential_reference.is_some() {
+            return Err(ToolError::Unavailable(
+                "this Site credential binding has no installed deployment adapter".into(),
+            )
+            .into());
+        }
+        let command = site.deployment_command.as_ref().ok_or_else(|| {
+            ToolError::Unavailable("the Site has no structured deployment command".into())
+        })?;
+        let project = self
+            .project(site.project_id)?
+            .ok_or(StorageError::ProjectNotFound(site.project_id))?;
+        if let Some(task_id) = task_id {
+            let task = self
+                .task(task_id)?
+                .ok_or(StorageError::TaskNotFound(task_id))?;
+            if task.project_id != Some(site.project_id) {
+                return Err(ToolError::Denied(
+                    "deployment task is not bound to the Site project".into(),
+                )
+                .into());
+            }
+        }
+        let root = std::path::PathBuf::from(&project.root);
+        let cwd = if command.working_directory.is_empty() {
+            root.clone()
+        } else {
+            root.join(&command.working_directory)
+        };
+        let options = ProcessOptions {
+            executable: command.executable.clone(),
+            argv: command.arguments.clone(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            env: Vec::new(),
+            stdin: ProcessStream::Null,
+            stdin_data: None,
+            stdout: ProcessStream::Piped,
+            stderr: ProcessStream::Piped,
+        };
+        let authority_task_id = task_id.unwrap_or_else(|| site_authority_task_id(site_id));
+        let mut request = ToolRequest::new(
+            authority_task_id,
+            format!(
+                "Deploy {} {} revision {} using exact structured command",
+                site.display_name,
+                site_environment_label(site.environment),
+                site.revision
+            ),
+            ToolRequestKind::SiteDeploy {
+                deployment_id,
+                site_id,
+                site_revision: site.revision,
+                task_id,
+                options: options.clone(),
+            },
+        );
+        request.id = site_deployment_tool_request_id(deployment_id);
+        request.timeout_seconds = 1_800;
+        let artifacts_path = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts_path)?;
+        let result = Arc::new(Mutex::new(None));
+        let executor = SiteDeploymentExecutor {
+            store: self.store.clone(),
+            process: Arc::new(
+                ProcessExecutor::new([root.clone()], Arc::new(RejectingCredentialResolver))
+                    .map_err(runtime_tool_error)?,
+            ),
+            artifacts: Arc::new(ArtifactStore::open(&artifacts_path).map_err(runtime_tool_error)?),
+            result: result.clone(),
+        };
+        let site_resource = site_revision_resource(site_id, site.revision);
+        let mut capabilities = CapabilityPolicy::project(&root);
+        capabilities.allowed_sites.push(site_resource);
+        let executable = platform_process_executable(&command.executable);
+        if !capabilities
+            .allowed_executables
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&executable))
+        {
+            capabilities.allowed_executables.push(executable);
+        }
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            executor,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.config.autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        broker.execute(&request).await?;
+        result
+            .lock()
+            .map_err(|_| RuntimeError::StorageLock)?
+            .take()
+            .ok_or_else(|| {
+                ToolError::Execution("Site deployment executor returned no mutation".into()).into()
+            })
+    }
+
+    /// Lists durable deployment history for one Site.
+    ///
+    /// # Errors
+    /// Returns not-found for an unknown Site or an error when storage cannot be read.
+    pub fn site_deployments(&self, site_id: SiteId) -> Result<Vec<SiteDeployment>, RuntimeError> {
+        Ok(self.store()?.site_deployments(site_id)?)
     }
 
     /// Creates and durably records a validated project-scoped memory claim.
@@ -3948,6 +4351,122 @@ fn computer_action_tool_request_id(batch_id: ComputerActionBatchId) -> ToolReque
     ))
 }
 
+fn site_authority_task_id(site_id: SiteId) -> TaskId {
+    TaskId::from_stable_bytes(stable_authority_bytes("mcg:site-authority:v1", site_id))
+}
+
+fn site_health_tool_request_id(check_id: SiteHealthCheckId) -> ToolRequestId {
+    ToolRequestId::from_stable_bytes(stable_authority_bytes(
+        "mcg:site-health-request:v1",
+        check_id,
+    ))
+}
+
+fn site_deployment_tool_request_id(deployment_id: SiteDeploymentId) -> ToolRequestId {
+    ToolRequestId::from_stable_bytes(stable_authority_bytes(
+        "mcg:site-deployment-request:v1",
+        deployment_id,
+    ))
+}
+
+fn site_revision_resource(site_id: SiteId, revision: u32) -> String {
+    format!("site://{site_id}/revision/{revision}")
+}
+
+const fn site_environment_label(environment: SiteEnvironment) -> &'static str {
+    match environment {
+        SiteEnvironment::Development => "development",
+        SiteEnvironment::Preview => "preview",
+        SiteEnvironment::Production => "production",
+    }
+}
+
+fn normalized_site_url(value: &str) -> Result<String, RuntimeError> {
+    let url = url::Url::parse(value.trim())
+        .map_err(|error| ToolError::Invalid(format!("invalid Site URL: {error}")))?;
+    Ok(url.to_string())
+}
+
+fn site_definition_hash(
+    request: &SiteRegistrationRequest,
+    public_url: &str,
+    health_url: &str,
+) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                SITE_SCHEMA_VERSION,
+                request.project_id,
+                request.display_name.trim(),
+                request.environment,
+                public_url,
+                health_url,
+                request.hosting_provider.trim(),
+                &request.deployment_command,
+                request
+                    .credential_reference
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
+                request.state,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn site_health_request_hash(site: &Site) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                SITE_SCHEMA_VERSION,
+                site.id,
+                site.revision,
+                &site.definition_hash,
+                &site.health_url,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn site_deployment_request_hash(
+    site: &Site,
+    task_id: Option<TaskId>,
+) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                SITE_SCHEMA_VERSION,
+                site.id,
+                site.revision,
+                &site.definition_hash,
+                task_id,
+                &site.deployment_command,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn bounded_site_detail(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        return "Site operation produced no detail".into();
+    }
+    if value.len() <= 512 {
+        return value.into();
+    }
+    let mut boundary = 512;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].into()
+}
+
 fn stable_authority_bytes(namespace: &str, id: impl std::fmt::Display) -> [u8; 16] {
     let digest = Sha256::digest(format!("{namespace}\0{id}").as_bytes());
     let mut bytes = [0_u8; 16];
@@ -4126,6 +4645,221 @@ fn computer_action_tool_outcome(
             method: "exact_frame_digest".into(),
             passed: true,
             detail: "captured pixels matched immediately before bounded input".into(),
+        }],
+        started_at,
+        finished_at: Utc::now(),
+    }
+}
+
+fn settled_site_deployment_replay(
+    deployment: SiteDeployment,
+) -> Result<SiteDeploymentMutation, RuntimeError> {
+    match deployment.state {
+        SiteDeploymentState::Succeeded => Ok(SiteDeploymentMutation {
+            deployment,
+            replayed: true,
+            outcome: None,
+        }),
+        SiteDeploymentState::Executing => {
+            Err(ToolError::Denied("Site deployment is already executing".into()).into())
+        }
+        SiteDeploymentState::Failed | SiteDeploymentState::Uncertain => {
+            Err(ToolError::Denied(format!(
+                "Site deployment will not be replayed: {}",
+                deployment.detail
+            ))
+            .into())
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SiteDeploymentExecutor {
+    store: Arc<Mutex<SqliteEventStore>>,
+    process: Arc<ProcessExecutor>,
+    artifacts: Arc<ArtifactStore>,
+    result: Arc<Mutex<Option<SiteDeploymentMutation>>>,
+}
+
+impl SiteDeploymentExecutor {
+    fn store(&self) -> Result<MutexGuard<'_, SqliteEventStore>, ToolError> {
+        self.store
+            .lock()
+            .map_err(|_| ToolError::Execution("runtime storage lock was poisoned".into()))
+    }
+
+    fn save_result(&self, result: SiteDeploymentMutation) -> Result<(), ToolError> {
+        *self.result.lock().map_err(|_| {
+            ToolError::Execution("Site deployment result lock was poisoned".into())
+        })? = Some(result);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SiteDeploymentExecutor {
+    #[allow(clippy::too_many_lines)] // Claim, process execution, evidence, and settlement are ordered.
+    async fn execute(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+    ) -> Result<ToolOutcome, ToolError> {
+        let ToolRequestKind::SiteDeploy {
+            deployment_id,
+            site_id,
+            site_revision,
+            task_id,
+            options,
+        } = &request.kind
+        else {
+            return Err(ToolError::Invalid(
+                "Site executor received a different tool kind".into(),
+            ));
+        };
+        let site = self
+            .store()?
+            .site(*site_id)
+            .map_err(tool_storage_error)?
+            .ok_or_else(|| ToolError::Invalid("Site was not found".into()))?;
+        let command = site
+            .deployment_command
+            .as_ref()
+            .ok_or_else(|| ToolError::Unavailable("Site deployment command is absent".into()))?;
+        if site.state != SiteState::Active
+            || site.revision != *site_revision
+            || command.executable != options.executable
+            || command.arguments != options.argv
+            || !options.env.is_empty()
+        {
+            return Err(ToolError::Denied(
+                "Site definition or command changed after authority was issued".into(),
+            ));
+        }
+        let started_at = Utc::now();
+        let request_hash = site_deployment_request_hash(&site, *task_id)
+            .map_err(|error| ToolError::Invalid(error.to_string()))?;
+        let claimed = SiteDeployment {
+            schema_version: SITE_SCHEMA_VERSION,
+            id: *deployment_id,
+            site_id: *site_id,
+            site_revision: *site_revision,
+            task_id: *task_id,
+            request_hash,
+            state: SiteDeploymentState::Executing,
+            detail: String::new(),
+            log_artifact_sha256: Vec::new(),
+            created_at: started_at,
+            updated_at: started_at,
+        };
+        let (deployment, created) = self
+            .store()?
+            .claim_site_deployment(&claimed)
+            .map_err(tool_storage_error)?;
+        if !created {
+            let replay = settled_site_deployment_replay(deployment)
+                .map_err(|error| ToolError::Denied(error.to_string()))?;
+            self.save_result(replay)?;
+            return Ok(site_deployment_replay_outcome(
+                execution_id,
+                request,
+                started_at,
+            ));
+        }
+        let mut process_request = request.clone();
+        process_request.kind = ToolRequestKind::ProcessExec {
+            options: options.clone(),
+        };
+        let execution = self.process.execute(execution_id, &process_request).await;
+        match execution {
+            Ok(mut outcome) => {
+                let log_artifact = capture_site_process_log(self.artifacts.as_ref(), &outcome)?;
+                let log_hashes = log_artifact
+                    .as_ref()
+                    .map(|artifact| vec![artifact.sha256.clone()])
+                    .unwrap_or_default();
+                if let Some(artifact) = log_artifact {
+                    outcome.artifacts.push(artifact);
+                }
+                let deployment_state = if outcome.status == ToolOutcomeStatus::Succeeded {
+                    SiteDeploymentState::Succeeded
+                } else {
+                    SiteDeploymentState::Failed
+                };
+                let deployment = self
+                    .store()?
+                    .finish_site_deployment(
+                        *deployment_id,
+                        deployment_state,
+                        &bounded_site_detail(&outcome.summary),
+                        log_hashes,
+                        Utc::now(),
+                    )
+                    .map_err(tool_storage_error)?;
+                self.save_result(SiteDeploymentMutation {
+                    deployment,
+                    replayed: false,
+                    outcome: Some(outcome.clone()),
+                })?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                self.store()?
+                    .finish_site_deployment(
+                        *deployment_id,
+                        SiteDeploymentState::Failed,
+                        "Site deployment process failed before verified completion",
+                        Vec::new(),
+                        Utc::now(),
+                    )
+                    .map_err(tool_storage_error)?;
+                Err(error)
+            }
+        }
+    }
+}
+
+fn capture_site_process_log(
+    artifacts: &ArtifactStore,
+    outcome: &ToolOutcome,
+) -> Result<Option<mcg_tools::ArtifactReference>, ToolError> {
+    if outcome.stdout.is_none() && outcome.stderr.is_none() {
+        return Ok(None);
+    }
+    let mut log = String::new();
+    if let Some(stdout) = &outcome.stdout {
+        log.push_str("stdout:\n");
+        log.push_str(stdout);
+        log.push('\n');
+    }
+    if let Some(stderr) = &outcome.stderr {
+        log.push_str("stderr:\n");
+        log.push_str(stderr);
+        log.push('\n');
+    }
+    artifacts
+        .capture(log.as_bytes(), "text/plain; charset=utf-8")
+        .map(Some)
+}
+
+fn site_deployment_replay_outcome(
+    execution_id: ToolExecutionId,
+    request: &ToolRequest,
+    started_at: DateTime<Utc>,
+) -> ToolOutcome {
+    ToolOutcome {
+        schema_version: TOOL_SCHEMA_VERSION,
+        execution_id,
+        request_id: request.id,
+        status: ToolOutcomeStatus::Succeeded,
+        summary: "Site deployment was already durably settled".into(),
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        artifacts: Vec::new(),
+        verification: vec![VerificationEvidence {
+            method: "site.deployment_replay".into(),
+            passed: true,
+            detail: "no deployment process was repeated".into(),
         }],
         started_at,
         finished_at: Utc::now(),
@@ -5053,6 +5787,143 @@ mod tests {
         runtime.create_task(&task).expect("task should persist");
 
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Proves registry, health, approval, deployment, and replay together.
+    async fn site_registration_and_health_are_idempotent_governed_and_artifact_backed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture_calls = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/health",
+            get(move || {
+                let calls = fixture_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (axum::http::StatusCode::NO_CONTENT, "")
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("fixture server");
+        });
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("package.json"), "{}").expect("manifest");
+        let data = tempfile::tempdir().expect("data");
+        let config = AppConfig::default().with_data_directory(data.path());
+        let runtime = AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let site_id = SiteId::new();
+        let request = SiteRegistrationRequest {
+            id: site_id,
+            project_id,
+            display_name: "  Fixture Site  ".into(),
+            environment: SiteEnvironment::Production,
+            public_url: format!("http://{address}"),
+            health_url: format!("http://{address}/health"),
+            hosting_provider: "fixture".into(),
+            deployment_command: Some(SiteDeploymentCommand {
+                executable: "node".into(),
+                arguments: vec![
+                    "-e".into(),
+                    "console.log('deploy-ok');require('fs').appendFileSync('deploy-count.txt','x')"
+                        .into(),
+                ],
+                working_directory: String::new(),
+            }),
+            credential_reference: None,
+            state: SiteState::Active,
+        };
+        let created = runtime.register_site(&request).expect("register");
+        assert!(!created.replayed);
+        assert_eq!(created.site.display_name, "Fixture Site");
+        assert!(runtime.register_site(&request).expect("replay").replayed);
+        assert_eq!(runtime.site_revisions(site_id).expect("revisions").len(), 1);
+
+        let check_id = SiteHealthCheckId::new();
+        let checked = runtime
+            .check_site_health(site_id, check_id)
+            .await
+            .expect("check");
+        assert!(!checked.replayed);
+        assert_eq!(checked.check.state, SiteHealthState::Healthy);
+        assert_eq!(checked.check.status_code, Some(204));
+        assert!(checked.check.response_artifact_sha256.is_some());
+        assert!(
+            runtime
+                .check_site_health(site_id, check_id)
+                .await
+                .expect("check replay")
+                .replayed
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.site_health_checks(site_id).expect("history").len(),
+            1
+        );
+        let audit = runtime
+            .tool_audit(site_authority_task_id(site_id))
+            .expect("audit");
+        assert_eq!(audit.len(), 2);
+        assert!(audit.iter().all(|record| record.tool == "http.request"));
+
+        let deployment_id = SiteDeploymentId::new();
+        assert!(matches!(
+            runtime.deploy_site(site_id, deployment_id, None).await,
+            Err(RuntimeError::Tool(ToolError::ApprovalRequired { .. }))
+        ));
+        assert!(
+            runtime
+                .site_deployments(site_id)
+                .expect("deployments")
+                .is_empty()
+        );
+        let pending = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("pending approval");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].action, "sites.deploy");
+        assert!(pending[0].resource.contains("deploy-count.txt"));
+        runtime
+            .resolve_approval(&ApprovalResolution {
+                approval_id: pending[0].id,
+                state: ApprovalState::Approved,
+                resolved_by: "fixture owner".into(),
+                reason: Some("exercise exact production deployment".into()),
+                resolved_at: Utc::now(),
+            })
+            .expect("approve");
+        let deployed = runtime
+            .deploy_site(site_id, deployment_id, None)
+            .await
+            .expect("deploy");
+        assert_eq!(deployed.deployment.state, SiteDeploymentState::Succeeded);
+        assert_eq!(deployed.deployment.log_artifact_sha256.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(project_root.path().join("deploy-count.txt"))
+                .expect("deployment marker"),
+            "x"
+        );
+        assert!(
+            runtime
+                .deploy_site(site_id, deployment_id, None)
+                .await
+                .expect("deployment replay")
+                .replayed
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_root.path().join("deploy-count.txt"))
+                .expect("unchanged marker"),
+            "x"
+        );
+        server.abort();
     }
 
     #[test]

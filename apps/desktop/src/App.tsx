@@ -7,12 +7,14 @@ import {
   attachComputerSession,
   cancelOpenAiOAuth,
   closePlatformSession,
+  checkSiteHealth,
   completeOpenAiOAuth,
   configureMcpConnection,
   configureProvider,
   captureComputerSession,
   createSchedule,
   createTask,
+  deploySite,
   denyRequest,
   discoverProject,
   discoverMcpConnection,
@@ -26,6 +28,7 @@ import {
   listSchedulerNotifications,
   listProjects,
   listPlatformSessions,
+  listSites,
   listTasks,
   launchTask,
   loadTaskAudit,
@@ -33,6 +36,8 @@ import {
   loadScheduleHistory,
   loadPlatformCapabilities,
   loadPlatformSessionHistory,
+  loadSiteDeployments,
+  loadSiteHealth,
   navigateBrowserSession,
   type McpAuthMode,
   type McpListItem,
@@ -58,11 +63,15 @@ import {
   type ScheduleHistoryResponse,
   type ScheduleTrigger,
   type SchedulerNotification,
+  type Site,
+  type SiteDeploymentListResponse,
+  type SiteHealthListResponse,
   retryTask,
   resumeTask,
   requestPlatformSession,
   reclaimBrowserSession,
   reclaimComputerSession,
+  registerSite,
   startOpenAiOAuth,
   setScheduleState,
   type TaskEnvelope,
@@ -273,6 +282,19 @@ export function App() {
   const [platformComputerRegion, setPlatformComputerRegion] = useState({ x: "", y: "", width: "", height: "" });
   const [platformBusy, setPlatformBusy] = useState(false);
   const [platformError, setPlatformError] = useState<string | null>(null);
+  const [sites, setSites] = useState<Site[]>([]);
+  const [siteRegistrationId, setSiteRegistrationId] = useState(() => crypto.randomUUID());
+  const [siteName, setSiteName] = useState("");
+  const [sitePublicUrl, setSitePublicUrl] = useState("");
+  const [siteHealthUrl, setSiteHealthUrl] = useState("");
+  const [siteProvider, setSiteProvider] = useState("");
+  const [siteDeployExecutable, setSiteDeployExecutable] = useState("");
+  const [siteDeployArguments, setSiteDeployArguments] = useState("");
+  const [siteBusy, setSiteBusy] = useState(false);
+  const [siteError, setSiteError] = useState<string | null>(null);
+  const [siteHealth, setSiteHealth] = useState<Record<string, SiteHealthListResponse | undefined>>({});
+  const [siteDeployments, setSiteDeployments] = useState<Record<string, SiteDeploymentListResponse | undefined>>({});
+  const [siteDeploymentIds, setSiteDeploymentIds] = useState<Record<string, string | undefined>>({});
 
   useEffect(() => {
     let active = true;
@@ -338,6 +360,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setPlatformError(errorMessage(error));
+      });
+    listSites()
+      .then((response) => {
+        if (active) setSites(response.sites);
+      })
+      .catch((error) => {
+        if (active) setSiteError(errorMessage(error));
       });
     return () => {
       active = false;
@@ -1100,6 +1129,113 @@ export function App() {
     }
   }
 
+  async function addSite() {
+    if (!selectedProject || !siteName.trim() || !sitePublicUrl.trim() || !siteHealthUrl.trim() || !siteProvider.trim()) {
+      setSiteError("Choose a project and enter the Site name, public URL, health URL, and hosting provider.");
+      return;
+    }
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      const site = await registerSite({
+        site_id: siteRegistrationId,
+        project_id: selectedProject.project_id,
+        display_name: siteName.trim(),
+        environment: "production",
+        public_url: sitePublicUrl.trim(),
+        health_url: siteHealthUrl.trim(),
+        hosting_provider: siteProvider.trim(),
+        deployment_command: siteDeployExecutable.trim() ? {
+          executable: siteDeployExecutable.trim(),
+          arguments: siteDeployArguments.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+          working_directory: ""
+        } : undefined,
+        state: "active"
+      });
+      setSites((current) => [site, ...current.filter((item) => item.id !== site.id)]);
+      setSiteRegistrationId(crypto.randomUUID());
+      setSiteName("");
+      setSitePublicUrl("");
+      setSiteHealthUrl("");
+      setSiteProvider("");
+      setSiteDeployExecutable("");
+      setSiteDeployArguments("");
+    } catch (error) {
+      setSiteError(errorMessage(error));
+    } finally {
+      setSiteBusy(false);
+    }
+  }
+
+  async function inspectSite(siteId: string) {
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      const [health, deployments] = await Promise.all([
+        loadSiteHealth(siteId),
+        loadSiteDeployments(siteId)
+      ]);
+      setSiteHealth((current) => ({ ...current, [siteId]: health }));
+      setSiteDeployments((current) => ({ ...current, [siteId]: deployments }));
+    } catch (error) {
+      setSiteError(errorMessage(error));
+    } finally {
+      setSiteBusy(false);
+    }
+  }
+
+  async function runSiteHealth(siteId: string) {
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      const mutation = await checkSiteHealth(siteId, crypto.randomUUID());
+      setSiteHealth((current) => ({
+        ...current,
+        [siteId]: { checks: [mutation.check, ...(current[siteId]?.checks ?? []).filter((check) => check.id !== mutation.check.id)] }
+      }));
+    } catch (error) {
+      setSiteError(errorMessage(error));
+    } finally {
+      setSiteBusy(false);
+    }
+  }
+
+  async function runSiteDeployment(siteId: string) {
+    const deploymentId = siteDeploymentIds[siteId] ?? crypto.randomUUID();
+    setSiteDeploymentIds((current) => ({ ...current, [siteId]: deploymentId }));
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      const mutation = await deploySite(siteId, deploymentId);
+      setSiteDeployments((current) => ({
+        ...current,
+        [siteId]: { deployments: [mutation.deployment, ...(current[siteId]?.deployments ?? []).filter((deployment) => deployment.id !== mutation.deployment.id)] }
+      }));
+      setSiteDeploymentIds((current) => ({ ...current, [siteId]: undefined }));
+    } catch (error) {
+      setSiteError(errorMessage(error));
+      const response = await listApprovals().catch(() => null);
+      if (response) setApprovals(response.approvals);
+    } finally {
+      setSiteBusy(false);
+    }
+  }
+
+  async function approveSiteDeployment(siteId: string, approvalId: string) {
+    setSiteBusy(true);
+    setSiteError(null);
+    try {
+      await approveRequest(approvalId);
+      setApprovals((current) => current.filter((approval) => approval.id !== approvalId));
+    } catch (error) {
+      setSiteError(errorMessage(error));
+      setSiteBusy(false);
+      return;
+    }
+    setSiteBusy(false);
+    await runSiteDeployment(siteId);
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -1112,6 +1248,7 @@ export function App() {
           <a className="nav-item" href="#projects">Projects</a>
           <a className="nav-item" href="#threads">Threads</a>
           <a className="nav-item" href="#scheduler">Scheduler</a>
+          <a className="nav-item" href="#sites">Sites</a>
           <a className="nav-item" href="#platform">Computer & browser</a>
           <a className="nav-item" href="#providers">Providers</a>
           <a className="nav-item" href="#mcp">Tools</a>
@@ -1298,6 +1435,69 @@ export function App() {
               </>
             )}
           </article>
+        </section>
+
+        <section className="panel scheduler-panel" id="sites" aria-label="Sites">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">SITES</p>
+              <h2>Web properties</h2>
+              <p className="muted">Register a project-backed Site, keep durable health evidence, and deploy only with explicit approval.</p>
+            </div>
+            <span className="count-badge">{sites.filter((site) => site.state === "active").length} active</span>
+          </div>
+          <div className="scheduler-layout">
+            <div className="schedule-composer">
+              <label>
+                Site project
+                <select value={selectedProject?.project_id ?? ""} onChange={(event) => setSelectedProject(projects.find((project) => project.project_id === event.target.value) ?? null)}>
+                  <option value="">Choose a project</option>
+                  {projects.map((project) => <option key={project.project_id} value={project.project_id}>Site: {project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                </select>
+              </label>
+              <label>Site name<input value={siteName} onChange={(event) => setSiteName(event.target.value)} placeholder="Production website" /></label>
+              <label>Public URL<input value={sitePublicUrl} onChange={(event) => setSitePublicUrl(event.target.value)} placeholder="https://example.com" /></label>
+              <label>Health URL<input value={siteHealthUrl} onChange={(event) => setSiteHealthUrl(event.target.value)} placeholder="https://example.com/health" /></label>
+              <label>Hosting provider<input value={siteProvider} onChange={(event) => setSiteProvider(event.target.value)} placeholder="Cloudflare, Vercel, local..." /></label>
+              {advanced && <div className="advanced-fields">
+                <label>Deployment executable<input value={siteDeployExecutable} onChange={(event) => setSiteDeployExecutable(event.target.value)} placeholder="npm" /></label>
+                <label>Deployment arguments (one per line)<textarea value={siteDeployArguments} onChange={(event) => setSiteDeployArguments(event.target.value)} placeholder={"run\ndeploy"} /></label>
+                <code>Retry identity: {siteRegistrationId}</code>
+              </div>}
+              <button className="primary" type="button" disabled={siteBusy} onClick={addSite}>{siteBusy ? "Saving..." : "Register Site"}</button>
+              {siteError && <p className="error-message" role="alert">{siteError}</p>}
+            </div>
+            <div className="schedule-list">
+              {sites.length === 0 ? <p className="empty-state">No Sites registered yet.</p> : sites.map((site) => {
+                const health = siteHealth[site.id]?.checks[0];
+                const deployment = siteDeployments[site.id]?.deployments[0];
+                const pendingDeployment = siteDeploymentIds[site.id]
+                  ? approvals.find((approval) => approval.action === "sites.deploy")
+                  : undefined;
+                return <article className="schedule-card" key={site.id}>
+                  <div>
+                    <span className={`task-state state-${site.state}`}>{site.state.replaceAll("_", " ")}</span>
+                    <h3>{site.display_name}</h3>
+                    <a href={site.public_url} target="_blank" rel="noreferrer">{site.public_url}</a>
+                    <small>{site.environment} · {site.hosting_provider}</small>
+                    {health && <small>Health: {health.state}{health.status_code ? ` · HTTP ${health.status_code}` : ""}</small>}
+                    {deployment && <small>Last deployment: {deployment.state} · revision {deployment.site_revision}</small>}
+                    {advanced && <><code>{site.id}</code><code>revision {site.revision} · {site.definition_hash.slice(0, 12)}</code></>}
+                  </div>
+                  <div className="task-actions">
+                    <button className="primary" type="button" disabled={siteBusy} onClick={() => runSiteHealth(site.id)}>Check health</button>
+                    {site.deployment_command && !pendingDeployment && <button className="secondary" type="button" disabled={siteBusy} onClick={() => runSiteDeployment(site.id)}>Deploy</button>}
+                    {pendingDeployment && <button className="primary" type="button" disabled={siteBusy} onClick={() => approveSiteDeployment(site.id, pendingDeployment.id)}>Approve and deploy</button>}
+                    <button className="secondary" type="button" disabled={siteBusy} onClick={() => inspectSite(site.id)}>History</button>
+                  </div>
+                  {advanced && (siteHealth[site.id] || siteDeployments[site.id]) && <div className="evidence-details">
+                    <span>{siteHealth[site.id]?.checks.length ?? 0} health checks</span>
+                    <span>{siteDeployments[site.id]?.deployments.length ?? 0} deployments</span>
+                  </div>}
+                </article>;
+              })}
+            </div>
+          </div>
         </section>
 
         <section className="panel scheduler-panel platform-panel" id="platform" aria-label="Computer and browser sessions">

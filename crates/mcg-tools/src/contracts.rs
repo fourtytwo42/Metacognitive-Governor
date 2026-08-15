@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mcg_domain::{
     ApprovalId, ArtifactId, ComputerActionBatchId, LeaseId, ManagedProcessId, PlatformSessionId,
-    TaskId, ToolExecutionId, ToolRequestId,
+    SiteDeploymentId, SiteId, TaskId, ToolExecutionId, ToolRequestId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -393,6 +393,13 @@ pub enum ToolRequestKind {
         expected_frame_sha256: String,
         actions: Vec<ComputerUseAction>,
     },
+    SiteDeploy {
+        deployment_id: SiteDeploymentId,
+        site_id: SiteId,
+        site_revision: u32,
+        task_id: Option<TaskId>,
+        options: ProcessOptions,
+    },
     McpCall {
         connection_id: String,
         tool_name: String,
@@ -443,6 +450,7 @@ impl ToolRequestKind {
             Self::MemoryRead { .. } => "memory.read".into(),
             Self::MemoryWrite { .. } => "memory.write".into(),
             Self::ComputerActions { .. } => "computer.actions".into(),
+            Self::SiteDeploy { .. } => "sites.deploy".into(),
             Self::McpCall {
                 connection_id,
                 tool_name,
@@ -492,6 +500,7 @@ impl ToolRequestKind {
                 }
                 | Self::MemoryWrite { .. }
                 | Self::ComputerActions { .. }
+                | Self::SiteDeploy { .. }
         )
     }
 }

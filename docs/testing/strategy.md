@@ -131,6 +131,12 @@ Desktop contract fixtures cover evidence/event co-loading, simple summaries,
 advanced tool verification and artifact provenance, every provider family, explicit
 billing/unknown-cost labels, and project discovery context. Responsive E2E asserts
 the mode switch remains visible and the page does not overflow at the narrow layout.
+Sites fixtures cross REST and MCP on one durable identity, prove exact health and
+deployment replay, require publication approval before ledger claim, retain response
+and process-log artifacts, and exercise the simple/advanced native dashboard plus
+caller-owned CLI identities. Release qualification additionally requires restart-
+uncertain deployment and scheduler-backed health transition scenarios on Windows
+and Linux.
 
 ## Local verification lanes
 

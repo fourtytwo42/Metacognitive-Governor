@@ -35,6 +35,7 @@ Implementation planning:
 - [M5 agent organization and run evidence](docs/architecture/agent-organization.md)
 - [M6 MCP boundary](docs/architecture/mcp.md)
 - [M8 platform capabilities and sessions](docs/architecture/platform-sessions.md)
+- [M8 Sites, deployment, and monitoring](docs/architecture/sites.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
@@ -116,6 +117,16 @@ digest, and use caller-owned durable batch IDs. A daemon crash converts a claime
 but unfinished batch to `uncertain` and never automatically repeats host input.
 The qualified Linux path currently requires an X11 owner-session `DISPLAY`;
 headless Linux and unqualified Wayland sessions report the capability unavailable.
+
+Project-backed web properties are registered in the native Sites dashboard or with
+`mcg site`. REST, CLI, MCP, and Tauri share the same caller-owned Site, health-check,
+and deployment UUIDs, so an uncertain response can be retried without repeating a
+health request or publication process. Health checks are bounded same-origin GETs
+with immutable response artifacts. Deployment commands are executable/argument
+vectors rather than shell strings, and every publication requires owner approval
+before the attempt ledger is claimed or a process starts. Restart-interrupted
+deployments become `uncertain` and are never automatically replayed. Site revision
+updates and scheduler-backed health monitoring remain active M8 work.
 
 The desktop task composer and `mcg task create/list/get/launch/transition/events` share
 the same durable projections. Simple mode asks only for a goal; advanced mode can

@@ -594,6 +594,26 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ResourceKind::ComputerSession,
             computer_session_resource(*session_id),
         )],
+        ToolRequestKind::SiteDeploy {
+            site_id,
+            site_revision,
+            options,
+            ..
+        } => vec![
+            make(
+                ActionClass::ExternalPublication,
+                CapabilityEffect::Publish,
+                ResourceKind::Site,
+                site_resource(*site_id, *site_revision),
+            ),
+            make(
+                ActionClass::BuildOrTest,
+                CapabilityEffect::Execute,
+                ResourceKind::Process,
+                executable_name(&options.executable),
+            ),
+            read_path(&options.cwd),
+        ],
         ToolRequestKind::McpCall {
             connection_id,
             tool_name,
@@ -693,6 +713,12 @@ fn primary_resource(request: &ToolRequest) -> String {
         ToolRequestKind::ComputerActions { session_id, .. } => {
             computer_session_resource(*session_id)
         }
+        ToolRequestKind::SiteDeploy {
+            site_id,
+            site_revision,
+            options,
+            ..
+        } => site_deployment_approval_resource(*site_id, *site_revision, options),
         ToolRequestKind::GitStatus { repository }
         | ToolRequestKind::GitDiff { repository, .. }
         | ToolRequestKind::GitCommit { repository, .. }
@@ -706,6 +732,22 @@ fn primary_resource(request: &ToolRequest) -> String {
 
 fn computer_session_resource(session_id: mcg_domain::PlatformSessionId) -> String {
     format!("computer://session/{session_id}")
+}
+
+fn site_resource(site_id: mcg_domain::SiteId, revision: u32) -> String {
+    format!("site://{site_id}/revision/{revision}")
+}
+
+fn site_deployment_approval_resource(
+    site_id: mcg_domain::SiteId,
+    revision: u32,
+    options: &crate::ProcessOptions,
+) -> String {
+    format!(
+        "{} command={}",
+        site_resource(site_id, revision),
+        serde_json::to_string(options).unwrap_or_else(|_| "invalid-command".into())
+    )
 }
 
 fn sanitized_url_resource(value: &str) -> String {
@@ -793,7 +835,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use mcg_domain::{ComputerActionBatchId, PlatformSessionId, TaskId};
+    use mcg_domain::{ComputerActionBatchId, PlatformSessionId, SiteDeploymentId, SiteId, TaskId};
     use tempfile::tempdir;
 
     use super::*;
@@ -1031,6 +1073,78 @@ mod tests {
             .execute(&tool_request)
             .await
             .expect("bounded autonomous input");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn site_deployment_requires_exact_scope_and_approval_in_autonomous_mode() {
+        let root = tempdir().expect("tempdir");
+        let site_id = SiteId::new();
+        let tool_request = request(
+            TaskId::new(),
+            ToolRequestKind::SiteDeploy {
+                deployment_id: SiteDeploymentId::new(),
+                site_id,
+                site_revision: 3,
+                task_id: None,
+                options: crate::ProcessOptions {
+                    executable: "node".into(),
+                    argv: vec!["deploy.js".into()],
+                    cwd: root.path().to_string_lossy().into(),
+                    env: Vec::new(),
+                    stdin: crate::ProcessStream::Null,
+                    stdin_data: None,
+                    stdout: crate::ProcessStream::Piped,
+                    stderr: crate::ProcessStream::Piped,
+                },
+            },
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        let denied = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            InMemoryApprovalRepository::default(),
+            InMemoryAuditSink::default(),
+            BrokerControls {
+                preset: AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities: CapabilityPolicy::project(root.path()),
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        assert!(matches!(
+            denied.execute(&tool_request).await,
+            Err(ToolError::Denied(_))
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        let approvals = InMemoryApprovalRepository::default();
+        let mut capabilities = CapabilityPolicy::project(root.path());
+        capabilities
+            .allowed_sites
+            .push(format!("site://{site_id}/revision/3"));
+        let broker = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            approvals.clone(),
+            InMemoryAuditSink::default(),
+            BrokerControls {
+                preset: AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        assert!(matches!(
+            broker.execute(&tool_request).await,
+            Err(ToolError::ApprovalRequired { .. })
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        approvals.set_state(tool_request.id, ApprovalState::Approved);
+        broker
+            .execute(&tool_request)
+            .await
+            .expect("approved exact deployment");
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

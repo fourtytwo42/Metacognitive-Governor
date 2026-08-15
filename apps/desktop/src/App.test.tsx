@@ -46,7 +46,13 @@ const client = vi.hoisted(() => ({
   captureComputerSession: vi.fn(),
   applyComputerActions: vi.fn(),
   handoffComputerSession: vi.fn(),
-  reclaimComputerSession: vi.fn()
+  reclaimComputerSession: vi.fn(),
+  listSites: vi.fn(),
+  registerSite: vi.fn(),
+  loadSiteHealth: vi.fn(),
+  checkSiteHealth: vi.fn(),
+  loadSiteDeployments: vi.fn(),
+  deploySite: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -94,7 +100,13 @@ vi.mock("./desktop-client", () => ({
   captureComputerSession: client.captureComputerSession,
   applyComputerActions: client.applyComputerActions,
   handoffComputerSession: client.handoffComputerSession,
-  reclaimComputerSession: client.reclaimComputerSession
+  reclaimComputerSession: client.reclaimComputerSession,
+  listSites: client.listSites,
+  registerSite: client.registerSite,
+  loadSiteHealth: client.loadSiteHealth,
+  checkSiteHealth: client.checkSiteHealth,
+  loadSiteDeployments: client.loadSiteDeployments,
+  deploySite: client.deploySite
 }));
 
 import { App } from "./App";
@@ -145,6 +157,12 @@ beforeEach(() => {
   client.applyComputerActions.mockReset();
   client.handoffComputerSession.mockReset();
   client.reclaimComputerSession.mockReset();
+  client.listSites.mockReset();
+  client.registerSite.mockReset();
+  client.loadSiteHealth.mockReset();
+  client.checkSiteHealth.mockReset();
+  client.loadSiteDeployments.mockReset();
+  client.deploySite.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.listMcp.mockResolvedValue({ connections: [] });
@@ -166,6 +184,65 @@ beforeEach(() => {
     observed_at: "2026-08-14T00:00:00Z"
   });
   client.listPlatformSessions.mockResolvedValue({ sessions: [] });
+  client.listSites.mockResolvedValue({ sites: [] });
+});
+
+test("simple Sites flow registers a selected project and records governed health", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000121",
+    project_id: "00000000-0000-4000-8000-000000000122",
+    root: "C:\\Projects\\site",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  const site = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000123",
+    definition_hash: "a".repeat(64),
+    revision: 1,
+    project_id: project.project_id,
+    display_name: "Production site",
+    environment: "production",
+    public_url: "https://example.com/",
+    health_url: "https://example.com/health",
+    hosting_provider: "fixture",
+    state: "active",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z"
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.registerSite.mockResolvedValue(site);
+  client.checkSiteHealth.mockResolvedValue({
+    replayed: false,
+    check: {
+      id: "00000000-0000-4000-8000-000000000124",
+      site_id: site.id,
+      state: "healthy",
+      status_code: 204,
+      detail: "HTTP 204",
+      checked_at: "2026-08-14T00:01:00Z"
+    }
+  });
+  render(<App />);
+  const panel = await screen.findByRole("region", { name: "Sites" });
+  fireEvent.change(within(panel).getByLabelText("Site project"), { target: { value: project.project_id } });
+  fireEvent.change(within(panel).getByLabelText("Site name"), { target: { value: "Production site" } });
+  fireEvent.change(within(panel).getByLabelText("Public URL"), { target: { value: "https://example.com" } });
+  fireEvent.change(within(panel).getByLabelText("Health URL"), { target: { value: "https://example.com/health" } });
+  fireEvent.change(within(panel).getByLabelText("Hosting provider"), { target: { value: "fixture" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Register Site" }));
+  await waitFor(() => expect(client.registerSite).toHaveBeenCalledWith(expect.objectContaining({
+    project_id: project.project_id,
+    display_name: "Production site",
+    state: "active"
+  })));
+  fireEvent.click(await within(panel).findByRole("button", { name: "Check health" }));
+  await waitFor(() => expect(client.checkSiteHealth).toHaveBeenCalledWith(site.id, expect.any(String)));
+  expect(await within(panel).findByText("Health: healthy · HTTP 204")).toBeInTheDocument();
 });
 
 test("simple scheduler creates restart-safe recurring work for a selected project", async () => {

@@ -17,9 +17,10 @@ use mcg_agents::{
 };
 use mcg_domain::{
     PlatformSessionId, PlatformSessionKind, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, TaskBudget, TaskEnvelope,
+    ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId,
+    SiteId, SiteState, TaskBudget, TaskEnvelope, TaskId,
 };
-use mcg_runtime::{AgentDispatchSpec, PlatformSessionRequest};
+use mcg_runtime::{AgentDispatchSpec, PlatformSessionRequest, SiteRegistrationRequest};
 use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -658,6 +659,80 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
         }),
         json!({
+            "name": "mcg_sites_list",
+            "title": "List MCG Sites",
+            "description": "List durable Site definitions, optionally with immutable revision, deployment, and health history for one Site.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"site_id": {"type": "string", "format": "uuid"}},
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_sites_register",
+            "title": "Register an MCG Site",
+            "description": "Idempotently register one project-bound web property with credential-free public and health URLs and an optional structured deployment command.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "site_id": {"type": "string", "format": "uuid"},
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "environment": {"type": "string", "enum": ["development", "preview", "production"]},
+                    "public_url": {"type": "string", "format": "uri", "maxLength": 2048},
+                    "health_url": {"type": "string", "format": "uri", "maxLength": 2048},
+                    "hosting_provider": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "deployment_command": {
+                        "type": "object",
+                        "properties": {
+                            "executable": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "arguments": {"type": "array", "items": {"type": "string", "maxLength": 4096}, "maxItems": 64},
+                            "working_directory": {"type": "string", "maxLength": 1024}
+                        },
+                        "required": ["executable", "working_directory"],
+                        "additionalProperties": false
+                    },
+                    "credential_reference": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+                    "state": {"type": "string", "enum": ["active", "monitoring_paused"], "default": "active"}
+                },
+                "required": ["site_id", "project_id", "display_name", "environment", "public_url", "health_url", "hosting_provider"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_sites_health",
+            "title": "Check MCG Site Health",
+            "description": "Run one idempotent bounded same-origin health GET and retain immutable status, latency, audit, and response artifact evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "site_id": {"type": "string", "format": "uuid"},
+                    "check_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["site_id", "check_id"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+        }),
+        json!({
+            "name": "mcg_sites_deploy",
+            "title": "Deploy an MCG Site",
+            "description": "Request one exact revision-bound deployment. External publication always requires owner approval before the deployment ledger is claimed or a process starts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "site_id": {"type": "string", "format": "uuid"},
+                    "deployment_id": {"type": "string", "format": "uuid"},
+                    "task_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["site_id", "deployment_id"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
+        }),
+        json!({
             "name": "mcg_scheduler_create",
             "title": "Create an MCG Schedule",
             "description": "Idempotently create one bounded durable schedule. Reuse the same schedule_id only for an exact retry of the same definition.",
@@ -869,6 +944,10 @@ async fn call_tool(
         "mcg_computer_actions" => computer_actions(state, &arguments).await,
         "mcg_computer_handoff" => computer_handoff(state, &arguments).await,
         "mcg_computer_reclaim" => computer_reclaim(state, &arguments).await,
+        "mcg_sites_list" => sites_list(state, &arguments),
+        "mcg_sites_register" => sites_register(state, &arguments),
+        "mcg_sites_health" => sites_health(state, &arguments).await,
+        "mcg_sites_deploy" => sites_deploy(state, &arguments).await,
         "mcg_run_agent" => run_agent(state, &arguments).await,
         _ => Err(RpcFailure::new(
             StatusCode::OK,
@@ -1248,6 +1327,165 @@ fn computer_error(error: &mcg_runtime::RuntimeError, operation: &str) -> Value {
     }
 }
 
+fn sites_list(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SitesListArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Site list arguments are invalid",
+        ));
+    };
+    if let Some(site_id) = request.site_id {
+        let site = match state.runtime.site(site_id) {
+            Ok(Some(site)) => site,
+            Ok(None) => {
+                return Ok(tool_error(
+                    "site_not_found",
+                    "The requested Site is not known to MCG",
+                ));
+            }
+            Err(_) => return Ok(tool_error("runtime_error", "MCG could not read the Site")),
+        };
+        let Ok(revisions) = state.runtime.site_revisions(site_id) else {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the Site revision history",
+            ));
+        };
+        let Ok(deployments) = state.runtime.site_deployments(site_id) else {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the Site deployment history",
+            ));
+        };
+        let Ok(health_checks) = state.runtime.site_health_checks(site_id) else {
+            return Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the Site health history",
+            ));
+        };
+        return tool_success(Ok(json!({
+            "site": site,
+            "revisions": revisions,
+            "deployments": deployments,
+            "health_checks": health_checks
+        })));
+    }
+    match state.runtime.sites() {
+        Ok(sites) => tool_success(Ok(json!({"sites": sites}))),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not list durable Sites",
+        )),
+    }
+}
+
+fn sites_register(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SitesRegisterArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Site registration arguments do not match the advertised schema",
+        ));
+    };
+    match state.runtime.register_site(&SiteRegistrationRequest {
+        id: request.site_id,
+        project_id: request.project_id,
+        display_name: request.display_name,
+        environment: request.environment,
+        public_url: request.public_url,
+        health_url: request.health_url,
+        hosting_provider: request.hosting_provider,
+        deployment_command: request.deployment_command,
+        credential_reference: request.credential_reference,
+        state: request.state,
+    }) {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(site_error(&error, "register")),
+    }
+}
+
+async fn sites_health(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SitesHealthArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Site health arguments are invalid",
+        ));
+    };
+    match state
+        .runtime
+        .check_site_health(request.site_id, request.check_id)
+        .await
+    {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(site_error(&error, "check")),
+    }
+}
+
+async fn sites_deploy(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SitesDeployArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Site deployment arguments are invalid",
+        ));
+    };
+    match state
+        .runtime
+        .deploy_site(request.site_id, request.deployment_id, request.task_id)
+        .await
+    {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(site_error(&error, "deploy")),
+    }
+}
+
+fn site_error(error: &mcg_runtime::RuntimeError, operation: &str) -> Value {
+    if error.is_not_found() {
+        tool_error(
+            "site_not_found",
+            "The requested Site or project is not known to MCG",
+        )
+    } else if matches!(
+        error,
+        mcg_runtime::RuntimeError::Tool(mcg_tools::ToolError::ApprovalRequired { .. })
+    ) {
+        tool_error("approval_required", &error.to_string())
+    } else if error.is_conflict() {
+        tool_error(
+            "conflict",
+            &format!("MCG could not {operation} the Site due to identity conflict"),
+        )
+    } else if error.is_invalid_request() {
+        tool_error(
+            "invalid_arguments",
+            &format!("MCG could not {operation} the Site definition"),
+        )
+    } else {
+        tool_error(
+            "runtime_error",
+            &format!("MCG could not {operation} the Site"),
+        )
+    }
+}
+
 fn frame_metadata(frame: &mcg_tools::ComputerUseFrame) -> Value {
     json!({
         "observation": frame.observation,
@@ -1333,6 +1571,52 @@ struct ComputerActionsArguments {
 #[serde(deny_unknown_fields)]
 struct BrowserSessionArguments {
     session_id: PlatformSessionId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SitesListArguments {
+    #[serde(default)]
+    site_id: Option<SiteId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SitesRegisterArguments {
+    site_id: SiteId,
+    project_id: ProjectId,
+    display_name: String,
+    environment: SiteEnvironment,
+    public_url: String,
+    health_url: String,
+    hosting_provider: String,
+    #[serde(default)]
+    deployment_command: Option<SiteDeploymentCommand>,
+    #[serde(default)]
+    credential_reference: Option<String>,
+    #[serde(default = "default_site_state")]
+    state: SiteState,
+}
+
+const fn default_site_state() -> SiteState {
+    SiteState::Active
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SitesHealthArguments {
+    site_id: SiteId,
+    check_id: SiteHealthCheckId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)] // Exact public MCP field names are part of the wire contract.
+struct SitesDeployArguments {
+    site_id: SiteId,
+    deployment_id: SiteDeploymentId,
+    #[serde(default)]
+    task_id: Option<TaskId>,
 }
 
 fn query_run(

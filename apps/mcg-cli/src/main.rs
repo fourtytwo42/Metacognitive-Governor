@@ -5,15 +5,17 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mcg_agents::{AgentRunState, RoleKind, SuccessCondition, TaskComplexity};
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
-    AttachBrowserSessionRequest, CorrectMemoryClaimRequest, CreateMemoryClaimRequest,
-    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
-    CreateTaskRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
-    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    AttachBrowserSessionRequest, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateSiteRequest, CreateTaskRequest, DeploySiteRequest,
+    DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest, LaunchTaskRequest,
+    LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
+    MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationListResponse,
+    OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, ProjectHistoryResponse,
     ProjectListResponse, ProviderListResponse, ResolveApprovalRequest, ScheduleHistoryResponse,
     ScheduleListResponse, SchedulerNotificationListResponse, SetScheduleStateRequest,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
     StartOpenAiOAuthRequest, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
     ToolAuditResponse, TransitionAgentRunRequest, TransitionMemoryClaimRequest,
     TransitionTaskRequest, WakeScheduleRequest,
@@ -23,7 +25,8 @@ use mcg_domain::{
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId,
     NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
     PlatformSessionId, PlatformSessionKind, ProjectId, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, TaskEnvelope, TaskId,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, TaskEnvelope, TaskId,
     TaskState, WorkItemId,
 };
 use mcg_mcp::{
@@ -39,6 +42,7 @@ use mcg_runtime::{
     AgentRunView, AgentTurnCommit, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, ProjectMutation, ProviderMutation, RuntimeStatus,
+    SiteDeploymentMutation, SiteHealthMutation,
 };
 use mcg_tools::{
     ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
@@ -140,6 +144,81 @@ enum Command {
         #[command(subcommand)]
         command: PlatformCommand,
     },
+    /// Register, inspect, monitor, and deploy durable Sites.
+    Site {
+        #[command(subcommand)]
+        command: SiteCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SiteCommand {
+    /// List all durable Sites.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one Site and all immutable revision, health, and deployment history.
+    Show { id: String },
+    /// Register one project-bound Site with an optional structured deployment command.
+    Register {
+        display_name: String,
+        project_id: String,
+        public_url: String,
+        health_url: String,
+        hosting_provider: String,
+        #[arg(long)]
+        site_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = SiteEnvironmentArg::Production)]
+        environment: SiteEnvironmentArg,
+        #[arg(long)]
+        deploy_executable: Option<String>,
+        #[arg(long = "deploy-arg")]
+        deploy_arguments: Vec<String>,
+        #[arg(long, default_value = "")]
+        deploy_cwd: String,
+        #[arg(long)]
+        credential_reference: Option<String>,
+        #[arg(long)]
+        monitoring_paused: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run or replay one bounded health check.
+    Health {
+        id: String,
+        #[arg(long)]
+        check_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request or replay one approval-governed deployment.
+    Deploy {
+        id: String,
+        #[arg(long)]
+        deployment_id: Option<String>,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SiteEnvironmentArg {
+    Development,
+    Preview,
+    Production,
+}
+
+impl From<SiteEnvironmentArg> for SiteEnvironment {
+    fn from(value: SiteEnvironmentArg) -> Self {
+        match value {
+            SiteEnvironmentArg::Development => Self::Development,
+            SiteEnvironmentArg::Preview => Self::Preview,
+            SiteEnvironmentArg::Production => Self::Production,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -883,8 +962,206 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Platform { command } => {
             run_platform(&client, host, token.trim(), command).await?;
         }
+        Command::Site { command } => {
+            run_site(&client, host, token.trim(), command).await?;
+        }
     }
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keeps the consumer Site command-to-HTTP contract auditable in one place.
+async fn run_site(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: SiteCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        SiteCommand::List { json } => {
+            let response: SiteListResponse = client
+                .get(format!("{host}/api/v1/sites"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.sites.is_empty() {
+                println!("No Sites registered");
+            } else {
+                for site in response.sites {
+                    println!(
+                        "{}  {}  {:?}  {}",
+                        site.id, site.display_name, site.state, site.public_url
+                    );
+                }
+            }
+        }
+        SiteCommand::Show { id } => {
+            let id = SiteId::from_str(&id)?;
+            let site: Site = client
+                .get(format!("{host}/api/v1/sites/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let revisions: SiteRevisionListResponse = client
+                .get(format!("{host}/api/v1/sites/{id}/revisions"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let health: SiteHealthListResponse = client
+                .get(format!("{host}/api/v1/sites/{id}/health"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let deployments: SiteDeploymentListResponse = client
+                .get(format!("{host}/api/v1/sites/{id}/deployments"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "site": site,
+                    "revisions": revisions.revisions,
+                    "health_checks": health.checks,
+                    "deployments": deployments.deployments
+                }))?
+            );
+        }
+        SiteCommand::Register {
+            display_name,
+            project_id,
+            public_url,
+            health_url,
+            hosting_provider,
+            site_id,
+            environment,
+            deploy_executable,
+            deploy_arguments,
+            deploy_cwd,
+            credential_reference,
+            monitoring_paused,
+            json,
+        } => {
+            let site_id = site_id
+                .map(|value| SiteId::from_str(&value))
+                .transpose()?
+                .unwrap_or_else(SiteId::new);
+            if deploy_executable.is_none() && !deploy_arguments.is_empty() {
+                return Err("--deploy-arg requires --deploy-executable".into());
+            }
+            let deployment_command = deploy_executable.map(|executable| SiteDeploymentCommand {
+                executable,
+                arguments: deploy_arguments,
+                working_directory: deploy_cwd,
+            });
+            let site: Site = client
+                .post(format!("{host}/api/v1/sites"))
+                .bearer_auth(token)
+                .json(&CreateSiteRequest {
+                    site_id,
+                    project_id: ProjectId::from_str(&project_id)?,
+                    display_name,
+                    environment: environment.into(),
+                    public_url,
+                    health_url,
+                    hosting_provider,
+                    deployment_command,
+                    credential_reference,
+                    state: if monitoring_paused {
+                        SiteState::MonitoringPaused
+                    } else {
+                        SiteState::Active
+                    },
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&site)?);
+            } else {
+                println!("{}: registered {}", site.id, site.public_url);
+            }
+        }
+        SiteCommand::Health { id, check_id, json } => {
+            let id = SiteId::from_str(&id)?;
+            let check_id = check_id
+                .map(|value| SiteHealthCheckId::from_str(&value))
+                .transpose()?
+                .unwrap_or_else(SiteHealthCheckId::new);
+            let mutation: SiteHealthMutation = client
+                .post(format!("{host}/api/v1/sites/{id}/health"))
+                .bearer_auth(token)
+                .json(&CheckSiteHealthRequest { check_id })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}: {:?}{}",
+                    mutation.check.id,
+                    mutation.check.state,
+                    if mutation.replayed { " (replay)" } else { "" }
+                );
+            }
+        }
+        SiteCommand::Deploy {
+            id,
+            deployment_id,
+            task_id,
+            json,
+        } => {
+            let id = SiteId::from_str(&id)?;
+            let deployment_id = deployment_id
+                .map(|value| SiteDeploymentId::from_str(&value))
+                .transpose()?
+                .unwrap_or_else(SiteDeploymentId::new);
+            let mutation: SiteDeploymentMutation = client
+                .post(format!("{host}/api/v1/sites/{id}/deployments"))
+                .bearer_auth(token)
+                .json(&DeploySiteRequest {
+                    deployment_id,
+                    task_id: task_id.map(|value| TaskId::from_str(&value)).transpose()?,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}: {:?}{}",
+                    mutation.deployment.id,
+                    mutation.deployment.state,
+                    if mutation.replayed { " (replay)" } else { "" }
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3053,6 +3330,64 @@ mod tests {
             navigate.command,
             Command::Platform {
                 command: PlatformCommand::Navigate { json: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn site_commands_preserve_caller_identity_and_structured_deployment() {
+        let site_id = "00000000-0000-4000-8000-000000000099";
+        let project_id = "00000000-0000-4000-8000-000000000001";
+        let register = Cli::try_parse_from([
+            "mcg",
+            "site",
+            "register",
+            "Production",
+            project_id,
+            "https://example.com",
+            "https://example.com/health",
+            "fixture",
+            "--site-id",
+            site_id,
+            "--deploy-executable",
+            "npm",
+            "--deploy-arg",
+            "run",
+            "--deploy-arg",
+            "deploy",
+            "--deploy-cwd",
+            "web",
+        ])
+        .expect("Site registration command");
+        assert!(matches!(
+            register.command,
+            Command::Site {
+                command: SiteCommand::Register {
+                    site_id: Some(id),
+                    deploy_executable: Some(executable),
+                    deploy_arguments,
+                    deploy_cwd,
+                    ..
+                }
+            } if id == site_id
+                && executable == "npm"
+                && deploy_arguments == ["run", "deploy"]
+                && deploy_cwd == "web"
+        ));
+        let deploy = Cli::try_parse_from([
+            "mcg",
+            "site",
+            "deploy",
+            site_id,
+            "--deployment-id",
+            "00000000-0000-4000-8000-000000000100",
+            "--json",
+        ])
+        .expect("Site deployment command");
+        assert!(matches!(
+            deploy.command,
+            Command::Site {
+                command: SiteCommand::Deploy { json: true, .. }
             }
         ));
     }

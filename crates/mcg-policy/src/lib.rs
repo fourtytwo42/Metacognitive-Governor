@@ -61,6 +61,7 @@ pub enum ResourceKind {
     Constitution,
     Credential,
     ComputerSession,
+    Site,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +100,8 @@ pub struct CapabilityPolicy {
     #[serde(default)]
     pub allowed_computer_sessions: Vec<String>,
     #[serde(default)]
+    pub allowed_sites: Vec<String>,
+    #[serde(default)]
     pub memory_read_prefixes: Vec<String>,
     #[serde(default)]
     pub memory_write_prefixes: Vec<String>,
@@ -133,6 +136,7 @@ impl CapabilityPolicy {
             allowed_network_origins: Vec::new(),
             allowed_environment_variables: Vec::new(),
             allowed_computer_sessions: Vec::new(),
+            allowed_sites: Vec::new(),
             memory_read_prefixes: vec!["project/".into(), "task/".into()],
             memory_write_prefixes: vec!["project/".into(), "task/".into()],
             allow_shell: false,
@@ -333,17 +337,26 @@ pub fn evaluate_capability(
                 "constitution.secret_path",
             );
         }
-        if constitution
+    }
+
+    if !capability_contains(capabilities, request) {
+        return PolicyDecision::deny(
+            "the requested resource is outside the caller capability scope",
+            "capability.scope",
+        );
+    }
+
+    if matches!(request.kind, ResourceKind::File | ResourceKind::Directory)
+        && constitution
             .protected_paths
             .iter()
-            .any(|scope| resource.starts_with(scope))
-            && request.effect != CapabilityEffect::Read
-        {
-            return PolicyDecision::approval(
-                "modifying a protected path requires owner approval",
-                "constitution.protected_path",
-            );
-        }
+            .any(|scope| Path::new(&request.resource).starts_with(scope))
+        && request.effect != CapabilityEffect::Read
+    {
+        return PolicyDecision::approval(
+            "modifying a protected path requires owner approval",
+            "constitution.protected_path",
+        );
     }
 
     if request.effect == CapabilityEffect::Delete {
@@ -362,13 +375,6 @@ pub fn evaluate_capability(
         return PolicyDecision::approval(
             "privilege elevation requires owner approval",
             "constitution.elevation_approval",
-        );
-    }
-
-    if !capability_contains(capabilities, request) {
-        return PolicyDecision::deny(
-            "the requested resource is outside the caller capability scope",
-            "capability.scope",
         );
     }
 
@@ -438,6 +444,10 @@ fn capability_contains(policy: &CapabilityPolicy, request: &CapabilityRequest) -
             .allowed_computer_sessions
             .iter()
             .any(|session| session == &request.resource),
+        ResourceKind::Site => policy
+            .allowed_sites
+            .iter()
+            .any(|site| site == &request.resource),
         ResourceKind::Constitution | ResourceKind::Credential => false,
     }
 }
@@ -638,5 +648,25 @@ mod tests {
             ),
             PolicyDecision::RequireApproval { .. }
         ));
+    }
+
+    #[test]
+    fn approval_class_effects_cannot_bypass_capability_scope() {
+        let capabilities = CapabilityPolicy::project("/project");
+        let constitution = OwnerConstitution::secure_defaults();
+        for effect in [CapabilityEffect::Delete, CapabilityEffect::Publish] {
+            let decision = evaluate_capability(
+                AutonomyPreset::Autonomous,
+                &constitution,
+                &capabilities,
+                &capability_request(
+                    ActionClass::ExternalPublication,
+                    effect,
+                    ResourceKind::File,
+                    "/outside/release",
+                ),
+            );
+            assert!(matches!(decision, PolicyDecision::Deny { .. }));
+        }
     }
 }

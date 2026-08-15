@@ -10,6 +10,10 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
 
   await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
+  const sites = page.getByRole("region", { name: "Sites" });
+  await expect(sites.getByRole("heading", { name: "Web properties" })).toBeVisible();
+  await expect(sites.getByLabel("Deployment executable")).toBeVisible();
+  await expect(sites.getByText(/Retry identity:/)).toBeVisible();
   await expect(page.getByLabel("Connection id")).toBeVisible();
   await expect(page.getByLabel("Protocol")).toHaveValue("auto");
   const scheduler = page.getByRole("region", { name: "Scheduler" });
