@@ -9,6 +9,7 @@ Durable project context lives here. Update this file whenever information should
 - Last meaningful change: Source commit `9cec1c69` adds a cross-platform optimized-daemon release soak/forced-crash gate; its exact 2,000-task, 60-second lane passed on Windows and Ubuntu with bounded startup, p95 latency, throughput, RSS, exact restart recovery, and clean SQLite/schema diagnostics.
 - Next step: Request/consume action-time confirmation, then launch the hash-verified `MCG_0.1.0_x64-setup (1).exe` on Win11-VM and perform native package UAT. Continue Ubuntu bubblewrap 0.11.2+ qualification and live provider/OAuth gates without weakening the OS sandbox.
 - Blockers: The current `4f8cfa3` installer is hash-verified on the unlocked Win11-VM, but launching newly transferred software through UI automation requires explicit action-time confirmation. Ubuntu is reachable noninteractively with the existing dedicated `mcg_m1_vm` SSH key (last verified 2026-08-15).
+- Ongoing verification (started 2026-08-15 08:58 America/Chicago): exact `9cec1c6` one-hour/10,000-task release soak lanes are running locally on Windows (controller PID `129648`, `target/soak-windows-1h.{stdout,stderr}.log`) and on Ubuntu (controller PID `1165175`, `/home/hendo420/mcg-soak-1h.log`). Recheck process identity and logs before relying on these volatile PIDs; update this handoff when they finish.
 
 ## Current State
 
