@@ -21,6 +21,32 @@ const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-
 if (JSON.stringify(config.bundle.externalBin) !== JSON.stringify(expectedSidecars)) {
   throw new Error("The installer sidecar contract changed or is incomplete.");
 }
+const expectedIcons = [
+  "icons/32x32.png",
+  "icons/128x128.png",
+  "icons/128x128@2x.png",
+  "icons/icon.icns",
+  "icons/icon.ico"
+];
+if (JSON.stringify(config.bundle.icon) !== JSON.stringify(expectedIcons)) {
+  throw new Error("The production bundle must explicitly declare the cross-platform icon set.");
+}
+for (const icon of expectedIcons) {
+  const iconPath = path.join(root, "apps/desktop/src-tauri", icon);
+  await access(iconPath, constants.R_OK);
+  if (path.extname(icon) === ".png") {
+    const bytes = await readFile(iconPath);
+    const pngSignature = "89504e470d0a1a0a";
+    if (bytes.length < 24 || bytes.subarray(0, 8).toString("hex") !== pngSignature) {
+      throw new Error(`Production bundle icon is not a valid PNG: ${icon}`);
+    }
+    const width = bytes.readUInt32BE(16);
+    const height = bytes.readUInt32BE(20);
+    if (width === 0 || width !== height) {
+      throw new Error(`AppImage requires a non-empty square PNG icon: ${icon}`);
+    }
+  }
+}
 for (const resource of ["../../../THIRD_PARTY_NOTICES.md", "../../../licenses/Apache-2.0.txt"]) {
   if (!config.bundle.resources?.includes(resource)) throw new Error(`Installer resource missing: ${resource}`);
 }
