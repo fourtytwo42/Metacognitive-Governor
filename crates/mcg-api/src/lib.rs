@@ -3037,10 +3037,20 @@ async fn retry_task(
         .retry_consumer_evaluation(task_id)
         .map_err(map_runtime_error)?
         .is_some();
-    let view = state
+    let mut view = state
         .runtime
         .agent_run_view(run_id)
         .map_err(map_runtime_error)?;
+    if view.run.state == AgentRunState::Recovering {
+        state
+            .runtime
+            .transition_agent_run(run_id, AgentRunState::Running, view.run.metrics.clone())
+            .map_err(map_runtime_error)?;
+        view = state
+            .runtime
+            .agent_run_view(run_id)
+            .map_err(map_runtime_error)?;
+    }
     if view.run.state != AgentRunState::Running {
         return Err(ApiError::conflict(
             "consumer retry requires a running durable run",
@@ -8731,6 +8741,13 @@ form.addEventListener('submit', (event) => {
             LaunchExecution::Blocked { .. }
         ));
         assert_eq!(runtime.organizations().expect("organizations").len(), 1);
+        runtime
+            .transition_agent_run(
+                launched.run.run.id,
+                AgentRunState::Recovering,
+                launched.run.run.metrics.clone(),
+            )
+            .expect("simulate daemon-recovered consumer run");
         let retried = router(runtime.clone())
             .oneshot(
                 authorized(Request::post(format!("/api/v1/tasks/{}/retry", task.id)))
@@ -8759,6 +8776,7 @@ form.addEventListener('submit', (event) => {
         )
         .expect("retry response body");
         assert_eq!(retried.run.run.id, launched.run.run.id);
+        assert_eq!(retried.run.run.state, AgentRunState::Running);
         assert_eq!(retried.task.state, TaskState::Blocked);
         assert!(matches!(retried.execution, LaunchExecution::Blocked { .. }));
         let cancelled = router(runtime.clone())
