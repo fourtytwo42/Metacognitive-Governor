@@ -5684,6 +5684,7 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Covers authentication, replay, plugin evidence, listing, and secret exclusion.
     async fn portable_backups_are_authenticated_idempotent_and_secret_free() {
         let temporary = tempfile::tempdir().expect("backup tempdir");
         let config = AppConfig::default().with_data_directory(temporary.path());
@@ -5691,6 +5692,32 @@ form.addEventListener('submit', (event) => {
         runtime
             .create_task(&TaskEnvelope::new("preserve this task"))
             .expect("task");
+        let module = br#"(module (func (export "_start")))"#;
+        let plugin = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: mcg_domain::PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: mcg_plugin_protocol::PLUGIN_SCHEMA_VERSION,
+                id: "example.backup-plugin".into(),
+                display_name: "Backup plugin fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        runtime
+            .install_sandboxed_plugin(&plugin, module)
+            .expect("install backup plugin");
         let token = runtime.auth().token_for_local_client().to_owned();
         let app = router(runtime);
         let backup_id = uuid::Uuid::new_v4();
@@ -5728,6 +5755,9 @@ form.addEventListener('submit', (event) => {
                 .iter()
                 .any(|entry| entry.path == "state/mcg.sqlite3")
         );
+        assert!(created.manifest.entries.iter().any(|entry| {
+            entry.sha256 == plugin.module_sha256 && entry.size_bytes == plugin.module_size_bytes
+        }));
 
         let replay = app
             .clone()

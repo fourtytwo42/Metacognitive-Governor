@@ -295,6 +295,14 @@ same durable head. CLI parser/integration tests keep install, grant, enable,
 invoke, and history operations explicit; desktop component tests prove an owner
 cannot enable a capability-bearing plugin until an exact scope has been granted.
 
+Portable-backup tests install and enable a real catalog revision, record a
+successful invocation, then prove the bundle contains the exact module and
+result artifacts. Offline restore retains immutable revision/invocation history
+and destination credentials while incrementing and disabling the restored
+installation head. Missing modules, broken foreign keys, inconsistent typed JSON
+projections, and missing successful-result artifacts fail verification before a
+database swap.
+
 Capability-grant storage tests prove strict manifest subsets, exact scope
 normalization, optimistic conflicts, enable refusal for incomplete grants,
 disable-on-change, and reopen durability. Protocol tests reject undeclared

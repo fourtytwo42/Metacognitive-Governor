@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -7,12 +7,21 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use rusqlite::{Connection, MAIN_DB, OpenFlags};
+use mcg_domain::{
+    PluginInstallation, PluginInvocationRecord, PluginInvocationState, PluginRevision,
+};
+use rusqlite::{Connection, MAIN_DB, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError};
+use crate::{
+    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
+    plugins::{
+        validate_plugin_backup_head, validate_plugin_invocation_backup_record,
+        validate_plugin_revision,
+    },
+};
 
 pub const BACKUP_BUNDLE_SCHEMA_VERSION: u16 = 1;
 const MAGIC: &[u8; 8] = b"MCGB0001";
@@ -157,6 +166,7 @@ pub fn create_backup_bundle_from_snapshot(
         for (path, source) in &sources {
             entries.push(inspect_source(path, source)?);
         }
+        validate_plugin_catalog_backup(snapshot, &entries)?;
         let manifest = BackupBundleManifest {
             schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             application_version: application_version.to_owned(),
@@ -232,6 +242,7 @@ pub fn verify_backup_bundle(path: &Path) -> Result<BackupBundleSummary, StorageE
         ));
     }
     let (manifest, header_bytes) = read_header(&mut input)?;
+    let mut database = tempfile::NamedTempFile::new()?;
     let mut bundle_digest = Sha256::new();
     bundle_digest.update(MAGIC);
     bundle_digest.update(header_bytes);
@@ -245,6 +256,9 @@ pub fn verify_backup_bundle(path: &Path) -> Result<BackupBundleSummary, StorageE
             input.read_exact(&mut buffer[..wanted])?;
             entry_digest.update(&buffer[..wanted]);
             bundle_digest.update(&buffer[..wanted]);
+            if entry.path == DATABASE_ENTRY {
+                database.as_file_mut().write_all(&buffer[..wanted])?;
+            }
             remaining -= u64::try_from(wanted)
                 .map_err(|_| StorageError::InvalidData("backup entry size overflow".into()))?;
         }
@@ -256,6 +270,9 @@ pub fn verify_backup_bundle(path: &Path) -> Result<BackupBundleSummary, StorageE
             "backup bundle contains trailing bytes".into(),
         ));
     }
+    database.as_file_mut().flush()?;
+    validate_restored_database(database.path())?;
+    validate_plugin_catalog_backup(database.path(), &manifest.entries)?;
     Ok(BackupBundleSummary {
         path: path.to_path_buf(),
         sha256: format!("{:x}", bundle_digest.finalize()),
@@ -285,6 +302,7 @@ pub fn restore_backup_bundle(
         let restored_database =
             staging.join(DATABASE_ENTRY.replace('/', std::path::MAIN_SEPARATOR_STR));
         validate_restored_database(&restored_database)?;
+        disable_restored_plugins(&restored_database, now)?;
         merge_restored_artifacts(
             &staging.join("artifacts"),
             &data_directory.join("artifacts"),
@@ -573,7 +591,316 @@ fn validate_restored_database(path: &Path) -> Result<(), StorageError> {
             "backup database schema version {newest} is newer than supported version {STORAGE_SCHEMA_VERSION}"
         )));
     }
+    let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
+    if foreign_keys.query([])?.next()?.is_some() {
+        return Err(StorageError::InvalidData(
+            "backup database contains broken foreign-key references".into(),
+        ));
+    }
     Ok(())
+}
+
+fn validate_plugin_catalog_backup(
+    database: &Path,
+    entries: &[BackupBundleEntry],
+) -> Result<(), StorageError> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if !table_exists(&connection, "plugin_revisions")? {
+        return Ok(());
+    }
+    if !table_exists(&connection, "plugin_installations")? {
+        return Err(StorageError::InvalidData(
+            "backup plugin catalog is incomplete".into(),
+        ));
+    }
+    let artifacts = entries
+        .iter()
+        .filter(|entry| entry.path != DATABASE_ENTRY)
+        .map(|entry| (entry.sha256.as_str(), entry.size_bytes))
+        .collect::<BTreeMap<_, _>>();
+    let mut revisions = BTreeMap::new();
+    let mut statement = connection.prepare(
+        "SELECT revision_id, plugin_id, module_sha256, revision_json, installed_at
+         FROM plugin_revisions ORDER BY revision_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (revision_id, plugin_id, module_sha256, revision_json, installed_at) = row?;
+        let revision: PluginRevision = serde_json::from_str(&revision_json)?;
+        validate_plugin_revision(&revision)?;
+        if revision.id.to_string() != revision_id
+            || revision.manifest.id != plugin_id
+            || revision.module_sha256 != module_sha256
+            || revision.installed_at.to_rfc3339() != installed_at
+            || artifacts.get(revision.module_sha256.as_str()) != Some(&revision.module_size_bytes)
+            || revisions.insert(revision_id, revision).is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "backup plugin revision or module evidence is inconsistent".into(),
+            ));
+        }
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT plugin_id, active_revision_id, enabled, revision, installation_json, updated_at
+         FROM plugin_installations ORDER BY plugin_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (plugin_id, active_revision_id, enabled, revision_number, json, updated_at) = row?;
+        let installation: PluginInstallation = serde_json::from_str(&json)?;
+        let revision = revisions.get(&active_revision_id).ok_or_else(|| {
+            StorageError::InvalidData("backup plugin head references a missing revision".into())
+        })?;
+        let stored_revision = u64::try_from(revision_number).map_err(|_| {
+            StorageError::InvalidData("backup plugin head revision is invalid".into())
+        })?;
+        if installation.plugin_id != plugin_id
+            || installation.active_revision_id.to_string() != active_revision_id
+            || i64::from(installation.enabled) != enabled
+            || installation.revision != stored_revision
+            || installation.updated_at.to_rfc3339() != updated_at
+        {
+            return Err(StorageError::InvalidData(
+                "backup plugin installation projection is inconsistent".into(),
+            ));
+        }
+        validate_plugin_backup_head(&installation, revision)?;
+    }
+    validate_plugin_invocation_backup(&connection, &revisions, &artifacts)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keeps projection/history/artifact agreement in one audit boundary.
+fn validate_plugin_invocation_backup(
+    connection: &Connection,
+    revisions: &BTreeMap<String, PluginRevision>,
+    artifacts: &BTreeMap<&str, u64>,
+) -> Result<(), StorageError> {
+    if !table_exists(connection, "plugin_invocations")?
+        || !table_exists(connection, "plugin_invocation_events")?
+    {
+        return Err(StorageError::InvalidData(
+            "backup plugin invocation history is incomplete".into(),
+        ));
+    }
+    let mut statement = connection.prepare(
+        "SELECT invocation_id, plugin_id, plugin_revision_id, state, invocation_json
+         FROM plugin_invocations ORDER BY invocation_id",
+    )?;
+    let mut projections = BTreeMap::<String, PluginInvocationRecord>::new();
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (invocation_id, plugin_id, revision_id, state, json) = row?;
+        let invocation: PluginInvocationRecord = serde_json::from_str(&json)?;
+        validate_plugin_invocation_backup_record(&invocation)?;
+        validate_plugin_invocation_identity(
+            &invocation,
+            &invocation_id,
+            &plugin_id,
+            &revision_id,
+            &state,
+            revisions,
+            artifacts,
+        )?;
+        if projections.insert(invocation_id, invocation).is_some() {
+            return Err(StorageError::InvalidData(
+                "backup contains duplicate plugin invocation projections".into(),
+            ));
+        }
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT invocation_id, state, invocation_json
+         FROM plugin_invocation_events ORDER BY sequence",
+    )?;
+    let mut histories = BTreeMap::<String, Vec<PluginInvocationRecord>>::new();
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (invocation_id, state, json) = row?;
+        let invocation: PluginInvocationRecord = serde_json::from_str(&json)?;
+        validate_plugin_invocation_backup_record(&invocation)?;
+        let revision_id = invocation.plugin_revision_id.to_string();
+        validate_plugin_invocation_identity(
+            &invocation,
+            &invocation_id,
+            &invocation.plugin_id,
+            &revision_id,
+            &state,
+            revisions,
+            artifacts,
+        )?;
+        histories.entry(invocation_id).or_default().push(invocation);
+    }
+    if projections.len() != histories.len() {
+        return Err(StorageError::InvalidData(
+            "backup plugin invocation history is incomplete".into(),
+        ));
+    }
+    for (invocation_id, projection) in projections {
+        let history = histories.get(&invocation_id).ok_or_else(|| {
+            StorageError::InvalidData("backup plugin invocation history is missing".into())
+        })?;
+        let history_shape_is_valid = history.first().is_some_and(|record| {
+            record.state == PluginInvocationState::Running
+                && record.result_sha256.is_none()
+                && record.error_code.is_none()
+                && record.completed_at.is_none()
+        }) && match history.as_slice() {
+            [running] => {
+                projection.state == PluginInvocationState::Running && &projection == running
+            }
+            [running, terminal] => {
+                terminal.state.is_terminal()
+                    && running.id == terminal.id
+                    && running.plugin_id == terminal.plugin_id
+                    && running.plugin_revision_id == terminal.plugin_revision_id
+                    && running.task_id == terminal.task_id
+                    && running.input_sha256 == terminal.input_sha256
+                    && running.started_at == terminal.started_at
+                    && &projection == terminal
+            }
+            _ => false,
+        };
+        if !history_shape_is_valid {
+            return Err(StorageError::InvalidData(
+                "backup plugin invocation projection and history disagree".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors the durable projection columns being cross-checked.
+fn validate_plugin_invocation_identity(
+    invocation: &PluginInvocationRecord,
+    invocation_id: &str,
+    plugin_id: &str,
+    revision_id: &str,
+    state: &str,
+    revisions: &BTreeMap<String, PluginRevision>,
+    artifacts: &BTreeMap<&str, u64>,
+) -> Result<(), StorageError> {
+    let revision = revisions.get(revision_id).ok_or_else(|| {
+        StorageError::InvalidData("backup plugin invocation references a missing revision".into())
+    })?;
+    let result_is_present = invocation
+        .result_sha256
+        .as_deref()
+        .is_none_or(|digest| artifacts.contains_key(digest));
+    if invocation.id.to_string() != invocation_id
+        || invocation.plugin_id != plugin_id
+        || invocation.plugin_revision_id.to_string() != revision_id
+        || revision.manifest.id != invocation.plugin_id
+        || plugin_invocation_state(invocation.state) != state
+        || !result_is_present
+    {
+        return Err(StorageError::InvalidData(
+            "backup plugin invocation evidence is inconsistent".into(),
+        ));
+    }
+    Ok(())
+}
+
+const fn plugin_invocation_state(state: PluginInvocationState) -> &'static str {
+    match state {
+        PluginInvocationState::Running => "running",
+        PluginInvocationState::Succeeded => "succeeded",
+        PluginInvocationState::Failed => "failed",
+        PluginInvocationState::Uncertain => "uncertain",
+    }
+}
+
+fn disable_restored_plugins(database: &Path, now: DateTime<Utc>) -> Result<(), StorageError> {
+    let mut connection = Connection::open(database)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    if !table_exists(&connection, "plugin_installations")? {
+        return Ok(());
+    }
+    let transaction = connection.transaction()?;
+    let installations = {
+        let mut statement = transaction.prepare(
+            "SELECT installation_json FROM plugin_installations
+             WHERE enabled = 1 ORDER BY plugin_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for json in installations {
+        let mut installation: PluginInstallation = serde_json::from_str(&json)?;
+        let revision_json = transaction.query_row(
+            "SELECT revision_json FROM plugin_revisions WHERE revision_id = ?1",
+            [installation.active_revision_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )?;
+        let revision: PluginRevision = serde_json::from_str(&revision_json)?;
+        validate_plugin_backup_head(&installation, &revision)?;
+        installation.enabled = false;
+        installation.revision = installation.revision.checked_add(1).ok_or_else(|| {
+            StorageError::InvalidData("restored plugin revision is exhausted".into())
+        })?;
+        installation.updated_at = now;
+        let changed = transaction.execute(
+            "UPDATE plugin_installations
+             SET enabled = 0, revision = ?1, installation_json = ?2, updated_at = ?3
+             WHERE plugin_id = ?4 AND enabled = 1",
+            params![
+                i64::try_from(installation.revision).map_err(|_| {
+                    StorageError::InvalidData("restored plugin revision is invalid".into())
+                })?,
+                serde_json::to_string(&installation)?,
+                installation.updated_at.to_rfc3339(),
+                installation.plugin_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "restored plugin head changed while being disabled".into(),
+            ));
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool, StorageError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )?)
 }
 
 fn merge_restored_artifacts(source: &Path, destination: &Path) -> Result<(), StorageError> {
@@ -696,12 +1023,19 @@ fn sync_parent(_path: &Path) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use mcg_domain::TaskEnvelope;
+    use chrono::Duration;
+    use mcg_domain::{
+        PLUGIN_CATALOG_SCHEMA_VERSION, PluginInstallSource, PluginInvocationId,
+        PluginInvocationRecord, PluginInvocationState, PluginRevision, PluginRevisionId,
+        PluginSignature, PluginSignatureState, TaskEnvelope,
+    };
+    use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest};
     use tempfile::tempdir;
 
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture proves database, module, token, and rollback behavior together.
     fn bundle_round_trip_is_secret_free_tamper_evident_and_restart_durable() {
         let source = tempdir().expect("source tempdir");
         let destination = tempdir().expect("destination tempdir");
@@ -718,12 +1052,84 @@ mod tests {
             .join(&digest);
         fs::create_dir_all(artifact.parent().expect("artifact parent")).expect("artifact dir");
         fs::write(&artifact, artifact_bytes).expect("artifact");
+        let module_bytes = b"\0asm\x01\0\0\0portable-plugin";
+        let module_digest = format!("{:x}", Sha256::digest(module_bytes));
+        let module_artifact = source
+            .path()
+            .join("artifacts")
+            .join(&module_digest[..2])
+            .join(&module_digest);
+        fs::create_dir_all(module_artifact.parent().expect("module parent"))
+            .expect("module directory");
+        fs::write(&module_artifact, module_bytes).expect("plugin module");
+        let installed_at = Utc::now();
+        let plugin = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.portable".into(),
+                display_name: "Portable plugin".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: module_digest.clone(),
+            module_size_bytes: u64::try_from(module_bytes.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at,
+        };
+        let installation = store
+            .install_unsigned_local_plugin_revision(&plugin)
+            .expect("install plugin");
+        let installation = store
+            .set_plugin_enabled(
+                &plugin.manifest.id,
+                installation.revision,
+                true,
+                installed_at + Duration::seconds(1),
+            )
+            .expect("enable plugin");
+        assert!(installation.enabled);
+        let invocation = PluginInvocationRecord {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginInvocationId::new(),
+            plugin_id: plugin.manifest.id.clone(),
+            plugin_revision_id: plugin.id,
+            task_id: None,
+            input_sha256: "b".repeat(64),
+            state: PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at: installed_at + Duration::seconds(2),
+            completed_at: None,
+        };
+        store
+            .begin_plugin_invocation(&invocation)
+            .expect("begin invocation");
+        let mut completed_invocation = invocation.clone();
+        completed_invocation.state = PluginInvocationState::Succeeded;
+        completed_invocation.result_sha256 = Some(digest.clone());
+        completed_invocation.completed_at = Some(installed_at + Duration::seconds(3));
+        store
+            .complete_plugin_invocation(&completed_invocation)
+            .expect("complete invocation");
         fs::write(source.path().join("local-auth-token"), "private-token").expect("token");
 
         let summary =
             create_backup_bundle(&store, source.path(), &backup_path, "0.1.0", Utc::now())
                 .expect("create backup");
         assert!(!summary.manifest.secrets_included);
+        assert!(summary.manifest.entries.iter().any(|entry| {
+            entry.sha256 == module_digest
+                && entry.size_bytes == u64::try_from(module_bytes.len()).expect("module size")
+        }));
         let bytes = fs::read(&backup_path).expect("bundle bytes");
         assert!(!String::from_utf8_lossy(&bytes).contains("private-token"));
         drop(store);
@@ -749,6 +1155,41 @@ mod tests {
         let restored =
             SqliteEventStore::open(destination.path().join("mcg.sqlite3")).expect("reopen");
         assert_eq!(restored.tasks().expect("task read"), vec![task]);
+        assert_eq!(
+            restored
+                .plugin_revision(plugin.id)
+                .expect("plugin revision"),
+            Some(plugin.clone())
+        );
+        let restored_installation = restored
+            .plugin_installation(&plugin.manifest.id)
+            .expect("plugin installation")
+            .expect("restored plugin");
+        assert!(!restored_installation.enabled);
+        assert_eq!(restored_installation.revision, installation.revision + 1);
+        assert_eq!(
+            restored
+                .plugin_invocation(invocation.id)
+                .expect("plugin invocation"),
+            Some(completed_invocation.clone())
+        );
+        assert_eq!(
+            restored
+                .plugin_invocation_history(invocation.id)
+                .expect("plugin invocation history"),
+            vec![invocation, completed_invocation]
+        );
+        assert_eq!(
+            fs::read(
+                destination
+                    .path()
+                    .join("artifacts")
+                    .join(&module_digest[..2])
+                    .join(&module_digest)
+            )
+            .expect("restored plugin module"),
+            module_bytes
+        );
         assert_eq!(
             fs::read(
                 destination
@@ -780,6 +1221,121 @@ mod tests {
         let tampered_path = source.path().join("tampered.mcgb");
         fs::write(&tampered_path, tampered).expect("tampered bundle");
         assert!(verify_backup_bundle(&tampered_path).is_err());
+    }
+
+    #[test]
+    fn backup_refuses_a_plugin_catalog_without_its_exact_module_artifact() {
+        let source = tempdir().expect("source tempdir");
+        let backup_path = source.path().join("backups").join("missing-module.mcgb");
+        let mut store = SqliteEventStore::open(source.path().join("mcg.sqlite3")).expect("store");
+        let plugin = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.missing".into(),
+                display_name: "Missing module".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: "a".repeat(64),
+            module_size_bytes: 8,
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        store
+            .install_unsigned_local_plugin_revision(&plugin)
+            .expect("catalog plugin");
+
+        let error = create_backup_bundle(&store, source.path(), &backup_path, "0.1.0", Utc::now())
+            .expect_err("missing module must fail backup");
+        assert!(error.to_string().contains("module evidence"));
+        assert!(!backup_path.exists());
+    }
+
+    #[test]
+    fn backup_refuses_successful_plugin_history_without_result_evidence() {
+        let source = tempdir().expect("source tempdir");
+        let backup_path = source.path().join("backups").join("missing-result.mcgb");
+        let mut store = SqliteEventStore::open(source.path().join("mcg.sqlite3")).expect("store");
+        let module_bytes = b"\0asm\x01\0\0\0result-fixture";
+        let module_digest = format!("{:x}", Sha256::digest(module_bytes));
+        let module_artifact = source
+            .path()
+            .join("artifacts")
+            .join(&module_digest[..2])
+            .join(&module_digest);
+        fs::create_dir_all(module_artifact.parent().expect("module parent"))
+            .expect("module directory");
+        fs::write(module_artifact, module_bytes).expect("module artifact");
+        let installed_at = Utc::now();
+        let plugin = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.missing_result".into(),
+                display_name: "Missing result".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: module_digest,
+            module_size_bytes: u64::try_from(module_bytes.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at,
+        };
+        let installation = store
+            .install_unsigned_local_plugin_revision(&plugin)
+            .expect("install plugin");
+        store
+            .set_plugin_enabled(
+                &plugin.manifest.id,
+                installation.revision,
+                true,
+                installed_at + Duration::seconds(1),
+            )
+            .expect("enable plugin");
+        let mut invocation = PluginInvocationRecord {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginInvocationId::new(),
+            plugin_id: plugin.manifest.id.clone(),
+            plugin_revision_id: plugin.id,
+            task_id: None,
+            input_sha256: "b".repeat(64),
+            state: PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at: installed_at + Duration::seconds(2),
+            completed_at: None,
+        };
+        store
+            .begin_plugin_invocation(&invocation)
+            .expect("begin invocation");
+        invocation.state = PluginInvocationState::Succeeded;
+        invocation.result_sha256 = Some("c".repeat(64));
+        invocation.completed_at = Some(installed_at + Duration::seconds(3));
+        store
+            .complete_plugin_invocation(&invocation)
+            .expect("complete invocation");
+
+        let error = create_backup_bundle(&store, source.path(), &backup_path, "0.1.0", Utc::now())
+            .expect_err("missing result artifact must fail backup");
+        assert!(error.to_string().contains("invocation evidence"));
+        assert!(!backup_path.exists());
     }
 
     #[test]

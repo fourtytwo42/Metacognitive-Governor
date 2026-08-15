@@ -433,7 +433,7 @@ impl SqliteEventStore {
     }
 }
 
-fn validate_plugin_revision(revision: &PluginRevision) -> Result<(), StorageError> {
+pub(crate) fn validate_plugin_revision(revision: &PluginRevision) -> Result<(), StorageError> {
     revision
         .manifest
         .validate()
@@ -491,6 +491,34 @@ fn validate_plugin_revision(revision: &PluginRevision) -> Result<(), StorageErro
     Ok(())
 }
 
+pub(crate) fn validate_plugin_backup_head(
+    installation: &PluginInstallation,
+    revision: &PluginRevision,
+) -> Result<(), StorageError> {
+    validate_plugin_revision(revision)?;
+    if installation.schema_version != PLUGIN_CATALOG_SCHEMA_VERSION
+        || installation.plugin_id != revision.manifest.id
+        || installation.active_revision_id != revision.id
+        || installation.revision == 0
+        || installation.updated_at < revision.installed_at
+    {
+        return Err(StorageError::InvalidData(
+            "plugin installation backup state is invalid".into(),
+        ));
+    }
+    let mut normalized = installation.capability_grants.clone();
+    normalize_and_validate_plugin_grants(&mut normalized, revision)?;
+    if normalized != installation.capability_grants {
+        return Err(StorageError::InvalidData(
+            "plugin installation grants are not canonical".into(),
+        ));
+    }
+    if installation.enabled {
+        validate_grants_cover_manifest(&installation.capability_grants, revision)?;
+    }
+    Ok(())
+}
+
 fn valid_plugin_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -512,6 +540,16 @@ fn validate_running_invocation(invocation: &PluginInvocationRecord) -> Result<()
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_plugin_invocation_backup_record(
+    invocation: &PluginInvocationRecord,
+) -> Result<(), StorageError> {
+    if invocation.state == PluginInvocationState::Running {
+        validate_running_invocation(invocation)
+    } else {
+        validate_terminal_invocation(invocation)
+    }
 }
 
 fn normalize_and_validate_plugin_grants(

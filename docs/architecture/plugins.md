@@ -149,8 +149,7 @@ large-package upload channel.
 
 Before plugin support is release-qualified, MCG still must add:
 
-- plugin-aware backup/restore, migration, additional adversarial package tests,
-  and native Windows/Linux UAT;
+- additional adversarial package tests and native Windows/Linux UAT;
 - the complete Wasmtime Apache-2.0-with-LLVM-exceptions license in packages that
   contain the runtime.
 

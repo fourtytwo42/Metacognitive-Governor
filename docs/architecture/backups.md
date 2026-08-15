@@ -24,6 +24,15 @@ manifest size, entry size, and total bytes are bounded. Duplicate paths,
 traversal, symlinks, unexpected files, changed sources, truncated bodies,
 trailing bytes, and hash mismatches fail closed.
 
+Plugin catalog evidence has an additional relational check. Every immutable
+plugin revision in the snapshot must decode as a valid sandboxed revision and
+have an exact-size artifact entry at its declared module SHA-256. Installation
+heads, canonical grants, invocation projections, and immutable invocation
+snapshots must agree with their typed JSON and referenced revision. Successful
+invocation result digests must also exist in the bundle. Creation and offline
+verification apply the same checks, so a catalog without its executable or
+result evidence is never represented as a healthy backup.
+
 Creation uses SQLite's online backup API, then writes a create-new temporary
 bundle and atomically renames it after every entry has been re-hashed while
 streaming. A caller-owned UUID provides lost-response replay: creating the same
@@ -44,6 +53,14 @@ existing path has identical bytes. Before swapping the database, MCG moves the
 current database to a uniquely named `backups/pre-restore-*.sqlite3` rollback
 copy. It never deletes that backup. The destination's auth token remains in
 place; credentials are intentionally absent and must be reconnected.
+
+Plugin revisions, invocation history, modules, and result evidence are restored,
+but every enabled plugin head is revisioned back to `disabled` in the staged
+database before it becomes active. This forces an explicit owner review on the
+destination machine, where project paths, available executables, network trust,
+and configured credential references may differ from the source installation.
+The original bundle remains immutable and the rollback database retains the
+pre-restore destination state.
 
 On the next daemon start, ordinary forward migrations and projection recovery
 run against the restored database. Restore never downgrades a newer bundle into
