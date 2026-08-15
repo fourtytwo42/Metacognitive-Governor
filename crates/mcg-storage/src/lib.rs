@@ -30,7 +30,8 @@ pub use agents::{
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
 };
 pub use experiments::{
-    AutomaticSupervisionMutation, CandidateRevisionMutation, ExperimentMutation,
+    AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
+    CandidateRevisionMutation, ExperimentMutation,
 };
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 
@@ -787,6 +788,28 @@ BEFORE DELETE ON supervised_evaluations BEGIN
 END;
 ";
 
+const MIGRATION_22: &str = r"
+CREATE TABLE IF NOT EXISTS automatic_experiment_outcomes (
+    observation_id TEXT PRIMARY KEY,
+    disposition TEXT NOT NULL,
+    candidate_revision_id TEXT,
+    experiment_id TEXT,
+    detail TEXT NOT NULL,
+    processed_at TEXT NOT NULL,
+    FOREIGN KEY(observation_id) REFERENCES supervision_observations(observation_id),
+    FOREIGN KEY(candidate_revision_id) REFERENCES organization_revisions(revision_id),
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE TRIGGER IF NOT EXISTS automatic_experiment_outcomes_no_update
+BEFORE UPDATE ON automatic_experiment_outcomes BEGIN
+    SELECT RAISE(FAIL, 'automatic experiment history is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS automatic_experiment_outcomes_no_delete
+BEFORE DELETE ON automatic_experiment_outcomes BEGIN
+    SELECT RAISE(FAIL, 'automatic experiment history is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -898,6 +921,7 @@ impl SqliteEventStore {
             (19_i64, MIGRATION_19),
             (20_i64, MIGRATION_20),
             (21_i64, MIGRATION_21),
+            (22_i64, MIGRATION_22),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

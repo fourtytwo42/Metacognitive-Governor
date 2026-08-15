@@ -33,7 +33,202 @@ pub struct AutomaticSupervisionMutation {
     pub events: Vec<EventEnvelope>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomaticExperimentDisposition {
+    Ready,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AutomaticExperimentOutcome {
+    pub observation_id: SupervisionObservationId,
+    pub disposition: AutomaticExperimentDisposition,
+    pub candidate_revision_id: Option<OrganizationRevisionId>,
+    pub experiment_id: Option<ExperimentId>,
+    pub detail: String,
+    pub processed_at: chrono::DateTime<chrono::Utc>,
+    pub replayed: bool,
+}
+
 impl SqliteEventStore {
+    /// Lists slow-loop observations that have no durable orchestration outcome.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds, malformed identities, or database failures.
+    pub fn pending_candidate_observation_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SupervisionObservationId>, StorageError> {
+        if limit == 0 || limit > 1_024 {
+            return Err(StorageError::InvalidData(
+                "candidate orchestration batch must contain 1 to 1024 observations".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StorageError::InvalidData("candidate batch is too large".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT o.observation_id FROM supervision_observations o
+             LEFT JOIN automatic_experiment_outcomes a
+               ON a.observation_id = o.observation_id
+             WHERE o.loop_kind = 'slow' AND a.observation_id IS NULL
+             ORDER BY o.observed_at, o.observation_id LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row?.parse().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "observation_id".into(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    /// Loads one immutable automatic candidate-orchestration outcome.
+    ///
+    /// # Errors
+    /// Returns an error when persisted identities, timestamps, or disposition are invalid.
+    pub fn automatic_experiment_outcome(
+        &self,
+        observation_id: SupervisionObservationId,
+    ) -> Result<Option<AutomaticExperimentOutcome>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT disposition, candidate_revision_id, experiment_id, detail, processed_at
+                 FROM automatic_experiment_outcomes WHERE observation_id = ?1",
+                [observation_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(disposition, candidate, experiment, detail, processed_at)| {
+                    Ok(AutomaticExperimentOutcome {
+                        observation_id,
+                        disposition: match disposition.as_str() {
+                            "ready" => AutomaticExperimentDisposition::Ready,
+                            "stale" => AutomaticExperimentDisposition::Stale,
+                            _ => {
+                                return Err(StorageError::InvalidData(
+                                    "invalid automatic experiment disposition".into(),
+                                ));
+                            }
+                        },
+                        candidate_revision_id: candidate
+                            .map(|value| value.parse())
+                            .transpose()
+                            .map_err(|_| {
+                                StorageError::InvalidData("invalid candidate identity".into())
+                            })?,
+                        experiment_id: experiment.map(|value| value.parse()).transpose().map_err(
+                            |_| StorageError::InvalidData("invalid experiment identity".into()),
+                        )?,
+                        detail,
+                        processed_at: chrono::DateTime::parse_from_rfc3339(&processed_at)
+                            .map_err(|_| {
+                                StorageError::InvalidData("invalid orchestration timestamp".into())
+                            })?
+                            .with_timezone(&chrono::Utc),
+                        replayed: true,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    /// Records an immutable outcome after automatic candidate orchestration.
+    ///
+    /// # Errors
+    /// Returns an error for invalid ready/stale shape, missing linked evidence, or drift.
+    pub fn record_automatic_experiment_outcome(
+        &mut self,
+        outcome: &AutomaticExperimentOutcome,
+    ) -> Result<AutomaticExperimentOutcome, StorageError> {
+        if outcome.detail.trim().is_empty() || outcome.detail.len() > 4_096 {
+            return Err(StorageError::InvalidData(
+                "automatic experiment outcome detail is invalid".into(),
+            ));
+        }
+        if let Some(existing) = self.automatic_experiment_outcome(outcome.observation_id)? {
+            let mut expected = outcome.clone();
+            expected.replayed = true;
+            if existing == expected {
+                return Ok(existing);
+            }
+            return Err(StorageError::Conflict(
+                "automatic experiment outcome changed under the same observation".into(),
+            ));
+        }
+        let observation = self
+            .supervision_observation(outcome.observation_id)?
+            .ok_or_else(|| {
+                StorageError::Conflict("supervision observation was not found".into())
+            })?;
+        match outcome.disposition {
+            AutomaticExperimentDisposition::Ready => {
+                let candidate_id = outcome.candidate_revision_id.ok_or_else(|| {
+                    StorageError::InvalidData("ready outcome requires a candidate".into())
+                })?;
+                let experiment_id = outcome.experiment_id.ok_or_else(|| {
+                    StorageError::InvalidData("ready outcome requires an experiment".into())
+                })?;
+                let candidate = self.organization_revision(candidate_id)?.ok_or_else(|| {
+                    StorageError::Conflict("automatic candidate was not found".into())
+                })?;
+                let experiment = self.experiment(experiment_id)?.ok_or_else(|| {
+                    StorageError::Conflict("automatic experiment was not found".into())
+                })?;
+                if experiment.state != ExperimentState::Ready
+                    || experiment.candidate_revision_id != candidate.revision_id
+                    || !experiment.observation_ids.contains(&observation.id)
+                {
+                    return Err(StorageError::Conflict(
+                        "ready outcome does not match its candidate experiment".into(),
+                    ));
+                }
+            }
+            AutomaticExperimentDisposition::Stale => {
+                if outcome.candidate_revision_id.is_some() || outcome.experiment_id.is_some() {
+                    return Err(StorageError::InvalidData(
+                        "stale outcome cannot reference created experiment state".into(),
+                    ));
+                }
+            }
+        }
+        self.connection.execute(
+            "INSERT INTO automatic_experiment_outcomes(
+                observation_id, disposition, candidate_revision_id, experiment_id,
+                detail, processed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                outcome.observation_id.to_string(),
+                match outcome.disposition {
+                    AutomaticExperimentDisposition::Ready => "ready",
+                    AutomaticExperimentDisposition::Stale => "stale",
+                },
+                outcome.candidate_revision_id.map(|id| id.to_string()),
+                outcome.experiment_id.map(|id| id.to_string()),
+                &outcome.detail,
+                outcome.processed_at.to_rfc3339(),
+            ],
+        )?;
+        let mut recorded = outcome.clone();
+        recorded.replayed = false;
+        Ok(recorded)
+    }
+
     /// Loads the immutable automatic-supervision result for one evaluation.
     ///
     /// # Errors
@@ -1240,6 +1435,35 @@ mod tests {
                 now + Duration::seconds(1),
             )
             .expect("ready");
+        let automatic_outcome = AutomaticExperimentOutcome {
+            observation_id: observed.id,
+            disposition: AutomaticExperimentDisposition::Ready,
+            candidate_revision_id: Some(candidate.revision_id),
+            experiment_id: Some(definition.id),
+            detail: "candidate is ready for isolated evaluation".into(),
+            processed_at: now + Duration::seconds(1),
+            replayed: false,
+        };
+        assert!(
+            !store
+                .record_automatic_experiment_outcome(&automatic_outcome)
+                .expect("automatic outcome")
+                .replayed
+        );
+        let mut expected_replay = automatic_outcome.clone();
+        expected_replay.replayed = true;
+        assert_eq!(
+            store
+                .record_automatic_experiment_outcome(&automatic_outcome)
+                .expect("automatic outcome replay"),
+            expected_replay
+        );
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM automatic_experiment_outcomes", [])
+                .is_err()
+        );
         store
             .transition_experiment(
                 definition.id,
@@ -1305,6 +1529,18 @@ mod tests {
                 .experiment_decisions(definition.id)
                 .expect("decisions"),
             vec![promote, revert]
+        );
+        assert_eq!(
+            reopened
+                .automatic_experiment_outcome(observed.id)
+                .expect("automatic outcome"),
+            Some(expected_replay)
+        );
+        assert!(
+            reopened
+                .pending_candidate_observation_ids(8)
+                .expect("pending candidates")
+                .is_empty()
         );
     }
 

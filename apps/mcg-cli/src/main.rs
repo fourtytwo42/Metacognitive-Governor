@@ -2473,6 +2473,14 @@ async fn run_status(
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
         println!("{} {} ({:?})", status.service, status.version, status.state);
+        println!(
+            "automatic shadow experiments: {}",
+            if status.shadow_experiments {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
     Ok(())
 }

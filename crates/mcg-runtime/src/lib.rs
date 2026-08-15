@@ -21,20 +21,21 @@ use mcg_agents::{
     AgentTurnCheckpointSink, AgentTurnEngine, AgentTurnError, AgentTurnRequest, AgentTurnResult,
     AgentUsageRecord, ConditionResult, ConfidenceEstimate, EvaluationEvidence, EvaluationOutcome,
     EvaluationReport, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
-    ExperimentState, ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics,
-    RoleKind, RunSupervisionSnapshot, ShadowExecutionReceipt, SuccessCondition,
-    SupervisionAnalyzer, SupervisionObservation, WorkPlan,
+    ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
+    OrganizationGenome, OrganizationalMetrics, RoleKind, RunSupervisionSnapshot,
+    ShadowExecutionReceipt, SuccessCondition, SupervisionAnalyzer, SupervisionObservation,
+    SupervisionSignal, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
     ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, ExperimentId, LeaseId,
-    MemoryClaimId, NotificationSeverity, OrganizationId, PLATFORM_SCHEMA_VERSION,
-    PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
-    PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
-    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
-    PlatformSessionState, ProjectId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
-    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationRevisionId,
+    PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
+    PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
+    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
+    PlatformSessionOwner, PlatformSessionState, ProjectId, RiskLevel, RunId, SITE_SCHEMA_VERSION,
+    SSH_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
     SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
@@ -67,8 +68,9 @@ use mcg_storage::{
     ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
 };
 pub use mcg_storage::{
-    AgentTurnCommit, AutomaticSupervisionMutation, CandidateRevisionMutation, ExperimentMutation,
-    ScheduleClaim, ScheduleWakeMutation,
+    AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
+    AutomaticSupervisionMutation, CandidateRevisionMutation, ExperimentMutation, ScheduleClaim,
+    ScheduleWakeMutation,
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
@@ -96,6 +98,7 @@ pub struct RuntimeStatus {
     pub version: String,
     pub state: RuntimeState,
     pub advanced_mode: bool,
+    pub shadow_experiments: bool,
     pub recovered_events: u64,
     pub recovered_tasks: u64,
     pub recovered_tool_leases: u64,
@@ -890,6 +893,7 @@ impl AppRuntime {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             state: RuntimeState::Ready,
             advanced_mode: self.config.advanced_mode,
+            shadow_experiments: self.config.shadow_experiments,
             recovered_events: self.recovery.events_replayed,
             recovered_tasks: self.recovery.tasks_rebuilt,
             recovered_tool_leases: self.recovered_tool_leases,
@@ -3540,6 +3544,178 @@ impl AppRuntime {
             .collect()
     }
 
+    /// Converts eligible slow-loop observations into inactive, ready shadow experiments.
+    ///
+    /// Consumer release builds require explicit shadow enablement; development and tests enable
+    /// this by default. Existing active experiments defer later observations without discarding
+    /// them, and stale-baseline observations receive an immutable terminal disposition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable evidence, candidate identity, or experiment state conflicts.
+    #[allow(clippy::too_many_lines)] // Keeps the restart-safe propose/create/ready/mark sequence auditable.
+    pub fn orchestrate_pending_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AutomaticExperimentOutcome>, RuntimeError> {
+        if !self.config.shadow_experiments {
+            return Ok(Vec::new());
+        }
+        let observation_ids = self.store()?.pending_candidate_observation_ids(limit)?;
+        let mut outcomes = Vec::new();
+        for observation_id in observation_ids {
+            if let Some(outcome) = self.store()?.automatic_experiment_outcome(observation_id)? {
+                outcomes.push(outcome);
+                continue;
+            }
+            let observation = self
+                .store()?
+                .supervision_observation(observation_id)?
+                .ok_or_else(|| {
+                    StorageError::Conflict("supervision observation was not found".into())
+                })?;
+            let Some(baseline_revision_id) = observation.organization_revision_id else {
+                outcomes.push(self.record_stale_candidate_outcome(
+                    observation_id,
+                    "slow-loop observation has no organization revision",
+                )?);
+                continue;
+            };
+            let Some(baseline) = self.organization_revision(baseline_revision_id)? else {
+                outcomes.push(self.record_stale_candidate_outcome(
+                    observation_id,
+                    "observed organization revision no longer exists",
+                )?);
+                continue;
+            };
+            let Some(current) = self.organization(baseline.organization_id)? else {
+                outcomes.push(self.record_stale_candidate_outcome(
+                    observation_id,
+                    "observed organization no longer exists",
+                )?);
+                continue;
+            };
+            if current.revision_id != baseline.revision_id {
+                outcomes.push(self.record_stale_candidate_outcome(
+                    observation_id,
+                    "organization head changed before candidate orchestration",
+                )?);
+                continue;
+            }
+            let candidate_revision_id = OrganizationRevisionId::from_stable_bytes(
+                automatic_experiment_id_bytes("candidate", observation.id),
+            );
+            let experiment_id = ExperimentId::from_stable_bytes(automatic_experiment_id_bytes(
+                "experiment",
+                observation.id,
+            ));
+            let existing_experiment = self.experiment(experiment_id)?;
+            let experiments = self.experiments(baseline.organization_id)?;
+            if experiments.iter().any(|experiment| {
+                experiment.id != experiment_id
+                    && matches!(
+                        experiment.state,
+                        ExperimentState::Draft
+                            | ExperimentState::Ready
+                            | ExperimentState::Running
+                            | ExperimentState::AwaitingDecision
+                            | ExperimentState::Promoted
+                    )
+            }) {
+                continue;
+            }
+            let candidate =
+                if let Some(candidate) = self.organization_revision(candidate_revision_id)? {
+                    if candidate.organization_id != baseline.organization_id
+                        || candidate.parent_revision_id != Some(baseline.revision_id)
+                    {
+                        return Err(StorageError::Conflict(
+                            "recovered automatic candidate does not match its baseline".into(),
+                        )
+                        .into());
+                    }
+                    candidate
+                } else {
+                    let history = self
+                        .store()?
+                        .organization_history(baseline.organization_id)?;
+                    let revision = history
+                        .iter()
+                        .map(|genome| genome.revision)
+                        .max()
+                        .unwrap_or(baseline.revision)
+                        .saturating_add(1);
+                    MeasuredCandidateDesigner::design(
+                        &baseline,
+                        &observation,
+                        candidate_revision_id,
+                        revision,
+                        observation.observed_at,
+                    )
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?
+                };
+            self.record_candidate_revision(&candidate)?;
+            let mut experiment = if let Some(experiment) = existing_experiment {
+                experiment
+            } else {
+                self.create_experiment(&automatic_experiment_definition(
+                    &baseline,
+                    &observation,
+                    candidate_revision_id,
+                    experiment_id,
+                )?)?
+                .experiment
+            };
+            if experiment.state == ExperimentState::Draft {
+                experiment = self
+                    .transition_experiment(
+                        experiment.id,
+                        ExperimentState::Draft,
+                        ExperimentState::Ready,
+                    )?
+                    .experiment;
+            }
+            if experiment.state != ExperimentState::Ready {
+                return Err(StorageError::Conflict(
+                    "recovered automatic experiment advanced before its ready marker".into(),
+                )
+                .into());
+            }
+            let outcome = AutomaticExperimentOutcome {
+                observation_id: observation.id,
+                disposition: AutomaticExperimentDisposition::Ready,
+                candidate_revision_id: Some(candidate.revision_id),
+                experiment_id: Some(experiment.id),
+                detail: "bounded candidate is ready for evaluation-only shadow execution".into(),
+                processed_at: Utc::now(),
+                replayed: false,
+            };
+            outcomes.push(
+                self.store()?
+                    .record_automatic_experiment_outcome(&outcome)?,
+            );
+        }
+        Ok(outcomes)
+    }
+
+    fn record_stale_candidate_outcome(
+        &self,
+        observation_id: SupervisionObservationId,
+        detail: &str,
+    ) -> Result<AutomaticExperimentOutcome, RuntimeError> {
+        Ok(self
+            .store()?
+            .record_automatic_experiment_outcome(&AutomaticExperimentOutcome {
+                observation_id,
+                disposition: AutomaticExperimentDisposition::Stale,
+                candidate_revision_id: None,
+                experiment_id: None,
+                detail: detail.into(),
+                processed_at: Utc::now(),
+                replayed: false,
+            })?)
+    }
+
     /// Loads a consumer evaluation checkpoint when objective execution has
     /// started or is waiting for approval.
     ///
@@ -5379,6 +5555,66 @@ const fn site_environment_label(environment: SiteEnvironment) -> &'static str {
     }
 }
 
+const fn supervision_signal_label(signal: SupervisionSignal) -> &'static str {
+    match signal {
+        SupervisionSignal::RepeatedFailure => "repeated-failure",
+        SupervisionSignal::AgentDisagreement => "agent-disagreement",
+        SupervisionSignal::RunawayLoop => "runaway-loop",
+        SupervisionSignal::Overconfidence => "overconfidence",
+        SupervisionSignal::Underconfidence => "underconfidence",
+        SupervisionSignal::ToolFailure => "tool-failure",
+        SupervisionSignal::BudgetPressure => "budget-pressure",
+        SupervisionSignal::ExcessiveOverhead => "excessive-overhead",
+        SupervisionSignal::UserCorrection => "user-correction",
+        SupervisionSignal::Regression => "regression",
+    }
+}
+
+fn automatic_experiment_id_bytes(
+    namespace: &str,
+    observation_id: SupervisionObservationId,
+) -> [u8; 16] {
+    let digest = Sha256::digest(format!(
+        "mcg-auto-experiment\0{namespace}\0{observation_id}"
+    ));
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes
+}
+
+fn automatic_experiment_definition(
+    baseline: &OrganizationGenome,
+    observation: &SupervisionObservation,
+    candidate_revision_id: OrganizationRevisionId,
+    experiment_id: ExperimentId,
+) -> Result<ExperimentDefinition, StorageError> {
+    Ok(ExperimentDefinition {
+        schema_version: mcg_agents::EXPERIMENT_SCHEMA_VERSION,
+        id: experiment_id,
+        organization_id: baseline.organization_id,
+        baseline_revision_id: baseline.revision_id,
+        candidate_revision_id,
+        mode: ExperimentMode::Shadow,
+        state: ExperimentState::Draft,
+        hypothesis: format!(
+            "Measured candidate addresses {}: {}",
+            supervision_signal_label(observation.signal),
+            observation.summary
+        ),
+        task_classes: vec![format!(
+            "supervision/{}",
+            supervision_signal_label(observation.signal)
+        )],
+        required_benchmarks: 1,
+        maximum_regressions: 0,
+        minimum_confidence: ConfidenceEstimate::new(8_000, 1)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        observation_ids: vec![observation.id],
+        created_at: observation.observed_at,
+        updated_at: observation.observed_at,
+    })
+}
+
 fn normalized_site_url(value: &str) -> Result<String, RuntimeError> {
     let url = url::Url::parse(value.trim())
         .map_err(|error| ToolError::Invalid(format!("invalid Site URL: {error}")))?;
@@ -7036,6 +7272,7 @@ mod tests {
         let config = AppConfig::default().with_data_directory(directory.path());
         let now = Utc::now();
         let run_id = RunId::new();
+        let baseline_revision_id = OrganizationRevisionId::new();
         let failed_id = EvaluationId::new();
         let passed_id = EvaluationId::new();
         {
@@ -7043,6 +7280,8 @@ mod tests {
             let task = TaskEnvelope::new("exercise automatic supervision");
             runtime.create_task(&task).expect("task");
             let genome = OrganizationGenome::consumer_default(now);
+            let mut genome = genome;
+            genome.revision_id = baseline_revision_id;
             runtime
                 .record_organization_revision(&genome)
                 .expect("organization");
@@ -7095,7 +7334,11 @@ mod tests {
                 }],
                 outcome,
                 confidence: ConfidenceEstimate::new(confidence, 1).expect("confidence"),
-                regressions: Vec::new(),
+                regressions: if outcome == EvaluationOutcome::Failed {
+                    vec!["seeded accessibility regression".into()]
+                } else {
+                    Vec::new()
+                },
                 evidence: vec![EvaluationEvidence {
                     method: "fixture".into(),
                     artifact_sha256: Some("a".repeat(64)),
@@ -7129,13 +7372,94 @@ mod tests {
                 .iter()
                 .map(|mutation| mutation.observations.len())
                 .sum::<usize>(),
-            2
+            3
         );
         let observations = runtime
             .supervision_observations()
             .expect("durable observations");
-        assert_eq!(observations.len(), 2);
-        assert_eq!(observations[0].task_id, observations[1].task_id);
+        assert_eq!(observations.len(), 3);
+        assert!(
+            observations
+                .iter()
+                .all(|observation| observation.task_id == observations[0].task_id)
+        );
+        let slow_observation = observations
+            .iter()
+            .find(|observation| observation.loop_kind == mcg_agents::SupervisionLoop::Slow)
+            .expect("slow observation");
+        let baseline = runtime
+            .organization_revision(baseline_revision_id)
+            .expect("baseline")
+            .expect("present");
+        let recovered_candidate_id = OrganizationRevisionId::from_stable_bytes(
+            automatic_experiment_id_bytes("candidate", slow_observation.id),
+        );
+        let recovered_experiment_id = ExperimentId::from_stable_bytes(
+            automatic_experiment_id_bytes("experiment", slow_observation.id),
+        );
+        let recovered_candidate = MeasuredCandidateDesigner::design(
+            &baseline,
+            slow_observation,
+            recovered_candidate_id,
+            2,
+            slow_observation.observed_at,
+        )
+        .expect("partial candidate");
+        runtime
+            .record_candidate_revision(&recovered_candidate)
+            .expect("candidate committed before simulated crash");
+        runtime
+            .create_experiment(
+                &automatic_experiment_definition(
+                    &baseline,
+                    slow_observation,
+                    recovered_candidate_id,
+                    recovered_experiment_id,
+                )
+                .expect("experiment definition"),
+            )
+            .expect("draft committed before simulated crash");
+        drop(runtime);
+        let runtime = AppRuntime::open(config.clone()).expect("reopen partial orchestration");
+        let candidate_outcomes = runtime
+            .orchestrate_pending_candidates(8)
+            .expect("orchestrate slow-loop candidate");
+        assert_eq!(candidate_outcomes.len(), 1);
+        let candidate_outcome = &candidate_outcomes[0];
+        assert_eq!(
+            candidate_outcome.disposition,
+            AutomaticExperimentDisposition::Ready
+        );
+        let experiment = runtime
+            .experiment(candidate_outcome.experiment_id.expect("experiment id"))
+            .expect("experiment")
+            .expect("present");
+        assert_eq!(experiment.state, ExperimentState::Ready);
+        assert_eq!(experiment.baseline_revision_id, baseline_revision_id);
+        assert_eq!(
+            runtime
+                .organization(experiment.organization_id)
+                .expect("active organization")
+                .expect("present")
+                .revision_id,
+            baseline_revision_id
+        );
+        let candidate = runtime
+            .organization_revision(
+                candidate_outcome
+                    .candidate_revision_id
+                    .expect("candidate revision"),
+            )
+            .expect("candidate")
+            .expect("present");
+        assert!(candidate.evaluation.require_independent_evaluation);
+        assert_eq!(candidate.parent_revision_id, Some(baseline_revision_id));
+        assert!(
+            runtime
+                .orchestrate_pending_candidates(8)
+                .expect("candidate marker replay")
+                .is_empty()
+        );
         runtime
             .transition_agent_run(
                 run_id,
@@ -7178,6 +7502,20 @@ mod tests {
                 .supervise_pending_evaluations(32)
                 .expect("persisted markers")
                 .is_empty()
+        );
+        assert!(
+            reopened
+                .orchestrate_pending_candidates(8)
+                .expect("persisted candidate outcome")
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .experiment(candidate_outcome.experiment_id.expect("experiment id"))
+                .expect("reopened experiment")
+                .expect("present")
+                .state,
+            ExperimentState::Ready
         );
     }
 

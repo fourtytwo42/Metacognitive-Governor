@@ -98,6 +98,70 @@ impl SupervisionAnalyzer {
     }
 }
 
+pub struct MeasuredCandidateDesigner;
+
+impl MeasuredCandidateDesigner {
+    /// Produces a bounded, inactive organization revision from one slow-loop finding.
+    ///
+    /// # Errors
+    /// Returns an invariant error unless the observation requests organization restructuring
+    /// against the supplied baseline revision.
+    pub fn design(
+        baseline: &crate::OrganizationGenome,
+        observation: &SupervisionObservation,
+        revision_id: OrganizationRevisionId,
+        revision: u64,
+        created_at: DateTime<Utc>,
+    ) -> Result<crate::OrganizationGenome, ExperimentError> {
+        if observation.loop_kind != SupervisionLoop::Slow
+            || observation.recommended_intervention != InterventionLevel::Restructure
+            || observation.organization_revision_id != Some(baseline.revision_id)
+            || revision <= baseline.revision
+        {
+            return Err(ExperimentError::InvalidCandidateProposal);
+        }
+        let mut candidate = baseline.clone();
+        candidate.revision_id = revision_id;
+        candidate.revision = revision;
+        candidate.parent_revision_id = Some(baseline.revision_id);
+        candidate.name = format!("{} measured candidate r{revision}", baseline.name);
+        candidate.created_at = created_at;
+        if observation.signal == SupervisionSignal::ExcessiveOverhead {
+            candidate.policy.max_parallel_agents = candidate
+                .policy
+                .max_parallel_agents
+                .saturating_sub(1)
+                .max(1);
+            candidate.policy.max_total_agents = candidate
+                .policy
+                .max_total_agents
+                .max(candidate.policy.max_parallel_agents);
+            candidate.policy.max_organizational_overhead_ratio =
+                candidate.policy.max_organizational_overhead_ratio.min(0.25);
+        } else {
+            candidate.evaluation.require_independent_evaluation = true;
+            candidate.evaluation.minimum_confidence =
+                candidate.evaluation.minimum_confidence.max(0.90);
+            for role in &mut candidate.roles {
+                if matches!(
+                    role.kind,
+                    crate::RoleKind::Coder | crate::RoleKind::Evaluator
+                ) {
+                    role.model_policy.max_escalation_tier = role
+                        .model_policy
+                        .max_escalation_tier
+                        .saturating_add(1)
+                        .min(4);
+                }
+            }
+        }
+        candidate
+            .validate()
+            .map_err(|_| ExperimentError::InvalidCandidateProposal)?;
+        Ok(candidate)
+    }
+}
+
 fn fast_finding(snapshot: &RunSupervisionSnapshot) -> Option<SupervisionFinding> {
     let (signal, severity, intervention, summary) = if snapshot.exhausted_leases > 0 {
         (
@@ -563,6 +627,8 @@ pub enum ExperimentError {
     InvalidBenchmark,
     #[error("experiment decision is missing evidence, direction, or rationale")]
     InvalidDecision,
+    #[error("automatic candidate proposal is inconsistent with its slow-loop evidence")]
+    InvalidCandidateProposal,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -706,5 +772,54 @@ mod tests {
             InterventionLevel::Restructure
         );
         assert_eq!(first[2].evidence[0].event_sequence, Some(42));
+    }
+
+    #[test]
+    fn slow_regression_produces_a_bounded_inactive_candidate() {
+        let now = Utc::now();
+        let baseline = crate::OrganizationGenome::consumer_default(now);
+        let observation = SupervisionObservation {
+            schema_version: SUPERVISION_SCHEMA_VERSION,
+            id: SupervisionObservationId::new(),
+            loop_kind: SupervisionLoop::Slow,
+            signal: SupervisionSignal::Regression,
+            severity_basis_points: 9_500,
+            recommended_intervention: InterventionLevel::Restructure,
+            task_id: Some(TaskId::new()),
+            run_id: Some(RunId::new()),
+            organization_revision_id: Some(baseline.revision_id),
+            summary: "seeded regression".into(),
+            evidence: vec![SupervisionEvidence {
+                method: "fixture".into(),
+                artifact_sha256: Some("a".repeat(64)),
+                event_sequence: Some(1),
+                detail: "objective regression".into(),
+            }],
+            observed_at: now,
+        };
+        let revision_id = OrganizationRevisionId::new();
+        let candidate = MeasuredCandidateDesigner::design(
+            &baseline,
+            &observation,
+            revision_id,
+            2,
+            now + chrono::Duration::seconds(1),
+        )
+        .expect("candidate");
+        assert_eq!(candidate.revision_id, revision_id);
+        assert_eq!(candidate.parent_revision_id, Some(baseline.revision_id));
+        assert!(candidate.evaluation.require_independent_evaluation);
+        assert!(candidate.evaluation.minimum_confidence >= 0.90);
+        assert!(
+            candidate
+                .roles
+                .iter()
+                .filter(|role| matches!(
+                    role.kind,
+                    crate::RoleKind::Coder | crate::RoleKind::Evaluator
+                ))
+                .all(|role| role.model_policy.max_escalation_tier == 3)
+        );
+        assert!(!baseline.evaluation.require_independent_evaluation);
     }
 }

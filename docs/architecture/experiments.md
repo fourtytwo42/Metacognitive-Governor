@@ -33,9 +33,19 @@ Shadow mode remains opt-in for normal consumers and enabled in development and
 scenario environments. A shadow result can influence production only after it
 becomes benchmark evidence for a separately promoted revision.
 
+`MCG_SHADOW_EXPERIMENTS` is the explicit headless opt-in (`1`, `true`, `yes`,
+or `on`). Debug/development builds default it on; release builds default it off.
+The authenticated runtime status reports the effective setting. When enabled,
+each scheduler tick turns eligible slow-loop regression evidence into at most
+one bounded inactive candidate per organization. Stable candidate/experiment
+identities and migration 22 outcomes resume a candidate or draft experiment
+that committed immediately before a crash. The active organization head never
+changes during this automation; the generated shadow experiment stops in
+`ready` until evaluation-only execution begins.
+
 ## Durable state
 
-SQLite migration 20 retains:
+SQLite migrations 20-22 retain:
 
 - immutable supervision observations;
 - one mutable experiment projection whose definition hash and revision pairing
@@ -44,6 +54,8 @@ SQLite migration 20 retains:
 - immutable evidence-linked decisions;
 - the existing immutable organization revisions and one current-revision
   pointer.
+- exactly-once evaluation-supervision markers and immutable automatic candidate
+  outcomes, including stale-baseline dispositions.
 
 Experiment states are `draft`, `ready`, `running`, `awaiting_decision`,
 `promoted`, `rejected`, and `reverted`. A candidate cannot jump directly from

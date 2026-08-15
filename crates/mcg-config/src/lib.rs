@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub data_directory: PathBuf,
     #[serde(default)]
     pub browser_executable: Option<PathBuf>,
+    #[serde(default = "default_shadow_experiments")]
+    pub shadow_experiments: bool,
 }
 
 impl AppConfig {
@@ -56,6 +58,22 @@ fn default_data_directory() -> PathBuf {
     PathBuf::from(".mcg")
 }
 
+const fn default_shadow_experiments() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn shadow_experiments_from_environment() -> bool {
+    std::env::var("MCG_SHADOW_EXPERIMENTS").map_or_else(
+        |_| default_shadow_experiments(),
+        |value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        },
+    )
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -65,6 +83,7 @@ impl Default for AppConfig {
             advanced_mode: false,
             data_directory: default_data_directory(),
             browser_executable: std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
+            shadow_experiments: shadow_experiments_from_environment(),
         }
     }
 }
@@ -79,6 +98,9 @@ mod tests {
 
         assert_eq!(config.autonomy, AutonomyPreset::Autonomous);
         assert!(!config.advanced_mode);
+        if std::env::var_os("MCG_SHADOW_EXPERIMENTS").is_none() {
+            assert_eq!(config.shadow_experiments, cfg!(debug_assertions));
+        }
         assert!(config.bind_address.starts_with("127.0.0.1:"));
         assert_eq!(
             config
