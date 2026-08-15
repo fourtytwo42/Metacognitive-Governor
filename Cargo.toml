@@ -12,6 +12,7 @@ members = [
     "crates/mcg-events",
     "crates/mcg-mcp",
     "crates/mcg-policy",
+    "crates/mcg-plugins",
     "crates/mcg-projects",
     "crates/mcg-providers",
     "crates/mcg-runtime",
@@ -29,6 +30,7 @@ default-members = [
     "crates/mcg-events",
     "crates/mcg-mcp",
     "crates/mcg-policy",
+    "crates/mcg-plugins",
     "crates/mcg-projects",
     "crates/mcg-providers",
     "crates/mcg-runtime",
@@ -80,6 +82,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 url = "2.5.8"
+wasmtime = { version = "=45.0.3", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
+wasmtime-wasi = { version = "=45.0.3", default-features = false, features = ["p1"] }
 webbrowser = "1.0.6"
 zeroize = { version = "1.8.2", features = ["derive"] }
 
