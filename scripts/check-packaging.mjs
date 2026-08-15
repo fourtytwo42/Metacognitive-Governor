@@ -83,9 +83,15 @@ const installerUat = await read("scripts/test-windows-installer.ps1");
 for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner.exe", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
+const linuxPackageUat = await read("scripts/test-linux-packages.sh");
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-shadow-runner", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "--appimage-extract", "protocolVersion", "xdotool", "import -window root"]) {
+  requireText(linuxPackageUat, invariant, "Linux package UAT");
+}
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");
 requireText(releaseSourceCheck, "--untracked-files=all", "release source preflight");
 requireText(windowsBuilder, "check-release-source.mjs", "Windows release builder");
 requireText(linuxBuilder, "check-release-source.mjs", "Linux release builder");
+
+await access(path.join(root, "scripts/test-linux-packages.sh"), constants.R_OK);
 
 console.log("Installer, sidecar, per-user, and license packaging contracts are valid.");

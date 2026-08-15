@@ -128,6 +128,11 @@ UI tests operate in two modes:
 - packaged Tauri mode for installer, IPC, daemon lifecycle, credential integration,
   filesystem dialogs, and OS-specific behavior.
 
+Linux release qualification additionally runs the real `.deb` and AppImage through
+`scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, retained
+external data, daemon restart, authenticated CLI/doctor/backup/MCP contracts, and
+both GUI formats under an owner-controlled X11 display with captured screenshots.
+
 Every major workflow is tested in simple and advanced mode. Accessibility checks
 cover keyboard navigation, focus, labels, contrast, reduced motion, and readable
 progress/errors. E2E tests preserve traces/screenshots only on failure and sanitize

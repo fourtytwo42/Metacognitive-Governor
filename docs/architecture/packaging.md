@@ -40,6 +40,14 @@ Linux:
 
 This builds the same version-matched sidecars, creates `.deb` and AppImage packages, and writes the same manifest contract. The build machine must provide Tauri's documented GTK/WebKit and package-tool prerequisites. Generated binaries, packages, and manifests stay under ignored build directories and are never committed.
 
+Run Linux package UAT as root while naming the non-root desktop owner:
+
+```bash
+sudo MCG_UAT_USER="$USER" ./scripts/test-linux-packages.sh
+```
+
+The harness refuses to replace an existing MCG package. In a unique external data directory it proves `.deb` install and same-version repair, daemon health and restart, authenticated CLI status/doctor/backup, MCP initialization and tool listing, installed desktop launch, AppImage extraction and launch, real X11 window creation, screenshot capture, uninstall, retained data, reinstall, and final application-file removal. Its temporary evidence directory is retained for review; it never writes credentials to output.
+
 ## Upgrade and repair
 
 Install a newer package over the same per-user installation. Durable state remains outside the application directory (`%LOCALAPPDATA%\\MCG` on Windows, `$XDG_DATA_HOME/mcg` or `~/.local/share/mcg` on Linux). Database migrations run only after the new daemon acquires the exclusive data-directory lock.
