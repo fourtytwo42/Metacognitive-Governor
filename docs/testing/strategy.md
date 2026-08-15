@@ -168,6 +168,17 @@ machines. GitHub is source hosting only.
 - macOS package build with an explicit best-effort support label until qualified;
 - reproducibility, SBOM, provenance, and artifact signature checks.
 
+### Typed SSH live qualification
+
+`mcg-runtime::live_ssh_inspect_survives_runtime_restart_without_reexecution`
+proves a real pinned, agent-authenticated inspection and observation-only replay
+after reopening durable storage. `mcg-tools/tests/ssh_live.rs` additionally proves
+wrong-host-key rejection, literal POSIX argv handling, verified upload/download
+SHA-256 round trip, and remote cleanup. Both fixtures skip unless
+`MCG_LIVE_SSH=1`; connection metadata and pinned key material are supplied through
+the documented `MCG_LIVE_SSH_*` environment variables, while credentials remain
+only in the controller's SSH agent.
+
 ## Coverage and release policy
 
 Coverage is a diagnostic, not a substitute for outcomes. Critical policy, state

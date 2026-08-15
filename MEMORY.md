@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Qualify and finish the typed outbound SSH execution surface for M8.
-- Last meaningful change: Exact commit `f5a1a1b` passed complete clean Windows and Ubuntu verification. A real Linux `ssh-agent` fixture then proved pinned inspection, runtime restart, and observation-only replay; 18 desktop component tests now include the simple pinned-host/inspection flow.
-- Next step: Commit the final SSH UAT/evidence update, add live mutation/transfer and wrong-key qualification, then perform native Windows/Linux SSH UI UAT when agent/visible-daemon prerequisites allow it.
+- Last meaningful change: Exact commit `f5a1a1b` passed complete clean Windows and Ubuntu verification. Real Linux `ssh-agent` fixtures prove wrong-key rejection, literal argv execution, SHA-256-verified upload/download, remote cleanup, runtime restart, and observation-only replay; 18 desktop component tests cover the simple pinned-host/inspection flow.
+- Next step: Perform native Windows/Linux SSH UI UAT when agent/visible-daemon prerequisites allow it, then continue the remaining M8 execution-plane and broader production roadmap.
 - Blockers: None documented.
 
 ## Current State
@@ -687,7 +687,7 @@ When sources conflict, use this order:
 - Files: `crates/mcg-{domain,policy,storage,tools,runtime,api}/`, `apps/{mcg-cli,desktop}/`, `docs/architecture/typed-ssh.md`.
 - Commands/tests: Exact `f5a1a1b` complete Windows `scripts/verify.ps1` passed in 424 seconds. Exact archived source passed Ubuntu `scripts/verify.sh` in 136 seconds after disk cleanup. Live Ubuntu agent-backed runtime inspect/restart/replay passed in 0.28 seconds. Strict workspace Clippy; 50 tool tests, 28 storage tests, 10 runtime tests, 44 API tests, 18 Vitest tests, production/native builds, two Playwright flows, and docs are green.
 - Result: REST, CLI, MCP, Tauri, and desktop share one credential-free pinned-host/operation contract. Real Windows-to-Ubuntu probing found that the local Windows `ssh-agent` service is disabled; MCG correctly did not fall back to a password/private-key option. The executor now uses a real isolated empty config, and Windows prefers native System32 OpenSSH to avoid Git/MSYS path-dialect ambiguity. Ubuntu initially filled its 48 GiB root volume with retained build targets; `cargo clean` removed 16.8 GiB only from `/home/hendo420/mcg-worktree-045dc93/target`, after which the complete gate passed.
-- Follow-up: Add live execute/upload/download and wrong-key qualification. Windows live SSH UAT requires enabling the native OpenSSH Authentication Agent service and loading the owner key; native stateful UI UAT still requires safely upgrading the visible daemon.
+- Follow-up: Windows live SSH UAT requires enabling the native OpenSSH Authentication Agent service and loading the owner key; native stateful UI UAT still requires safely upgrading the visible daemon. Linux live qualification passed wrong-key rejection, literal typed execution, hash-verified upload/download, cleanup, restart, and exact replay.
 
 ## Known Issues
 
