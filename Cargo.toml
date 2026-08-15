@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "apps/mcg-cli",
     "apps/mcg-daemon",
+    "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
     "apps/desktop/src-tauri",
     "crates/mcg-api",
@@ -22,6 +23,7 @@ members = [
 default-members = [
     "apps/mcg-cli",
     "apps/mcg-daemon",
+    "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
     "crates/mcg-api",
     "crates/mcg-agents",

@@ -33,13 +33,21 @@ the asynchronous Wasmtime/WASI path lets the wall timer cancel a guest blocked i
 a WASI host call. Store limits reject oversized memories/tables/instances, and
 the in-memory pipes prevent unbounded output.
 
+`mcg-plugin-runner` wraps that kernel in a one-request process contract. It reads
+at most 32 MiB from stdin, accepts only one versioned JSON document, requires
+canonical base64 and the exact lowercase SHA-256 of the module bytes, executes
+once, writes one bounded structured response, and exits nonzero on failure. It
+does not use stderr as a data channel. This gives the future daemon launcher an
+OS-killable boundary around module validation, compilation, and guest execution.
+
 ## Remaining integration gates
 
 The execution kernel is only the first M10 boundary. Before plugins become a
 consumer feature, MCG still must add:
 
-- a dedicated package-local runner process so validation/compilation and every
-  guest lifetime have an OS-killable wall boundary;
+- the daemon launcher that locates only the adjacent package-local runner, clears
+  its environment, bounds its pipes and process tree, enforces an outer timeout,
+  and records crash/timeout as non-replayable uncertainty;
 - content-addressed module installation, signature/provenance policy, immutable
   manifest revisions, enable/disable state, and invocation audit in SQLite;
 - explicit broker-issued capability adapters instead of ambient WASI grants;

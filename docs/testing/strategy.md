@@ -248,9 +248,12 @@ only in the controller's SSH agent.
 closed-authority WASI kernel. Sandboxed fixtures cover one bounded JSON result,
 unknown-import denial, fuel exhaustion, memory/output ceilings, requested-
 capability denial, and the absence of inherited environment or filesystem
-preopens. The plugin feature is not release-qualified until the dedicated runner,
-durable catalog/audit, all interfaces, packaging/license, cross-platform crash
-recovery, and native UAT gates in `docs/architecture/plugins.md` are complete.
+preopens. Runner tests additionally prove bounded/malformed request rejection,
+pre-execution module-digest rejection, and a real child process that consumes one
+request, returns one result, keeps stderr empty, and exits. The plugin feature is
+not release-qualified until daemon launch/control, durable catalog/audit, all
+interfaces, packaging/license, cross-platform crash recovery, and native UAT
+gates in `docs/architecture/plugins.md` are complete.
 
 ## Coverage and release policy
 

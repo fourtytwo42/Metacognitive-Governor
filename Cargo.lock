@@ -3470,6 +3470,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcg-plugin-runner"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "mcg-plugins",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "mcg-plugins"
 version = "0.1.0"
 dependencies = [

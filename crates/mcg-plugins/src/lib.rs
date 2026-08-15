@@ -209,7 +209,7 @@ impl TrustedPluginRegistry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasiPluginLimits {
     pub maximum_module_bytes: usize,
     pub maximum_input_bytes: usize,
