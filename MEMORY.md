@@ -6,8 +6,8 @@ Durable project context lives here. Update this file whenever information should
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
 - Current task: Complete M9 measured metacognitive improvement after establishing its durable supervision/experiment foundation.
-- Last meaningful change: Exact commit `a52db8f` has the full M9 experiment lifecycle across authenticated REST, CLI, MCP, Tauri, resumable events, and the desktop Improvement workspace. Complete Windows and Ubuntu local qualification is green; a cold-build timing race in the scheduler restart test was corrected to compare against the completed restart clock.
-- Next step: Add automatic fast/medium/slow observation production and candidate/shadow/benchmark orchestration over real runs, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
+- Last meaningful change: M9 now automatically derives deterministic fast/medium/slow supervision findings from durable objective evaluations. Migration 21 atomically marks each evaluation processed (including zero findings), scheduler ticks drain the backlog, stable observation identities make restart retries observation-only, and immutable markers prevent analysis drift.
+- Next step: Add automatic candidate/shadow/benchmark orchestration over real runs, then execute seeded promotion/reversion exit scenarios and exact Windows/Ubuntu qualification.
 - Blockers: None documented.
 
 ## Current State
@@ -23,6 +23,7 @@ Durable project context lives here. Update this file whenever information should
 - The desktop provider workspace supports OpenAI subscription OAuth, OpenAI API keys, OpenRouter, and arbitrary OpenAI-compatible/local endpoints. It discovers before saving, stores credentials through the existing OS credential service, labels billing explicitly, and displays known price metadata or `Cost unknown`.
 - The desktop Projects panel lists durable discovered workspaces with language/build/test/Git context and exposes paths, branches, and instruction-conflict counts only in advanced mode.
 - The desktop Improvement workspace shows immutable supervision signals, candidate experiment state, evidence counts, protected baseline language, and promotion/reversion outcomes in simple mode. Advanced mode exposes complete versioned contracts and legal state advances; REST, `mcg experiment`, MCP, and Tauri use the same evidence gates and caller identities.
+- M9 automatic supervision analyzes only durable run/evaluation evidence. Every daemon scheduler tick drains up to 32 unsupervised evaluations; migration 21 records an immutable exactly-once marker even when no signal is produced, and processed evaluations replay their stored result rather than recomputing against later mutable run projections.
 - GitHub Actions is disabled at repository level and its workflow/Dependabot files are removed; GitHub is source hosting only.
 - M1 task state is durable in SQLite, rebuilt from its authoritative event log at startup, protected by a persistent local bearer token, and exposed through authenticated REST plus resumable SSE.
 - M6 has an authenticated stateless MCP `2026-07-28` Streamable HTTP server with deterministic read/query tools and an idempotent governed single-turn mutation. Its client supports current/legacy HTTP and stdio configuration/discovery/calls through API, CLI, and desktop; expanded run-control/evaluation contracts remain in scope.
@@ -142,6 +143,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-15: M9 automatic-supervision checkpoint passed strict formatting and changed-package all-feature/all-target Clippy plus complete affected suites: 17 agent, 31 storage, 11 runtime, and 45 API tests. Deterministic fixtures cover fast/medium/slow derivation, malformed legacy artifact filtering, atomic marker/evidence persistence, same-hash and changed-hash conflict rejection, immutable deletion rejection, zero-finding processing, scheduler backlog integration, restart durability, and observation-only replay after the run projection changes. No GitHub-hosted compute ran; exact full cross-platform qualification is deferred until the remaining orchestration/exit slice is complete.
 
 - 2026-08-15: Exact pushed commit `a52db8f` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 362 seconds from `/home/hendo420/mcg-worktree-a52db8f`: dependency audit, formatting, strict workspace Clippy, every Rust unit/integration/doc test, live GPU45/browser/computer/SSH fixtures, documentation, frontend typecheck, 21 Vitest flows, production frontend, native Tauri/GTK, and two Playwright flows. `.source-commit`, `.qualified-commit`, `verify-final.exit=0`, and `verify-linux.log` remain with the source. Before staging, only the prior exact `1cb32b2` worktree's verified regenerable target cache was cleaned, restoring 33 GiB; its source/evidence/artifacts remain. No GitHub-hosted compute ran.
 

@@ -6,7 +6,9 @@ use mcg_domain::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ConfidenceEstimate, EvaluationOutcome, OrganizationalMetrics};
+use crate::{
+    AgentRunState, ConfidenceEstimate, EvaluationOutcome, EvaluationReport, OrganizationalMetrics,
+};
 
 pub const SUPERVISION_SCHEMA_VERSION: u16 = 1;
 pub const EXPERIMENT_SCHEMA_VERSION: u16 = 1;
@@ -52,6 +54,185 @@ pub struct SupervisionEvidence {
     pub artifact_sha256: Option<String>,
     pub event_sequence: Option<u64>,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunSupervisionSnapshot {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub run_state: AgentRunState,
+    pub metrics: OrganizationalMetrics,
+    pub failed_instances: u32,
+    pub exhausted_leases: u32,
+    pub evaluation: EvaluationReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisionFinding {
+    pub loop_kind: SupervisionLoop,
+    pub signal: SupervisionSignal,
+    pub severity_basis_points: u16,
+    pub recommended_intervention: InterventionLevel,
+    pub summary: String,
+    pub evidence: Vec<SupervisionEvidence>,
+}
+
+pub struct SupervisionAnalyzer;
+
+impl SupervisionAnalyzer {
+    /// Derives deterministic supervision findings from durable run evidence.
+    #[must_use]
+    pub fn analyze(snapshot: &RunSupervisionSnapshot) -> Vec<SupervisionFinding> {
+        let mut findings = Vec::new();
+        if let Some(finding) = fast_finding(snapshot) {
+            findings.push(finding);
+        }
+        if let Some(finding) = medium_finding(snapshot) {
+            findings.push(finding);
+        }
+        if let Some(finding) = slow_finding(snapshot) {
+            findings.push(finding);
+        }
+        findings
+    }
+}
+
+fn fast_finding(snapshot: &RunSupervisionSnapshot) -> Option<SupervisionFinding> {
+    let (signal, severity, intervention, summary) = if snapshot.exhausted_leases > 0 {
+        (
+            SupervisionSignal::BudgetPressure,
+            9_000,
+            InterventionLevel::Halt,
+            "One or more agent leases exhausted a configured budget",
+        )
+    } else if snapshot.failed_instances > 0 {
+        (
+            SupervisionSignal::ToolFailure,
+            8_000,
+            InterventionLevel::Redirect,
+            "One or more agent instances failed during the run",
+        )
+    } else {
+        match snapshot.evaluation.outcome {
+            EvaluationOutcome::Failed => (
+                SupervisionSignal::RepeatedFailure,
+                8_500,
+                InterventionLevel::Redirect,
+                "Objective evaluation failed",
+            ),
+            EvaluationOutcome::Inconclusive => (
+                SupervisionSignal::Underconfidence,
+                6_000,
+                InterventionLevel::Nudge,
+                "Objective evaluation was inconclusive",
+            ),
+            EvaluationOutcome::Passed => return None,
+        }
+    };
+    Some(finding(
+        snapshot,
+        SupervisionLoop::Fast,
+        signal,
+        severity,
+        intervention,
+        summary,
+    ))
+}
+
+fn medium_finding(snapshot: &RunSupervisionSnapshot) -> Option<SupervisionFinding> {
+    let evaluation = &snapshot.evaluation;
+    let (signal, severity, intervention, summary) = if !evaluation.regressions.is_empty() {
+        (
+            SupervisionSignal::Regression,
+            9_000,
+            InterventionLevel::Halt,
+            "Objective evaluation reported one or more regressions",
+        )
+    } else if evaluation.outcome == EvaluationOutcome::Failed
+        && evaluation.confidence.basis_points >= 8_000
+    {
+        (
+            SupervisionSignal::Overconfidence,
+            8_500,
+            InterventionLevel::Reframe,
+            "High-confidence work failed objective evaluation",
+        )
+    } else if evaluation.outcome == EvaluationOutcome::Passed
+        && evaluation.confidence.basis_points <= 6_000
+    {
+        (
+            SupervisionSignal::Underconfidence,
+            6_500,
+            InterventionLevel::Prime,
+            "Low-confidence work passed objective evaluation",
+        )
+    } else if snapshot.metrics.coordination_seconds >= 30 && snapshot.metrics.overhead_ratio() > 0.4
+    {
+        (
+            SupervisionSignal::ExcessiveOverhead,
+            7_000,
+            InterventionLevel::Reframe,
+            "Coordination consumed more than forty percent of measured run time",
+        )
+    } else {
+        return None;
+    };
+    Some(finding(
+        snapshot,
+        SupervisionLoop::Medium,
+        signal,
+        severity,
+        intervention,
+        summary,
+    ))
+}
+
+fn slow_finding(snapshot: &RunSupervisionSnapshot) -> Option<SupervisionFinding> {
+    if snapshot.evaluation.regressions.is_empty() {
+        return None;
+    }
+    Some(finding(
+        snapshot,
+        SupervisionLoop::Slow,
+        SupervisionSignal::Regression,
+        9_500,
+        InterventionLevel::Restructure,
+        "Measured regression requires organization-level review before further promotion",
+    ))
+}
+
+fn finding(
+    snapshot: &RunSupervisionSnapshot,
+    loop_kind: SupervisionLoop,
+    signal: SupervisionSignal,
+    severity_basis_points: u16,
+    recommended_intervention: InterventionLevel,
+    summary: &str,
+) -> SupervisionFinding {
+    let source = snapshot.evaluation.evidence.first();
+    SupervisionFinding {
+        loop_kind,
+        signal,
+        severity_basis_points,
+        recommended_intervention,
+        summary: summary.into(),
+        evidence: vec![SupervisionEvidence {
+            method: "objective_evaluation".into(),
+            artifact_sha256: source
+                .and_then(|value| value.artifact_sha256.as_ref())
+                .filter(|digest| valid_sha256(digest))
+                .cloned(),
+            event_sequence: source.and_then(|value| value.event_sequence),
+            detail: format!(
+                "evaluation {} outcome {:?}; {} failed instances; {} exhausted leases",
+                snapshot.evaluation.id,
+                snapshot.evaluation.outcome,
+                snapshot.failed_instances,
+                snapshot.exhausted_leases
+            ),
+        }],
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,5 +655,56 @@ mod tests {
         decision.validate().expect("valid decision");
         decision.to_revision_id = revision;
         assert_eq!(decision.validate(), Err(ExperimentError::InvalidDecision));
+    }
+
+    #[test]
+    fn durable_run_evidence_drives_graduated_deterministic_findings() {
+        let task_id = TaskId::new();
+        let run_id = RunId::new();
+        let snapshot = RunSupervisionSnapshot {
+            task_id,
+            run_id,
+            organization_revision_id: OrganizationRevisionId::new(),
+            run_state: AgentRunState::Failed,
+            metrics: OrganizationalMetrics {
+                useful_work_seconds: 30,
+                coordination_seconds: 45,
+                ..OrganizationalMetrics::default()
+            },
+            failed_instances: 1,
+            exhausted_leases: 0,
+            evaluation: EvaluationReport {
+                schema_version: crate::AGENT_RUN_SCHEMA_VERSION,
+                id: EvaluationId::new(),
+                run_id,
+                task_id,
+                evaluator_instance_id: None,
+                conditions: Vec::new(),
+                outcome: EvaluationOutcome::Failed,
+                confidence: confidence(9_000),
+                regressions: vec!["seeded accessibility regression".into()],
+                evidence: vec![crate::EvaluationEvidence {
+                    method: "fixture".into(),
+                    artifact_sha256: Some("d".repeat(64)),
+                    event_sequence: Some(42),
+                    detail: "seeded objective evidence".into(),
+                }],
+                evaluated_at: Utc::now(),
+            },
+        };
+        let first = SupervisionAnalyzer::analyze(&snapshot);
+        let second = SupervisionAnalyzer::analyze(&snapshot);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[0].loop_kind, SupervisionLoop::Fast);
+        assert_eq!(first[0].signal, SupervisionSignal::ToolFailure);
+        assert_eq!(first[1].loop_kind, SupervisionLoop::Medium);
+        assert_eq!(first[1].signal, SupervisionSignal::Regression);
+        assert_eq!(first[2].loop_kind, SupervisionLoop::Slow);
+        assert_eq!(
+            first[2].recommended_intervention,
+            InterventionLevel::Restructure
+        );
+        assert_eq!(first[2].evidence[0].event_sequence, Some(42));
     }
 }

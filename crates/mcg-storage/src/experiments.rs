@@ -4,7 +4,7 @@ use mcg_agents::{
     SupervisionObservation, SupervisionSignal,
 };
 use mcg_domain::{
-    ExperimentBenchmarkId, ExperimentId, OrganizationId, OrganizationRevisionId,
+    EvaluationId, ExperimentBenchmarkId, ExperimentId, OrganizationId, OrganizationRevisionId,
     SupervisionObservationId,
 };
 use mcg_events::{EventEnvelope, EventKind};
@@ -26,7 +26,86 @@ pub struct CandidateRevisionMutation {
     pub events: Vec<EventEnvelope>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AutomaticSupervisionMutation {
+    pub observations: Vec<SupervisionObservation>,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
 impl SqliteEventStore {
+    /// Loads the immutable automatic-supervision result for one evaluation.
+    ///
+    /// # Errors
+    /// Returns an error when marker JSON is invalid or referenced evidence is missing.
+    pub fn automatic_supervision(
+        &self,
+        evaluation_id: EvaluationId,
+    ) -> Result<Option<AutomaticSupervisionMutation>, StorageError> {
+        let ids_json = self
+            .connection
+            .query_row(
+                "SELECT observation_ids_json FROM supervised_evaluations
+                 WHERE evaluation_id = ?1",
+                [evaluation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(ids_json) = ids_json else {
+            return Ok(None);
+        };
+        let ids: Vec<SupervisionObservationId> = serde_json::from_str(&ids_json)?;
+        let mut observations = Vec::with_capacity(ids.len());
+        for id in ids {
+            observations.push(self.supervision_observation(id)?.ok_or_else(|| {
+                StorageError::InvalidData(
+                    "automatic supervision marker references missing evidence".into(),
+                )
+            })?);
+        }
+        Ok(Some(AutomaticSupervisionMutation {
+            observations,
+            replayed: true,
+            events: Vec::new(),
+        }))
+    }
+
+    /// Lists durable evaluations that have not yet received automatic supervision.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds or database failures.
+    pub fn unsupervised_evaluation_ids(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<EvaluationId>, StorageError> {
+        if limit == 0 || limit > 1_024 {
+            return Err(StorageError::InvalidData(
+                "automatic supervision batch must contain 1 to 1024 evaluations".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StorageError::InvalidData("supervision batch is too large".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT e.evaluation_id FROM evaluations e
+             LEFT JOIN supervised_evaluations s ON s.evaluation_id = e.evaluation_id
+             WHERE s.evaluation_id IS NULL
+             ORDER BY e.evaluated_at, e.evaluation_id LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row?.parse().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "evaluation_id".into(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
     /// Records a candidate revision without changing the active organization.
     ///
     /// # Errors
@@ -147,6 +226,133 @@ impl SqliteEventStore {
         Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(false)
+    }
+
+    /// Atomically records all deterministic findings for one durable evaluation.
+    /// Exact analysis replay is observation-only, including evaluations with no findings.
+    ///
+    /// # Errors
+    /// Returns an error for unknown evaluations, mismatched scope, invalid findings,
+    /// malformed analysis identity, or conflicting replay.
+    #[allow(clippy::too_many_lines)] // Findings, marker, and events are one exactly-once transaction.
+    pub fn record_automatic_supervision(
+        &mut self,
+        evaluation_id: EvaluationId,
+        analysis_sha256: &str,
+        observations: &[SupervisionObservation],
+        processed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AutomaticSupervisionMutation, StorageError> {
+        if analysis_sha256.len() != 64
+            || !analysis_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(StorageError::InvalidData(
+                "automatic supervision analysis hash is invalid".into(),
+            ));
+        }
+        let evaluation_json = self
+            .connection
+            .query_row(
+                "SELECT evaluation_json FROM evaluations WHERE evaluation_id = ?1",
+                [evaluation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::Conflict("evaluation was not found".into()))?;
+        let evaluation: mcg_agents::EvaluationReport = serde_json::from_str(&evaluation_json)?;
+        for observation in observations {
+            observation
+                .validate()
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            if observation.task_id != Some(evaluation.task_id)
+                || observation.run_id != Some(evaluation.run_id)
+            {
+                return Err(StorageError::Conflict(
+                    "automatic observation scope does not match its evaluation".into(),
+                ));
+            }
+        }
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT analysis_sha256, observation_ids_json
+                 FROM supervised_evaluations WHERE evaluation_id = ?1",
+                [evaluation_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_hash, ids_json)) = existing {
+            if existing_hash != analysis_sha256 {
+                return Err(StorageError::Conflict(
+                    "evaluation supervision was replayed with different analysis".into(),
+                ));
+            }
+            let ids: Vec<SupervisionObservationId> = serde_json::from_str(&ids_json)?;
+            let mut existing_observations = Vec::with_capacity(ids.len());
+            for id in ids {
+                existing_observations.push(self.supervision_observation(id)?.ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "automatic supervision marker references missing evidence".into(),
+                    )
+                })?);
+            }
+            if existing_observations != observations {
+                return Err(StorageError::Conflict(
+                    "evaluation supervision observations changed under the same analysis".into(),
+                ));
+            }
+            return Ok(AutomaticSupervisionMutation {
+                observations: existing_observations,
+                replayed: true,
+                events: Vec::new(),
+            });
+        }
+        let transaction = self.connection.transaction()?;
+        let mut events = Vec::with_capacity(observations.len());
+        for observation in observations {
+            transaction.execute(
+                "INSERT INTO supervision_observations(
+                    observation_id, loop_kind, signal, observation_json, observed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    observation.id.to_string(),
+                    supervision_loop_name(observation.loop_kind),
+                    supervision_signal_name(observation.signal),
+                    serde_json::to_string(observation)?,
+                    observation.observed_at.to_rfc3339(),
+                ],
+            )?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::SupervisionObserved,
+                    observation.task_id,
+                    serde_json::to_value(observation)?,
+                ),
+            )?);
+        }
+        let ids = observations
+            .iter()
+            .map(|observation| observation.id)
+            .collect::<Vec<_>>();
+        transaction.execute(
+            "INSERT INTO supervised_evaluations(
+                evaluation_id, analysis_sha256, observation_ids_json, processed_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                evaluation_id.to_string(),
+                analysis_sha256,
+                serde_json::to_string(&ids)?,
+                processed_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(AutomaticSupervisionMutation {
+            observations: observations.to_vec(),
+            replayed: false,
+            events,
+        })
     }
 
     /// Loads one immutable supervision observation.

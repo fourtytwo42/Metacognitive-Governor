@@ -1174,6 +1174,9 @@ pub async fn run_scheduler_tick_at(
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<ScheduleOccurrence>, String> {
     runtime
+        .supervise_pending_evaluations(32)
+        .map_err(|error| error.to_string())?;
+    runtime
         .poll_event_schedules(now)
         .map_err(|error| error.to_string())?;
     runtime

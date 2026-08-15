@@ -22,7 +22,8 @@ use mcg_agents::{
     AgentUsageRecord, ConditionResult, ConfidenceEstimate, EvaluationEvidence, EvaluationOutcome,
     EvaluationReport, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
     ExperimentState, ExternalToolBinding, LeaseBudget, OrganizationGenome, OrganizationalMetrics,
-    RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, WorkPlan,
+    RoleKind, RunSupervisionSnapshot, ShadowExecutionReceipt, SuccessCondition,
+    SupervisionAnalyzer, SupervisionObservation, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset};
 use mcg_domain::{
@@ -39,8 +40,8 @@ use mcg_domain::{
     SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
     SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
     SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
-    SshOperationId, SshOperationKind, SshOperationState, TaskBudget, TaskEnvelope, TaskId,
-    TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    SshOperationId, SshOperationKind, SshOperationState, SupervisionObservationId, TaskBudget,
+    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -66,8 +67,8 @@ use mcg_storage::{
     ConsumerEvaluationCheckpointState, RecoveryReport, SqliteEventStore, StorageError,
 };
 pub use mcg_storage::{
-    AgentTurnCommit, CandidateRevisionMutation, ExperimentMutation, ScheduleClaim,
-    ScheduleWakeMutation,
+    AgentTurnCommit, AutomaticSupervisionMutation, CandidateRevisionMutation, ExperimentMutation,
+    ScheduleClaim, ScheduleWakeMutation,
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
@@ -3437,6 +3438,106 @@ impl AppRuntime {
         let event = self.store()?.record_evaluation(report)?;
         let _ = self.event_sender.send(event.clone());
         Ok(event)
+    }
+
+    /// Deterministically derives and atomically records supervision findings for one evaluation.
+    ///
+    /// Exact retries, including evaluations with no findings, are observation-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the evaluation/run cannot be loaded or durable evidence conflicts.
+    pub fn supervise_evaluation(
+        &self,
+        evaluation_id: mcg_domain::EvaluationId,
+    ) -> Result<AutomaticSupervisionMutation, RuntimeError> {
+        if let Some(mutation) = self.store()?.automatic_supervision(evaluation_id)? {
+            return Ok(mutation);
+        }
+        let evaluation = self
+            .store()?
+            .evaluation(evaluation_id)?
+            .ok_or_else(|| StorageError::Conflict("evaluation was not found".into()))?;
+        let view = self.agent_run_view(evaluation.run_id)?;
+        let failed_instances = u32::try_from(
+            view.instances
+                .iter()
+                .filter(|instance| instance.state == AgentState::Failed)
+                .count(),
+        )
+        .map_err(|_| StorageError::InvalidData("failed instance count exceeds u32".into()))?;
+        let exhausted_leases = u32::try_from(
+            view.leases
+                .iter()
+                .filter(|lease| lease.budget.is_exhausted())
+                .count(),
+        )
+        .map_err(|_| StorageError::InvalidData("exhausted lease count exceeds u32".into()))?;
+        let snapshot = RunSupervisionSnapshot {
+            task_id: evaluation.task_id,
+            run_id: evaluation.run_id,
+            organization_revision_id: view.run.organization_revision_id,
+            run_state: view.run.state,
+            metrics: view.run.metrics,
+            failed_instances,
+            exhausted_leases,
+            evaluation: evaluation.clone(),
+        };
+        let findings = SupervisionAnalyzer::analyze(&snapshot);
+        let analysis_bytes =
+            serde_json::to_vec(&(&snapshot, &findings)).map_err(StorageError::from)?;
+        let analysis_sha256 = format!("{:x}", Sha256::digest(&analysis_bytes));
+        let observations = findings
+            .into_iter()
+            .enumerate()
+            .map(|(index, finding)| {
+                let finding_bytes =
+                    serde_json::to_vec(&(evaluation.id, &analysis_sha256, index, &finding))?;
+                let digest = Sha256::digest(finding_bytes);
+                let mut stable_bytes = [0_u8; 16];
+                stable_bytes.copy_from_slice(&digest[..16]);
+                Ok(SupervisionObservation {
+                    schema_version: mcg_agents::SUPERVISION_SCHEMA_VERSION,
+                    id: SupervisionObservationId::from_stable_bytes(stable_bytes),
+                    loop_kind: finding.loop_kind,
+                    signal: finding.signal,
+                    severity_basis_points: finding.severity_basis_points,
+                    recommended_intervention: finding.recommended_intervention,
+                    task_id: Some(evaluation.task_id),
+                    run_id: Some(evaluation.run_id),
+                    organization_revision_id: Some(view.run.organization_revision_id),
+                    summary: finding.summary,
+                    evidence: finding.evidence,
+                    observed_at: evaluation.evaluated_at,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let mutation = self.store()?.record_automatic_supervision(
+            evaluation.id,
+            &analysis_sha256,
+            &observations,
+            Utc::now(),
+        )?;
+        for event in &mutation.events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(mutation)
+    }
+
+    /// Processes a bounded backlog of evaluations not yet marked as supervised.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable evaluation or supervision state is invalid.
+    pub fn supervise_pending_evaluations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AutomaticSupervisionMutation>, RuntimeError> {
+        let evaluation_ids = self.store()?.unsupervised_evaluation_ids(limit)?;
+        evaluation_ids
+            .into_iter()
+            .map(|evaluation_id| self.supervise_evaluation(evaluation_id))
+            .collect()
     }
 
     /// Loads a consumer evaluation checkpoint when objective execution has
@@ -6849,7 +6950,7 @@ mod tests {
         AGENT_RUN_SCHEMA_VERSION, AgentTurnRequest, ExecutivePlanner, LeaseBudget, PlannedWork,
         PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
     };
-    use mcg_domain::{AgentInstanceId, AgentLeaseId, RunId, TaskBudget};
+    use mcg_domain::{AgentInstanceId, AgentLeaseId, EvaluationId, RunId, TaskBudget};
     use mcg_policy::{CapabilityPolicy, OwnerConstitution};
     use mcg_projects::{ContextAssembly, ContextCategory, ContextItem};
     use mcg_providers::{
@@ -6926,6 +7027,158 @@ mod tests {
         runtime.create_task(&task).expect("task should persist");
 
         assert_eq!(runtime.task(task.id).expect("task should read"), Some(task));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One contiguous restart/exactly-once evidence scenario.
+    fn pending_evaluations_are_supervised_once_after_restart_including_empty_findings() {
+        let directory = tempfile::tempdir().expect("data directory");
+        let config = AppConfig::default().with_data_directory(directory.path());
+        let now = Utc::now();
+        let run_id = RunId::new();
+        let failed_id = EvaluationId::new();
+        let passed_id = EvaluationId::new();
+        {
+            let runtime = AppRuntime::open(config.clone()).expect("runtime");
+            let task = TaskEnvelope::new("exercise automatic supervision");
+            runtime.create_task(&task).expect("task");
+            let genome = OrganizationGenome::consumer_default(now);
+            runtime
+                .record_organization_revision(&genome)
+                .expect("organization");
+            let condition = SuccessCondition::Custom {
+                description: "objective evidence exists".into(),
+            };
+            let planning = PlanningRequest {
+                run_id,
+                task: task.clone(),
+                complexity: TaskComplexity::Atomic,
+                work: vec![PlannedWork::atomic(
+                    "exercise supervision",
+                    RoleKind::Coder,
+                    vec![condition.clone()],
+                )],
+                require_independent_evaluation: false,
+            };
+            let plan = ExecutivePlanner::default()
+                .plan(&genome, &planning, now)
+                .expect("plan");
+            let run = AgentRun {
+                schema_version: AGENT_RUN_SCHEMA_VERSION,
+                id: planning.run_id,
+                task_id: task.id,
+                organization_revision_id: genome.revision_id,
+                state: AgentRunState::Planned,
+                metrics: OrganizationalMetrics::default(),
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+            };
+            runtime.create_agent_run(&run, &plan).expect("run");
+            runtime
+                .transition_agent_run(
+                    run.id,
+                    AgentRunState::Running,
+                    OrganizationalMetrics::default(),
+                )
+                .expect("running");
+            let evaluation = |id, outcome, confidence| EvaluationReport {
+                schema_version: AGENT_RUN_SCHEMA_VERSION,
+                id,
+                run_id: run.id,
+                task_id: task.id,
+                evaluator_instance_id: None,
+                conditions: vec![ConditionResult {
+                    condition: condition.clone(),
+                    passed: outcome == EvaluationOutcome::Passed,
+                    detail: "durable fixture evidence".into(),
+                }],
+                outcome,
+                confidence: ConfidenceEstimate::new(confidence, 1).expect("confidence"),
+                regressions: Vec::new(),
+                evidence: vec![EvaluationEvidence {
+                    method: "fixture".into(),
+                    artifact_sha256: Some("a".repeat(64)),
+                    event_sequence: Some(1),
+                    detail: "objective fixture".into(),
+                }],
+                evaluated_at: now,
+            };
+            runtime
+                .record_evaluation(&evaluation(failed_id, EvaluationOutcome::Failed, 9_000))
+                .expect("failed evaluation");
+            runtime
+                .record_evaluation(&evaluation(passed_id, EvaluationOutcome::Passed, 9_000))
+                .expect("passed evaluation");
+            assert!(
+                runtime
+                    .supervision_observations()
+                    .expect("observations")
+                    .is_empty()
+            );
+        }
+
+        let runtime = AppRuntime::open(config.clone()).expect("reopened runtime");
+        let mutations = runtime
+            .supervise_pending_evaluations(32)
+            .expect("supervise backlog");
+        assert_eq!(mutations.len(), 2);
+        assert!(mutations.iter().all(|mutation| !mutation.replayed));
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|mutation| mutation.observations.len())
+                .sum::<usize>(),
+            2
+        );
+        let observations = runtime
+            .supervision_observations()
+            .expect("durable observations");
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].task_id, observations[1].task_id);
+        runtime
+            .transition_agent_run(
+                run_id,
+                AgentRunState::Failed,
+                OrganizationalMetrics {
+                    coordination_seconds: 90,
+                    ..OrganizationalMetrics::default()
+                },
+            )
+            .expect("run changes after immutable analysis");
+        assert!(
+            runtime
+                .supervise_evaluation(failed_id)
+                .expect("replay after run projection changed")
+                .replayed
+        );
+        assert!(
+            runtime
+                .supervise_pending_evaluations(32)
+                .expect("empty backlog")
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .supervise_evaluation(passed_id)
+                .expect("empty-finding replay")
+                .replayed
+        );
+        drop(runtime);
+
+        let reopened = AppRuntime::open(config).expect("second reopen");
+        assert_eq!(
+            reopened
+                .supervision_observations()
+                .expect("reopened observations"),
+            observations
+        );
+        assert!(
+            reopened
+                .supervise_pending_evaluations(32)
+                .expect("persisted markers")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

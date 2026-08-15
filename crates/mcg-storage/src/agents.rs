@@ -2840,6 +2840,20 @@ impl SqliteEventStore {
         Ok(event)
     }
 
+    /// Loads one immutable evaluation report.
+    ///
+    /// # Errors
+    /// Returns an error when persisted JSON cannot be decoded.
+    pub fn evaluation(
+        &self,
+        evaluation_id: mcg_domain::EvaluationId,
+    ) -> Result<Option<EvaluationReport>, StorageError> {
+        self.read_optional_json(
+            "SELECT evaluation_json FROM evaluations WHERE evaluation_id = ?1",
+            &evaluation_id.to_string(),
+        )
+    }
+
     /// Atomically records objective evaluation evidence and settles the
     /// consumer task/run projection from that evidence.
     ///
@@ -3445,11 +3459,14 @@ mod tests {
     use chrono::Duration;
     use mcg_agents::{
         AGENT_RUN_SCHEMA_VERSION, AgentLease, AgentRun, AgentUsageRecord, ConditionResult,
-        EvaluationEvidence, EvaluationOutcome, ExecutivePlanner, LeaseBudget, PlannedWork,
-        PlanningRequest, RoleKind, SuccessCondition, TaskComplexity, UsageKind,
+        EvaluationEvidence, EvaluationOutcome, ExecutivePlanner, InterventionLevel, LeaseBudget,
+        PlannedWork, PlanningRequest, RoleKind, SUPERVISION_SCHEMA_VERSION, SuccessCondition,
+        SupervisionEvidence, SupervisionLoop, SupervisionObservation, SupervisionSignal,
+        TaskComplexity, UsageKind,
     };
     use mcg_domain::{
-        AgentInstanceId, AgentLeaseId, EvaluationId, RunId, TaskBudget, UsageRecordId,
+        AgentInstanceId, AgentLeaseId, EvaluationId, RunId, SupervisionObservationId, TaskBudget,
+        UsageRecordId,
     };
     use tempfile::tempdir;
 
@@ -3775,6 +3792,75 @@ mod tests {
             evaluated_at: now + Duration::seconds(4),
         };
         store.record_evaluation(&report).expect("record evaluation");
+        let automatic_observation = SupervisionObservation {
+            schema_version: SUPERVISION_SCHEMA_VERSION,
+            id: SupervisionObservationId::new(),
+            loop_kind: SupervisionLoop::Fast,
+            signal: SupervisionSignal::RepeatedFailure,
+            severity_basis_points: 8_500,
+            recommended_intervention: InterventionLevel::Redirect,
+            task_id: Some(task.id),
+            run_id: Some(run.id),
+            organization_revision_id: Some(genome.revision_id),
+            summary: "objective evaluation failed".into(),
+            evidence: vec![SupervisionEvidence {
+                method: "objective_evaluation".into(),
+                artifact_sha256: Some("a".repeat(64)),
+                event_sequence: None,
+                detail: "durable automatic fixture".into(),
+            }],
+            observed_at: report.evaluated_at,
+        };
+        let analysis_hash = "b".repeat(64);
+        let recorded = store
+            .record_automatic_supervision(
+                report.id,
+                &analysis_hash,
+                std::slice::from_ref(&automatic_observation),
+                now + Duration::seconds(5),
+            )
+            .expect("record automatic supervision");
+        assert!(!recorded.replayed);
+        assert_eq!(recorded.events.len(), 1);
+        assert!(
+            store
+                .record_automatic_supervision(
+                    report.id,
+                    &analysis_hash,
+                    std::slice::from_ref(&automatic_observation),
+                    now + Duration::seconds(6),
+                )
+                .expect("exact supervision replay")
+                .replayed
+        );
+        let mut changed_observation = automatic_observation.clone();
+        changed_observation.summary = "changed under same analysis".into();
+        assert!(
+            store
+                .record_automatic_supervision(
+                    report.id,
+                    &analysis_hash,
+                    &[changed_observation],
+                    now + Duration::seconds(6),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .record_automatic_supervision(
+                    report.id,
+                    &"c".repeat(64),
+                    std::slice::from_ref(&automatic_observation),
+                    now + Duration::seconds(6),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM supervised_evaluations", [])
+                .is_err()
+        );
         drop(store);
 
         let mut reopened = SqliteEventStore::open(&database).expect("reopen store");
@@ -3799,6 +3885,18 @@ mod tests {
         assert_eq!(
             reopened.evaluations(run.id).expect("evaluations"),
             vec![report.clone()]
+        );
+        assert!(
+            reopened
+                .unsupervised_evaluation_ids(32)
+                .expect("supervision markers")
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .supervision_observation(automatic_observation.id)
+                .expect("automatic observation"),
+            Some(automatic_observation)
         );
 
         let recovery = reopened
