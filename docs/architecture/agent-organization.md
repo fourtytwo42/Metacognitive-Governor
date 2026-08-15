@@ -163,7 +163,12 @@ server-owned tool schemas, provider routes, organization concurrency, lease
 duration, and remaining budget again at execution time. SQLite writes the fresh
 instance, its created-to-running transition, the active lease, and all three
 events atomically. Duplicate active/completed work, incomplete dependencies, and
-exhausted parallel/total-agent limits produce no new authority or event.
+exhausted parallel/total-role limits produce no new authority or event. The total
+limit bounds distinct organization roles represented in a run, while the
+parallel limit bounds active instances. Failed retries of the same role do not
+consume a new topology slot; automatic retries remain bounded by the lease
+attempt limit, and only an authenticated explicit owner retry may exceed that
+attempt count.
 
 The runtime constructs every filesystem, process, Git, HTTP, system, and memory
 executor before dispatch. Host capabilities are confined to the registered

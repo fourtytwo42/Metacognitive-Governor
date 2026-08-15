@@ -8918,7 +8918,10 @@ form.addEventListener('submit', (event) => {
         };
         let body = serde_json::to_vec(&request).expect("request body");
         let mut latest = None;
-        for attempt in 0..4 {
+        // Ten attempts exceed the default organization's eight-role topology
+        // ceiling. Retries reuse the same role and therefore must not consume a
+        // new topology slot, while the separate automatic-attempt limit remains.
+        for attempt in 0..10 {
             let action = if attempt == 0 { "launch" } else { "retry" };
             let response = router(runtime.clone())
                 .oneshot(

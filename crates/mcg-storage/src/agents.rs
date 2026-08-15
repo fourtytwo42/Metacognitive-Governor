@@ -2062,9 +2062,16 @@ impl SqliteEventStore {
             .ok_or_else(|| {
                 StorageError::InvalidData("lease references unknown work item".into())
             })?;
-        let total_instances: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM agent_instances WHERE run_id = ?1",
+        let represented_roles: i64 = self.connection.query_row(
+            "SELECT COUNT(DISTINCT role_id) FROM agent_instances WHERE run_id = ?1",
             [created.run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let role_already_represented: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM agent_instances WHERE run_id = ?1 AND role_id = ?2
+             )",
+            params![created.run_id.to_string(), created.role_id.to_string()],
             |row| row.get(0),
         )?;
         let active_instances: i64 = self.connection.query_row(
@@ -2073,11 +2080,16 @@ impl SqliteEventStore {
             [created.run_id.to_string()],
             |row| row.get(0),
         )?;
-        if total_instances >= i64::from(organization.policy.max_total_agents)
-            || active_instances >= i64::from(organization.policy.max_parallel_agents)
+        if !role_already_represented
+            && represented_roles >= i64::from(organization.policy.max_total_agents)
         {
             return Err(StorageError::Conflict(
-                "organization agent concurrency limit is exhausted".into(),
+                "organization total role limit is exhausted".into(),
+            ));
+        }
+        if active_instances >= i64::from(organization.policy.max_parallel_agents) {
+            return Err(StorageError::Conflict(
+                "organization parallel agent limit is exhausted".into(),
             ));
         }
         let prior_authority: bool = self.connection.query_row(
