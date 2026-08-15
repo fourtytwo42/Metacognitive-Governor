@@ -7,7 +7,7 @@ use mcg_agents::{
 };
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ExperimentId, OrganizationId, OrganizationRevisionId,
-    ProjectSnapshotId, RunId, TaskEnvelope, TaskState, ToolRequestId,
+    ProjectSnapshotId, RunId, TaskEnvelope, TaskId, TaskState, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState};
@@ -1230,6 +1230,39 @@ impl SqliteEventStore {
             replayed: false,
             events,
         })
+    }
+
+    /// Resolves one durable external-interface request identity to its task and run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a stored identity is malformed or the query fails.
+    pub fn interface_run_request(
+        &self,
+        interface: &str,
+        request_key: &str,
+    ) -> Result<Option<(TaskId, RunId)>, StorageError> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT task_id, run_id FROM interface_run_requests
+                 WHERE interface = ?1 AND request_key = ?2",
+                params![interface, request_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        stored
+            .map(|(task_id, run_id)| {
+                Ok((
+                    task_id.parse().map_err(|_| {
+                        StorageError::InvalidData("stored interface task id is invalid".into())
+                    })?,
+                    run_id.parse().map_err(|_| {
+                        StorageError::InvalidData("stored interface run id is invalid".into())
+                    })?,
+                ))
+            })
+            .transpose()
     }
 
     /// Atomically creates an idempotent interface-owned task, organization,
@@ -3608,6 +3641,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture proves atomic creation, exact replay/conflict, and both request/launch identities across reopen.
     fn interface_consumer_run_creation_is_atomic_idempotent_and_restart_durable() {
         let directory = tempdir().expect("temp directory");
         let database = directory.path().join("mcg.sqlite3");
@@ -3668,6 +3702,12 @@ mod tests {
             store.task_launch_run_id(task.id).expect("consumer launch"),
             Some(run.id)
         );
+        assert_eq!(
+            store
+                .interface_run_request("mcp", "fixture-request")
+                .expect("interface request"),
+            Some((task.id, run.id))
+        );
         let event_count = store.event_count().expect("event count");
         drop(store);
 
@@ -3693,6 +3733,12 @@ mod tests {
                 .task_launch_run_id(task.id)
                 .expect("reopened consumer launch"),
             Some(run.id)
+        );
+        assert_eq!(
+            reopened
+                .interface_run_request("mcp", "fixture-request")
+                .expect("reopened interface request"),
+            Some((task.id, run.id))
         );
         assert_eq!(reopened.event_count().expect("event count"), event_count);
         assert!(

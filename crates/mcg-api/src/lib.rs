@@ -4494,7 +4494,12 @@ mod tests {
     }
 
     async fn consumer_task_model_fixture() -> String {
-        async fn response(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        consumer_task_model_fixture_with_delay(Duration::ZERO).await
+    }
+
+    async fn consumer_task_model_fixture_with_delay(delay: Duration) -> String {
+        let response = move |Json(_body): Json<serde_json::Value>| async move {
+            tokio::time::sleep(delay).await;
             Json(serde_json::json!({
                 "id": uuid::Uuid::new_v4().to_string(),
                 "model": "consumer-task-model",
@@ -4506,7 +4511,7 @@ mod tests {
                 }],
                 "usage": {"input_tokens": 32, "output_tokens": 4, "total_tokens": 36}
             }))
-        }
+        };
 
         let app = Router::new()
             .route(
@@ -5232,6 +5237,46 @@ form.addEventListener('submit', (event) => {
             .expect("MCP request")
     }
 
+    fn mcp_progress_request(
+        id: &serde_json::Value,
+        name: &str,
+        arguments: &serde_json::Value,
+        progress_token: &serde_json::Value,
+    ) -> Request<Body> {
+        let mut params = serde_json::json!({"name": name, "arguments": arguments})
+            .as_object()
+            .expect("tool params")
+            .clone();
+        params.insert(
+            "_meta".into(),
+            serde_json::json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "mcg-api-progress-test",
+                    "version": "1.0.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "progressToken": progress_token
+            }),
+        );
+        authorized(Request::post("/mcp"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream; q=1")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "tools/call")
+            .header("mcp-name", name)
+            .body(Body::from(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": params,
+                })
+                .to_string(),
+            ))
+            .expect("MCP progress request")
+    }
+
     async fn response_json(response: Response) -> serde_json::Value {
         serde_json::from_slice(
             &response
@@ -5242,6 +5287,15 @@ form.addEventListener('submit', (event) => {
                 .to_bytes(),
         )
         .expect("JSON response")
+    }
+
+    fn sse_data_values(body: &str) -> Vec<serde_json::Value> {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).expect("SSE JSON data"))
+            .collect()
     }
 
     async fn mcp_tool_response(
@@ -6205,6 +6259,240 @@ form.addEventListener('submit', (event) => {
             Some(&serde_json::json!("conflict"))
         );
         assert_eq!(runtime.tasks().expect("two consumer tasks").len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn mcp_task_progress_is_scoped_durable_validated_and_cancelled_on_disconnect() {
+        let runtime = test_runtime();
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(
+            project_root.path().join("README.md"),
+            "MCP progress fixture",
+        )
+        .expect("project fixture");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "mcp_progress_provider".into(),
+                    display_name: "MCP Progress Provider".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: consumer_task_model_fixture_with_delay(Duration::from_millis(250))
+                        .await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+        let app = router(runtime.clone());
+        let arguments = serde_json::json!({
+            "request_key": "consumer-progress-1",
+            "project_id": project_id,
+            "goal": "Verify the project readme without leaking this goal in progress",
+            "success_conditions": ["FILE EXISTS README.md"],
+            "context_token_budget": 512,
+            "estimated_output_tokens": 128,
+            "max_model_calls": 2
+        });
+        let response = app
+            .clone()
+            .oneshot(mcp_progress_request(
+                &serde_json::json!(400),
+                "mcg_run_task",
+                &arguments,
+                &serde_json::json!("progress-400"),
+            ))
+            .await
+            .expect("progress response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/event-stream"))
+        );
+
+        let unrelated = TaskEnvelope::new("unrelated event must not enter task progress");
+        let unrelated_event = runtime.create_task(&unrelated).expect("unrelated event");
+        let bytes = tokio::time::timeout(Duration::from_secs(5), response.into_body().collect())
+            .await
+            .expect("progress response timeout")
+            .expect("progress response body")
+            .to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).expect("UTF-8 SSE");
+        let messages = sse_data_values(&body);
+        let notifications = messages
+            .iter()
+            .filter(|message| {
+                message.get("method") == Some(&serde_json::json!("notifications/progress"))
+            })
+            .collect::<Vec<_>>();
+        assert!(notifications.len() >= 2, "{body}");
+        assert_eq!(
+            notifications[0].pointer("/params/progress"),
+            Some(&serde_json::json!(0))
+        );
+        assert!(notifications.iter().all(|message| {
+            message.pointer("/params/progressToken") == Some(&serde_json::json!("progress-400"))
+                && message.pointer("/params/task_id").is_none()
+                && message.pointer("/params/payload").is_none()
+        }));
+        let progress = notifications
+            .iter()
+            .map(|message| {
+                message
+                    .pointer("/params/progress")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("numeric progress")
+            })
+            .collect::<Vec<_>>();
+        assert!(progress.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(!progress.contains(&unrelated_event.sequence));
+
+        let (task_id, _) = runtime
+            .interface_run_request("mcp_task", "consumer-progress-1")
+            .expect("progress task lookup")
+            .expect("progress task identity");
+        let durable_sequences = runtime
+            .task_events(task_id)
+            .expect("durable task progress")
+            .into_iter()
+            .map(|event| event.sequence)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            progress
+                .iter()
+                .skip(1)
+                .all(|sequence| durable_sequences.contains(sequence))
+        );
+        let final_response = messages.last().expect("final JSON-RPC result");
+        assert_eq!(final_response.get("id"), Some(&serde_json::json!(400)));
+        assert_eq!(
+            final_response.pointer("/result/structuredContent/task/state"),
+            Some(&serde_json::json!("completed"))
+        );
+
+        let json_response = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(401),
+                "tools/call",
+                serde_json::json!({"name": "mcg_run_task", "arguments": arguments})
+                    .as_object()
+                    .expect("tool params")
+                    .clone(),
+                Some("mcg_run_task"),
+            ))
+            .await
+            .expect("JSON replay response");
+        assert!(
+            json_response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/json"))
+        );
+        assert_eq!(
+            response_json(json_response)
+                .await
+                .pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+
+        let invalid = app
+            .clone()
+            .oneshot(mcp_progress_request(
+                &serde_json::json!(402),
+                "mcg_run_task",
+                &serde_json::json!({}),
+                &serde_json::json!({"invalid": true}),
+            ))
+            .await
+            .expect("invalid progress token response");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invalid).await.pointer("/error/code"),
+            Some(&serde_json::json!(-32_602))
+        );
+
+        let disconnect = app
+            .oneshot(mcp_progress_request(
+                &serde_json::json!(403),
+                "mcg_run_task",
+                &serde_json::json!({
+                    "request_key": "consumer-progress-cancel",
+                    "project_id": project_id,
+                    "goal": "Cancel this task when its request stream closes",
+                    "success_conditions": ["FILE EXISTS README.md"],
+                    "context_token_budget": 512,
+                    "estimated_output_tokens": 128,
+                    "max_model_calls": 2
+                }),
+                &serde_json::json!(403),
+            ))
+            .await
+            .expect("disconnect response");
+        let mut disconnect_body = disconnect.into_body();
+        let mut received = String::new();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(2), disconnect_body.frame())
+                .await
+                .expect("disconnect progress timeout")
+                .expect("disconnect progress frame")
+                .expect("disconnect body frame");
+            if let Ok(data) = frame.into_data() {
+                received.push_str(&String::from_utf8_lossy(&data));
+            }
+            if sse_data_values(&received).iter().any(|message| {
+                message
+                    .pointer("/params/progress")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|progress| progress > 0)
+            }) {
+                break;
+            }
+        }
+        drop(disconnect_body);
+        let (cancelled_task_id, _) = runtime
+            .interface_run_request("mcp_task", "consumer-progress-cancel")
+            .expect("cancelled stream lookup")
+            .expect("cancelled stream identity");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime
+                    .task(cancelled_task_id)
+                    .expect("cancelled stream task")
+                    .is_some_and(|task| task.state == TaskState::Cancelled)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stream close cancellation timeout");
+        let run_id = runtime
+            .task_launch_run_id(cancelled_task_id)
+            .expect("cancelled launch")
+            .expect("cancelled run id");
+        assert_eq!(
+            runtime
+                .agent_run_view(run_id)
+                .expect("cancelled run")
+                .run
+                .state,
+            AgentRunState::Cancelled
+        );
     }
 
     #[tokio::test]

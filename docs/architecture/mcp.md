@@ -12,6 +12,14 @@ client capabilities in `params._meta`. There is no `initialize` session, GET
 event stream, `Mcp-Session-Id`, or resumable `Last-Event-ID` behavior in this
 protocol revision.
 
+Most calls return one `application/json` response. A caller can opt a
+`mcg_run_task` request into request-scoped progress by sending a string or number
+in `params._meta.progressToken` and accepting `text/event-stream`. That POST then
+stays open long enough to emit `notifications/progress` messages followed by the
+one final JSON-RPC response. Progress is the committed global event sequence, so
+it is strictly increasing, reconciles from SQLite if the in-memory broadcast
+lags, and never substitutes an ephemeral counter for durable history.
+
 The implementation follows the official [MCP discovery
 contract](https://modelcontextprotocol.io/specification/2026-07-28/server/discover),
 [Streamable HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http),
@@ -76,6 +84,24 @@ list every requested tool; omitting the list does not grant the role's full tool
 Scheduler creation is mutating, idempotent, and open-world because admitted work
 can later reach configured providers and governed tools. Scheduler removal is an
 idempotent closed-world state transition and never erases evidence.
+
+## Request-scoped task progress
+
+Progress streaming is opt-in and isolated to the task reserved by the exact
+`mcg_run_task` request key. Each notification contains only the caller's original
+progress token, durable event sequence, and event-kind message; it does not expose
+event payloads, goals, prompts, results, task ids, or unrelated task events. The
+last SSE message is the ordinary JSON-RPC tool result or error, preserving the
+same complete tool contract as JSON response mode. An exact replay can therefore
+return a short stream followed by the retained result without repeating provider
+or tool authority.
+
+Closing the response body is the MCP cancellation signal for that in-flight
+request. Once the durable request identity exists, MCG atomically cancels the
+nonterminal task, its consumer run, and active leases while retaining committed
+history. Closing after a terminal result is harmless. This stream is scoped to
+one request; it is not a session-wide subscription channel and does not add a GET
+stream or server session.
 
 ## Governed run idempotency
 
@@ -218,6 +244,12 @@ request/evaluation identities, and atomically cancels a second nonterminal task.
 The file-backed interface fixture proves the consumer-launch identity and request
 mapping survive reopen together.
 
+A request-scoped progress fixture proves string-token validation, SSE content
+negotiation (including media-type parameters), monotonic SQLite-backed progress,
+unrelated-task isolation, payload omission, a final complete JSON-RPC result,
+ordinary JSON replay when no token is supplied, and atomic task/run cancellation
+when a client drops a live response stream.
+
 A second file-backed consumer fixture uses a destructive/open-world external MCP
 tool in guided mode. It proves the remote call remains at zero before approval,
 reopens the daemon while waiting, restores provider/catalog and agent authority,
@@ -225,8 +257,10 @@ executes the remote side effect exactly once, and continues the pinned model tur
 without repeating the paid pre-approval inference.
 
 This is a broad MCP server plus HTTP/stdio client implementation, but native
-interoperability and subscription work remain. Remaining M6 work includes:
+interoperability and catalog-change subscription work remain. Remaining M6 work
+includes:
 
-- request-scoped SSE progress and opt-in subscription streams where useful;
+- opt-in `subscriptions/listen` streams only where MCG has useful runtime
+  tool/prompt/resource catalog-change notifications to publish;
 - interoperability fixtures against representative third-party MCP SDKs and
   both-platform native desktop UAT.

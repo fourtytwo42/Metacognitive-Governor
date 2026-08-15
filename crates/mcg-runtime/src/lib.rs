@@ -5996,6 +5996,21 @@ impl AppRuntime {
         Ok(event)
     }
 
+    /// Resolves one durable external-interface request identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read or contains invalid identity data.
+    pub fn interface_run_request(
+        &self,
+        interface: &str,
+        request_key: &str,
+    ) -> Result<Option<(TaskId, RunId)>, RuntimeError> {
+        Ok(self
+            .store()?
+            .interface_run_request(interface, request_key)?)
+    }
+
     /// Atomically reserves and starts an idempotent task/run requested through
     /// an external interface, then returns its complete durable view. When
     /// `consumer_launch` is true, the unique task-to-consumer-run identity is

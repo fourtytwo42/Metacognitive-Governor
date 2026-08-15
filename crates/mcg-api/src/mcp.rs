@@ -1,13 +1,13 @@
 //! Stateless MCP 2026-07-28 Streamable HTTP server boundary.
 
-use std::{collections::HashSet, str::FromStr};
+use std::{collections::HashSet, convert::Infallible, str::FromStr, time::Duration};
 
 use axum::{
     Json,
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse, sse::Event as SseEvent},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
@@ -32,6 +32,7 @@ use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio_stream::wrappers::ReceiverStream;
 use url::{Host, Url};
 
 use super::{ApiState, CreateScheduleRequest, LaunchTaskRequest, create_schedule_record};
@@ -125,6 +126,13 @@ pub(super) async fn handle(
     if let Err(error) = validate_metadata_and_headers(&headers, &request) {
         return error.response();
     }
+    if request.method == "tools/call"
+        && request.params.get("name").and_then(Value::as_str) == Some("mcg_run_task")
+        && accepts_sse(&headers)
+        && let Some(progress_token) = progress_token(&request.params)
+    {
+        return stream_task_call(state, request, progress_token);
+    }
 
     let id = request.id.clone();
     let result = match request.method.as_str() {
@@ -149,6 +157,236 @@ pub(super) async fn handle(
             error.response()
         }
     }
+}
+
+fn progress_token(params: &serde_json::Map<String, Value>) -> Option<Value> {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("progressToken"))
+        .cloned()
+}
+
+fn accepts_sse(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|value| {
+                value.split(';').next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                })
+            })
+        })
+}
+
+fn stream_task_call(state: ApiState, request: RpcRequest, progress_token: Value) -> Response {
+    let request_key = request
+        .params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .and_then(|arguments| arguments.get("request_key"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut event_receiver = state.runtime.subscribe();
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(32);
+    tokio::spawn(async move {
+        if send_mcp_sse(&sender, initial_progress_notification(&progress_token))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let id = request.id.clone();
+        let params = request.params;
+        let call = call_tool(&state, &params);
+        tokio::pin!(call);
+        let mut task_id = None;
+        let mut last_sequence = 0;
+        let mut events_open = true;
+        loop {
+            tokio::select! {
+                () = sender.closed() => {
+                    cancel_streamed_task(&state, request_key.as_deref(), task_id);
+                    return;
+                }
+                result = &mut call => {
+                    emit_durable_task_progress(
+                        &state,
+                        request_key.as_deref(),
+                        &mut task_id,
+                        &mut last_sequence,
+                        &progress_token,
+                        &sender,
+                    ).await;
+                    let body = match result {
+                        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                        Err(mut error) => {
+                            error.id.get_or_insert(id);
+                            rpc_failure_body(&error)
+                        }
+                    };
+                    if send_mcp_sse(&sender, body).await.is_err() {
+                        cancel_streamed_task(&state, request_key.as_deref(), task_id);
+                    }
+                    return;
+                }
+                event = event_receiver.recv(), if events_open => {
+                    match event {
+                        Ok(event) => {
+                            if task_id.is_none() {
+                                task_id = streamed_task_id(&state, request_key.as_deref());
+                            }
+                            if event.task_id == task_id && event.sequence > last_sequence {
+                                last_sequence = event.sequence;
+                                if send_mcp_sse(
+                                    &sender,
+                                    progress_notification(
+                                        &progress_token,
+                                        event.sequence,
+                                        event.kind.as_str(),
+                                    ),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    cancel_streamed_task(&state, request_key.as_deref(), task_id);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            emit_durable_task_progress(
+                                &state,
+                                request_key.as_deref(),
+                                &mut task_id,
+                                &mut last_sequence,
+                                &progress_token,
+                                &sender,
+                            ).await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => events_open = false,
+                    }
+                }
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(receiver))
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+async fn emit_durable_task_progress(
+    state: &ApiState,
+    request_key: Option<&str>,
+    task_id: &mut Option<TaskId>,
+    last_sequence: &mut u64,
+    progress_token: &Value,
+    sender: &tokio::sync::mpsc::Sender<Result<SseEvent, Infallible>>,
+) {
+    if task_id.is_none() {
+        *task_id = streamed_task_id(state, request_key);
+    }
+    if let Some(task_id) = *task_id
+        && let Ok(events) = state.runtime.task_events(task_id)
+    {
+        for event in events {
+            if event.sequence > *last_sequence {
+                *last_sequence = event.sequence;
+                if send_mcp_sse(
+                    sender,
+                    progress_notification(progress_token, event.sequence, event.kind.as_str()),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn streamed_task_id(state: &ApiState, request_key: Option<&str>) -> Option<TaskId> {
+    request_key
+        .and_then(|request_key| {
+            state
+                .runtime
+                .interface_run_request("mcp_task", request_key)
+                .ok()
+                .flatten()
+        })
+        .map(|(task_id, _)| task_id)
+}
+
+fn cancel_streamed_task(state: &ApiState, request_key: Option<&str>, task_id: Option<TaskId>) {
+    let task_id = task_id.or_else(|| streamed_task_id(state, request_key));
+    if let Some(task_id) = task_id
+        && state
+            .runtime
+            .task(task_id)
+            .ok()
+            .flatten()
+            .is_some_and(|task| {
+                !matches!(
+                    task.state,
+                    TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+                )
+            })
+    {
+        let _ = state.runtime.transition_task(task_id, TaskState::Cancelled);
+    }
+}
+
+fn progress_notification(progress_token: &Value, progress: u64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": progress_token,
+            "progress": progress,
+            "message": message,
+        }
+    })
+}
+
+fn initial_progress_notification(progress_token: &Value) -> Value {
+    progress_notification(
+        progress_token,
+        0,
+        "MCG is reserving the durable consumer task",
+    )
+}
+
+async fn send_mcp_sse(
+    sender: &tokio::sync::mpsc::Sender<Result<SseEvent, Infallible>>,
+    message: Value,
+) -> Result<(), ()> {
+    sender
+        .send(Ok(SseEvent::default()
+            .event("message")
+            .data(message.to_string())))
+        .await
+        .map_err(|_| ())
+}
+
+fn rpc_failure_body(error: &RpcFailure) -> Value {
+    let mut detail = json!({
+        "code": error.code,
+        "message": error.message,
+    });
+    if let Some(data) = &error.data {
+        detail["data"] = data.clone();
+    }
+    let mut body = json!({"jsonrpc": "2.0", "error": detail});
+    if let Some(id) = &error.id {
+        body["id"] = id.clone();
+    }
+    body
 }
 
 fn parse_request(value: &Value) -> Result<RpcRequest, RpcFailure> {
@@ -249,6 +487,17 @@ fn validate_metadata_and_headers(
             id,
             INVALID_PARAMS,
             "Client capabilities metadata must be an object",
+        ));
+    }
+    if meta
+        .get("progressToken")
+        .is_some_and(|token| !token.is_string() && !token.is_number())
+    {
+        return Err(RpcFailure::new(
+            StatusCode::BAD_REQUEST,
+            id,
+            INVALID_PARAMS,
+            "Progress token must be a string or number",
         ));
     }
 

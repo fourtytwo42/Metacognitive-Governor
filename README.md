@@ -354,9 +354,13 @@ memory, task/run query, complete consumer-task execution/retry/resume/cancellati
 evidence-validated evaluation, and atomic governed agent-run tools under strict
 MCP 2026-07-28 metadata, header, and loopback-Origin validation. Complete MCP
 tasks share the desktop/CLI decomposition, independent evaluation, objective
-verification, durable replay, and terminal settlement path. See
+verification, durable replay, and terminal settlement path. Callers can opt
+`mcg_run_task` into request-scoped SSE progress with `_meta.progressToken`; MCG
+streams only durable task event kinds/sequences, returns the final tool result on
+the same response, and cancels nonterminal task/run authority if that response is
+closed. See
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
-the remaining subscription and native interoperability work.
+the remaining catalog-change subscription and native interoperability work.
 
 MCG can also connect to Streamable HTTP or local stdio MCP servers. Use
 `mcg mcp add-http ID NAME URL`; select `--auth bearer-token` and pipe the secret
