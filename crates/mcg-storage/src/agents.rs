@@ -3250,7 +3250,7 @@ impl SqliteEventStore {
             .transpose()
     }
 
-    fn read_json_rows<T: serde::de::DeserializeOwned>(
+    pub(crate) fn read_json_rows<T: serde::de::DeserializeOwned>(
         &self,
         sql: &str,
         parameter: &str,

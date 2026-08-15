@@ -5,9 +5,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows and Linux; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on both platforms.
-- Current task: Begin M9 measured metacognitive improvement after closing M8's expanded-execution-plane evidence on both qualified operating systems.
-- Last meaningful change: Exact commit `1cb32b2` passed the complete Ubuntu gate and stateful native Linux UAT. The release GUI and portable bundle discovered GPU45, registered a project through the native picker, created and honestly blocked a task, and recovered provider/project/task/evidence after daemon and GUI restart. M8 exit evidence is now complete on Windows and Linux.
-- Next step: Define and implement the M9 supervision/experiment durability boundary: measured fast/medium/slow observations, immutable candidate revisions, shadow isolation, benchmark evidence, and atomic promote/revert.
+- Current task: Complete M9 measured metacognitive improvement after establishing its durable supervision/experiment foundation.
+- Last meaningful change: M9 contracts and SQLite migration 20 now represent measured fast/medium/slow observations, graduated intervention levels, immutable candidate revisions, evaluation-only shadow receipts, paired benchmarks, prospective decisions, and atomic promotion/rejection/reversion to a known-good organization head. Focused storage/contract tests and strict Clippy pass on Windows.
+- Next step: Expose the M9 experiment lifecycle through the runtime, authenticated REST, CLI, MCP, Tauri, and simple/advanced desktop surfaces, then run adversarial exit scenarios and cross-platform qualification.
 - Blockers: None documented.
 
 ## Current State
@@ -127,6 +127,7 @@ When sources conflict, use this order:
 - M3 implements typed filesystem, process/shell, HTTP/download, system, Git/worktree/patch, and memory primitives behind one policy broker. SQLite durably stores approval state, execution leases, immutable tool audit, artifact registrations, and associated task events.
 - M4 uses a separate `mcg-projects` boundary for stable project snapshots, hierarchical instruction resolution, context assembly, watched-input invalidation, world-model facts, and structured memory claims. Semantic indexes are optional derivatives, never canonical memory.
 - M5 uses a separate `mcg-agents` boundary for versioned organization genomes, roles/instances, work plans, agent leases, success conditions, evaluation evidence, confidence/calibration, and organizational-cost metrics.
+- M9 migration 20 stores immutable supervision observations, candidate experiments, evaluation-only shadow receipts, paired benchmarks, and decisions. Candidate recording never changes the active organization head; promotion and reversion move that head only in the same transaction as the immutable decision and experiment projection. Promotion requires the declared benchmark count, confidence floor, regression ceiling, and prospective analysis; shadow receipts contain no authoritative task settlement field.
 - The M6 provider proxy is authenticated by the installation bearer token and never executes externally supplied caller tools. `/v1/responses` and `/v1/chat/completions` share exact provider routing/fallback rules; authentication errors cannot cross provider or billing boundaries. `mcg:cheap` requires known cost and `mcg:local` accepts only loopback/private endpoints.
 - The M6 MCP server uses one stateless `POST /mcp`; it requires per-request protocol/capability metadata and matching `MCP-Protocol-Version`, `Mcp-Method`, and tool `Mcp-Name` headers. Present Origins must be literal loopback/localhost and are rejected before authentication otherwise. Read/query tools return private-cache structured evidence; the agent-run mutation is explicitly marked destructive/open-world and remains policy-governed.
 - The `mcg-mcp` client boundary stores only secret-free connection metadata/catalogs in migration 9 and bearer secrets under a separate OS credential-store service. Current HTTP configuration performs `server/discover` and `tools/list` before committing; public plaintext endpoints and URL-embedded credentials are rejected. Explicit remote agent tools use canonical `mcp::connection::tool` requests, per-lease aliases, immutable internal bindings, conservative catalog annotations, and the existing policy/approval/audit/execution-lease broker; the executor revalidates enabled catalog identity/classification before every call.
@@ -140,6 +141,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-14: M9 durable foundation passed 16 `mcg-agents` and 31 `mcg-storage` tests plus strict Clippy for agents/events/storage, formatting, documentation validation, and diff hygiene. Evidence covers explicit loop/intervention and experiment transition contracts, observation exact replay and immutable-delete rejection across reopen, atomic promotion/reversion of the active organization revision, insufficient/regressing candidate rejection, and shadow receipts that cannot settle a real task. Full interface integration and cross-platform qualification remain pending.
 
 - 2026-08-15: Exact pushed commit `1cb32b234d961a7012e6c3b92b0add30ed2d23a9` passed complete owner-controlled Ubuntu `./scripts/verify.sh` in 430.5 seconds: dependency installation, browser provisioning, formatting, strict workspace Clippy, every Rust test, documentation, frontend typecheck, 20 Vitest flows, production frontend, native Tauri/GTK, and two Playwright flows. Release Tauri `build --no-bundle` then passed in 320 seconds and release daemon/CLI compilation passed in 148.8 seconds. No GitHub-hosted compute ran.
 
@@ -738,6 +741,7 @@ When sources conflict, use this order:
 - Complete MCP server subscriptions/interoperability plus MCP client stdio negotiation and real native MCP UAT.
 - Expand consumer objective settlement beyond the qualified guided, command, HTTP, browser render, element, typed browser workflow, file, exact-discovered custom, screenshot, and research evaluators to accessibility checks, service-health semantics, and other typed conditions; unsupported conditions deliberately remain nonterminal.
 - Qualify the newly wired standalone OpenAI OAuth provider management on Windows and Ubuntu, then perform live-account OAuth/model/tool UAT; do not expose tokens or fall back to API billing.
+- Finish M9 runtime and every-interface experiment lifecycle, automated candidate/shadow/benchmark orchestration, adversarial promotion/reversion exit scenarios, and exact Windows/Ubuntu qualification.
 
 ## Do Not Forget
 

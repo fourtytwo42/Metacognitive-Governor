@@ -46,6 +46,12 @@ pub enum EventKind {
     AgentTurnWaiting,
     AgentTurnFailed,
     McgIntervention,
+    SupervisionObserved,
+    ExperimentCreated,
+    ExperimentStateChanged,
+    ShadowExecutionRecorded,
+    ExperimentBenchmarkRecorded,
+    ExperimentDecisionRecorded,
 }
 
 impl EventKind {
@@ -87,6 +93,12 @@ impl EventKind {
             Self::AgentTurnWaiting => "agent_turn_waiting",
             Self::AgentTurnFailed => "agent_turn_failed",
             Self::McgIntervention => "mcg_intervention",
+            Self::SupervisionObserved => "supervision_observed",
+            Self::ExperimentCreated => "experiment_created",
+            Self::ExperimentStateChanged => "experiment_state_changed",
+            Self::ShadowExecutionRecorded => "shadow_execution_recorded",
+            Self::ExperimentBenchmarkRecorded => "experiment_benchmark_recorded",
+            Self::ExperimentDecisionRecorded => "experiment_decision_recorded",
         }
     }
 
@@ -150,6 +162,20 @@ impl EventKind {
             "agent_turn_waiting" | "AgentTurnWaiting" => Ok(Self::AgentTurnWaiting),
             "agent_turn_failed" | "AgentTurnFailed" => Ok(Self::AgentTurnFailed),
             "mcg_intervention" | "McgIntervention" => Ok(Self::McgIntervention),
+            "supervision_observed" | "SupervisionObserved" => Ok(Self::SupervisionObserved),
+            "experiment_created" | "ExperimentCreated" => Ok(Self::ExperimentCreated),
+            "experiment_state_changed" | "ExperimentStateChanged" => {
+                Ok(Self::ExperimentStateChanged)
+            }
+            "shadow_execution_recorded" | "ShadowExecutionRecorded" => {
+                Ok(Self::ShadowExecutionRecorded)
+            }
+            "experiment_benchmark_recorded" | "ExperimentBenchmarkRecorded" => {
+                Ok(Self::ExperimentBenchmarkRecorded)
+            }
+            "experiment_decision_recorded" | "ExperimentDecisionRecorded" => {
+                Ok(Self::ExperimentDecisionRecorded)
+            }
             other => Err(other.to_owned()),
         }
     }

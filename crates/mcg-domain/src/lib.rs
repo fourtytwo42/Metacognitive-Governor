@@ -79,6 +79,10 @@ domain_id!(SiteHealthCheckId);
 domain_id!(SshHostId);
 domain_id!(SshHostRevisionId);
 domain_id!(SshOperationId);
+domain_id!(SupervisionObservationId);
+domain_id!(ExperimentId);
+domain_id!(ExperimentBenchmarkId);
+domain_id!(ExperimentDecisionId);
 
 impl ToolRequestId {
     /// Creates a stable request identity from a caller-provided 128-bit digest.

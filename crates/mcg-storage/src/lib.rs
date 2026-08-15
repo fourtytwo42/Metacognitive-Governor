@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod agents;
+mod experiments;
 mod mcp;
 mod platform;
 mod providers;
@@ -28,6 +29,7 @@ pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
 };
+pub use experiments::ExperimentMutation;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
@@ -665,6 +667,106 @@ BEFORE DELETE ON ssh_operations BEGIN
 END;
 ";
 
+const MIGRATION_20: &str = r"
+CREATE TABLE IF NOT EXISTS supervision_observations (
+    observation_id TEXT PRIMARY KEY,
+    loop_kind TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    observation_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS supervision_observations_time
+    ON supervision_observations(observed_at, observation_id);
+CREATE TRIGGER IF NOT EXISTS supervision_observations_no_update
+BEFORE UPDATE ON supervision_observations BEGIN
+    SELECT RAISE(FAIL, 'supervision observations are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS supervision_observations_no_delete
+BEFORE DELETE ON supervision_observations BEGIN
+    SELECT RAISE(FAIL, 'supervision observations are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS experiments (
+    experiment_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    baseline_revision_id TEXT NOT NULL,
+    candidate_revision_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    state TEXT NOT NULL,
+    experiment_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id),
+    FOREIGN KEY(baseline_revision_id) REFERENCES organization_revisions(revision_id),
+    FOREIGN KEY(candidate_revision_id) REFERENCES organization_revisions(revision_id)
+);
+CREATE INDEX IF NOT EXISTS experiments_organization_state
+    ON experiments(organization_id, state, updated_at, experiment_id);
+CREATE TRIGGER IF NOT EXISTS experiments_no_delete
+BEFORE DELETE ON experiments BEGIN
+    SELECT RAISE(FAIL, 'experiment history cannot be deleted');
+END;
+
+CREATE TABLE IF NOT EXISTS shadow_execution_receipts (
+    candidate_run_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    source_task_id TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id),
+    FOREIGN KEY(source_task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS shadow_execution_receipts_experiment
+    ON shadow_execution_receipts(experiment_id, completed_at, candidate_run_id);
+CREATE TRIGGER IF NOT EXISTS shadow_execution_receipts_no_update
+BEFORE UPDATE ON shadow_execution_receipts BEGIN
+    SELECT RAISE(FAIL, 'shadow execution receipts are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS shadow_execution_receipts_no_delete
+BEFORE DELETE ON shadow_execution_receipts BEGIN
+    SELECT RAISE(FAIL, 'shadow execution receipts are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS experiment_benchmarks (
+    benchmark_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    scenario_key TEXT NOT NULL,
+    benchmark_json TEXT NOT NULL,
+    measured_at TEXT NOT NULL,
+    UNIQUE(experiment_id, scenario_key),
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE INDEX IF NOT EXISTS experiment_benchmarks_history
+    ON experiment_benchmarks(experiment_id, measured_at, benchmark_id);
+CREATE TRIGGER IF NOT EXISTS experiment_benchmarks_no_update
+BEFORE UPDATE ON experiment_benchmarks BEGIN
+    SELECT RAISE(FAIL, 'experiment benchmarks are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS experiment_benchmarks_no_delete
+BEFORE DELETE ON experiment_benchmarks BEGIN
+    SELECT RAISE(FAIL, 'experiment benchmarks are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS experiment_decisions (
+    decision_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    decision_json TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE INDEX IF NOT EXISTS experiment_decisions_history
+    ON experiment_decisions(experiment_id, decided_at, decision_id);
+CREATE TRIGGER IF NOT EXISTS experiment_decisions_no_update
+BEFORE UPDATE ON experiment_decisions BEGIN
+    SELECT RAISE(FAIL, 'experiment decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS experiment_decisions_no_delete
+BEFORE DELETE ON experiment_decisions BEGIN
+    SELECT RAISE(FAIL, 'experiment decisions are immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("SQLite operation failed: {0}")]
@@ -774,6 +876,7 @@ impl SqliteEventStore {
             (17_i64, MIGRATION_17),
             (18_i64, MIGRATION_18),
             (19_i64, MIGRATION_19),
+            (20_i64, MIGRATION_20),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
