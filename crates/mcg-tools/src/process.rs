@@ -123,7 +123,8 @@ impl ProcessExecutor {
                 "stdin_data requires a piped stdin stream".into(),
             ));
         }
-        let mut command = Command::new(&options.executable);
+        let executable = platform_process_executable(&options.executable);
+        let mut command = Command::new(executable);
         command.args(&options.argv);
         command.current_dir(self.resolve_cwd(&options.cwd)?);
         command.kill_on_drop(true);
@@ -462,6 +463,23 @@ fn validate_executable(value: &str) -> Result<(), ToolError> {
         return Err(ToolError::Invalid("executable is invalid".into()));
     }
     Ok(())
+}
+
+fn platform_process_executable(executable: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let path = Path::new(executable);
+        if path.components().count() == 1 && path.extension().is_none() {
+            let command = executable.to_ascii_lowercase();
+            if matches!(
+                command.as_str(),
+                "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" | "bun" | "bunx" | "corepack"
+            ) {
+                return format!("{executable}.cmd");
+            }
+        }
+    }
+    executable.into()
 }
 
 fn validate_environment_name(value: &str) -> Result<(), ToolError> {
@@ -904,5 +922,63 @@ mod tests {
             name: "FIXTURE".into(),
             value: HeaderValue::Literal("value".into()),
         };
+    }
+
+    #[test]
+    fn platform_process_launcher_preserves_structured_execution() {
+        if cfg!(windows) {
+            assert_eq!(platform_process_executable("npm"), "npm.cmd");
+            assert_eq!(platform_process_executable("NPM"), "NPM.cmd");
+            assert_eq!(platform_process_executable("corepack"), "corepack.cmd");
+            assert_eq!(platform_process_executable("npm.cmd"), "npm.cmd");
+            assert_eq!(
+                platform_process_executable(r"C:\\tools\\npm"),
+                r"C:\\tools\\npm"
+            );
+        } else {
+            assert_eq!(platform_process_executable("npm"), "npm");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_javascript_runner_executes_cmd_wrapper_without_shell_request() {
+        let root = tempdir().expect("root");
+        std::fs::write(
+            root.path().join("npm.cmd"),
+            "@echo off\r\necho structured-wrapper-ok\r\n",
+        )
+        .expect("fixture npm wrapper");
+        let request = ToolRequest::new(
+            mcg_domain::TaskId::new(),
+            "run JavaScript package command",
+            ToolRequestKind::ProcessExec {
+                options: ProcessOptions {
+                    executable: "npm".into(),
+                    argv: vec!["run".into(), "test".into()],
+                    cwd: root.path().to_string_lossy().into_owned(),
+                    env: vec![ProcessEnvironmentVariable {
+                        name: "PATH".into(),
+                        value: HeaderValue::Literal(root.path().to_string_lossy().into_owned()),
+                    }],
+                    stdin: ProcessStream::Null,
+                    stdin_data: None,
+                    stdout: ProcessStream::Piped,
+                    stderr: ProcessStream::Piped,
+                },
+            },
+        );
+        let outcome = executor(root.path())
+            .execute(ToolExecutionId::new(), &request)
+            .await
+            .expect("execute npm.cmd wrapper");
+        assert_eq!(outcome.status, ToolOutcomeStatus::Succeeded);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(
+            outcome
+                .stdout
+                .as_deref()
+                .is_some_and(|stdout| stdout.contains("structured-wrapper-ok"))
+        );
     }
 }

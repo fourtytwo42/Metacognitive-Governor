@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-16 - Windows model-issued JavaScript runner defect corrected
+
+- Context: A restored, secret-free GPU45 provider catalog drove an installed consumer task through a live model/tool turn, but the task stopped with `spawn process: program not found` while validating a Node fixture. Objective and shadow-verification paths already translated Windows JavaScript runners to `.cmd`; model-issued `process.exec` did not.
+- Decision: Normalize the common JavaScript package/runtime shims (`npm`, `npx`, `pnpm`, `pnpx`, `yarn`, `yarnpkg`, `bun`, `bunx`, and `corepack`) inside `ProcessExecutor`, where every governed caller receives the same shell-free structured-argument behavior. Explicit paths and already-suffixed executables remain unchanged.
+- Files: `crates/mcg-tools/src/process.rs`. Ignored failure evidence remains `.local-test/installed-provider-restored-evidence.json`, SHA-256 `18976895420e371c006e8d050fee748b0132e0f7bb9a749f410081f057477ea0`; the temporary rerun script must be removed after qualification.
+- Commands/tests: `cargo test -p mcg-tools` passed 53 tests with one intentionally ignored owner-visible browser test; the new hermetic Windows test executes a fixture `npm.cmd` via a typed `ProcessExec` request without a shell request. Strict `cargo clippy -p mcg-tools --all-targets -- -D warnings`, `cargo fmt --all --check`, and `git diff --check` pass.
+- Result: The cross-caller defect is corrected locally. A fresh clean package and successful installed GPU45 consumer task are still required before this release gate is closed; the previous installer does not contain the fix.
+- Follow-up: Commit the correction, build an exact clean local Windows package, and rerun the provider-backed installed CLI journey with raw/audit evidence retained before exact cleanup. No GitHub-hosted compute may run.
+
 ### 2026-08-16 - Windows installed consumer CLI package gate passed
 
 - Context: Windows final-package UAT covered the installed CLI administration surfaces but not consumer bare/JSON/NDJSON/piped/bounded-input behavior or the real interactive prompt.
@@ -132,9 +141,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Qualify a successful provider-backed installed consumer CLI journey, complete normal browser OAuth/provider parity on Ubuntu and macOS, then continue the remaining matched release gates.
-- Last meaningful change: Windows harness commit `70301bf` passed the exact installed NSIS package through bare/JSON/NDJSON/piped/oversized consumer CLI automation plus real-console interactive UAT, full desktop/package lifecycle, and exact cleanup. Linux package CLI parity was already green at `bf9b602`.
-- Next step: Qualify a successful provider-backed task from an installed CLI without silent billing fallback, then restart the prepared Ubuntu Secret Service plus browser-PKCE callback flow when the owner is ready and continue macOS parity.
+- Current task: Build a fresh clean Windows package containing the governed JavaScript-runner correction and qualify a successful GPU45-backed installed consumer CLI journey, then complete normal browser OAuth/provider parity on Ubuntu and macOS and continue the remaining matched release gates.
+- Last meaningful change: `crates/mcg-tools/src/process.rs` now normalizes common Windows JavaScript runners to `.cmd` inside the shared `ProcessExecutor`; 53 `mcg-tools` tests, a hermetic Windows wrapper regression, strict Clippy, formatting, and diff hygiene pass. The prior installed GPU45 run reached live model/tool execution and exposed this defect but did not complete.
+- Next step: Commit the correction, build an exact clean local NSIS package, and rerun the restored secret-free GPU45 consumer task while retaining raw task/history/audit evidence before exact cleanup. Then restart the prepared Ubuntu Secret Service plus browser-PKCE callback flow when the owner is ready and continue macOS parity.
 - Blockers: `Get-Command wsb.exe` returned false on Win11-VM, so the live Windows Sandbox gate requires enabling that Windows capability or another owner-controlled Windows machine. Trusted Windows/macOS signing and notarization identities are not yet configured. Ubuntu remains reachable noninteractively with the dedicated `mcg_m1_vm` SSH key (last verified 2026-08-15); credentials are intentionally not retained here.
 - Extended verification: Exact `9cec1c6` one-hour/10,000-task release soak lanes passed on Windows and Ubuntu on 2026-08-15. Baseline `d5aa893` also completed its Windows two-hour/10,000-task lane: 897.9 tasks/s, 38.3 ms creation p95, 30.8 MiB peak RSS, 15.5 MiB RSS growth, 146 ms cold start, 810 ms forced-crash restart, all 10,000 tasks/events recovered, database/schema checks pass, and empty stderr. Logs are `target/soak-windows-d5aa-2h.{stdout,stderr}.log`. The matching Ubuntu lane was externally terminated by the owner-initiated VM reboot used to expose the enlarged virtual disk and is not counted. Executable code has advanced beyond `d5aa893`, so final matched soak lanes remain required after stabilization.
 
