@@ -5866,7 +5866,7 @@ impl AppRuntime {
         let baseline = self.source_evaluation_for_observation(&source, observation_id)?;
         let candidate = self.agent_run_view(receipt.candidate_run_id)?;
         let evaluation = self
-            .isolated_shadow_evaluation(&candidate, &receipt)
+            .isolated_shadow_evaluation(&candidate, &receipt, &baseline)
             .await?;
         let benchmark = self.automatic_shadow_benchmark(
             &experiment,
@@ -5914,6 +5914,7 @@ impl AppRuntime {
         &self,
         candidate: &AgentRunView,
         receipt: &ShadowExecutionReceipt,
+        baseline: &EvaluationReport,
     ) -> Result<EvaluationReport, RuntimeError> {
         let evaluation_id = EvaluationId::from_stable_bytes(automatic_shadow_evidence_id_bytes(
             "evaluation",
@@ -5976,9 +5977,19 @@ impl AppRuntime {
             .into());
         }
         let artifact_root = self.config.data_directory.join("artifacts");
-        let verifier = FilesystemExecutor::open([workspace_root.clone()], &artifact_root)
-            .map_err(runtime_tool_error)?;
+        let verifier = Arc::new(
+            FilesystemExecutor::open([workspace_root.clone()], &artifact_root)
+                .map_err(runtime_tool_error)?,
+        );
         let artifacts = ArtifactStore::open(&artifact_root).map_err(runtime_tool_error)?;
+        let research = ResearchExecutor::new(Arc::new(
+            HttpExecutor::new(
+                Arc::new(RejectingCredentialResolver),
+                verifier.clone(),
+                &artifact_root,
+            )
+            .map_err(runtime_tool_error)?,
+        ));
         let mut conditions = Vec::new();
         let mut evidence = vec![EvaluationEvidence {
             method: "isolated_shadow_execution".into(),
@@ -6003,7 +6014,7 @@ impl AppRuntime {
                     SuccessCondition::FileExists { .. }
                 ) {
                     let (result, verification) = verify_isolated_file_condition(
-                        &verifier,
+                        verifier.as_ref(),
                         candidate.run.task_id,
                         &workspace_root,
                         condition,
@@ -6020,6 +6031,21 @@ impl AppRuntime {
                         condition,
                     )
                     .await;
+                    conditions.push(result);
+                    evidence.push(verification);
+                    is_supported
+                } else if matches!(condition, SuccessCondition::ResearchSources { .. }) {
+                    let baseline_urls =
+                        baseline_research_source_urls(&artifacts, baseline, condition);
+                    let (result, verification, is_supported) = verify_isolated_research_condition(
+                        verifier.as_ref(),
+                        &research,
+                        candidate.run.task_id,
+                        &workspace_root,
+                        condition,
+                        baseline_urls.as_ref(),
+                    )
+                    .await?;
                     conditions.push(result);
                     evidence.push(verification);
                     is_supported
@@ -10050,6 +10076,239 @@ async fn verify_isolated_file_condition(
     }
 }
 
+fn baseline_research_source_urls(
+    artifacts: &ArtifactStore,
+    baseline: &EvaluationReport,
+    condition: &SuccessCondition,
+) -> Option<BTreeSet<String>> {
+    const MAX_EVIDENCE_BYTES: u64 = 1_048_576;
+    let SuccessCondition::ResearchSources { required_scope, .. } = condition else {
+        return None;
+    };
+    if !baseline
+        .conditions
+        .iter()
+        .any(|result| result.passed && result.condition == *condition)
+    {
+        return None;
+    }
+    let mut matches = baseline
+        .evidence
+        .iter()
+        .filter(|evidence| evidence.method == "governed_research_sources")
+        .filter_map(|evidence| evidence.artifact_sha256.as_deref())
+        .filter_map(|digest| {
+            artifacts
+                .read_verified_digest(digest, MAX_EVIDENCE_BYTES)
+                .ok()
+        })
+        .filter_map(|bytes| serde_json::from_slice::<ResearchEvidenceDocument>(&bytes).ok())
+        .filter(|document| document.scope.trim() == required_scope.trim())
+        .map(|document| {
+            document
+                .claims
+                .into_iter()
+                .flat_map(|claim| claim.citations)
+                .map(|citation| citation.url)
+                .collect::<BTreeSet<_>>()
+        });
+    let urls = matches.next()?;
+    if urls.is_empty() || matches.next().is_some() {
+        None
+    } else {
+        Some(urls)
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Keep baseline binding, artifact capture, and fetch settlement auditable together.
+async fn verify_isolated_research_condition(
+    filesystem: &FilesystemExecutor,
+    research: &ResearchExecutor,
+    task_id: TaskId,
+    workspace_root: &Path,
+    condition: &SuccessCondition,
+    baseline_urls: Option<&BTreeSet<String>>,
+) -> Result<(ConditionResult, EvaluationEvidence, bool), RuntimeError> {
+    const MAX_EVIDENCE_BYTES: u64 = 1_048_576;
+    let SuccessCondition::ResearchSources {
+        evidence_path,
+        minimum,
+        max_age_days,
+        required_scope,
+    } = condition
+    else {
+        return Err(StorageError::InvalidData(
+            "isolated research verifier received a different condition kind".into(),
+        )
+        .into());
+    };
+    let Some(baseline_urls) = baseline_urls else {
+        return Ok((
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "The source evaluation has no unique, passing immutable research-source binding; automatic verification remains inconclusive.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_research_verification".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "No candidate file was trusted and no source was fetched because baseline authorization could not be re-established from immutable evidence.".into(),
+            },
+            false,
+        ));
+    };
+    let absolute =
+        objective_project_file_path(workspace_root.to_string_lossy().as_ref(), evidence_path)?;
+    let read_request = ToolRequest::new(
+        task_id,
+        "read isolated shadow research evidence",
+        ToolRequestKind::FsRead {
+            path: absolute.clone(),
+            max_bytes: MAX_EVIDENCE_BYTES,
+        },
+    );
+    let read = match filesystem
+        .execute(ToolExecutionId::new(), &read_request)
+        .await
+    {
+        Ok(outcome) if outcome.status == ToolOutcomeStatus::Succeeded => outcome,
+        _ => {
+            return Ok((
+                ConditionResult {
+                    condition: condition.clone(),
+                    passed: false,
+                    detail: "Private-workspace research evidence could not be read as one bounded regular UTF-8 file.".into(),
+                },
+                EvaluationEvidence {
+                    method: "isolated_research_verification".into(),
+                    artifact_sha256: None,
+                    event_sequence: None,
+                    detail: "No research source was fetched because the declared evidence file failed closed before verification.".into(),
+                },
+                true,
+            ));
+        }
+    };
+    let Some(evidence_json) = read.stdout else {
+        return Ok((
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "Private-workspace research evidence was not valid UTF-8 JSON.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_research_verification".into(),
+                artifact_sha256: read.artifacts.first().map(|artifact| artifact.sha256.clone()),
+                event_sequence: None,
+                detail: "The bounded evidence artifact was retained, but no source was fetched because it could not be parsed.".into(),
+            },
+            true,
+        ));
+    };
+    let evidence_artifact = read.artifacts.first().cloned().ok_or_else(|| {
+        StorageError::InvalidData(
+            "isolated research evidence read omitted its immutable artifact".into(),
+        )
+    })?;
+    let Ok(document) = serde_json::from_str::<ResearchEvidenceDocument>(&evidence_json) else {
+        return Ok((
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "Private-workspace research evidence was not valid schema-bound JSON."
+                    .into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_research_verification".into(),
+                artifact_sha256: Some(evidence_artifact.sha256),
+                event_sequence: None,
+                detail: "The bounded evidence artifact was retained, but no source was fetched because JSON decoding failed.".into(),
+            },
+            true,
+        ));
+    };
+    let candidate_urls = document
+        .claims
+        .iter()
+        .flat_map(|claim| &claim.citations)
+        .map(|citation| citation.url.clone())
+        .collect::<BTreeSet<_>>();
+    if candidate_urls != *baseline_urls {
+        return Ok((
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "The candidate changed the exact source URL set bound by the immutable baseline evaluation.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_research_verification".into(),
+                artifact_sha256: Some(evidence_artifact.sha256),
+                event_sequence: None,
+                detail: "No source was fetched because automatic shadow assessment never expands or changes baseline network authority.".into(),
+            },
+            true,
+        ));
+    }
+    let mut request = ToolRequest::new(
+        task_id,
+        "verify isolated shadow research sources",
+        ToolRequestKind::ResearchVerify {
+            evidence_path: absolute,
+            evidence_artifact: evidence_artifact.clone(),
+            evidence_json,
+            document,
+            required_scope: required_scope.clone(),
+            minimum_sources: *minimum,
+            max_age_days: *max_age_days,
+            max_response_bytes: MAX_EVIDENCE_BYTES,
+        },
+    );
+    request.timeout_seconds = 120;
+    let Ok(outcome) = research.execute(ToolExecutionId::new(), &request).await else {
+        return Ok((
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "Credential-free research-source verification failed closed before producing a complete outcome.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_research_verification".into(),
+                artifact_sha256: Some(evidence_artifact.sha256),
+                event_sequence: None,
+                detail: "The immutable evidence file was retained; source fetching or validation did not complete, so the candidate was not accepted.".into(),
+            },
+            true,
+        ));
+    };
+    let passed = outcome.status == ToolOutcomeStatus::Succeeded;
+    let source_count = outcome
+        .verification
+        .iter()
+        .filter(|item| item.method == "research.source" && item.passed)
+        .count();
+    Ok((
+        ConditionResult {
+            condition: condition.clone(),
+            passed,
+            detail: objective_condition_outcome_detail(condition, &outcome),
+        },
+        EvaluationEvidence {
+            method: "isolated_research_verification".into(),
+            artifact_sha256: Some(evidence_artifact.sha256),
+            event_sequence: None,
+            detail: if passed {
+                format!(
+                    "The immutable private-workspace report passed independent scope, structure, freshness, conflict, and quote-grounding checks against {source_count} credential-free sources."
+                )
+            } else {
+                "The immutable private-workspace report or one of its declared sources failed independent research verification.".into()
+            },
+        },
+        true,
+    ))
+}
+
 async fn verify_isolated_command_condition(
     verifier: &dyn ShadowCommandVerifier,
     artifacts: &ArtifactStore,
@@ -10179,6 +10438,11 @@ fn isolated_evaluation_regressions(
                 "candidate condition lacks an isolated verifier".into()
             } else if objective_command(&condition.condition).is_some() {
                 "candidate failed an isolated command objective".into()
+            } else if matches!(
+                condition.condition,
+                SuccessCondition::ResearchSources { .. }
+            ) {
+                "candidate failed isolated research-source verification".into()
             } else {
                 "candidate failed an isolated file objective".into()
             }
@@ -10653,7 +10917,8 @@ mod tests {
         RouteCandidate, RoutingPolicy, ToolDefinition, Usage,
     };
     use mcg_tools::{
-        BrokerControls, OutputRedactor, TOOL_SCHEMA_VERSION, ToolBroker, ToolExecutor, ToolOutcome,
+        BrokerControls, OutputRedactor, RESEARCH_EVIDENCE_SCHEMA_VERSION, ResearchCitationEvidence,
+        ResearchClaimEvidence, TOOL_SCHEMA_VERSION, ToolBroker, ToolExecutor, ToolOutcome,
         ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
     };
 
@@ -11486,6 +11751,164 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One test proves every fetch/no-fetch authorization branch.
+    async fn isolated_research_verifier_rebinds_and_grounds_private_workspace_evidence() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let served_fetches = fetches.clone();
+        let app = Router::new().route(
+            "/source",
+            get(move || {
+                let served_fetches = served_fetches.clone();
+                async move {
+                    served_fetches.fetch_add(1, Ordering::SeqCst);
+                    "The independently observed result is reproducible."
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("research listener");
+        let address = listener.local_addr().expect("research address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        let workspace = tempfile::tempdir().expect("workspace");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([workspace.path().to_path_buf()], artifact_root.path())
+                .expect("filesystem verifier"),
+        );
+        let http = Arc::new(
+            HttpExecutor::new(
+                Arc::new(RejectingCredentialResolver),
+                filesystem.clone(),
+                artifact_root.path(),
+            )
+            .expect("HTTP verifier"),
+        );
+        let research = ResearchExecutor::new(http);
+        let mut document = ResearchEvidenceDocument {
+            schema_version: RESEARCH_EVIDENCE_SCHEMA_VERSION,
+            scope: "compare the reproducibility evidence".into(),
+            claims: vec![ResearchClaimEvidence {
+                id: "claim-one".into(),
+                statement: "the result is reproducible".into(),
+                citations: vec![ResearchCitationEvidence {
+                    url: format!("http://{address}/source"),
+                    quote: "The independently observed result is reproducible.".into(),
+                    published_at: Some(Utc::now()),
+                }],
+            }],
+            conflicts: Vec::new(),
+        };
+        let evidence_path = workspace.path().join("research.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&document).expect("research JSON"),
+        )
+        .expect("write research evidence");
+        let condition = SuccessCondition::ResearchSources {
+            evidence_path: "research.json".into(),
+            minimum: 1,
+            max_age_days: Some(30),
+            required_scope: "compare the reproducibility evidence".into(),
+        };
+        let baseline_urls = BTreeSet::from([format!("http://{address}/source")]);
+        let (result, evidence, supported) = verify_isolated_research_condition(
+            filesystem.as_ref(),
+            &research,
+            TaskId::new(),
+            workspace.path(),
+            &condition,
+            Some(&baseline_urls),
+        )
+        .await
+        .expect("grounded research verification");
+        assert!(result.passed);
+        assert!(supported);
+        assert_eq!(evidence.method, "isolated_research_verification");
+        assert!(evidence.artifact_sha256.is_some());
+        assert!(evidence.detail.contains("1 credential-free sources"));
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        document.scope = "a candidate-controlled replacement scope".into();
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&document).expect("changed research JSON"),
+        )
+        .expect("rewrite research evidence");
+        let (result, evidence, supported) = verify_isolated_research_condition(
+            filesystem.as_ref(),
+            &research,
+            TaskId::new(),
+            workspace.path(),
+            &condition,
+            Some(&baseline_urls),
+        )
+        .await
+        .expect("scope mismatch is a measured failure");
+        assert!(!result.passed);
+        assert!(supported);
+        assert!(evidence.artifact_sha256.is_some());
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            isolated_evaluation_regressions(&[result], &[true]),
+            vec!["candidate failed isolated research-source verification"]
+        );
+
+        document.scope = "compare the reproducibility evidence".into();
+        document.claims[0].citations[0].url = "http://127.0.0.1:1/private".into();
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&document).expect("changed URL research JSON"),
+        )
+        .expect("rewrite changed URL evidence");
+        let (result, evidence, supported) = verify_isolated_research_condition(
+            filesystem.as_ref(),
+            &research,
+            TaskId::new(),
+            workspace.path(),
+            &condition,
+            Some(&baseline_urls),
+        )
+        .await
+        .expect("changed source set is rejected without expanded authority");
+        assert!(!result.passed);
+        assert!(supported);
+        assert!(evidence.detail.contains("No source was fetched"));
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        std::fs::write(&evidence_path, b"not JSON").expect("malformed research evidence");
+        let (result, evidence, supported) = verify_isolated_research_condition(
+            filesystem.as_ref(),
+            &research,
+            TaskId::new(),
+            workspace.path(),
+            &condition,
+            Some(&baseline_urls),
+        )
+        .await
+        .expect("malformed evidence fails closed");
+        assert!(!result.passed);
+        assert!(supported);
+        assert!(evidence.artifact_sha256.is_some());
+
+        let (result, evidence, supported) = verify_isolated_research_condition(
+            filesystem.as_ref(),
+            &research,
+            TaskId::new(),
+            workspace.path(),
+            &condition,
+            None,
+        )
+        .await
+        .expect("missing baseline remains inconclusive");
+        assert!(!result.passed);
+        assert!(!supported);
+        assert!(evidence.artifact_sha256.is_none());
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn isolated_command_verification_distinguishes_pass_failure_and_unavailability() {
         let workspace = tempfile::tempdir().expect("workspace");
         let artifact_root = tempfile::tempdir().expect("artifacts");
@@ -11600,6 +12023,48 @@ mod tests {
         let config = AppConfig::default().with_data_directory(directory.path());
         let project_root = tempfile::tempdir().expect("project directory");
         std::fs::write(project_root.path().join("package.json"), "{}").expect("manifest");
+        let research_app = Router::new().route(
+            "/source",
+            get(|| async { "The automatic candidate evidence is independently reproducible." }),
+        );
+        let research_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("research listener");
+        let research_address = research_listener.local_addr().expect("research address");
+        tokio::spawn(async move {
+            axum::serve(research_listener, research_app)
+                .await
+                .expect("research source");
+        });
+        let research_document = ResearchEvidenceDocument {
+            schema_version: RESEARCH_EVIDENCE_SCHEMA_VERSION,
+            scope: "exercise automatic supervision".into(),
+            claims: vec![ResearchClaimEvidence {
+                id: "reproducible".into(),
+                statement: "candidate evidence is reproducible".into(),
+                citations: vec![ResearchCitationEvidence {
+                    url: format!("http://{research_address}/source"),
+                    quote: "The automatic candidate evidence is independently reproducible.".into(),
+                    published_at: Some(Utc::now()),
+                }],
+            }],
+            conflicts: Vec::new(),
+        };
+        let research_bytes =
+            serde_json::to_vec(&research_document).expect("research evidence JSON");
+        std::fs::write(project_root.path().join("research.json"), &research_bytes)
+            .expect("research evidence");
+        let baseline_research_artifact =
+            ArtifactStore::open(config.data_directory.join("artifacts"))
+                .expect("baseline artifact store")
+                .capture(&research_bytes, "application/json")
+                .expect("baseline research artifact");
+        let research_condition = SuccessCondition::ResearchSources {
+            evidence_path: "research.json".into(),
+            minimum: 1,
+            max_age_days: Some(30),
+            required_scope: "exercise automatic supervision".into(),
+        };
         let project_id = ProjectId::new();
         let now = Utc::now();
         let run_id = RunId::new();
@@ -11635,7 +12100,11 @@ mod tests {
                 work: vec![PlannedWork::atomic(
                     "exercise supervision",
                     RoleKind::Coder,
-                    vec![condition.clone(), command_condition.clone()],
+                    vec![
+                        condition.clone(),
+                        command_condition.clone(),
+                        research_condition.clone(),
+                    ],
                 )],
                 require_independent_evaluation: false,
             };
@@ -11678,6 +12147,11 @@ mod tests {
                         passed: outcome == EvaluationOutcome::Passed,
                         detail: "durable command fixture evidence".into(),
                     },
+                    ConditionResult {
+                        condition: research_condition.clone(),
+                        passed: true,
+                        detail: "durable research fixture evidence".into(),
+                    },
                 ],
                 outcome,
                 confidence: ConfidenceEstimate::new(confidence, 1).expect("confidence"),
@@ -11686,12 +12160,20 @@ mod tests {
                 } else {
                     Vec::new()
                 },
-                evidence: vec![EvaluationEvidence {
-                    method: "fixture".into(),
-                    artifact_sha256: Some("a".repeat(64)),
-                    event_sequence: Some(1),
-                    detail: "objective fixture".into(),
-                }],
+                evidence: vec![
+                    EvaluationEvidence {
+                        method: "fixture".into(),
+                        artifact_sha256: Some("a".repeat(64)),
+                        event_sequence: Some(1),
+                        detail: "objective fixture".into(),
+                    },
+                    EvaluationEvidence {
+                        method: "governed_research_sources".into(),
+                        artifact_sha256: Some(baseline_research_artifact.sha256.clone()),
+                        event_sequence: Some(2),
+                        detail: "owner-governed baseline research binding".into(),
+                    },
+                ],
                 evaluated_at: now,
             };
             runtime
@@ -12022,7 +12504,7 @@ mod tests {
             .expect("workspace query")
             .expect("workspace");
         assert_eq!(workspace.state, ShadowWorkspaceState::Retained);
-        assert_eq!(workspace.file_count, 1);
+        assert_eq!(workspace.file_count, 2);
         assert_eq!(
             std::fs::read(
                 config
@@ -12095,6 +12577,10 @@ mod tests {
         }));
         assert!(assessments[0].evaluation.evidence.iter().any(|evidence| {
             evidence.method == "isolated_command_sandbox" && evidence.artifact_sha256.is_some()
+        }));
+        assert!(assessments[0].evaluation.evidence.iter().any(|evidence| {
+            evidence.method == "isolated_research_verification"
+                && evidence.artifact_sha256.is_some()
         }));
         assert_eq!(
             reopened

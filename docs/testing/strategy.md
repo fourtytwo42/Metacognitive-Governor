@@ -210,7 +210,11 @@ transcript, malformed references remain inconclusive, and transcript bytes are
 independently re-hashed and matched to the exact condition before trusted code
 derives pass/fail from timeout and exit status. The automatic
 promotion/restart scenario combines real private-file evidence with an injected
-qualified command fixture. Cross-platform unit tests prove the Linux profile has
+qualified command fixture and a real loopback research source whose immutable
+baseline report survives restart. Research-verifier tests prove the valid bound
+source is fetched exactly once; mismatched scope, candidate URL substitution,
+malformed JSON, and missing baseline evidence add no request. They also prove
+that failed-source details omit query values. Cross-platform unit tests prove the Linux profile has
 no network sharing, mounts the retained workspace read-only, executes in a
 bounded tmpfs, preserves argument-vector semantics, rejects unsafe workspaces,
 and creates no evidence when the sandbox executable is absent. On Linux, an

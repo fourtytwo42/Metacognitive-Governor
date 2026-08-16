@@ -113,7 +113,10 @@ impl ResearchExecutor {
                     request,
                     started_at,
                     parameters.evidence_artifact.clone(),
-                    format!("research source returned a non-success response: {url}"),
+                    format!(
+                        "research source returned a non-success response: {}",
+                        sanitized_source_url(url)
+                    ),
                     artifacts.into_iter().skip(1).collect(),
                 );
                 failed.verification.extend(source_verification);
@@ -599,6 +602,39 @@ mod tests {
         assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
         assert_eq!(outcome.artifacts.len(), 3);
         assert!(outcome.summary.contains("not found"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_source_details_omit_query_values() {
+        let (base, server) = server().await;
+        let project = tempdir().expect("project");
+        let artifacts = tempdir().expect("artifacts");
+        let store = ArtifactStore::open(artifacts.path()).expect("store");
+        let mut request = request(&base, &store, "Independent evidence confirms the result.");
+        let ToolRequestKind::ResearchVerify {
+            evidence_artifact,
+            evidence_json,
+            document,
+            ..
+        } = &mut request.kind
+        else {
+            panic!("research request")
+        };
+        document.claims[0].citations[0].url =
+            format!("{base}/missing?candidate_secret=must-not-appear");
+        *evidence_json = serde_json::to_string(document).expect("serialize changed evidence");
+        *evidence_artifact = store
+            .capture(evidence_json.as_bytes(), "application/json")
+            .expect("changed evidence artifact");
+        let outcome = executor(project.path(), artifacts.path())
+            .execute(ToolExecutionId::new(), &request)
+            .await
+            .expect("verify");
+        assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
+        assert!(outcome.summary.contains("/missing"));
+        assert!(!outcome.summary.contains("candidate_secret"));
+        assert!(!outcome.summary.contains("must-not-appear"));
         server.abort();
     }
 

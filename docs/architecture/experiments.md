@@ -80,6 +80,17 @@ store, and compares declared minimum bytes and optional SHA-256. A missing,
 oversized, mismatched, traversal, or symlink-escape target fails closed. If all
 conditions are supported, all passes produce `passed` and any failure produces
 `failed`; the presence of any unsupported condition produces `inconclusive`.
+`ResearchSources` assessment reopens the candidate's bounded JSON evidence and
+re-hashes the exact baseline research artifact that was retained by the
+owner-governed source evaluation. The baseline condition must have passed and
+exactly one artifact with the same bound scope must exist. The candidate may
+not add, remove, or change a source URL: any URL-set change fails before a
+request, while a missing, ambiguous, or unverifiable baseline binding remains
+inconclusive and launches no request. With that authority re-established, the
+credential-rejecting research executor refetches only the exact baseline URL
+set and independently checks schema, scope, source minimum, freshness,
+conflicts, and bounded quote grounding. The report and fetched bodies remain
+content-addressed; query values are omitted from failure details.
 Build, test, static-analysis, and exact `COMMAND SUCCEEDS` conditions now cross
 an explicit shadow-command-verifier boundary. A conforming backend must enforce
 filesystem, child-process, credential, and network isolation at the operating
