@@ -58,6 +58,9 @@ Property and scenario tests enforce that:
 9. event history and current projections agree;
 10. configuration experiments can always revert to their parent revision.
 11. an uncertain computer-input outcome is never automatically replayed.
+12. terminal failure, approval rejection, and cancellation preserve checkpointed
+    provider/tool usage exactly once, remove continuation authority, and never
+    create a successful result; task cancellation leaves no pending approval.
 
 ## Website/application reference scenarios
 
@@ -75,6 +78,9 @@ The first real-project suite includes:
 - restart while local or external MCP work awaits approval and prove the exact
   pinned continuation runs without replaying the paid provider response or
   duplicating the governed side effect;
+- deny one checkpointed turn and cancel a retried checkpointed turn, proving both
+  paid provider calls remain in usage/metrics, neither creates a success result,
+  both checkpoints disappear, and cancellation terminates the pending approval;
 - require approval for deployment while allowing autonomous local build/test work;
 - exercise a fake provider failure, model escalation, budget stop, and user steering;
 - compare active and shadow models while accepting output only from the active run.

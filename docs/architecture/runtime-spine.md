@@ -74,11 +74,15 @@ mirrors the flow with `mcg task create --project-id ...` and `mcg task launch`.
 Provider/tool failures move the task to `blocked`; retry is an explicit owner
 action and each work item is capped at its durable lease retry limit. Cancelling
 a launched task atomically cancels its run and revokes active agent instances and
-leases, so the task projection cannot leave hidden execution authority behind.
+leases, cancels every still-pending approval, and retains any checkpointed
+provider/tool accounting, so the task projection cannot leave hidden execution
+authority or erase paid work behind.
 Denied or cancelled approvals are also one atomic authority settlement: the
 approval becomes terminal, the waiting instance and retained lease fail, the run
 returns to its retryable running state, and the task becomes blocked with ordered
-events in the same SQLite transaction.
+events in the same SQLite transaction. Checkpointed calls and completed tools are
+committed to immutable usage and metrics exactly once before the checkpoint is
+removed; no failed or cancelled path fabricates a successful turn result.
 When a local tool needs permission, desktop shows the pending request on its task
 card. Approve and continue revalidates the live lease, organization, provider
 routes, tool permissions, and current project-context fingerprint before restoring
@@ -92,7 +96,8 @@ and a matching unexpired pending/approved request. Resume revalidates current
 project context, role, catalog, tool schema/classification, and exact approval,
 then continues from the checkpoint without replaying the paid provider call.
 Local and external MCP tools use the same continuation path; completion,
-rejection, failure, and cancellation remove the checkpoint atomically.
+rejection, failure, and cancellation settle its real accounting and remove the
+checkpoint atomically.
 Checkpoints are private local working data and can contain bounded project/model
 content, but never provider credentials or authorization headers.
 

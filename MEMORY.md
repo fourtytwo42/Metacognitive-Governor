@@ -2,6 +2,30 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-16 - Terminal agent-turn accounting is lossless
+
+- Context: Failed provider turns, denied approval-waiting turns, and task cancellation deleted durable turn checkpoints even when those checkpoints contained real paid model calls and completed governed tools. Task cancellation also left the associated owner approval pending.
+- Decision: Share one validated checkpoint-accounting path across successful and terminal settlement. Before deleting continuation state, atomically persist immutable provider/tool usage, update run and lease metrics, and retain the assigned route. Never estimate usage absent from provider evidence and never create a successful result for failed, denied, or cancelled work. Task cancellation now cancels every still-pending approval in the same transaction.
+- Files: `crates/mcg-storage/src/agents.rs`, `crates/mcg-runtime/src/lib.rs`, `crates/mcg-api/src/lib.rs`, `docs/architecture/agent-organization.md`, `docs/architecture/runtime-spine.md`, `docs/testing/strategy.md`.
+- Commands/tests: Windows passed 44 storage, 28 runtime, and 56 API tests. The provider-failure regression retains one 60-token call plus one completed tool while producing no result. The public guided-consumer scenario proves denial retains one 48-token call, retry cancellation retains a second exactly once, both checkpoints disappear, the active lease terminates, and the pending approval becomes cancelled. Strict all-target/all-feature Clippy for all three crates, formatting, documentation validation, and diff hygiene pass.
+- Result: Real model/tool spend can no longer disappear from run evidence when a turn terminates unsuccessfully, and cancelled tasks leave no resumable checkpoint or stale pending approval. No GitHub-hosted compute ran.
+- Follow-up: Exact-qualify the affected suites on Ubuntu, then resume normal browser OAuth/provider lifecycle parity on Ubuntu and macOS plus the remaining final release gates.
+
+### 2026-08-16 - Windows debug build cache cleaned
+
+- Context: The owner explicitly requested another cleanup of local Rust debug artifacts after recent build and test work.
+- Commands/tests: Resolved and validated the exact repository `target/debug` path, confirmed no process was executing from it, measured 6,285,791,530 bytes (5.85 GiB), and ran `cargo clean --target-dir <validated target/debug>`.
+- Result: Cargo removed 7,817 generated files and reported 5.9 GiB removed. `target/debug` no longer exists, `target/release` remains intact, measured `C:` free space increased by 5,953,617,920 bytes (5.54 GiB) to 100.91 GiB, and no source or release artifact was removed.
+- Follow-up: Debug artifacts will regenerate on the next debug build or test; continue applying the repository's path-validated cleanup rule when disk pressure returns.
+
+### 2026-08-16 - Ubuntu OAuth handoff repeated and failed closed
+
+- Context: Normal Ubuntu browser OAuth parity was retried against the exact clean AppImage from source `1e1a4b5` after the installed Windows GPU45 consumer gate passed.
+- Decision: Use an isolated `dbus-run-session` plus encrypted temporary GNOME Secret Service, AppImage-extracted CLI/service, fixed OpenAI loopback callback ports tunneled owner-locally, and a one-time redirect that never printed or retained the authorization URL. Account selection and credential entry remained an explicit owner handoff.
+- Result: The real OpenAI “Welcome back” page was shown in the visible in-app browser, but no owner sign-in occurred before the callback window expired. The flow failed at `oauth_callback`; no provider was created and no silent API fallback occurred.
+- Cleanup: The exact remote service/callback/redirect processes, listeners, extracted AppImage, data/keyring root, scripts, logs, and PID files were removed. The local SSH tunnel and all three forward listeners were stopped, and the visible tab was returned to Win11-VM. No OAuth URL, code, token, account identity, or credential was retained. No GitHub-hosted compute ran.
+- Follow-up: Retry only when the owner is present to complete the visible OpenAI sign-in, then qualify discovery, live inference, restart persistence, refresh rotation, disconnect, and zero keyring residue on Ubuntu before repeating the normal lifecycle on macOS.
+
 ### 2026-08-16 - Installed Windows GPU45 consumer CLI gate passed
 
 - Context: A restored, secret-free GPU45 provider catalog drove an installed consumer task through a live model/tool turn, but the task stopped with `spawn process: program not found` while validating a Node fixture. Objective and shadow-verification paths already translated Windows JavaScript runners to `.cmd`; model-issued `process.exec` did not.
@@ -101,7 +125,7 @@ Durable project context lives here. Update this file whenever information should
 - Files: `crates/mcg-api/src/lib.rs`, `crates/mcg-api/src/mcp.rs`, `apps/mcg-cli/src/main.rs`, `apps/desktop/src/desktop-client.ts`, `apps/desktop/src/App.tsx`, and their tests.
 - Commands/tests: Windows, exact Ubuntu, and exact macOS pass all 56 API tests, 14 CLI unit tests plus the CLI process integration, 27 desktop tests, desktop typecheck/production build, strict API/CLI all-feature/all-target Clippy, formatting, docs, and diff hygiene. Exact logs: Ubuntu `/home/hendo420/qualify-3cf9f37-ubuntu-run2.log`, SHA-256 `6c480320acc7f897ff4b71ac6287d6654ea1a446f724825df69547b6d5ec8d2d`; macOS `/Users/hendo42/qualify-3cf9f37-macos-run2.log`, SHA-256 `83c31bc2cbff285676df5f9ed89b9dca6e7b5e9ecfffa9040f4873a4c12a1ffe`. Both exit markers are zero and both exact checkouts are clean. The first cross-platform attempts are invalid harness/resource evidence: Ubuntu used the wrong browser environment name; macOS then exhausted its 64 GiB APFS container during a debug-info link. Path-validated `cargo clean` removed only 4.3 GiB of task-generated Mac target cache, and the valid Mac lane used no debug symbols/incremental state.
 - Result: Every consumer-facing default now gives realistic multi-file build/evaluation work twice the bounded turn runway. Exact rebuilt daemon PID `71138` reopened the original store with empty stderr. The same task `4ce909dc-f0fa-4547-a780-7660f034658d` and run `c86108aa-aad4-4178-aa7d-5262a74f53eb` completed; evaluation `61e2b04e-1f23-4764-bcc9-25926c166b96` passed both governed commands at 9,500 basis points confidence. Local representative project commit: `29a3e8e0f0d6ea4b096ad0abd33c4bae896d5f37`.
-- Follow-up: Failed-turn usage/model-call settlement is still a separate accounting defect because failed checkpoints are removed even though tool audit/task events remain durable. Implement native macOS packaging/UAT next; final packaging needs more than the remaining 2.8 GiB free.
+- Follow-up: Failed-turn usage/model-call settlement was resolved on 2026-08-16 with exact-once terminal checkpoint accounting. Continue final cross-platform OAuth and release qualification.
 
 ### 2026-08-15 - Native macOS packaging contract
 
@@ -142,9 +166,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Complete normal browser OAuth/provider parity on Ubuntu and macOS, then continue the remaining matched release gates.
-- Last meaningful change: Exact clean Windows package commit `23475bb` passed a successful installed GPU45 consumer task with two independent role results, 10 durable provider-model usage records, successful governed `npm`/Git execution, 74 events, 28 immutable audit records, empty stderr, and exact uninstall cleanup. The shared Windows JavaScript-runner defect is covered by 53 passing `mcg-tools` tests and strict Clippy.
-- Next step: Commit the qualification record, restart the prepared Ubuntu Secret Service plus browser-PKCE callback flow when the owner is ready, qualify normal OAuth lifecycle parity, and then continue macOS parity and final matched release gates.
+- Current task: Exact-qualify terminal checkpoint accounting on Ubuntu, then complete normal browser OAuth/provider parity on Ubuntu and macOS and continue the remaining matched release gates.
+- Last meaningful change: Windows now atomically retains checkpointed provider/tool usage and metrics on provider failure, owner denial, and task cancellation; cancelled tasks also resolve pending approvals. All 128 affected storage/runtime/API tests and strict affected Clippy/docs gates pass.
+- Next step: Commit and push the source-only accounting correction, run the affected exact commit on the owner-controlled Ubuntu VM, then retry browser OAuth only while the owner is present for account sign-in.
 - Blockers: `Get-Command wsb.exe` returned false on Win11-VM, so the live Windows Sandbox gate requires enabling that Windows capability or another owner-controlled Windows machine. Trusted Windows/macOS signing and notarization identities are not yet configured. Ubuntu remains reachable noninteractively with the dedicated `mcg_m1_vm` SSH key (last verified 2026-08-15); credentials are intentionally not retained here.
 - Extended verification: Exact `9cec1c6` one-hour/10,000-task release soak lanes passed on Windows and Ubuntu on 2026-08-15. Baseline `d5aa893` also completed its Windows two-hour/10,000-task lane: 897.9 tasks/s, 38.3 ms creation p95, 30.8 MiB peak RSS, 15.5 MiB RSS growth, 146 ms cold start, 810 ms forced-crash restart, all 10,000 tasks/events recovered, database/schema checks pass, and empty stderr. Logs are `target/soak-windows-d5aa-2h.{stdout,stderr}.log`. The matching Ubuntu lane was externally terminated by the owner-initiated VM reboot used to expose the enlarged virtual disk and is not counted. Executable code has advanced beyond `d5aa893`, so final matched soak lanes remain required after stabilization.
 
@@ -299,6 +323,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-16: Windows terminal agent-turn accounting qualification passed 44 storage, 28 runtime, and 56 API tests plus strict all-target/all-feature Clippy, formatting, documentation validation, and diff hygiene. Provider failure retains its checkpointed 60-token model call and completed tool with no fabricated result. Through the authenticated consumer API, owner denial retains one 48-token call; a retried turn cancelled at approval retains a second exactly once, removes the checkpoint, terminates the lease, cancels the pending approval, and leaves no result. No GitHub-hosted compute ran.
 
 - 2026-08-16: Exact clean Windows package commit `23475bb10093344d46a1d75e8db3c9cee36ff5d1` produced NSIS SHA-256 `1be04234acb087edd76d02639daf338a1edf78b5ac6a435452fd162f9510817e` with `source_dirty:false`. Its isolated installed CLI restored the secret-free GPU45 backup, pinned `Qwen3.8-27B-UD-Q4_K_XL-262K`, and completed a real consumer task plus independent evaluator against a clean Node/Git fixture. Durable evidence contains 10 provider-model records, 24,224 input/17,202 cached/2,098 output tokens, unknown cost, three successful process executions including `npm run test`, four successful Git executions, zero failed completions, 74 events, 28 audit records, and empty stderr. Summary/result/event/audit SHA-256 values are `75410c64d9ecded01dfdfbcee68bfd898c57d66acc9291576c91c82d6c494a3b`, `912752d20f96732663241fea299615d308f8f7cc12e63c005b1d84f861a7e0b0`, `4390d244348aa58f042d9756be7d464b7acfbe9e7d61da8e5481ebfef1dd885c`, and `7936bc189c5b5c842b7a6685c1c2b9c45c9746bbb90c3049a7dbfbea8d80d5fe`. Cleanup left zero registrations, roots, services, or listeners; no GitHub-hosted compute ran.
 

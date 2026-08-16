@@ -12728,8 +12728,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)] // Full runtime/provider/broker/storage boundary fixture.
-    async fn completed_agent_turn_commits_usage_result_and_terminal_authority_atomically() {
+    #[allow(clippy::too_many_lines)] // Full success/failure runtime/provider/broker/storage boundary fixture.
+    async fn completed_and_failed_agent_turns_settle_usage_and_authority_atomically() {
         let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
             .expect("runtime");
         let root = tempfile::tempdir().expect("project root");
@@ -12934,6 +12934,7 @@ mod tests {
             estimated_output_tokens: 200,
             max_model_calls: 4,
         };
+        let failed_turn_template = turn.clone();
         let commit = runtime
             .execute_agent_turn(
                 turn,
@@ -12948,19 +12949,169 @@ mod tests {
         assert_eq!(commit.usage.len(), 3);
         assert_eq!(commit.run.metrics.model_calls, 2);
         assert_eq!(commit.run.metrics.tool_calls, 1);
-        let store = runtime.store().expect("store");
-        assert_eq!(
-            store.agent_turn_result(lease.id).expect("result"),
-            Some(commit.result.clone())
-        );
-        assert_eq!(store.agent_usage(run.id).expect("usage").len(), 3);
-        drop(store);
+        {
+            let store = runtime.store().expect("store");
+            assert_eq!(
+                store.agent_turn_result(lease.id).expect("result"),
+                Some(commit.result.clone())
+            );
+            assert_eq!(store.agent_usage(run.id).expect("usage").len(), 3);
+        }
         assert!(
             runtime
                 .task_events(task.id)
                 .expect("events")
                 .iter()
                 .any(|event| event.kind == mcg_events::EventKind::AgentTurnCompleted)
+        );
+
+        let failed_created = AgentInstance {
+            id: AgentInstanceId::new(),
+            state: AgentState::Created,
+            model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            ..failed_turn_template.instance.clone()
+        };
+        runtime
+            .record_agent_instance(&failed_created)
+            .expect("failed-turn instance");
+        let failed_instance = runtime
+            .transition_agent_instance(
+                failed_created.id,
+                AgentState::Running,
+                failed_created.confidence,
+            )
+            .expect("start failed-turn instance");
+        let failed_lease = AgentLease {
+            id: AgentLeaseId::new(),
+            instance_id: failed_instance.id,
+            budget: LeaseBudget {
+                limit: failed_turn_template.lease.budget.limit.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            state: mcg_agents::AgentLeaseState::Active,
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            heartbeat_at: Utc::now(),
+            ..failed_turn_template.lease.clone()
+        };
+        runtime
+            .record_agent_lease(&failed_lease)
+            .expect("failed-turn lease");
+        let failed_arguments = serde_json::json!({
+            "path": fixture_path.to_string_lossy(),
+            "max_bytes": 4096
+        })
+        .to_string();
+        let failed_models = TurnModels {
+            responses: Mutex::new(VecDeque::from([ModelResponse {
+                contract_version: CONTRACT_VERSION,
+                id: "response-before-provider-failure".into(),
+                model: "fixture-model".into(),
+                status: Some("completed".into()),
+                output: vec![OutputItem::ToolCall {
+                    id: "call-before-provider-failure".into(),
+                    name: "fs.read".into(),
+                    arguments: failed_arguments,
+                }],
+                usage: Usage {
+                    input_tokens: 50,
+                    output_tokens: 10,
+                    total_tokens: 60,
+                    ..Usage::default()
+                },
+                provider_metadata: serde_json::Value::Null,
+            }])),
+        };
+        let failed_turn = AgentTurnRequest {
+            instance: failed_instance,
+            lease: failed_lease.clone(),
+            ..failed_turn_template
+        };
+        assert!(matches!(
+            runtime
+                .execute_agent_turn(
+                    failed_turn,
+                    &failed_models,
+                    &broker,
+                    ConfidenceEstimate::new(9_000, 1).expect("confidence"),
+                )
+                .await,
+            Err(RuntimeError::AgentTurn(AgentTurnError::Provider(
+                ProviderError::Incompatible(_)
+            )))
+        ));
+        let store = runtime.store().expect("store after failed turn");
+        let failed_instance = store
+            .agent_instance(failed_created.id)
+            .expect("failed instance")
+            .expect("present");
+        assert_eq!(failed_instance.state, AgentState::Failed);
+        assert_eq!(
+            failed_instance.model.as_ref().map(|model| (
+                model.provider_connection_id.as_str(),
+                model.model_id.as_str()
+            )),
+            Some(("fixture-provider", "fixture-model"))
+        );
+        let failed_lease = store
+            .agent_lease(failed_lease.id)
+            .expect("failed lease")
+            .expect("present");
+        assert_eq!(failed_lease.state, mcg_agents::AgentLeaseState::Failed);
+        assert_eq!(failed_lease.budget.consumed_tokens, 60);
+        let usage = store.agent_usage(run.id).expect("all usage");
+        let failed_usage = usage
+            .iter()
+            .filter(|usage| usage.instance_id == Some(failed_created.id))
+            .collect::<Vec<_>>();
+        assert_eq!(failed_usage.len(), 2);
+        assert_eq!(
+            failed_usage
+                .iter()
+                .filter(|usage| usage.kind == mcg_agents::UsageKind::ProviderModel)
+                .count(),
+            1
+        );
+        assert_eq!(
+            failed_usage
+                .iter()
+                .filter(|usage| usage.kind == mcg_agents::UsageKind::Tool)
+                .count(),
+            1
+        );
+        let settled_run = store.agent_run(run.id).expect("run").expect("present");
+        assert_eq!(settled_run.metrics.model_calls, 3);
+        assert_eq!(settled_run.metrics.tool_calls, 2);
+        assert_eq!(settled_run.metrics.tokens, 208);
+        assert_eq!(
+            store
+                .agent_turn_checkpoint(failed_lease.id)
+                .expect("checkpoint"),
+            None
+        );
+        assert_eq!(
+            store
+                .agent_turn_result(failed_lease.id)
+                .expect("failed result"),
+            None
+        );
+        drop(store);
+        let events = runtime.task_events(task.id).expect("events after failure");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == mcg_events::EventKind::AgentUsageRecorded)
+                .count(),
+            5
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == mcg_events::EventKind::AgentTurnFailed)
         );
     }
 }

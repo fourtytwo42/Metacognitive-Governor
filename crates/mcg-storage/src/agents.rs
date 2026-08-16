@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState,
     AgentState, AgentTurnCheckpoint, AgentTurnResult, AgentUsageRecord, AssignedModel,
-    ConfidenceEstimate, EvaluationReport, ExperimentState, OrganizationGenome,
+    ConfidenceEstimate, EvaluationReport, ExperimentState, ModelCallEvidence, OrganizationGenome,
     OrganizationalMetrics, ShadowWorkspaceState, UsageKind, WorkPlan,
 };
 use mcg_domain::{
@@ -10,7 +10,7 @@ use mcg_domain::{
     ProjectSnapshotId, RunId, TaskEnvelope, TaskId, TaskState, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
-use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState};
+use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -611,6 +611,16 @@ impl SqliteEventStore {
             ));
         };
         let at = resolution.resolved_at;
+        let checkpoint = self.agent_turn_checkpoint(lease.id)?.ok_or_else(|| {
+            StorageError::Conflict("waiting approval turn has no durable checkpoint".into())
+        })?;
+        let usage = apply_checkpointed_turn_accounting(
+            Some(&checkpoint),
+            &mut run,
+            &mut instance,
+            &mut lease,
+            at,
+        )?;
         approval.state = resolution.state;
         task.transition_to(TaskState::Blocked)?;
         task.updated_at = at;
@@ -628,6 +638,18 @@ impl SqliteEventStore {
             "approval_cancelled"
         };
         let transaction = self.connection.transaction()?;
+        let mut events = Vec::new();
+        for record in &usage {
+            insert_agent_usage(&transaction, record)?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentUsageRecorded,
+                    Some(task.id),
+                    serde_json::to_value(record)?,
+                ),
+            )?);
+        }
         transaction.execute(
             "DELETE FROM agent_turn_checkpoints WHERE lease_id = ?1",
             [lease.id.to_string()],
@@ -676,7 +698,7 @@ impl SqliteEventStore {
             ],
         )?;
         ensure_single_change(changed, "waiting run changed before approval rejection")?;
-        let mut events = vec![
+        events.extend([
             Self::insert_event(
                 &transaction,
                 &EventEnvelope::new(
@@ -717,7 +739,15 @@ impl SqliteEventStore {
                     serde_json::json!({"run_id": run.id, "instance_id": instance.id, "lease_id": lease.id, "reason_code": reason_code}),
                 ),
             )?,
-        ];
+            Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunMetricsUpdated,
+                    Some(task.id),
+                    serde_json::to_value(&run)?,
+                ),
+            )?,
+        ]);
         let task_event = Self::insert_event(
             &transaction,
             &EventEnvelope::new(
@@ -950,12 +980,87 @@ impl SqliteEventStore {
              ORDER BY agent_leases.acquired_at, agent_leases.lease_id",
             &run_id.to_string(),
         )?;
+        let checkpoints: Vec<AgentTurnCheckpoint> = self.read_json_rows(
+            "SELECT checkpoint_json FROM agent_turn_checkpoints
+             WHERE task_id = ?1 ORDER BY lease_id",
+            &task_id.to_string(),
+        )?;
+        let mut approvals: Vec<ApprovalRequest> = self.read_json_rows(
+            "SELECT approval_json FROM approvals
+             WHERE task_id = ?1 AND state = 'pending' ORDER BY requested_at, approval_id",
+            &task_id.to_string(),
+        )?;
+        let mut usage = Vec::new();
+        for checkpoint in &checkpoints {
+            let instance_index = instances
+                .iter()
+                .position(|instance| instance.id == checkpoint.request.instance.id)
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "cancelled checkpoint has no active task instance".into(),
+                    )
+                })?;
+            let lease_index = leases
+                .iter()
+                .position(|lease| lease.id == checkpoint.request.lease.id)
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "cancelled checkpoint has no active task lease".into(),
+                    )
+                })?;
+            usage.extend(apply_checkpointed_turn_accounting(
+                Some(checkpoint),
+                &mut run,
+                &mut instances[instance_index],
+                &mut leases[lease_index],
+                task.updated_at,
+            )?);
+        }
         let transaction = self.connection.transaction()?;
+        let mut events = Vec::new();
+        for record in &usage {
+            insert_agent_usage(&transaction, record)?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentUsageRecorded,
+                    Some(task_id),
+                    serde_json::to_value(record)?,
+                ),
+            )?);
+        }
         transaction.execute(
             "DELETE FROM agent_turn_checkpoints WHERE task_id = ?1",
             [task_id.to_string()],
         )?;
-        let mut events = Vec::new();
+        for approval in &mut approvals {
+            approval.state = ApprovalState::Cancelled;
+            let resolution = ApprovalResolution {
+                approval_id: approval.id,
+                state: ApprovalState::Cancelled,
+                resolved_by: "system:task_cancelled".into(),
+                reason: Some("task was cancelled before approval resolution".into()),
+                resolved_at: task.updated_at,
+            };
+            let changed = transaction.execute(
+                "UPDATE approvals SET state = 'cancelled', approval_json = ?1, resolved_at = ?2
+                 WHERE approval_id = ?3 AND state = 'pending'",
+                params![
+                    serde_json::to_string(approval)?,
+                    task.updated_at.to_rfc3339(),
+                    approval.id.to_string(),
+                ],
+            )?;
+            ensure_single_change(changed, "approval changed while cancelling task")?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::ApprovalResolved,
+                    Some(task_id),
+                    serde_json::json!({"approval": approval, "resolution": resolution}),
+                ),
+            )?);
+        }
         for instance in &mut instances {
             let previous = instance.state;
             instance.state = AgentState::Cancelled;
@@ -1021,6 +1126,16 @@ impl SqliteEventStore {
                 serde_json::json!({"from": previous_run, "to": AgentRunState::Cancelled, "run": &run, "reason": "task_cancelled"}),
             ),
         )?);
+        if !usage.is_empty() {
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentRunMetricsUpdated,
+                    Some(task_id),
+                    serde_json::to_value(&run)?,
+                ),
+            )?);
+        }
         let task_event = Self::insert_event(
             &transaction,
             &EventEnvelope::new(
@@ -2403,51 +2518,13 @@ impl SqliteEventStore {
             ));
         }
 
-        let mut usage = Vec::new();
-        for call in &result.model_calls {
-            usage.push(AgentUsageRecord {
-                schema_version: AGENT_RUN_SCHEMA_VERSION,
-                id: mcg_domain::UsageRecordId::new(),
-                run_id: run.id,
-                task_id: run.task_id,
-                instance_id: Some(instance.id),
-                kind: UsageKind::ProviderModel,
-                provider_connection_id: Some(call.target.provider_id.clone()),
-                model_id: Some(call.target.model_id.clone()),
-                tool_execution_id: None,
-                input_tokens: call.usage.input_tokens,
-                cached_input_tokens: call.usage.cached_input_tokens,
-                output_tokens: call.usage.output_tokens,
-                cost_usd: call.cost_usd,
-                duration_ms: call.duration_ms,
-                occurred_at: at,
-            });
-        }
-        for outcome in &result.tool_outcomes {
-            let duration_ms = u64::try_from(
-                (outcome.finished_at - outcome.started_at)
-                    .num_milliseconds()
-                    .max(0),
-            )
-            .unwrap_or(u64::MAX);
-            usage.push(AgentUsageRecord {
-                schema_version: AGENT_RUN_SCHEMA_VERSION,
-                id: mcg_domain::UsageRecordId::new(),
-                run_id: run.id,
-                task_id: run.task_id,
-                instance_id: Some(instance.id),
-                kind: UsageKind::Tool,
-                provider_connection_id: None,
-                model_id: None,
-                tool_execution_id: Some(outcome.execution_id),
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                output_tokens: 0,
-                cost_usd: None,
-                duration_ms,
-                occurred_at: outcome.finished_at,
-            });
-        }
+        let usage = agent_turn_usage_records(
+            &run,
+            instance.id,
+            &result.model_calls,
+            &result.tool_outcomes,
+            at,
+        );
         if usage.iter().any(|record| {
             record.cached_input_tokens > record.input_tokens
                 || record
@@ -2681,8 +2758,10 @@ impl SqliteEventStore {
         )
     }
 
-    /// Atomically settles a turn that could not complete, without inventing
-    /// provider/tool usage or a successful result.
+    /// Atomically settles a turn that could not complete. A failed turn moves
+    /// any already-checkpointed provider/tool evidence into immutable usage and
+    /// metrics before deleting its continuation state; it never invents a
+    /// successful result.
     ///
     /// # Errors
     ///
@@ -2730,6 +2809,18 @@ impl SqliteEventStore {
                 "agent turn authority changed before error settlement".into(),
             ));
         }
+        let checkpoint = if disposition == AgentTurnDisposition::Failed {
+            self.agent_turn_checkpoint(lease.id)?
+        } else {
+            None
+        };
+        let usage = apply_checkpointed_turn_accounting(
+            checkpoint.as_ref(),
+            &mut run,
+            &mut instance,
+            &mut lease,
+            at,
+        )?;
         let (instance_state, lease_state, run_state, event_kind) = match disposition {
             AgentTurnDisposition::Waiting => (
                 AgentState::Waiting,
@@ -2764,6 +2855,18 @@ impl SqliteEventStore {
             task_transition = Some((task, next));
         }
         let transaction = self.connection.transaction()?;
+        let mut events = Vec::new();
+        for record in &usage {
+            insert_agent_usage(&transaction, record)?;
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::AgentUsageRecorded,
+                    Some(run.task_id),
+                    serde_json::to_value(record)?,
+                ),
+            )?);
+        }
         if disposition == AgentTurnDisposition::Failed {
             transaction.execute(
                 "DELETE FROM agent_turn_checkpoints WHERE lease_id = ?1",
@@ -2803,7 +2906,6 @@ impl SqliteEventStore {
             ],
         )?;
         ensure_single_change(changed, "agent run changed before error settlement")?;
-        let mut events = Vec::new();
         events.push(Self::insert_event(
             &transaction,
             &EventEnvelope::new(
@@ -2821,6 +2923,16 @@ impl SqliteEventStore {
                     serde_json::to_value(&lease)?,
                 ),
             )?);
+            if !usage.is_empty() {
+                events.push(Self::insert_event(
+                    &transaction,
+                    &EventEnvelope::new(
+                        EventKind::AgentRunMetricsUpdated,
+                        Some(run.task_id),
+                        serde_json::to_value(&run)?,
+                    ),
+                )?);
+            }
         } else {
             events.push(Self::insert_event(
                 &transaction,
@@ -3440,6 +3552,140 @@ fn insert_agent_usage(
         ],
     )?;
     Ok(())
+}
+
+fn agent_turn_usage_records(
+    run: &AgentRun,
+    instance_id: AgentInstanceId,
+    model_calls: &[ModelCallEvidence],
+    tool_outcomes: &[ToolOutcome],
+    settled_at: DateTime<Utc>,
+) -> Vec<AgentUsageRecord> {
+    let mut usage = Vec::with_capacity(model_calls.len().saturating_add(tool_outcomes.len()));
+    usage.extend(model_calls.iter().map(|call| AgentUsageRecord {
+        schema_version: AGENT_RUN_SCHEMA_VERSION,
+        id: mcg_domain::UsageRecordId::new(),
+        run_id: run.id,
+        task_id: run.task_id,
+        instance_id: Some(instance_id),
+        kind: UsageKind::ProviderModel,
+        provider_connection_id: Some(call.target.provider_id.clone()),
+        model_id: Some(call.target.model_id.clone()),
+        tool_execution_id: None,
+        input_tokens: call.usage.input_tokens,
+        cached_input_tokens: call.usage.cached_input_tokens,
+        output_tokens: call.usage.output_tokens,
+        cost_usd: call.cost_usd,
+        duration_ms: call.duration_ms,
+        occurred_at: settled_at,
+    }));
+    usage.extend(tool_outcomes.iter().map(|outcome| {
+        let duration_ms = u64::try_from(
+            (outcome.finished_at - outcome.started_at)
+                .num_milliseconds()
+                .max(0),
+        )
+        .unwrap_or(u64::MAX);
+        AgentUsageRecord {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: mcg_domain::UsageRecordId::new(),
+            run_id: run.id,
+            task_id: run.task_id,
+            instance_id: Some(instance_id),
+            kind: UsageKind::Tool,
+            provider_connection_id: None,
+            model_id: None,
+            tool_execution_id: Some(outcome.execution_id),
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: None,
+            duration_ms,
+            occurred_at: outcome.finished_at,
+        }
+    }));
+    usage
+}
+
+fn apply_checkpointed_turn_accounting(
+    checkpoint: Option<&AgentTurnCheckpoint>,
+    run: &mut AgentRun,
+    instance: &mut AgentInstance,
+    lease: &mut AgentLease,
+    settled_at: DateTime<Utc>,
+) -> Result<Vec<AgentUsageRecord>, StorageError> {
+    lease.budget.elapsed_seconds = lease.budget.elapsed_seconds.max(
+        u64::try_from((settled_at - lease.acquired_at).num_seconds().max(0)).unwrap_or(u64::MAX),
+    );
+    let Some(checkpoint) = checkpoint else {
+        return Ok(Vec::new());
+    };
+    if checkpoint.request.instance.id != instance.id
+        || checkpoint.request.instance.run_id != run.id
+        || checkpoint.request.instance.task_id != run.task_id
+        || checkpoint.request.lease.id != lease.id
+        || checkpoint.request.lease.instance_id != instance.id
+        || checkpoint.model_calls.is_empty()
+        || checkpoint.response.model != checkpoint.pinned_route.target.model_id
+        || checkpoint
+            .model_calls
+            .iter()
+            .any(|call| call.target != checkpoint.pinned_route.target)
+    {
+        return Err(StorageError::InvalidData(
+            "terminal agent turn checkpoint authority or evidence is inconsistent".into(),
+        ));
+    }
+    let usage = agent_turn_usage_records(
+        run,
+        instance.id,
+        &checkpoint.model_calls,
+        &checkpoint.tool_outcomes,
+        settled_at,
+    );
+    if usage.iter().any(|record| {
+        record.cached_input_tokens > record.input_tokens
+            || record
+                .cost_usd
+                .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+    }) {
+        return Err(StorageError::InvalidData(
+            "terminal agent turn contains invalid usage values".into(),
+        ));
+    }
+    let turn_tokens = checkpoint
+        .model_calls
+        .iter()
+        .map(|call| call.usage.total_tokens)
+        .sum::<u64>();
+    let turn_cost = checkpoint
+        .model_calls
+        .iter()
+        .filter_map(|call| call.cost_usd)
+        .sum::<f64>();
+    lease.budget.consumed_tokens = lease.budget.consumed_tokens.saturating_add(turn_tokens);
+    lease.budget.consumed_cost_usd += turn_cost;
+    instance.model = Some(AssignedModel {
+        provider_connection_id: checkpoint.pinned_route.target.provider_id.clone(),
+        model_id: checkpoint.pinned_route.target.model_id.clone(),
+        route_reason: "pinned by the bounded route plan".into(),
+    });
+    run.metrics.model_calls = run
+        .metrics
+        .model_calls
+        .saturating_add(u32::try_from(checkpoint.model_calls.len()).unwrap_or(u32::MAX));
+    run.metrics.tool_calls = run
+        .metrics
+        .tool_calls
+        .saturating_add(u32::try_from(checkpoint.tool_outcomes.len()).unwrap_or(u32::MAX));
+    run.metrics.tokens = run.metrics.tokens.saturating_add(turn_tokens);
+    run.metrics.cost_usd += turn_cost;
+    if !metrics_valid(&run.metrics) || !lease.budget.consumed_cost_usd.is_finite() {
+        return Err(StorageError::InvalidData(
+            "terminal agent turn exceeds numeric storage bounds".into(),
+        ));
+    }
+    Ok(usage)
 }
 
 fn upsert_consumer_evaluation_checkpoint(

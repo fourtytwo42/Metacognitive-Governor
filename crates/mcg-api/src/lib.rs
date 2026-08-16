@@ -9293,6 +9293,14 @@ form.addEventListener('submit', (event) => {
             .expect("denied run");
         let denied_view = runtime.agent_run_view(denied_run_id).expect("denied view");
         assert_eq!(denied_view.run.state, AgentRunState::Running);
+        assert_eq!(denied_view.run.metrics.model_calls, 1);
+        assert_eq!(denied_view.run.metrics.tool_calls, 0);
+        assert_eq!(denied_view.run.metrics.tokens, 48);
+        assert_eq!(denied_view.usage.len(), 1);
+        assert_eq!(
+            denied_view.usage[0].kind,
+            mcg_agents::UsageKind::ProviderModel
+        );
         assert!(
             denied_view
                 .instances
@@ -9313,6 +9321,7 @@ form.addEventListener('submit', (event) => {
         );
 
         let retried = app
+            .clone()
             .oneshot(
                 authorized(Request::post(format!(
                     "/api/v1/tasks/{}/retry",
@@ -9331,6 +9340,75 @@ form.addEventListener('submit', (event) => {
             .expect("retry pending approval");
         assert_eq!(retry_approval.len(), 1);
         assert_ne!(retry_approval[0].id, rejected_id);
+        let retry_view = runtime.agent_run_view(denied_run_id).expect("retry view");
+        assert_eq!(retry_view.run.state, AgentRunState::Waiting);
+        assert_eq!(retry_view.run.metrics.model_calls, 1);
+        assert_eq!(retry_view.usage.len(), 1);
+        let retry_lease_id = retry_view
+            .leases
+            .iter()
+            .find(|lease| lease.state == mcg_agents::AgentLeaseState::Active)
+            .expect("retry active lease")
+            .id;
+        assert!(
+            runtime
+                .has_agent_turn_checkpoint(retry_lease_id)
+                .expect("retry checkpoint")
+        );
+
+        let cancelled = app
+            .oneshot(
+                authorized(Request::post(format!("/api/v1/tasks/{}", denied_task.id)))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"state":"cancelled"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("cancel response");
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancelled_view = runtime
+            .agent_run_view(denied_run_id)
+            .expect("cancelled view");
+        assert_eq!(cancelled_view.run.state, AgentRunState::Cancelled);
+        assert_eq!(cancelled_view.run.metrics.model_calls, 2);
+        assert_eq!(cancelled_view.run.metrics.tool_calls, 0);
+        assert_eq!(cancelled_view.run.metrics.tokens, 96);
+        assert_eq!(cancelled_view.usage.len(), 2);
+        assert!(cancelled_view.results.is_empty());
+        let retry_lease = cancelled_view
+            .leases
+            .iter()
+            .find(|lease| lease.id == retry_lease_id)
+            .expect("cancelled retry lease");
+        assert_eq!(retry_lease.state, mcg_agents::AgentLeaseState::Terminated);
+        assert_eq!(retry_lease.budget.consumed_tokens, 48);
+        assert!(
+            !runtime
+                .has_agent_turn_checkpoint(retry_lease_id)
+                .expect("cancelled checkpoint")
+        );
+        assert!(
+            runtime
+                .approvals(Some(ApprovalState::Pending))
+                .expect("no cancelled pending approval")
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .approvals(Some(ApprovalState::Cancelled))
+                .expect("cancelled approval")
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .task_events(denied_task.id)
+                .expect("denied task events")
+                .iter()
+                .filter(|event| event.kind == mcg_events::EventKind::AgentUsageRecorded)
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]

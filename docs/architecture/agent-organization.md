@@ -80,6 +80,11 @@ lease for explicit resume. Other provider, tool, policy, malformed-output, and
 iteration failures fail the instance and lease with a stable reason code. Error
 details from external providers are not copied into durable failure events, and
 no unsuccessful turn creates fabricated model/tool usage or a success result.
+Provider calls and completed governed tools already recorded in the durable turn
+checkpoint are real billable/execution evidence, however, so terminal failure,
+owner denial, and task cancellation atomically move that evidence into immutable
+usage and run/lease metrics before removing continuation state. A provider failure
+that supplies no usage remains unknown rather than being estimated.
 Local-tool resume is explicit and context-bound: runtime verifies an approved
 request, the one waiting instance and lease, the original organization role, the
 current provider routes and tools, and an unchanged project-context fingerprint.
