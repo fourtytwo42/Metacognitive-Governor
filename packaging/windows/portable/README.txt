@@ -13,7 +13,10 @@ The folder also includes:
 Automatic shadow build/test/static-analysis verification additionally requires
 Windows Sandbox with its `wsb.exe` command-line interface (Windows 11 24H2 or
 later on a supported Pro, Enterprise, or Education edition). MCG uses a
-networkless disposable VM and read-only host mappings. If that capability or
+networkless disposable VM and read-only host mappings. Newer Windows Sandbox
+releases deliver this CLI through the official Microsoft Store package rather
+than System32; MCG resolves the protected package installation directly and
+does not trust the per-user app-execution alias or PATH. If that capability or
 the adjacent helper is missing, MCG runs no fallback host command and reports
 the shadow objective as inconclusive.
 

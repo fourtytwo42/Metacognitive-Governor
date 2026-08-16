@@ -100,11 +100,18 @@ command evidence. Constraining only the child working directory is explicitly
 insufficient. The trusted runtime reopens and hashes the versioned transcript,
 requires it to bind the exact condition, independently verifies optional output
 artifacts, and derives pass/fail from timeout and exit status rather than
-trusting a backend-supplied verdict. Linux adversarial host qualification and a
-matching Windows host qualification remain required before this slice is
-production-complete. The Windows backend requires the Windows Sandbox CLI
-available in current Windows 11 releases and the package-adjacent internal
-`mcg-shadow-runner.exe`. It starts one serialized, UUID-addressed hypervisor
+trusting a backend-supplied verdict. Linux adversarial host qualification and
+the Windows ephemeral-workspace/host-mapping qualification pass; the remaining
+Windows live negative gates are tracked in the testing strategy. The Windows
+backend requires the Windows Sandbox CLI available in current Windows 11
+releases and the package-adjacent internal `mcg-shadow-runner.exe`. It prefers a
+fixed non-reparse System32 CLI when present. Current Store-delivered releases
+are discovered through the fixed System32 Windows PowerShell/Appx module under
+a minimal environment, and only the single official
+`MicrosoftWindows.WindowsSandbox` package beneath `Program Files\WindowsApps`
+with publisher ID `cw5n1h2txyewy` and a non-reparse, nonempty `wsb.exe` is
+accepted. App-execution aliases and path lookup are never trusted. It starts one
+serialized, UUID-addressed hypervisor
 sandbox per condition with networking, vGPU, microphone, camera, printers, and
 clipboard disabled and Protected Client enabled. The retained source and the
 two-file harness are separate read-only mappings; the bounded runner copies the
@@ -115,7 +122,10 @@ missing or lost sandbox session from masquerading as test failure. Wall timeout
 always triggers a best-effort session stop, and no writable host share or host
 process fallback exists. The Windows CLI cannot return child process I/O, so
 the transcript records only the independently interpreted exit/timeout
-disposition.
+disposition. Because the Store CLI accepts one `--command` value rather than a
+POSIX `--` argument tail, MCG selects only two compile-time runner command lines
+(probe or request); the untrusted objective executable and argument array remain
+inside the bounded JSON request and never enter that CLI string.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and

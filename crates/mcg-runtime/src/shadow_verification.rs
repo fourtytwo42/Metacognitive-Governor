@@ -1,7 +1,9 @@
+#[cfg(target_os = "windows")]
+use std::process::Command;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use std::{
     fs::{self, OpenOptions},
-    path::PathBuf,
+    path::{Path as StdPath, PathBuf},
 };
 use std::{path::Path, sync::Arc};
 
@@ -330,7 +332,8 @@ impl WindowsSandboxVerifier {
             return Err(error);
         }
 
-        let probe = windows_sandbox_exec_arguments(&session_id, "--probe");
+        let probe =
+            windows_sandbox_exec_arguments(&session_id, WindowsSandboxRunnerInvocation::Probe);
         let preflight = run_windows_sandbox_cli(
             process,
             &self.executable,
@@ -342,16 +345,20 @@ impl WindowsSandboxVerifier {
         .await;
         if preflight.as_ref().ok().and_then(|value| value.exit_code) != Some(0) {
             stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
-            return Err(ToolError::Unavailable(
-                "Windows Sandbox runner preflight failed".into(),
-            ));
+            let detail = preflight.map_or_else(
+                |error| error.to_string(),
+                |outcome| windows_sandbox_outcome_detail(&outcome),
+            );
+            return Err(ToolError::Unavailable(format!(
+                "Windows Sandbox runner preflight failed: {detail}"
+            )));
         }
 
         let command = run_windows_sandbox_cli(
             process,
             &self.executable,
             harness_root,
-            windows_sandbox_exec_arguments(&session_id, r"C:\mcg-harness\request.json"),
+            windows_sandbox_exec_arguments(&session_id, WindowsSandboxRunnerInvocation::Request),
             WSB_COMMAND_TIMEOUT_SECONDS,
             "execute Windows Sandbox shadow command",
         )
@@ -504,18 +511,32 @@ fn windows_sandbox_start_arguments(session_id: &str, configuration: &str) -> Vec
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_sandbox_exec_arguments(session_id: &str, argument: &str) -> Vec<String> {
+#[derive(Clone, Copy)]
+enum WindowsSandboxRunnerInvocation {
+    Probe,
+    Request,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_exec_arguments(
+    session_id: &str,
+    invocation: WindowsSandboxRunnerInvocation,
+) -> Vec<String> {
+    let command = match invocation {
+        WindowsSandboxRunnerInvocation::Probe => r"C:\mcg-harness\mcg-shadow-runner.exe --probe",
+        WindowsSandboxRunnerInvocation::Request => {
+            r"C:\mcg-harness\mcg-shadow-runner.exe C:\mcg-harness\request.json"
+        }
+    };
     vec![
         "exec".into(),
         "--raw".into(),
         "--id".into(),
         session_id.into(),
         "--command".into(),
-        r"C:\mcg-harness\mcg-shadow-runner.exe".into(),
+        command.into(),
         "--run-as".into(),
         "System".into(),
-        "--".into(),
-        argument.into(),
     ]
 }
 
@@ -571,10 +592,28 @@ fn require_success(outcome: &ToolOutcome, purpose: &str) -> Result<(), ToolError
         Ok(())
     } else {
         Err(ToolError::Unavailable(format!(
-            "{purpose} failed with {:?}",
-            outcome.exit_code
+            "{purpose} failed: {}",
+            windows_sandbox_outcome_detail(outcome)
         )))
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_outcome_detail(outcome: &ToolOutcome) -> String {
+    const MAX_FIELD_CHARS: usize = 1_024;
+
+    fn excerpt(value: Option<&str>) -> String {
+        value
+            .map(|value| value.chars().take(MAX_FIELD_CHARS).collect())
+            .unwrap_or_default()
+    }
+
+    format!(
+        "exit={:?}; stdout={:?}; stderr={:?}",
+        outcome.exit_code,
+        excerpt(outcome.stdout.as_deref()),
+        excerpt(outcome.stderr.as_deref())
+    )
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -887,38 +926,154 @@ fn bubblewrap_version_is_supported(output: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn trusted_windows_sandbox_components() -> Option<(PathBuf, PathBuf)> {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     let windows = std::env::var_os("WINDIR").map(PathBuf::from)?;
-    let expected = windows.join("System32").join("wsb.exe");
-    let executable = expected.canonicalize().ok()?;
-    if !executable
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&expected.to_string_lossy())
-    {
-        return None;
-    }
-    let executable_metadata = fs::symlink_metadata(&executable).ok()?;
-    if !executable_metadata.is_file()
-        || executable_metadata.file_type().is_symlink()
-        || executable_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return None;
-    }
+    let system32 = windows.join("System32");
+    let executable = trusted_windows_regular_file(&system32.join("wsb.exe"))
+        .or_else(|| trusted_packaged_windows_sandbox_cli(&system32))?;
 
     let runner = std::env::current_exe()
         .ok()?
         .parent()?
         .join("mcg-shadow-runner.exe");
-    let runner_metadata = fs::symlink_metadata(&runner).ok()?;
-    if !runner_metadata.is_file()
-        || runner_metadata.file_type().is_symlink()
-        || runner_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    let runner = trusted_windows_regular_file(&runner)?;
+    Some((executable, runner))
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_packaged_windows_sandbox_cli(system32: &StdPath) -> Option<PathBuf> {
+    const MAX_DISCOVERY_OUTPUT_BYTES: usize = 4 * 1024;
+    const PACKAGE_FAMILY_PREFIX: &str = "MicrosoftWindows.WindowsSandbox_";
+    const PACKAGE_PUBLISHER_SUFFIX: &str = "__cw5n1h2txyewy";
+
+    let powershell =
+        trusted_windows_regular_file(&system32.join("WindowsPowerShell/v1.0/powershell.exe"))?;
+    let output = Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$packages = @(Appx\\Get-AppxPackage -Name 'MicrosoftWindows.WindowsSandbox' -ErrorAction SilentlyContinue); if ($packages.Count -eq 1) { [Console]::Out.Write(($packages[0].InstallLocation)) }",
+        ])
+        .env_clear()
+        .env("SystemRoot", system32.parent()?)
+        .env("WINDIR", system32.parent()?)
+        .env(
+            "PSModulePath",
+            system32.join("WindowsPowerShell/v1.0/Modules"),
+        )
+        .output()
+        .ok()?;
+    if !output.status.success()
+        || output.stdout.is_empty()
+        || output.stdout.len() > MAX_DISCOVERY_OUTPUT_BYTES
+        || output.stderr.len() > MAX_DISCOVERY_OUTPUT_BYTES
     {
         return None;
     }
-    Some((executable, runner))
+    let package_location = std::str::from_utf8(&output.stdout).ok()?.trim();
+    if package_location.is_empty() || package_location.lines().count() != 1 {
+        return None;
+    }
+    let package_location = PathBuf::from(package_location);
+    let package_name = package_location.file_name()?.to_str()?;
+    if !package_name.starts_with(PACKAGE_FAMILY_PREFIX)
+        || !package_name.ends_with(PACKAGE_PUBLISHER_SUFFIX)
+    {
+        return None;
+    }
+
+    if !package_location.is_absolute()
+        || package_location.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return None;
+    }
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from)?;
+    let windows_apps = program_files.join("WindowsApps");
+    if !windows_paths_equal(package_location.parent()?, &windows_apps) {
+        return None;
+    }
+    if !trusted_windows_directory(&package_location) {
+        return None;
+    }
+    trusted_windows_package_file(&package_location.join("wsb.exe"))
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_regular_file(expected: &StdPath) -> Option<PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let executable = expected.canonicalize().ok()?;
+    if !windows_paths_equal(&executable, expected) {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(&executable).ok()?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return None;
+    }
+    Some(executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_paths_equal(left: &StdPath, right: &StdPath) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn normalized(path: &StdPath) -> Vec<u16> {
+        const VERBATIM_PREFIX: &[u16] = &[92, 92, 63, 92];
+
+        let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.starts_with(VERBATIM_PREFIX) {
+            units.drain(..VERBATIM_PREFIX.len());
+        }
+        for unit in &mut units {
+            if *unit == u16::from(b'/') {
+                *unit = u16::from(b'\\');
+            } else if let Ok(ascii) = u8::try_from(*unit) {
+                *unit = u16::from(ascii.to_ascii_lowercase());
+            }
+        }
+        units
+    }
+
+    normalized(left) == normalized(right)
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_directory(path: &StdPath) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    fs::symlink_metadata(path).ok().is_some_and(|metadata| {
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_package_file(path: &StdPath) -> Option<PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -1041,6 +1196,30 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn trusted_windows_path_comparison_accepts_only_equivalent_fixed_paths() {
+        assert!(windows_paths_equal(
+            Path::new(r"\\?\C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            Path::new(r"c:/windows/system32/windowspowershell/v1.0/POWERSHELL.EXE"),
+        ));
+        assert!(!windows_paths_equal(
+            Path::new(r"\\?\C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            Path::new(r"C:\Windows\Temp\powershell.exe"),
+        ));
+
+        let windows = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .expect("WINDIR");
+        assert!(
+            trusted_windows_regular_file(
+                &windows.join("System32/WindowsPowerShell/v1.0/powershell.exe")
+            )
+            .is_some(),
+            "the fixed System32 Windows PowerShell binary must survive canonicalization"
+        );
+    }
+
     #[test]
     fn windows_sandbox_profile_is_locked_down_read_only_and_xml_safe() {
         let source = Path::new(r"C:\source & fixtures");
@@ -1084,15 +1263,22 @@ mod tests {
                 .any(|value| value == "share" || value == "--allow-write")
         );
 
-        let exec = windows_sandbox_exec_arguments("session", r"C:\mcg-harness\request.json");
+        let exec =
+            windows_sandbox_exec_arguments("session", WindowsSandboxRunnerInvocation::Request);
         assert!(exec.windows(2).any(|pair| pair == ["--run-as", "System"]));
+        assert!(exec.windows(2).any(|pair| pair
+            == [
+                "--command",
+                r"C:\mcg-harness\mcg-shadow-runner.exe C:\mcg-harness\request.json"
+            ]));
+        assert!(!exec.iter().any(|argument| argument == "--"));
+
+        let probe =
+            windows_sandbox_exec_arguments("session", WindowsSandboxRunnerInvocation::Probe);
         assert!(
-            exec.windows(2)
-                .any(|pair| pair == ["--command", r"C:\mcg-harness\mcg-shadow-runner.exe"])
-        );
-        assert_eq!(
-            exec.last().map(String::as_str),
-            Some(r"C:\mcg-harness\request.json")
+            probe
+                .windows(2)
+                .any(|pair| pair == ["--command", r"C:\mcg-harness\mcg-shadow-runner.exe --probe"])
         );
         assert_eq!(windows_command_name("npm"), "npm.cmd");
         assert_eq!(windows_command_name("cargo"), "cargo");
@@ -1127,6 +1313,76 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires the current Microsoft Windows Sandbox package and nested virtualization"]
+    async fn installed_windows_sandbox_executes_ephemerally_and_keeps_host_mappings_read_only() {
+        let windows = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .expect("WINDIR");
+        let executable = trusted_windows_regular_file(&windows.join("System32/wsb.exe"))
+            .or_else(|| trusted_packaged_windows_sandbox_cli(&windows.join("System32")))
+            .expect("trusted Windows Sandbox CLI");
+        let runner = std::env::var_os("MCG_WINDOWS_SANDBOX_RUNNER")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()?
+                    .parent()?
+                    .parent()
+                    .map(|target| target.join("mcg-shadow-runner.exe"))
+            })
+            .and_then(|path| trusted_windows_regular_file(&path))
+            .expect("built mcg-shadow-runner.exe");
+        let verifier = WindowsSandboxVerifier {
+            executable,
+            runner,
+            lifecycle: tokio::sync::Mutex::new(()),
+        };
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::write(workspace.path().join("input.txt"), b"input").expect("input");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let artifacts = ArtifactStore::open(artifact_root.path()).expect("artifacts");
+
+        let ephemeral = SuccessCondition::Test {
+            command: r#"cmd.exe /D /S /C "if exist input.txt (echo sandbox-only>sandbox-only.txt) else exit /b 7""#.into(),
+        };
+        let ShadowCommandVerification::Completed { transcript } = verifier
+            .verify_inner(workspace.path(), &ephemeral, &artifacts)
+            .await
+            .expect("installed Windows Sandbox must pass its runner probe")
+        else {
+            panic!("installed Windows Sandbox returned no completed evidence");
+        };
+        let bytes = artifacts
+            .read_verified_reference(&transcript, 1024 * 1024)
+            .expect("transcript");
+        let record: ShadowCommandTranscript = serde_json::from_slice(&bytes).expect("record");
+        assert_eq!(record.exit_code, Some(0));
+        assert!(!record.timed_out);
+        assert!(!workspace.path().join("sandbox-only.txt").exists());
+
+        let host_write = SuccessCondition::Test {
+            command: r#"cmd.exe /D /S /C "echo escaped>C:\mcg-source\escaped.txt""#.into(),
+        };
+        let ShadowCommandVerification::Completed { transcript } = verifier
+            .verify_inner(workspace.path(), &host_write, &artifacts)
+            .await
+            .expect("read-only host mapping check must run")
+        else {
+            panic!("read-only host mapping check returned no completed evidence");
+        };
+        let bytes = artifacts
+            .read_verified_reference(&transcript, 1024 * 1024)
+            .expect("host-write transcript");
+        let record: ShadowCommandTranscript = serde_json::from_slice(&bytes).expect("record");
+        assert!(matches!(record.exit_code, Some(0 | 1)));
+        assert!(!record.timed_out);
+        // Windows Sandbox may satisfy a write through its disposable view even when the
+        // mapped host folder is read-only. Host non-persistence is the security invariant.
+        assert!(!workspace.path().join("escaped.txt").exists());
     }
 
     #[cfg(target_os = "linux")]

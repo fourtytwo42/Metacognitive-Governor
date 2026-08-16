@@ -218,13 +218,19 @@ installed trusted bubblewrap additionally runs a live ephemeral-write and
 `/etc/passwd` escape scenario. Cross-platform Windows tests prove the generated
 Windows Sandbox profile disables network/device/redirection surfaces, enables
 Protected Client, XML-escapes host paths, exposes exactly two read-only host
-mappings, runs the package-local helper as `System`, preserves a direct argument
-boundary, and produces no evidence or workspace effect when the CLI is absent.
+mappings, runs the package-local helper as `System`, preserves the JSON argument
+boundary behind the CLI's single compile-time command value, rejects canonical
+path-prefix confusion, and produces no evidence or workspace effect when the CLI
+is absent.
 The helper separately proves bounded link/reparse-safe copying, exact internal
 paths, one-shot destination creation, environment clearing, and normalized
-command failure. Live Win11 qualification must still prove ephemeral writes,
-blocked network access, host-file protection, timeout/stop behavior, and
-setup-failure handling before the Windows backend is production-qualified.
+command failure. Live Win11 qualification on the current Store-delivered Sandbox
+CLI proves official-package discovery, start/exec/probe/stop compatibility,
+ephemeral command writes, and no persistence through the read-only host mapping.
+Windows Sandbox may satisfy a mapped-folder write through its disposable view,
+so the gate measures host non-persistence rather than assuming the child must
+fail. Live blocked-network, timeout/stop, and setup-failure scenarios remain
+required before the Windows backend is production-qualified.
 The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision promotes only the
 independently verified candidate while retaining one evaluation, benchmark, and
