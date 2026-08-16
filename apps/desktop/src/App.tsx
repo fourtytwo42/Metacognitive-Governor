@@ -303,7 +303,6 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
-  const [oauthMethod, setOauthMethod] = useState<OpenAiOAuthMethod>("browser");
   const [login, setLogin] = useState<OAuthLoginStart | null>(null);
   const [providerStatus, setProviderStatus] = useState("Not connected");
   const [busy, setBusy] = useState(false);
@@ -652,17 +651,18 @@ export function App() {
     }
   }
 
-  async function startLogin() {
+  async function startLogin(method: OpenAiOAuthMethod) {
     setBusy(true);
     setProviderError(null);
     try {
-      const started = await startOpenAiOAuth(oauthMethod);
+      const started = await startOpenAiOAuth(method);
       setLogin(started);
       setProviderStatus("Waiting for authorization");
       try {
         await openExternalUrl(started.verification_url);
       } catch (error) {
-        setProviderError(`${errorMessage(error)}. Use “Open verification page” below.`);
+        const retryLabel = started.user_code ? "Open device authorization page" : "Open sign-in page";
+        setProviderError(`${errorMessage(error)}. Use “${retryLabel}” below.`);
       }
     } catch (error) {
       setProviderError(errorMessage(error));
@@ -2528,33 +2528,33 @@ export function App() {
             </p>
           </div>
           <div className="provider-actions">
-            {advanced && !login && (
-              <label>
-                Login method
-                <select
-                  value={oauthMethod}
-                  onChange={(event) => setOauthMethod(event.target.value as OpenAiOAuthMethod)}
-                >
-                  <option value="browser">Browser</option>
-                  <option value="device_code">One-time device code</option>
-                </select>
-              </label>
-            )}
             {!login ? (
-              <button className="primary" type="button" disabled={busy} onClick={startLogin}>
-                {busy ? "Connecting…" : "Connect with OpenAI"}
-              </button>
+              <>
+                <button className="primary" type="button" disabled={busy} onClick={() => startLogin("browser")}>
+                  {busy ? "Opening sign-in..." : "Continue with OpenAI"}
+                </button>
+                <p className="form-note">Uses browser sign-in with your ChatGPT subscription. No CLI pairing code.</p>
+                {advanced && <details className="device-login">
+                  <summary>Can't open a browser?</summary>
+                  <p>Use a one-time device code only for a headless or remote computer. This method requires entering a separate pairing code.</p>
+                  <button className="secondary" type="button" disabled={busy} onClick={() => startLogin("device_code")}>
+                    Use a device code instead
+                  </button>
+                </details>}
+              </>
             ) : (
               <div className="oauth-card" role="status">
-                <p>Authorize MCG in the page that opened.</p>
+                <p>{login.user_code
+                  ? "Enter this one-time code on the device authorization page."
+                  : "Finish signing in with OpenAI in your browser, then return here."}</p>
                 <button className="link-button" type="button" onClick={() => openVerification(login.verification_url)}>
-                  Open verification page
+                  {login.user_code ? "Open device authorization page" : "Open sign-in page"}
                 </button>
                 {login.user_code && <p className="device-code">Code: <strong>{login.user_code}</strong></p>}
                 <div className="composer-actions">
                   <button className="secondary" type="button" disabled={busy} onClick={cancelLogin}>Cancel</button>
                   <button className="primary" type="button" disabled={busy} onClick={finishLogin}>
-                    {busy ? "Checking…" : "I’ve authorized MCG"}
+                    {busy ? "Checking..." : login.user_code ? "I've entered the code" : "Finish connection"}
                   </button>
                 </div>
               </div>

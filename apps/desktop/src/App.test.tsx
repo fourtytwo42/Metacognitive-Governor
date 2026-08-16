@@ -915,33 +915,55 @@ test("advanced mode reveals runtime details", async () => {
   expect(screen.getByRole("heading", { name: "Runtime status" })).toBeInTheDocument();
 });
 
-test("OpenAI subscription login exposes verification then confirms connection", async () => {
+test("OpenAI subscription browser login is the clear default and confirms connection", async () => {
   client.start.mockResolvedValue({
     session_id: "fixture-session",
     connection_id: "openai-subscription",
-    auth_mode: "chat_gpt_device_code",
-    verification_url: "https://auth.openai.com/codex/device",
-    user_code: "ABCD-1234"
+    auth_mode: "chat_gpt_browser_oauth",
+    verification_url: "https://auth.openai.com/oauth/authorize"
   });
   client.complete.mockResolvedValue({
     connection: {
       id: "openai-subscription",
       display_name: "OpenAI Subscription",
-      auth_mode: "chat_gpt_device_code"
+      auth_mode: "chat_gpt_browser_oauth"
     },
     catalog: { models: [] }
   });
   render(<App />);
 
-  fireEvent.click(screen.getByRole("button", { name: "Connect with OpenAI" }));
-  expect(await screen.findByText("Code:", { exact: false })).toHaveTextContent("ABCD-1234");
-  expect(screen.getByRole("button", { name: "Open verification page" })).toBeInTheDocument();
+  expect(screen.getByText(/No CLI pairing code\./)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue with OpenAI" }));
+  expect(await screen.findByText("Finish signing in with OpenAI in your browser, then return here.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Open sign-in page" })).toBeInTheDocument();
+  expect(screen.queryByText("Code:", { exact: false })).not.toBeInTheDocument();
   expect(client.start).toHaveBeenCalledWith("browser");
-  expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
+  expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/oauth/authorize");
 
-  fireEvent.click(screen.getByRole("button", { name: "I’ve authorized MCG" }));
+  fireEvent.click(screen.getByRole("button", { name: "Finish connection" }));
   expect(await screen.findByText("OpenAI Subscription connected")).toBeInTheDocument();
   expect(client.complete).toHaveBeenCalledWith("fixture-session");
+});
+
+test("advanced mode keeps device-code login an explicit headless fallback", async () => {
+  client.start.mockResolvedValue({
+    session_id: "device-session",
+    connection_id: "openai-subscription",
+    auth_mode: "chat_gpt_device_code",
+    verification_url: "https://auth.openai.com/codex/device",
+    user_code: "ABCD-1234"
+  });
+  render(<App />);
+
+  await enableAdvancedMode();
+  fireEvent.click(screen.getByText("Can't open a browser?"));
+  fireEvent.click(screen.getByRole("button", { name: "Use a device code instead" }));
+
+  expect(await screen.findByText("Code:", { exact: false })).toHaveTextContent("ABCD-1234");
+  expect(screen.getByRole("button", { name: "Open device authorization page" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "I've entered the code" })).toBeInTheDocument();
+  expect(client.start).toHaveBeenCalledWith("device_code");
+  expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
 });
 
 test("consumer provider setup discovers a local endpoint and advanced mode shows honest model cost", async () => {

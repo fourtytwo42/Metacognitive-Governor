@@ -120,6 +120,25 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
 });
 
+test("scaled 1280x800 Windows layout keeps browser OAuth reachable", async ({ page }) => {
+  await page.setViewportSize({ width: 853, height: 533 });
+  await page.goto("/");
+
+  const providerLink = page.getByRole("link", { name: "Providers" });
+  await expect(providerLink).toBeVisible();
+  await providerLink.click();
+
+  const connect = page.getByRole("button", { name: "Continue with OpenAI" });
+  await connect.scrollIntoViewIfNeeded();
+  await expect(connect).toBeVisible();
+  const box = await connect.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(853);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(533);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(853);
+});
+
 test("plugin permission review gates enablement and invocation", async ({ page }) => {
   await page.goto("/");
 
