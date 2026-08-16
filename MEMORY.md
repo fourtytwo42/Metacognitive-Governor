@@ -2,6 +2,13 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-16 - Corrected Windows Sandbox qualification published and cache reclaimed
+
+- Context: The fully corrected Windows Sandbox isolation implementation and its matched Windows/Ubuntu qualification were ready for a source-only checkpoint. The qualifying builds had regenerated substantial local debug output.
+- Commands/tests: Diff hygiene passed; the seven intended source/documentation files were committed as `87c59b5` (`Qualify Windows Sandbox isolation`) and pushed directly to private `origin/main` without GitHub-hosted compute. The exact repository `target/debug` path was resolved and measured at 12.28 GiB, no process was executing from it, and `cargo clean --target-dir <validated target/debug>` removed 11,962 files (12.3 GiB reported).
+- Result: Private `main` contains the corrected implementation and qualification record. `target/debug` is absent, `target/release` remains intact, and the repository measures 7.10 GiB after cleanup.
+- Follow-up: Resume the remaining M9 objective-specific verifier/package gates and normal browser OAuth/provider parity on Ubuntu and macOS.
+
 ### 2026-08-16 - Full Win11 Windows Sandbox qualification corrected and passed
 
 - Context: The first negative-gate run exposed concurrent ignored tests racing the Store package's single-instance application contract. After serializing live fixtures, raw `wsb exec --raw` evidence showed the host CLI exited zero while its JSON `ExitCode` was `-1073741515` (`0xC0000135`): the dynamically linked Rust runner could not start because pristine Windows Sandbox lacks `VCRUNTIME140.dll`. This also proves the earlier positive gate at `52d541e` was a false positive for nested execution; it qualified lifecycle/host mapping but incorrectly trusted wrapper status.
@@ -9,7 +16,7 @@ Durable project context lives here. Update this file whenever information should
 - Files: `crates/mcg-runtime/src/shadow_verification.rs`, `scripts/prepare-sidecars.ps1`, `scripts/check-packaging.mjs`, `docs/architecture/experiments.md`, `docs/architecture/packaging.md`, `docs/testing/strategy.md`.
 - Commands/tests: Final Windows source passes formatting, 30 runtime tests with two live tests ignored by default, three runner tests, strict affected Clippy, documentation, packaging, and diff hygiene. Full debug sidecar preparation succeeds and emits the same static runner. Exact-source Ubuntu passes formatting, 30 runtime tests including live Bubblewrap, three runner tests, strict affected Clippy, documentation, and packaging. The exact final 46,680,576-byte runtime test executable has SHA-256 `95617B34506C6D7A843A4C15FB7CC0E3D42155C8E6E3A907BB6870D83453E59D`; the exact 714,240-byte self-contained runner has SHA-256 `651CD3C1A78EC10004168CE4E2D48B107A35BC9AA41ECA2EC8CC2B56E83692AC` and imports only `api-ms-win-core-synch-l1-2-0.dll`, `KERNEL32.dll`, and `ntdll.dll`.
 - Result: The exact final-source hash-gated Win11-VM lane passed both live tests in 48.37 seconds. It proves real nested runner execution, an ephemeral private workspace, no host persistence through read-only mappings, no default IPv4 route or non-loopback IPv4 address, a two-second host timeout followed by verified session teardown, deliberate schema-invalid setup rejection, and an empty Sandbox session list after every case. The exploratory/final scoped cleanups removed 18 then four transferred artifacts, each left zero matching artifacts and independently reported `WindowsSandboxEnvironments: []`; both helpers self-deleted. The exact Ubuntu qualification tree and 274.4 MiB local transfer staging were removed. No host fallback or GitHub-hosted compute ran.
-- Follow-up: Commit and push source only, remove regenerated local debug output, then resume the remaining M9 verifier/package gates and Ubuntu/macOS normal browser OAuth parity.
+- Follow-up: Completed in commit `87c59b5` and the post-push cleanup entry above; resume the remaining M9 verifier/package gates and Ubuntu/macOS normal browser OAuth parity.
 
 ### 2026-08-16 - Windows debug cache cleaned after negative Sandbox build
 
@@ -206,9 +213,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Finish matched Windows/Ubuntu qualification for the corrected Windows Sandbox boundary, commit and push source only, then resume normal browser OAuth/provider parity on Ubuntu and macOS.
-- Last meaningful change: The exact hash-gated Win11 lane now passes real nested execution plus ephemeral/no-host-persistence, blocked-network, timeout/teardown, setup-failure, and zero-session cases; the earlier wrapper-status false positive is explicitly superseded.
-- Next step: Run documentation/packaging/diff and affected native gates, qualify the exact source on Ubuntu, remove local transfer/debug artifacts, then commit and push.
+- Current task: Resume the remaining M9 objective-specific verifier/package gates and normal browser OAuth/provider parity on Ubuntu and macOS.
+- Last meaningful change: Corrected Windows Sandbox isolation and its exact Windows/Ubuntu qualification were pushed as `87c59b5`; the regenerated 12.28 GiB `target/debug` cache was then removed while preserving `target/release`.
+- Next step: Select and implement the next objective-specific shadow verifier, then exercise its exact cross-platform/package path; coordinate owner-present Ubuntu OAuth sign-in when available and repeat the normal lifecycle on macOS.
 - Blockers: Trusted Windows/macOS signing and notarization identities are not yet configured. Ubuntu browser OAuth needs the owner present for account sign-in. Ubuntu remains reachable noninteractively with the dedicated `mcg_m1_vm` SSH key (last verified 2026-08-15); credentials are intentionally not retained here.
 - Extended verification: Exact `9cec1c6` one-hour/10,000-task release soak lanes passed on Windows and Ubuntu on 2026-08-15. Baseline `d5aa893` also completed its Windows two-hour/10,000-task lane: 897.9 tasks/s, 38.3 ms creation p95, 30.8 MiB peak RSS, 15.5 MiB RSS growth, 146 ms cold start, 810 ms forced-crash restart, all 10,000 tasks/events recovered, database/schema checks pass, and empty stderr. Logs are `target/soak-windows-d5aa-2h.{stdout,stderr}.log`. The matching Ubuntu lane was externally terminated by the owner-initiated VM reboot used to expose the enlarged virtual disk and is not counted. Executable code has advanced beyond `d5aa893`, so final matched soak lanes remain required after stabilization.
 
