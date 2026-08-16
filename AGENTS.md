@@ -97,3 +97,10 @@ Before finishing substantial work:
 ## Default Operating Rule
 
 If there is any uncertainty about retained context, read `MEMORY.md` first.
+
+## Local Build Cache Limit
+
+- Check local workspace size when disk pressure is reported or large native build/test runs have accumulated.
+- If this repository exceeds 50 GB, treat `target/debug` as disposable generated output and clean it.
+- Before cleanup, resolve and validate that the exact deletion target is `<repository-root>\target\debug`, identify and stop only repository processes executing from that directory, and preserve `target/release` plus all source, evidence, and user data.
+- After cleanup, verify the directory is gone, measure reclaimed space, and report the result. Never delete `target/release` under this rule without explicit owner authorization.

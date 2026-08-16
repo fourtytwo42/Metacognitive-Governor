@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-16 - Owner-host repository disk usage diagnosed
+
+- Context: The workspace appeared to consume more than 100 GB and the owner host had only about 18.5 GiB free on `C:`.
+- Decision: `AGENTS.md` now requires path-validated cleanup of only `target/debug` whenever the repository exceeds 50 GB, while preserving `target/release`. Do not use a time-based scheduled task.
+- Commands/tests: Read-only `robocopy /L /S /BYTES` measurements and `git count-objects -vH`; last verified 2026-08-16.
+- Before: Ignored Rust build output under `target/` was 107,116,518,951 bytes (about 99.8 GiB). `target/debug/` was 100,093,590,372 bytes, principally `deps` (73,438,836,539), `incremental` (19,759,726,845), and `build` (2,663,266,104); `target/release/` was 6,746,262,988 bytes. Git object storage was only about 25.4 MiB, `node_modules/` about 213 MiB, and both `target/` and `node_modules/` contained zero tracked files.
+- Result: After validating the literal repository path, the only process executing from `target/debug` was development daemon PID 109272; it was stopped. `cargo clean --target-dir <validated target/debug>` removed 53,776 generated files and reported 93.2 GiB removed. The directory no longer exists, `target/release` remains, actual `C:` free space increased by about 89.67 GiB to 108.2 GiB, and the complete workspace now measures 7,618,048,207 bytes (about 7.1 GiB).
+- Follow-up: All Rust debug artifacts can be regenerated locally. Apply the `AGENTS.md` 50 GB rule when future native test/build accumulation crosses the threshold; do not schedule time-based cleanup and do not delete `target/release` without explicit owner authorization.
+
 ### 2026-08-16 - Installed Linux consumer CLI package gate expanded
 
 - Context: Final-package CLI follow-up still lacked native evidence for bare goals, one-document JSON, task-scoped NDJSON, piped context, bounded input, and the true interactive prompt. A normal Ubuntu browser-OAuth attempt was also prepared while this independent gate ran.
