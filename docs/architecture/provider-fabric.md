@@ -51,8 +51,23 @@ state. Pending sessions intentionally do not survive daemon restart. The CLI and
 native desktop call the same start/complete/cancel endpoints. Refresh replaces all
 token slots transactionally, restores the prior complete set on any partial store
 failure, leaves the provider on OAuth billing, and appends only secret-free rotation
-evidence to SQLite. OAuth login never performs an API model request as a fallback;
-model discovery is an explicit subsequent operation.
+evidence to SQLite. A subscription authentication failure enters one per-connection
+refresh gate: concurrent failures coalesce to one rotation, then each caller retries
+the exact pinned route once. It never selects another provider or API billing.
+Disconnect unregisters the live provider, clears every protected credential slot,
+atomically removes only the active connection/catalog projections, and retains
+immutable usage/audit history. Failed durable removal restores the prior protected
+credential set and registry entry. OAuth login never performs an API model request
+as a fallback; model discovery is an explicit subsequent operation.
+
+The subscription adapter pins first-party Codex wire compatibility revision
+`0.147.0`. Its `/models` request declares that client version and filters only
+visible API-supported models. Subscription Responses always use SSE, explicitly
+set `store: false`, omit public-API controls rejected by the Codex backend, and
+advertise the pinned wire revision separately from MCG's product version. API-key,
+OpenRouter, and custom-compatible payloads retain their normal public/provider
+semantics. The bounded buffered decoder reconstructs output from completed SSE item
+frames when the terminal envelope is sparse.
 
 The native desktop uses the same authenticated configure/list/discover boundary for
 OpenAI API-key, OpenRouter, and arbitrary OpenAI-compatible endpoints. Credential
@@ -76,10 +91,11 @@ adapted from OpenAI's Apache-2.0-licensed
 Discovery starts with the endpoint's model list. Provider-native metadata supplies
 context length, supported parameters, modalities, and provider-reported prices when
 available. Missing metadata remains unknown rather than becoming a false claim.
-The explicit conformance probe runs buffered and streaming Responses requests, a
-harmless required function-call request, and a per-request `reasoning.effort=none`
-control check, then records supported, unsupported, or indeterminate evidence. A
-successful response that ignores the required call remains indeterminate; tool
+The explicit conformance probe requires real assistant output from buffered and
+streaming Responses requests, a harmless required function-call request, and a
+per-request `reasoning.effort=none` control check, then records supported,
+unsupported, or indeterminate evidence. An empty terminal envelope does not count
+as inference. A successful response that ignores the required call remains indeterminate; tool
 authority is not granted from model prose or wishful inference. Tool-using agent
 turns disable internal reasoning only after the exact model has positively proven
 that control, preserving output budget for complete JSON tool arguments. Unknown
@@ -124,3 +140,9 @@ adapter accepts this documented exception. On 2026-08-14 its active model passed
 buffered and streaming Responses but ignored the required function-call probe, so
 tool support remained unknown and it was not eligible for tool-using Coder work.
 Live aliases remain dynamically discovered and are never compiled into MCG.
+
+On 2026-08-15 an isolated owner-host ChatGPT device-code connection survived daemon
+restart, discovered six visible subscription models with honest unknown prices, and
+passed real buffered output, streaming output, required function calling, and
+reasoning-control probes with empty daemon stderr. Secure disconnect then removed
+the active projection and all matching Windows Credential Manager entries.

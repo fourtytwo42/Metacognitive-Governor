@@ -905,6 +905,8 @@ enum ProviderCommand {
     Discover { id: String },
     /// Rotate the tokens for an `OpenAI` subscription connection.
     Refresh { id: String },
+    /// Disconnect a provider and remove its protected credentials.
+    Disconnect { id: String },
     /// Probe one model's live Responses, streaming, and tool-call capabilities.
     Probe { id: String, model: String },
     /// Show durable token and known-cost totals for local proxy calls.
@@ -3838,6 +3840,17 @@ async fn run_provider(
                 "{id}: OAuth credentials refreshed (event {})",
                 event.sequence
             );
+        }
+        ProviderCommand::Disconnect { id } => {
+            let event: EventEnvelope = client
+                .delete(format!("{host}/api/v1/providers/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{id}: disconnected (event {})", event.sequence);
         }
         ProviderCommand::Probe { id, model } => {
             let report: ModelProbeReport = client

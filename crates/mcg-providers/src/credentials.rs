@@ -1,8 +1,19 @@
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, OnceLock},
+};
+
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 
 use crate::{OAuthTokenSet, ProviderAuthMode, ProviderCredential, ProviderError};
 
 const SERVICE_NAME: &str = "com.metacognitive-governor.provider";
+const CHUNK_MANIFEST_PREFIX: &str = "mcg-keyring-chunks-v1";
+const MAX_KEYRING_CHUNK_CHARS: usize = 512;
+const MAX_KEYRING_CHUNKS: usize = 128;
+
+static OS_CREDENTIAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSecretSlot {
@@ -57,13 +68,81 @@ pub trait ProviderCredentialStore: Send + Sync {
 pub struct OsProviderCredentialStore;
 
 impl OsProviderCredentialStore {
+    fn entry_for_name(name: &str) -> Result<keyring::Entry, ProviderError> {
+        keyring::Entry::new(SERVICE_NAME, name).map_err(credential_store_error)
+    }
+
+    fn base_name(connection_id: &str, slot: ProviderSecretSlot) -> Result<String, ProviderError> {
+        validate_connection_id(connection_id)?;
+        Ok(format!("{connection_id}/{}", slot.name()))
+    }
+
     fn entry(
         connection_id: &str,
         slot: ProviderSecretSlot,
     ) -> Result<keyring::Entry, ProviderError> {
-        validate_connection_id(connection_id)?;
-        keyring::Entry::new(SERVICE_NAME, &format!("{connection_id}/{}", slot.name()))
-            .map_err(credential_store_error)
+        Self::entry_for_name(&Self::base_name(connection_id, slot)?)
+    }
+
+    fn chunk_entry(
+        connection_id: &str,
+        slot: ProviderSecretSlot,
+        generation: &str,
+        index: usize,
+    ) -> Result<keyring::Entry, ProviderError> {
+        let base = Self::base_name(connection_id, slot)?;
+        Self::entry_for_name(&format!("{base}/chunk/{generation}/{index}"))
+    }
+
+    fn load_unlocked(
+        connection_id: &str,
+        slot: ProviderSecretSlot,
+    ) -> Result<Option<ProviderCredential>, ProviderError> {
+        let stored = match Self::entry(connection_id, slot)?.get_password() {
+            Ok(secret) => secret,
+            Err(keyring::Error::NoEntry) => return Ok(None),
+            Err(error) => return Err(credential_store_error(error)),
+        };
+        let Some(manifest) = ChunkManifest::parse(&stored)? else {
+            return ProviderCredential::new(stored).map(Some);
+        };
+        let mut secret = String::new();
+        for index in 0..manifest.count {
+            let chunk = Self::chunk_entry(connection_id, slot, &manifest.generation, index)?
+                .get_password()
+                .map_err(|error| match error {
+                    keyring::Error::NoEntry => credential_store_error(
+                        "chunked credential is incomplete in the operating-system store",
+                    ),
+                    other => credential_store_error(other),
+                })?;
+            secret.push_str(&chunk);
+        }
+        if secret_digest(&secret) != manifest.digest {
+            return Err(credential_store_error(
+                "chunked credential failed its integrity check",
+            ));
+        }
+        ProviderCredential::new(secret).map(Some)
+    }
+
+    fn delete_chunks_unlocked(
+        connection_id: &str,
+        slot: ProviderSecretSlot,
+        manifest: &ChunkManifest,
+    ) -> Result<(), ProviderError> {
+        let mut first_error = None;
+        for index in 0..manifest.count {
+            match Self::chunk_entry(connection_id, slot, &manifest.generation, index)?
+                .delete_credential()
+            {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(error) => {
+                    first_error.get_or_insert_with(|| credential_store_error(error));
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -73,11 +152,8 @@ impl ProviderCredentialStore for OsProviderCredentialStore {
         connection_id: &str,
         slot: ProviderSecretSlot,
     ) -> Result<Option<ProviderCredential>, ProviderError> {
-        match Self::entry(connection_id, slot)?.get_password() {
-            Ok(secret) => ProviderCredential::new(secret).map(Some),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(credential_store_error(error)),
-        }
+        let _guard = os_credential_lock()?;
+        Self::load_unlocked(connection_id, slot)
     }
 
     fn save(
@@ -86,17 +162,151 @@ impl ProviderCredentialStore for OsProviderCredentialStore {
         slot: ProviderSecretSlot,
         credential: &ProviderCredential,
     ) -> Result<(), ProviderError> {
-        Self::entry(connection_id, slot)?
-            .set_password(credential.expose())
-            .map_err(credential_store_error)
+        let _guard = os_credential_lock()?;
+        let previous = match Self::entry(connection_id, slot)?.get_password() {
+            Ok(value) => ChunkManifest::parse(&value)?,
+            Err(keyring::Error::NoEntry) => None,
+            Err(error) => return Err(credential_store_error(error)),
+        };
+        let chunks = credential_chunks(credential.expose())?;
+        let manifest = ChunkManifest::new(chunks.len(), credential.expose());
+        for (index, chunk) in chunks.iter().enumerate() {
+            if let Err(error) = Self::chunk_entry(connection_id, slot, &manifest.generation, index)?
+                .set_password(chunk)
+            {
+                let _ = Self::delete_chunks_unlocked(connection_id, slot, &manifest);
+                return Err(credential_store_error(error));
+            }
+        }
+        if let Err(error) = Self::entry(connection_id, slot)?.set_password(&manifest.encode()) {
+            let _ = Self::delete_chunks_unlocked(connection_id, slot, &manifest);
+            return Err(credential_store_error(error));
+        }
+        if let Some(previous) = previous
+            && previous.generation != manifest.generation
+        {
+            Self::delete_chunks_unlocked(connection_id, slot, &previous)?;
+        }
+        Ok(())
     }
 
     fn delete(&self, connection_id: &str, slot: ProviderSecretSlot) -> Result<(), ProviderError> {
+        let _guard = os_credential_lock()?;
+        let manifest = match Self::entry(connection_id, slot)?.get_password() {
+            Ok(value) => ChunkManifest::parse(&value)?,
+            Err(keyring::Error::NoEntry) => return Ok(()),
+            Err(error) => return Err(credential_store_error(error)),
+        };
         match Self::entry(connection_id, slot)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(credential_store_error(error)),
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(credential_store_error(error)),
+        }
+        if let Some(manifest) = manifest {
+            Self::delete_chunks_unlocked(connection_id, slot, &manifest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChunkManifest {
+    generation: String,
+    count: usize,
+    digest: String,
+}
+
+impl ChunkManifest {
+    fn new(count: usize, secret: &str) -> Self {
+        let mut generation = [0_u8; 16];
+        rand::rng().fill_bytes(&mut generation);
+        Self {
+            generation: hex(&generation),
+            count,
+            digest: secret_digest(secret),
         }
     }
+
+    fn encode(&self) -> String {
+        format!(
+            "{CHUNK_MANIFEST_PREFIX}|{}|{}|{}",
+            self.generation, self.count, self.digest
+        )
+    }
+
+    fn parse(value: &str) -> Result<Option<Self>, ProviderError> {
+        if !value.starts_with(CHUNK_MANIFEST_PREFIX) {
+            return Ok(None);
+        }
+        let parts = value.split('|').collect::<Vec<_>>();
+        if parts.len() != 4
+            || parts[0] != CHUNK_MANIFEST_PREFIX
+            || parts[1].len() != 32
+            || !parts[1].bytes().all(|byte| byte.is_ascii_hexdigit())
+            || parts[3].len() != 64
+            || !parts[3].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(credential_store_error(
+                "chunked credential manifest is malformed",
+            ));
+        }
+        let count = parts[2]
+            .parse::<usize>()
+            .map_err(|_| credential_store_error("chunked credential count is malformed"))?;
+        if !(1..=MAX_KEYRING_CHUNKS).contains(&count) {
+            return Err(credential_store_error(
+                "chunked credential count is outside the supported range",
+            ));
+        }
+        Ok(Some(Self {
+            generation: parts[1].to_ascii_lowercase(),
+            count,
+            digest: parts[3].to_ascii_lowercase(),
+        }))
+    }
+}
+
+fn credential_chunks(secret: &str) -> Result<Vec<String>, ProviderError> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_characters = 0;
+    for character in secret.chars() {
+        if current_characters == MAX_KEYRING_CHUNK_CHARS {
+            chunks.push(std::mem::take(&mut current));
+            current_characters = 0;
+        }
+        current.push(character);
+        current_characters += 1;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() || chunks.len() > MAX_KEYRING_CHUNKS {
+        return Err(credential_store_error(
+            "credential is outside the supported protected-store size range",
+        ));
+    }
+    Ok(chunks)
+}
+
+fn secret_digest(secret: &str) -> String {
+    hex(&Sha256::digest(secret.as_bytes()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn os_credential_lock() -> Result<std::sync::MutexGuard<'static, ()>, ProviderError> {
+    OS_CREDENTIAL_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| credential_store_error("credential-store lock was poisoned"))
 }
 
 #[derive(Debug, Default)]
@@ -420,6 +630,73 @@ mod tests {
         assert_eq!(
             restored.refresh_token.expose(),
             original.refresh_token.expose()
+        );
+    }
+
+    #[test]
+    fn oversized_credentials_split_on_character_boundaries_with_integrity() {
+        let secret = format!("{}{}", "a".repeat(3_200), "\u{1f980}".repeat(700));
+        let chunks = credential_chunks(&secret).expect("chunks");
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= MAX_KEYRING_CHUNK_CHARS)
+        );
+        let reassembled = chunks.concat();
+        assert_eq!(reassembled, secret);
+
+        let manifest = ChunkManifest::new(chunks.len(), &secret);
+        let parsed = ChunkManifest::parse(&manifest.encode())
+            .expect("valid manifest")
+            .expect("chunked manifest");
+        assert_eq!(parsed.count, chunks.len());
+        assert_eq!(parsed.digest, secret_digest(&reassembled));
+        assert!(
+            ChunkManifest::parse("ordinary-legacy-secret")
+                .expect("legacy value")
+                .is_none()
+        );
+        assert!(ChunkManifest::parse("mcg-keyring-chunks-v1|bad|2|bad").is_err());
+    }
+
+    #[test]
+    fn oversized_os_credential_round_trip_is_opt_in() {
+        if std::env::var("MCG_LIVE_OS_CREDENTIAL_STORE").as_deref() != Ok("1") {
+            return;
+        }
+        let store = OsProviderCredentialStore;
+        let connection_id = format!("mcg-keyring-live-{}", std::process::id());
+        let slot = ProviderSecretSlot::Primary;
+        let _ = store.delete(&connection_id, slot);
+        let oversized = ProviderCredential::new("live-secret-".repeat(600)).expect("credential");
+        store
+            .save(&connection_id, slot, &oversized)
+            .expect("chunked OS credential save");
+        let loaded = store
+            .load(&connection_id, slot)
+            .expect("OS credential load")
+            .expect("stored credential");
+        assert_eq!(loaded.expose(), oversized.expose());
+
+        let replacement = ProviderCredential::new("short-replacement").expect("replacement");
+        store
+            .save(&connection_id, slot, &replacement)
+            .expect("atomic replacement");
+        assert_eq!(
+            store
+                .load(&connection_id, slot)
+                .expect("replacement load")
+                .expect("replacement stored")
+                .expose(),
+            replacement.expose()
+        );
+        store.delete(&connection_id, slot).expect("cleanup");
+        assert!(
+            store
+                .load(&connection_id, slot)
+                .expect("deleted load")
+                .is_none()
         );
     }
 }

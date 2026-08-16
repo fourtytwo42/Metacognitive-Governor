@@ -385,6 +385,50 @@ impl SqliteEventStore {
         transaction.commit()?;
         Ok(event)
     }
+
+    /// Atomically removes one active provider projection and catalog while
+    /// retaining its immutable call/accounting history and a secret-free audit event.
+    ///
+    /// # Errors
+    /// Returns not-found or persistence failures without partially removing the
+    /// active projection.
+    pub fn record_provider_connection_removed(
+        &mut self,
+        connection_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<EventEnvelope, StorageError> {
+        let connection = self.provider_connection(connection_id)?.ok_or_else(|| {
+            StorageError::InvalidData(format!("provider connection {connection_id} was not found"))
+        })?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM provider_catalogs WHERE connection_id = ?1",
+            [connection_id],
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM provider_connections WHERE connection_id = ?1",
+            [connection_id],
+        )?;
+        if removed != 1 {
+            return Err(StorageError::Conflict(format!(
+                "provider connection {connection_id} changed during removal"
+            )));
+        }
+        let event = Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::ProviderConnectionRemoved,
+                None,
+                serde_json::json!({
+                    "connection_id": connection_id,
+                    "auth_mode": connection.auth_mode,
+                    "removed_at": at,
+                }),
+            ),
+        )?;
+        transaction.commit()?;
+        Ok(event)
+    }
 }
 
 fn validate_proxy_record(
@@ -485,7 +529,7 @@ mod tests {
             .expect("configuration");
         drop(store);
 
-        let reopened = SqliteEventStore::open(&database).expect("reopen");
+        let mut reopened = SqliteEventStore::open(&database).expect("reopen");
         assert_eq!(
             reopened.provider_connections().expect("connections"),
             vec![connection]
@@ -499,6 +543,32 @@ mod tests {
         let encoded = serde_json::to_string(&events).expect("event JSON");
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("token"));
+
+        let removed = reopened
+            .record_provider_connection_removed("gpu45", Utc::now())
+            .expect("remove provider");
+        assert_eq!(removed.kind, EventKind::ProviderConnectionRemoved);
+        assert!(
+            reopened
+                .provider_connections()
+                .expect("connections")
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .provider_catalog("gpu45")
+                .expect("catalog")
+                .is_none()
+        );
+        drop(reopened);
+        let reopened = SqliteEventStore::open(&database).expect("reopen after removal");
+        assert!(
+            reopened
+                .provider_connections()
+                .expect("connections")
+                .is_empty()
+        );
+        assert_eq!(reopened.events_after(0).expect("events").len(), 3);
     }
 
     #[test]

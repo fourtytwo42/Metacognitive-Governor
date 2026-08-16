@@ -664,6 +664,13 @@ impl ToolExecutor for RuntimeMcpExecutor {
 #[derive(Clone)]
 pub struct RuntimeProviderGateway {
     registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
+    oauth_refresh: Arc<OAuthRefreshCoordinator>,
+}
+
+enum ProtectedProviderCredentialSnapshot {
+    None,
+    Primary(ProviderCredential),
+    OAuth(OAuthTokenSet),
 }
 
 impl RuntimeProviderGateway {
@@ -677,11 +684,38 @@ impl RuntimeProviderGateway {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<mcg_providers::ProviderStream, ProviderError> {
+        let initial = self
+            .registry
+            .read()
+            .await
+            .stream_response(target, request.clone())
+            .await;
+        if !matches!(initial, Err(ProviderError::Authentication(_))) {
+            return initial;
+        }
+        if !self.refresh_after_authentication_failure(target).await? {
+            return initial;
+        }
         self.registry
             .read()
             .await
             .stream_response(target, request)
             .await
+    }
+
+    async fn refresh_after_authentication_failure(
+        &self,
+        target: &ProviderModelRef,
+    ) -> Result<bool, ProviderError> {
+        self.oauth_refresh
+            .refresh_after_authentication_failure(&target.provider_id)
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Provider(error) => error,
+                error => ProviderError::Authentication(format!(
+                    "automatic OAuth refresh failed without changing billing mode: {error}"
+                )),
+            })
     }
 }
 
@@ -700,6 +734,18 @@ impl AgentModelGateway for RuntimeProviderGateway {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<ModelResponse, ProviderError> {
+        let initial = self
+            .registry
+            .read()
+            .await
+            .create_response(target, request.clone())
+            .await;
+        if !matches!(initial, Err(ProviderError::Authentication(_))) {
+            return initial;
+        }
+        if !self.refresh_after_authentication_failure(target).await? {
+            return initial;
+        }
         self.registry
             .read()
             .await
@@ -1151,6 +1197,7 @@ pub struct AppRuntime {
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     oauth_state: OAuthRuntimeState,
+    oauth_refresh: Arc<OAuthRefreshCoordinator>,
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
     plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
     plugin_trust: Arc<PluginTrustStore>,
@@ -1356,11 +1403,20 @@ impl AppRuntime {
                 }
             }))?;
         let (event_sender, _) = broadcast::channel(256);
+        let store = Arc::new(Mutex::new(store));
+        let provider_registry = Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default()));
+        let oauth_refresh = Arc::new(OAuthRefreshCoordinator::new(
+            store.clone(),
+            provider_credentials.clone(),
+            provider_registry.clone(),
+            device_config.clone(),
+            event_sender.clone(),
+        ));
         Ok(Self {
             config,
             data_lock,
             settings: Arc::new(RwLock::new(settings)),
-            store: Arc::new(Mutex::new(store)),
+            store,
             event_sender,
             auth,
             recovery,
@@ -1379,8 +1435,9 @@ impl AppRuntime {
             computer_sessions,
             provider_credentials,
             mcp_credentials,
-            provider_registry: Arc::new(tokio::sync::RwLock::new(ProviderRegistry::default())),
+            provider_registry,
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
+            oauth_refresh,
             shadow_command_verifier: default_shadow_command_verifier(),
             plugin_runner: package_plugin_runner(),
             plugin_trust: Arc::new(plugin_trust),
@@ -4696,7 +4753,141 @@ impl AppRuntime {
     pub fn provider_gateway(&self) -> RuntimeProviderGateway {
         RuntimeProviderGateway {
             registry: self.provider_registry.clone(),
+            oauth_refresh: self.oauth_refresh.clone(),
         }
+    }
+
+    /// Disconnects one provider, removes every protected credential slot, and
+    /// atomically removes its active connection/catalog projections while retaining
+    /// secret-free immutable audit and usage history.
+    ///
+    /// # Errors
+    /// Returns not-found, protected-store, registry, or persistence failures. When
+    /// persistence fails after credential deletion, the prior credential set and
+    /// live registry entry are restored best-effort before returning the error.
+    pub async fn disconnect_provider(
+        &self,
+        connection_id: &str,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let _operation = self.oauth_refresh.lock_connection(connection_id).await;
+        let connection = self
+            .store()?
+            .provider_connection(connection_id)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(format!(
+                    "provider connection {connection_id} was not found"
+                ))
+            })?;
+        let credentials = self.provider_credential_snapshot(&connection)?;
+        let mut registry = self.provider_registry.write().await;
+        registry.unregister(connection_id);
+        if let Err(error) =
+            clear_provider_credentials(self.provider_credentials.as_ref(), connection_id)
+        {
+            if self
+                .restore_provider_registration(&mut registry, &connection, &credentials)
+                .is_err()
+            {
+                return Err(ProviderError::Authentication(
+                    "provider credential deletion failed and the prior live registration could not be restored"
+                        .into(),
+                )
+                .into());
+            }
+            return Err(error.into());
+        }
+        let event = match self
+            .store()?
+            .record_provider_connection_removed(connection_id, Utc::now())
+        {
+            Ok(event) => event,
+            Err(error) => {
+                if self
+                    .restore_provider_registration(&mut registry, &connection, &credentials)
+                    .is_err()
+                {
+                    return Err(ProviderError::Authentication(
+                        "provider disconnect persistence failed and the prior live registration could not be restored"
+                            .into(),
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+        };
+        drop(registry);
+        self.oauth_refresh.forget_connection(connection_id).await;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
+    }
+
+    fn provider_credential_snapshot(
+        &self,
+        connection: &ProviderConnection,
+    ) -> Result<ProtectedProviderCredentialSnapshot, RuntimeError> {
+        match connection.auth_mode {
+            mcg_providers::ProviderAuthMode::None => Ok(ProtectedProviderCredentialSnapshot::None),
+            mcg_providers::ProviderAuthMode::ApiKey
+            | mcg_providers::ProviderAuthMode::BearerToken => self
+                .provider_credentials
+                .load(&connection.id, ProviderSecretSlot::Primary)?
+                .map(ProtectedProviderCredentialSnapshot::Primary)
+                .ok_or_else(|| {
+                    ProviderError::Authentication(format!(
+                        "provider connection {} has no protected primary credential",
+                        connection.id
+                    ))
+                    .into()
+                }),
+            mcg_providers::ProviderAuthMode::ChatGptBrowserOauth
+            | mcg_providers::ProviderAuthMode::ChatGptDeviceCode => Ok(
+                ProtectedProviderCredentialSnapshot::OAuth(mcg_providers::load_oauth_credentials(
+                    self.provider_credentials.as_ref(),
+                    &connection.id,
+                    connection.auth_mode,
+                )?),
+            ),
+        }
+    }
+
+    fn restore_provider_credentials(
+        &self,
+        connection: &ProviderConnection,
+        credentials: &ProtectedProviderCredentialSnapshot,
+    ) -> Result<(), ProviderError> {
+        match credentials {
+            ProtectedProviderCredentialSnapshot::None => save_provider_credentials(
+                self.provider_credentials.as_ref(),
+                &connection.id,
+                connection.auth_mode,
+                None,
+                None,
+            ),
+            ProtectedProviderCredentialSnapshot::Primary(primary) => save_provider_credentials(
+                self.provider_credentials.as_ref(),
+                &connection.id,
+                connection.auth_mode,
+                Some(primary),
+                None,
+            ),
+            ProtectedProviderCredentialSnapshot::OAuth(oauth) => save_provider_credentials(
+                self.provider_credentials.as_ref(),
+                &connection.id,
+                connection.auth_mode,
+                None,
+                Some(oauth),
+            ),
+        }
+    }
+
+    fn restore_provider_registration(
+        &self,
+        registry: &mut ProviderRegistry,
+        connection: &ProviderConnection,
+        credentials: &ProtectedProviderCredentialSnapshot,
+    ) -> Result<(), ProviderError> {
+        self.restore_provider_credentials(connection, credentials)?;
+        registry.register_connection(connection.clone(), self.provider_credentials.as_ref())
     }
 
     /// Returns discovered routes, lazily restoring durable provider metadata and

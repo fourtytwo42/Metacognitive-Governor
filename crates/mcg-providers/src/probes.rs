@@ -6,7 +6,8 @@ use serde_json::Value;
 
 use crate::{
     CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelDescriptor, ModelProvider,
-    ModelRequest, OutputItem, ProviderError, ReasoningConfig, ToolChoice, ToolDefinition,
+    ModelRequest, ModelResponse, OutputItem, ProviderError, ReasoningConfig, ToolChoice,
+    ToolDefinition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,24 +53,39 @@ pub async fn probe_model(
             ))
         })?;
     let request = probe_request(model_id);
-    let buffered = provider.create_response(request.clone()).await;
+    let buffered = provider
+        .create_response(request.clone())
+        .await
+        .and_then(require_assistant_output);
     let mut observations = vec![observation("responses", &buffered)];
     model.capabilities.responses = Some(buffered.is_ok());
 
     let streaming = match provider.stream_response(request).await {
-        Ok(mut stream) => {
-            match tokio::time::timeout(Duration::from_secs(30), stream.next()).await {
-                Ok(Some(Ok(_))) => Ok(()),
-                Ok(Some(Err(error))) => Err(error),
-                Ok(None) => Err(ProviderError::Incompatible(
-                    "provider stream ended without an event".into(),
-                )),
-                Err(_) => Err(ProviderError::Request {
-                    message: "provider stream produced no event within 30 seconds".into(),
-                    retriable: true,
-                }),
+        Ok(mut stream) => tokio::time::timeout(Duration::from_secs(30), async move {
+            while let Some(event) = stream.next().await {
+                match event? {
+                    crate::ModelStreamEvent::OutputTextDelta { delta, .. }
+                        if !delta.trim().is_empty() =>
+                    {
+                        return Ok(());
+                    }
+                    crate::ModelStreamEvent::Completed { response } => {
+                        return require_assistant_output(response).map(drop);
+                    }
+                    _ => {}
+                }
             }
-        }
+            Err(ProviderError::Incompatible(
+                "provider stream ended without assistant output".into(),
+            ))
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(ProviderError::Request {
+                message: "provider stream produced no assistant output within 30 seconds".into(),
+                retriable: true,
+            })
+        }),
         Err(error) => Err(error),
     };
     observations.push(observation("streaming", &streaming));
@@ -77,23 +93,7 @@ pub async fn probe_model(
     let tool_call = provider
         .create_response(tool_probe_request(model_id))
         .await
-        .and_then(|response| {
-            response
-                .output
-                .iter()
-                .any(|item| {
-                    matches!(
-                        item,
-                        OutputItem::ToolCall { name, .. } if name == "report_ok"
-                    )
-                })
-                .then_some(())
-                .ok_or_else(|| {
-                    ProviderError::Incompatible(
-                        "required tool probe returned no report_ok tool call".into(),
-                    )
-                })
-        });
+        .and_then(|response| required_tool_call_result(&response));
     let tool_observation = observation("tools", &tool_call);
     model.capabilities.tools = match tool_observation.support {
         ProbeSupport::Supported => Some(true),
@@ -107,6 +107,7 @@ pub async fn probe_model(
     let reasoning_observation = match reasoning_control {
         Ok(response)
             if response.usage.reasoning_tokens == 0
+                && has_assistant_output(&response)
                 && !response
                     .output
                     .iter()
@@ -136,6 +137,53 @@ pub async fn probe_model(
         model,
         observations,
     })
+}
+
+fn require_assistant_output(response: ModelResponse) -> Result<ModelResponse, ProviderError> {
+    has_assistant_output(&response)
+        .then_some(response)
+        .ok_or_else(|| {
+            ProviderError::Incompatible("response completed without assistant output".into())
+        })
+}
+
+fn has_assistant_output(response: &ModelResponse) -> bool {
+    response.output.iter().any(|item| match item {
+        OutputItem::Message { content, .. } => content
+            .iter()
+            .any(|part| matches!(part, ContentPart::Text { text } if !text.trim().is_empty())),
+        OutputItem::Refusal { text } => !text.trim().is_empty(),
+        OutputItem::ToolCall { .. } => true,
+        OutputItem::Reasoning { .. } | OutputItem::Unknown { .. } => false,
+    })
+}
+
+fn required_tool_call_result(response: &ModelResponse) -> Result<(), ProviderError> {
+    if response.output.iter().any(|item| {
+        matches!(
+            item,
+            OutputItem::ToolCall { name, .. } if name == "report_ok"
+        )
+    }) {
+        return Ok(());
+    }
+    let output_types = response
+        .provider_metadata
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("type").and_then(Value::as_str))
+        .take(8)
+        .collect::<Vec<_>>();
+    Err(ProviderError::Incompatible(format!(
+        "required tool probe returned no report_ok tool call (output types: {})",
+        if output_types.is_empty() {
+            "none".into()
+        } else {
+            output_types.join(",")
+        }
+    )))
 }
 
 fn observation<T>(operation: &str, result: &Result<T, ProviderError>) -> ProbeObservation {

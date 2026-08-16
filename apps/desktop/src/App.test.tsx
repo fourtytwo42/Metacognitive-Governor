@@ -11,6 +11,7 @@ const client = vi.hoisted(() => ({
   proxyConversations: vi.fn(),
   configureProvider: vi.fn(),
   discoverProvider: vi.fn(),
+  disconnectProvider: vi.fn(),
   listMcp: vi.fn(),
   listPlugins: vi.fn(),
   installLocalPlugin: vi.fn(),
@@ -99,6 +100,7 @@ vi.mock("./desktop-client", () => ({
   providerProxyConversations: client.proxyConversations,
   configureProvider: client.configureProvider,
   discoverProvider: client.discoverProvider,
+  disconnectProvider: client.disconnectProvider,
   listMcpConnections: client.listMcp,
   listPlugins: client.listPlugins,
   installLocalPlugin: client.installLocalPlugin,
@@ -190,6 +192,7 @@ beforeEach(() => {
   client.proxyConversations.mockReset();
   client.configureProvider.mockReset();
   client.discoverProvider.mockReset();
+  client.disconnectProvider.mockReset();
   client.listMcp.mockReset();
   client.listPlugins.mockReset();
   client.installLocalPlugin.mockReset();
@@ -977,6 +980,32 @@ test("consumer provider setup discovers a local endpoint and advanced mode shows
   await enableAdvancedMode();
   expect(screen.getByText("Local Model")).toBeInTheDocument();
   expect(screen.getByText("Cost unknown")).toBeInTheDocument();
+});
+
+test("provider disconnect confirms intent and removes the connection from the consumer UI", async () => {
+  const connection = {
+    contract_version: 1,
+    id: "subscription",
+    display_name: "OpenAI Subscription",
+    kind: "open_ai",
+    base_url: "https://chatgpt.com/backend-api/codex",
+    auth_mode: "chat_gpt_device_code"
+  };
+  client.listProviders.mockResolvedValue({
+    providers: [{ connection, catalog: { connection_id: connection.id, models: [], discovered_at: "2026-08-15T00:00:00Z" } }]
+  });
+  client.disconnectProvider.mockResolvedValue(undefined);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: connection.display_name })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+  await waitFor(() => expect(client.disconnectProvider).toHaveBeenCalledWith(connection.id));
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("protected credentials"));
+  expect(screen.queryByRole("heading", { name: connection.display_name })).not.toBeInTheDocument();
+  expect(screen.getByText("OpenAI Subscription disconnected")).toBeInTheDocument();
+  confirm.mockRestore();
 });
 
 test("provider workspace shows durable privacy-preserving proxy usage", async () => {

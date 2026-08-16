@@ -21,6 +21,7 @@ pub enum EventKind {
     ProviderCallStarted,
     ProviderCallCompleted,
     ProviderConnectionRecorded,
+    ProviderConnectionRemoved,
     ProviderCatalogDiscovered,
     ProviderCredentialsRefreshed,
     McpConnectionRecorded,
@@ -70,6 +71,7 @@ impl EventKind {
             Self::ProviderCallStarted => "provider_call_started",
             Self::ProviderCallCompleted => "provider_call_completed",
             Self::ProviderConnectionRecorded => "provider_connection_recorded",
+            Self::ProviderConnectionRemoved => "provider_connection_removed",
             Self::ProviderCatalogDiscovered => "provider_catalog_discovered",
             Self::ProviderCredentialsRefreshed => "provider_credentials_refreshed",
             Self::McpConnectionRecorded => "mcp_connection_recorded",
@@ -124,6 +126,9 @@ impl EventKind {
             "provider_call_completed" | "ProviderCallCompleted" => Ok(Self::ProviderCallCompleted),
             "provider_connection_recorded" | "ProviderConnectionRecorded" => {
                 Ok(Self::ProviderConnectionRecorded)
+            }
+            "provider_connection_removed" | "ProviderConnectionRemoved" => {
+                Ok(Self::ProviderConnectionRemoved)
             }
             "provider_catalog_discovered" | "ProviderCatalogDiscovered" => {
                 Ok(Self::ProviderCatalogDiscovered)

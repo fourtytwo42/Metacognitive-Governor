@@ -14,7 +14,8 @@ mod registry;
 mod routing;
 
 pub use compatible::{
-    CHATGPT_CODEX_BASE_URL, OpenAiCompatibleProvider, OpenAiCompatibleProviderBuilder,
+    CHATGPT_CODEX_BASE_URL, OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION, OpenAiCompatibleProvider,
+    OpenAiCompatibleProviderBuilder,
 };
 pub use contracts::*;
 pub use credentials::*;

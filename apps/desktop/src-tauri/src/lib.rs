@@ -245,6 +245,23 @@ async fn refresh_openai_oauth(connection_id: String) -> Result<EventEnvelope, St
 }
 
 #[tauri::command]
+async fn disconnect_provider(connection_id: String) -> Result<EventEnvelope, String> {
+    let response = reqwest::Client::new()
+        .delete(format!("{LOCAL_DAEMON}/api/v1/providers/{connection_id}"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Provider could not be disconnected: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Provider disconnect").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Provider disconnect response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn list_providers() -> Result<ProviderListResponse, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/providers"))
@@ -1739,6 +1756,7 @@ pub fn run() {
             complete_openai_oauth,
             cancel_openai_oauth,
             refresh_openai_oauth,
+            disconnect_provider,
             list_providers,
             get_user_settings,
             update_user_settings,

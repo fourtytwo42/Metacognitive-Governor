@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -15,6 +19,11 @@ use crate::{
 };
 
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+/// First-party Codex wire revision whose model-catalog and Responses contracts
+/// this standalone adapter has been qualified against. This is deliberately
+/// separate from MCG's product version and must advance only with compatibility
+/// tests plus live subscription UAT.
+pub const OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION: &str = "0.147.0";
 const MAX_SSE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_CLOUD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -69,6 +78,18 @@ impl OpenAiCompatibleProviderBuilder {
                 account_id,
             );
         }
+        builder.headers.insert(
+            header::HeaderName::from_static("originator"),
+            header::HeaderValue::from_static("mcg"),
+        );
+        builder.headers.insert(
+            header::HeaderName::from_static("version"),
+            header::HeaderValue::from_static(OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION),
+        );
+        builder.headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static(concat!("mcg/", env!("CARGO_PKG_VERSION"))),
+        );
         builder.build()
     }
 
@@ -213,6 +234,13 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
+    fn is_openai_subscription(&self) -> bool {
+        matches!(
+            self.connection.auth_mode,
+            ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+        )
+    }
+
     fn endpoint(&self, relative: &str) -> Result<Url, ProviderError> {
         self.base_url
             .join(relative)
@@ -277,7 +305,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
-        let endpoint = self.endpoint("models")?;
+        let mut endpoint = self.endpoint("models")?;
+        let subscription = matches!(
+            self.connection.auth_mode,
+            ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+        );
+        if subscription {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("client_version", OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION);
+        }
         let response = self
             .send_with_retry(|| self.authorize(self.client.get(endpoint.clone())))
             .await?;
@@ -285,20 +322,41 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .json()
             .await
             .map_err(|error| ProviderError::Incompatible(error.to_string()))?;
-        let models = body
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ProviderError::Incompatible("model list has no data array".into()))?;
-        models
-            .iter()
-            .map(|model| parse_model(model, self.connection.kind))
-            .collect()
+        if subscription {
+            let models = body
+                .get("models")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    ProviderError::Incompatible("Codex model list has no models array".into())
+                })?;
+            models
+                .iter()
+                .filter(|model| {
+                    model.get("supported_in_api").and_then(Value::as_bool) == Some(true)
+                        && model.get("visibility").and_then(Value::as_str) == Some("list")
+                })
+                .map(parse_codex_model)
+                .collect()
+        } else {
+            let models = body.get("data").and_then(Value::as_array).ok_or_else(|| {
+                ProviderError::Incompatible("model list has no data array".into())
+            })?;
+            models
+                .iter()
+                .map(|model| parse_model(model, self.connection.kind))
+                .collect()
+        }
     }
 
     async fn create_response(&self, request: ModelRequest) -> Result<ModelResponse, ProviderError> {
         validate_request(&request)?;
         let endpoint = self.endpoint("responses")?;
-        let body = request_json(&request, false, self.openrouter_routing.as_ref());
+        let body = request_json(
+            &request,
+            false,
+            self.is_openai_subscription(),
+            self.openrouter_routing.as_ref(),
+        );
         let response = self
             .send_with_retry(|| self.authorize(self.client.post(endpoint.clone()).json(&body)))
             .await?;
@@ -308,19 +366,20 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        let value: Value = if content_type.starts_with("text/event-stream") {
-            completed_response_from_sse_response(response, self.timeout).await?
-        } else {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|error| ProviderError::Request {
-                    message: response_body_error(&error, self.timeout),
-                    retriable: false,
-                })?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| ProviderError::Incompatible(error.to_string()))?
-        };
+        let value: Value =
+            if self.is_openai_subscription() || content_type.starts_with("text/event-stream") {
+                completed_response_from_sse_response(response, self.timeout).await?
+            } else {
+                let bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|error| ProviderError::Request {
+                        message: response_body_error(&error, self.timeout),
+                        retriable: false,
+                    })?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| ProviderError::Incompatible(error.to_string()))?
+            };
         parse_response(&value)
     }
 
@@ -330,7 +389,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
     ) -> Result<ProviderStream, ProviderError> {
         validate_request(&request)?;
         let endpoint = self.endpoint("responses")?;
-        let body = request_json(&request, true, self.openrouter_routing.as_ref());
+        let body = request_json(
+            &request,
+            true,
+            self.is_openai_subscription(),
+            self.openrouter_routing.as_ref(),
+        );
         let response = self
             .send_with_retry(|| self.authorize(self.client.post(endpoint.clone()).json(&body)))
             .await?;
@@ -395,6 +459,7 @@ fn validate_request(request: &ModelRequest) -> Result<(), ProviderError> {
 fn request_json(
     request: &ModelRequest,
     stream: bool,
+    openai_subscription: bool,
     openrouter_routing: Option<&OpenRouterRouting>,
 ) -> Value {
     let input: Vec<Value> = request
@@ -459,12 +524,15 @@ fn request_json(
             })
         })
         .collect();
-    let tool_choice = request.tool_choice.as_ref().map(|choice| match choice {
+    let mut tool_choice = request.tool_choice.as_ref().map(|choice| match choice {
         ToolChoice::Auto => json!("auto"),
         ToolChoice::None => json!("none"),
         ToolChoice::Required => json!("required"),
         ToolChoice::Named(name) => json!({"type": "function", "name": name}),
     });
+    if openai_subscription && tool_choice.is_none() {
+        tool_choice = Some(json!("auto"));
+    }
     let text = request.structured_output.as_ref().map(|format| {
         json!({"format": {
             "type": "json_schema",
@@ -480,13 +548,16 @@ fn request_json(
         "input": input,
         "tools": (!tools.is_empty()).then_some(tools),
         "tool_choice": tool_choice,
+        "parallel_tool_calls": openai_subscription.then_some(true),
         "text": text,
         "reasoning": request.reasoning,
-        "temperature": request.temperature,
-        "top_p": request.top_p,
-        "max_output_tokens": request.max_output_tokens,
-        "metadata": request.metadata,
-        "stream": stream,
+        "temperature": (!openai_subscription).then_some(request.temperature).flatten(),
+        "top_p": (!openai_subscription).then_some(request.top_p).flatten(),
+        "max_output_tokens": (!openai_subscription).then_some(request.max_output_tokens).flatten(),
+        "metadata": (!openai_subscription).then_some(&request.metadata),
+        "stream": stream || openai_subscription,
+        "store": openai_subscription.then_some(false),
+        "include": openai_subscription.then(Vec::<Value>::new),
         "provider": openrouter_routing,
     });
     remove_null_object_fields(&mut value);
@@ -562,6 +633,34 @@ fn parse_model(model: &Value, kind: ProviderKind) -> Result<ModelDescriptor, Pro
             reasoning_control: None,
         },
         price,
+        metadata: model.clone(),
+    })
+}
+
+fn parse_codex_model(model: &Value) -> Result<ModelDescriptor, ProviderError> {
+    let id = model
+        .get("slug")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProviderError::Incompatible("Codex model has no string slug".into()))?;
+    let reasoning = model
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+        .map(|levels| !levels.is_empty());
+    Ok(ModelDescriptor {
+        id: id.into(),
+        display_name: model
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .into(),
+        owned_by: Some("openai".into()),
+        context_window: model.get("context_window").and_then(Value::as_u64),
+        capabilities: ModelCapabilities {
+            responses: model.get("supported_in_api").and_then(Value::as_bool),
+            reasoning,
+            ..ModelCapabilities::default()
+        },
+        price: None,
         metadata: model.clone(),
     })
 }
@@ -677,6 +776,7 @@ fn parse_output_item(item: &Value) -> OutputItem {
 }
 
 fn parse_stream_event(event_name: &str, data: &str) -> Result<ModelStreamEvent, ProviderError> {
+    let data = data.trim();
     if data == "[DONE]" {
         return Ok(ModelStreamEvent::ProviderEvent {
             event_type: "done".into(),
@@ -780,6 +880,7 @@ struct SseCompletionDecoder {
     pending: Vec<u8>,
     total_bytes: usize,
     last_event: Option<Value>,
+    completed_output_items: BTreeMap<u64, Value>,
 }
 
 impl SseCompletionDecoder {
@@ -828,27 +929,55 @@ impl SseCompletionDecoder {
         let event = std::str::from_utf8(event)
             .map_err(|error| ProviderError::Incompatible(error.to_string()))?;
         let mut data = String::new();
+        let mut event_name = None;
         for line in event.lines() {
-            let Some(part) = line.strip_prefix("data:") else {
-                continue;
-            };
-            if !data.is_empty() {
-                data.push('\n');
+            if let Some(part) = line.strip_prefix("event:") {
+                event_name = Some(part.trim());
+            } else if let Some(part) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(part.strip_prefix(' ').unwrap_or(part));
             }
-            data.push_str(part.strip_prefix(' ').unwrap_or(part));
         }
+        let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
             return Ok(None);
         }
-        let value: Value = serde_json::from_str(&data)
-            .map_err(|error| ProviderError::Incompatible(error.to_string()))?;
+        let value: Value = serde_json::from_str(data).map_err(|error| {
+            let first_byte = data.as_bytes().first().copied().unwrap_or_default();
+            ProviderError::Incompatible(format!(
+                "non-JSON SSE event {} ({} bytes, first byte 0x{first_byte:02x}): {error}",
+                event_name.unwrap_or("unnamed"),
+                data.len()
+            ))
+        })?;
         self.last_event = Some(value.clone());
-        if value.get("type").and_then(Value::as_str) != Some("response.completed") {
+        let event_type = value.get("type").and_then(Value::as_str);
+        if event_type == Some("response.output_item.done")
+            && let (Some(output_index), Some(item)) = (
+                value.get("output_index").and_then(Value::as_u64),
+                value.get("item"),
+            )
+        {
+            self.completed_output_items
+                .insert(output_index, item.clone());
+        }
+        if event_type != Some("response.completed") {
             return Ok(None);
         }
-        value.get("response").cloned().map(Some).ok_or_else(|| {
+        let mut response = value.get("response").cloned().ok_or_else(|| {
             ProviderError::Incompatible("completed SSE event has no response".into())
-        })
+        })?;
+        let output_is_empty = response
+            .get("output")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty);
+        if output_is_empty && !self.completed_output_items.is_empty() {
+            response["output"] =
+                Value::Array(self.completed_output_items.values().cloned().collect());
+        }
+        Ok(Some(response))
     }
 
     fn missing_terminal_error(&self) -> ProviderError {
@@ -984,8 +1113,8 @@ mod tests {
 
     use axum::{
         Json, Router,
-        extract::State,
-        http::StatusCode,
+        extract::{Query, State},
+        http::{HeaderMap, StatusCode},
         response::IntoResponse,
         routing::{get, post},
     };
@@ -1147,7 +1276,7 @@ mod tests {
             },
         ]);
         validate_request(&request).expect("valid tool inputs");
-        let value = request_json(&request, false, None);
+        let value = request_json(&request, false, false, None);
         assert_eq!(
             value.pointer("/input/1/type"),
             Some(&json!("function_call"))
@@ -1163,6 +1292,35 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn subscription_requests_disable_response_storage_without_changing_api_payloads() {
+        let mut fixture = request();
+        fixture.max_output_tokens = Some(64);
+        fixture.temperature = Some(0.2);
+        fixture.top_p = Some(0.9);
+        fixture.metadata = json!({"task": "fixture"});
+        let subscription = request_json(&fixture, false, true, None);
+        assert_eq!(subscription.get("store"), Some(&json!(false)));
+        assert_eq!(subscription.get("stream"), Some(&json!(true)));
+        assert!(subscription.get("max_output_tokens").is_none());
+        assert!(subscription.get("temperature").is_none());
+        assert!(subscription.get("top_p").is_none());
+        assert!(subscription.get("metadata").is_none());
+        assert_eq!(subscription.get("tool_choice"), Some(&json!("auto")));
+        assert_eq!(subscription.get("parallel_tool_calls"), Some(&json!(true)));
+        assert_eq!(subscription.get("include"), Some(&json!([])));
+
+        let api = request_json(&fixture, false, false, None);
+        assert!(api.get("store").is_none());
+        assert_eq!(api.get("stream"), Some(&json!(false)));
+        assert_eq!(api.get("max_output_tokens"), Some(&json!(64)));
+        assert_eq!(api.get("temperature"), Some(&json!(0.2)));
+        assert_eq!(api.get("top_p"), Some(&json!(0.9)));
+        assert_eq!(api.get("metadata"), Some(&json!({"task": "fixture"})));
+        assert!(api.get("parallel_tool_calls").is_none());
+        assert!(api.get("include").is_none());
+    }
+
     #[tokio::test]
     async fn discovers_models_and_normalizes_response() {
         let provider = OpenAiCompatibleProviderBuilder::new(connection(fixture_server().await))
@@ -1176,6 +1334,81 @@ mod tests {
         assert!(
             matches!(&response.output[0], OutputItem::Message { content, .. } if content[0] == ContentPart::Text { text: "hello".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn subscription_discovery_uses_pinned_codex_contract_and_filters_catalog() {
+        async fn models(
+            Query(query): Query<HashMap<String, String>>,
+            headers: HeaderMap,
+        ) -> impl IntoResponse {
+            let valid = query.get("client_version").map(String::as_str)
+                == Some(OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION)
+                && headers
+                    .get("originator")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("mcg")
+                && headers.get("version").and_then(|value| value.to_str().ok())
+                    == Some(OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION)
+                && headers
+                    .get(header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(concat!("mcg/", env!("CARGO_PKG_VERSION")));
+            if !valid {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error":"contract"})))
+                    .into_response();
+            }
+            Json(json!({"models":[
+                {
+                    "slug":"gpt-visible",
+                    "display_name":"GPT Visible",
+                    "visibility":"list",
+                    "supported_in_api":true,
+                    "context_window":272_000,
+                    "supported_reasoning_levels":[{"effort":"medium"}]
+                },
+                {
+                    "slug":"hidden-model",
+                    "display_name":"Hidden",
+                    "visibility":"hide",
+                    "supported_in_api":true
+                },
+                {
+                    "slug":"unsupported-model",
+                    "display_name":"Unsupported",
+                    "visibility":"list",
+                    "supported_in_api":false
+                }
+            ]}))
+            .into_response()
+        }
+
+        let app = Router::new().route("/models", get(models));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+        let tokens = OAuthTokenSet {
+            id_token: ProviderCredential::new("fixture-id").expect("id"),
+            access_token: ProviderCredential::new("fixture-access").expect("access"),
+            refresh_token: ProviderCredential::new("fixture-refresh").expect("refresh"),
+        };
+        let mut provider = OpenAiCompatibleProviderBuilder::openai_subscription(
+            "subscription",
+            "Subscription",
+            ProviderAuthMode::ChatGptDeviceCode,
+            &tokens,
+        )
+        .expect("provider");
+        provider.base_url = Url::parse(&format!("http://{address}/")).expect("fixture URL");
+
+        let models = provider.list_models().await.expect("Codex models");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-visible");
+        assert_eq!(models[0].display_name, "GPT Visible");
+        assert_eq!(models[0].context_window, Some(272_000));
+        assert_eq!(models[0].capabilities.responses, Some(true));
+        assert_eq!(models[0].capabilities.reasoning, Some(true));
+        assert!(models[0].price.is_none());
     }
 
     #[tokio::test]
@@ -1207,6 +1440,38 @@ mod tests {
             event_decoder.push(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]),
             Err(ProviderError::Incompatible(message)) if message.contains("SSE event exceeded")
         ));
+    }
+
+    #[test]
+    fn buffered_sse_ignores_whitespace_only_data_frames() {
+        let mut decoder = SseCompletionDecoder::default();
+        assert!(
+            decoder
+                .push(b"data:   \n\n")
+                .expect("keepalive frame")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn buffered_sse_reconstructs_sparse_terminal_output_from_done_items() {
+        let mut decoder = SseCompletionDecoder::default();
+        let frames = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"report_ok\",\"arguments\":\"{\\\"ok\\\":true}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"fixture\",\"status\":\"completed\",\"output\":[],\"usage\":{\"total_tokens\":1}}}\n\n"
+        );
+        let response = decoder
+            .push(frames.as_bytes())
+            .expect("valid SSE")
+            .expect("completed response");
+        assert_eq!(
+            response.pointer("/output/0/type"),
+            Some(&json!("function_call"))
+        );
+        assert_eq!(
+            response.pointer("/output/0/name"),
+            Some(&json!("report_ok"))
+        );
     }
 
     #[tokio::test]

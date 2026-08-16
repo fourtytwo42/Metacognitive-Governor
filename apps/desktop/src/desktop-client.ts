@@ -843,6 +843,10 @@ export function discoverProvider(connectionId: string): Promise<ProviderModelCat
   return invoke("discover_provider", { connectionId });
 }
 
+export function disconnectProvider(connectionId: string): Promise<void> {
+  return invoke("disconnect_provider", { connectionId });
+}
+
 export function listMcpConnections(): Promise<McpListResponse> {
   return invoke("list_mcp_connections");
 }

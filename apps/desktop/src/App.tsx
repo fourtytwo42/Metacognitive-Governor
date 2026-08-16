@@ -22,6 +22,7 @@ import {
   discoverProject,
   discoverMcpConnection,
   discoverProvider,
+  disconnectProvider,
   handoffBrowserSession,
   handoffComputerSession,
   listMcpConnections,
@@ -152,7 +153,7 @@ function positiveWholeNumber(value: string, label: string): number {
 const SCHEDULE_EVENT_KINDS = [
   "task_created", "task_started", "task_state_changed", "task_completed", "task_failed",
   "approval_requested", "approval_resolved", "provider_call_started", "provider_call_completed",
-  "provider_connection_recorded", "provider_catalog_discovered", "provider_credentials_refreshed",
+  "provider_connection_recorded", "provider_connection_removed", "provider_catalog_discovered", "provider_credentials_refreshed",
   "mcp_connection_recorded", "mcp_catalog_discovered", "tool_requested", "tool_completed",
   "project_discovered", "memory_claim_recorded", "memory_claim_corrected", "memory_claim_state_changed",
   "organization_revision_recorded", "agent_run_planned", "agent_run_state_changed",
@@ -773,6 +774,21 @@ export function App() {
       setProviders((current) => current.map((item) =>
         item.connection.id === connectionId ? { ...item, catalog } : item
       ));
+    } catch (error) {
+      setProviderError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeProvider(item: ProviderListItem) {
+    if (!window.confirm(`Disconnect ${item.connection.display_name}? Its protected credentials will be removed from this computer.`)) return;
+    setBusy(true);
+    setProviderError(null);
+    try {
+      await disconnectProvider(item.connection.id);
+      setProviders((current) => current.filter((provider) => provider.connection.id !== item.connection.id));
+      setProviderStatus(`${item.connection.display_name} disconnected`);
     } catch (error) {
       setProviderError(errorMessage(error));
     } finally {
@@ -2630,7 +2646,10 @@ export function App() {
                   <p>{item.connection.auth_mode.startsWith("chat_gpt") ? "Subscription billing" : item.connection.auth_mode === "none" ? "Endpoint-reported billing" : "Usage-based billing"} · {item.catalog?.models.length ?? 0} models</p>
                   {advanced && <><code>{item.connection.base_url}</code><small>{item.connection.kind.replaceAll("_", " ")} · {item.connection.auth_mode.replaceAll("_", " ")}</small></>}
                 </div>
-                <button className="secondary" type="button" disabled={busy} onClick={() => refreshProvider(item.connection.id)}>Refresh models</button>
+                <div className="card-actions">
+                  <button className="secondary" type="button" disabled={busy} onClick={() => refreshProvider(item.connection.id)}>Refresh models</button>
+                  <button className="secondary" type="button" disabled={busy} onClick={() => removeProvider(item)}>Disconnect</button>
+                </div>
                 {advanced && item.catalog && <ul className="model-list">
                   {item.catalog.models.slice(0, 12).map((model) => <li key={model.id}>
                     <span><strong>{model.display_name}</strong><code>{model.id}</code></span>

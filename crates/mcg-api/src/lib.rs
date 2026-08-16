@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -1120,6 +1120,10 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
         .route(
             "/api/v1/providers",
             get(list_providers).post(configure_provider),
+        )
+        .route(
+            "/api/v1/providers/{connection_id}",
+            delete(disconnect_provider),
         )
         .route(
             "/api/v1/providers/{connection_id}/models",
@@ -3870,6 +3874,18 @@ async fn discover_provider(
     state
         .runtime
         .discover_provider(&connection_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn disconnect_provider(
+    State(state): State<ApiState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<EventEnvelope>, ApiError> {
+    state
+        .runtime
+        .disconnect_provider(&connection_id)
         .await
         .map(Json)
         .map_err(map_runtime_error)
@@ -7838,6 +7854,39 @@ form.addEventListener('submit', (event) => {
         assert!(!refresh_text.contains("fixture-refresh-secret"));
         assert!(!refresh_text.contains("account-123"));
 
+        let disconnected = app
+            .clone()
+            .oneshot(
+                authorized(Request::delete("/api/v1/providers/openai-subscription"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("disconnect response");
+        assert_eq!(disconnected.status(), StatusCode::OK);
+        let disconnected_bytes = disconnected
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let disconnected_event: EventEnvelope =
+            serde_json::from_slice(&disconnected_bytes).expect("disconnect event");
+        assert_eq!(
+            disconnected_event.kind,
+            mcg_events::EventKind::ProviderConnectionRemoved
+        );
+        let disconnect_text =
+            String::from_utf8(disconnected_bytes.to_vec()).expect("UTF-8 response");
+        assert!(!disconnect_text.contains("fixture-refresh-secret"));
+        assert!(!disconnect_text.contains("account-123"));
+        assert!(
+            runtime
+                .provider_connections()
+                .expect("providers")
+                .is_empty()
+        );
+
         let cancel_body = serde_json::to_vec(&StartOpenAiOAuthRequest {
             connection_id: "cancelled-subscription".into(),
             display_name: "Cancelled Subscription".into(),
@@ -7886,7 +7935,12 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("cancelled complete response");
         assert_eq!(cancelled_complete.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(runtime.provider_connections().expect("providers").len(), 1);
+        assert!(
+            runtime
+                .provider_connections()
+                .expect("providers")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

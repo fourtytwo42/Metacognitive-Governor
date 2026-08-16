@@ -339,6 +339,11 @@ never accepted as command-line arguments. Use `mcg provider list`, `models`, and
 `discover` to inspect the secret-free durable catalog. Use `mcg provider probe
 PROVIDER MODEL` to explicitly test and persist live Responses, streaming, and
 required function-call behavior before assigning tool-using work.
+Use `mcg provider disconnect PROVIDER` (or **Disconnect** in the native Providers
+panel) to remove the live connection and all of its protected credentials while
+retaining secret-free usage and audit history. Expired subscription access tokens
+refresh automatically once per failure burst and retry only the same subscription
+route; they never fall back to API billing.
 
 External local harnesses can use MCG itself as an OpenAI-compatible provider at
 `/v1/models`, `/v1/responses`, and `/v1/chat/completions` with the installation
