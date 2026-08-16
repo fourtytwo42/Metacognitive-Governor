@@ -28,6 +28,120 @@ function Wait-ForHealth([int]$Port, [string]$OutputPath) {
     throw "MCG did not become healthy on port $Port."
 }
 
+function Invoke-ConsumerCliProcess(
+    [string]$Executable,
+    [string[]]$Arguments,
+    [string]$InputText,
+    [string]$EvidenceRoot,
+    [string]$Label
+) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Executable
+    $start.Arguments = (@($Arguments | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join ' ')
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) { throw "Could not start installed consumer CLI for $Label." }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if ($null -ne $InputText) { $process.StandardInput.Write($InputText) }
+    $process.StandardInput.Close()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
+    $encoding = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText((Join-Path $EvidenceRoot "$Label.stdout"), $stdout, $encoding)
+    [IO.File]::WriteAllText((Join-Path $EvidenceRoot "$Label.stderr"), $stderr, $encoding)
+    [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
+}
+
+function Test-ConsumerCli(
+    [string]$Executable,
+    [string]$HostUrl,
+    [string]$TokenFile,
+    [string]$Project,
+    [string]$EvidenceRoot
+) {
+    New-Item -ItemType Directory -Path $Project -Force | Out-Null
+    [IO.File]::WriteAllText(
+        (Join-Path $Project "package.json"),
+        '{"scripts":{"test":"node --test"}}' + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $base = @("--host", $HostUrl, "--token-file", $TokenFile, "-C", $Project)
+    $results = [Collections.Generic.List[object]]::new()
+
+    $bare = Invoke-ConsumerCliProcess $Executable ($base + @("review", "this", "diff")) ("diff --git a/file.txt b/file.txt`n+private fixture content`n") $EvidenceRoot "consumer-bare"
+    $results.Add($bare)
+    if ($bare.ExitCode -eq 0 -or $bare.Stdout -notmatch "Status: blocked" -or $bare.Stderr -notmatch "requires attention" -or $bare.Stdout -match "private fixture content") {
+        throw "Installed consumer CLI bare/piped-context contract failed."
+    }
+
+    $structured = Invoke-ConsumerCliProcess $Executable ($base + @("run", "--json", "fix", "the", "tests")) $null $EvidenceRoot "consumer-json"
+    $results.Add($structured)
+    $structuredValue = $structured.Stdout | ConvertFrom-Json
+    if ($structured.ExitCode -eq 0 -or $structuredValue.task.goal -ne "fix the tests" -or $structuredValue.task.state -ne "blocked") {
+        throw "Installed consumer CLI JSON contract failed."
+    }
+
+    $stream = Invoke-ConsumerCliProcess $Executable ($base + @("run", "--stream-json", "inspect", "the", "project")) $null $EvidenceRoot "consumer-stream"
+    $results.Add($stream)
+    $streamValues = @($stream.Stdout -split "`r?`n" | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($stream.ExitCode -eq 0 -or $streamValues[0].type -ne "task" -or $streamValues[-1].type -ne "result" -or -not ($streamValues.type -contains "event")) {
+        throw "Installed consumer CLI NDJSON contract failed."
+    }
+
+    $piped = Invoke-ConsumerCliProcess $Executable $base ("summarize this project" + [Environment]::NewLine) $EvidenceRoot "consumer-piped"
+    $results.Add($piped)
+    if ($piped.ExitCode -eq 0 -or $piped.Stdout -notmatch "Status: blocked") {
+        throw "Installed consumer CLI piped-goal contract failed."
+    }
+
+    $oversized = Invoke-ConsumerCliProcess $Executable ($base + @("review", "oversized", "input")) ("x" * 1048577) $EvidenceRoot "consumer-oversized"
+    $results.Add($oversized)
+    if ($oversized.ExitCode -eq 0 -or $oversized.Stderr -notmatch "1048576-byte limit") {
+        throw "Installed consumer CLI input limit failed."
+    }
+
+    $tasks = Invoke-ConsumerCliProcess $Executable ($base + @("task", "list", "--json")) $null $EvidenceRoot "consumer-tasks"
+    $projects = Invoke-ConsumerCliProcess $Executable ($base + @("project", "list", "--json")) $null $EvidenceRoot "consumer-projects"
+    $results.Add($tasks)
+    $results.Add($projects)
+    $taskValues = @((($tasks.Stdout | ConvertFrom-Json).tasks))
+    $projectValues = @((($projects.Stdout | ConvertFrom-Json).projects))
+    if ($tasks.ExitCode -ne 0 -or $projects.ExitCode -ne 0 -or $taskValues.Count -ne 4 -or $projectValues.Count -ne 1) {
+        throw "Installed consumer CLI did not reuse one durable project across four tasks."
+    }
+
+    $token = (Get-Content -LiteralPath $TokenFile -Raw).Trim()
+    foreach ($result in $results) {
+        if ($result.Stdout.Contains($token) -or $result.Stderr.Contains($token)) {
+            throw "Installed consumer CLI exposed the local bearer token."
+        }
+    }
+
+    $report = [ordered]@{
+        schema_version = 1
+        bare_blocked = $true
+        json_blocked = $true
+        stream_ndjson = $true
+        piped_context_private = $true
+        oversized_rejected = $true
+        task_count = $taskValues.Count
+        project_count = $projectValues.Count
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $EvidenceRoot "consumer-cli.json"),
+        ($report | ConvertTo-Json -Compress),
+        [Text.UTF8Encoding]::new($false)
+    )
+    [pscustomobject]$report
+}
+
 function Save-DesktopScreenshot([string]$Path) {
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Windows.Forms
@@ -187,6 +301,7 @@ try {
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
     if ($backup.manifest.schema_version -ne 1 -or $backup.manifest.secrets_included -ne $false -or $backup.size_bytes -le 0) { throw "Installed CLI backup returned invalid or unsafe metadata." }
     $backup | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $uatRoot "backup.json") -Encoding UTF8
+    $consumerCli = Test-ConsumerCli $cli "http://127.0.0.1:$servicePort" $tokenFile (Join-Path $uatRoot "consumer-project") $uatRoot
 
     $token = (Get-Content -LiteralPath $tokenFile -Raw).Trim()
     $mcpMeta = @{
@@ -281,6 +396,9 @@ try {
         CliStatus = $cliStatus -join " "
         DoctorSchema = $doctor.schema_version
         BackupSchema = $backup.manifest.schema_version
+        ConsumerCliReport = Join-Path $uatRoot "consumer-cli.json"
+        ConsumerCliTaskCount = $consumerCli.task_count
+        ConsumerCliProjectCount = $consumerCli.project_count
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }

@@ -135,6 +135,12 @@ UI tests operate in two modes:
 - packaged Tauri mode for installer, IPC, daemon lifecycle, credential integration,
   filesystem dialogs, and OS-specific behavior.
 
+Windows installer qualification executes bare-goal, single-JSON, durable NDJSON
+stream, piped-context, and oversized-input consumer CLI forms against the installed
+daemon, including canonical project reuse and token-exclusion assertions. The true
+interactive prompt is exercised visibly because redirected stdin is intentionally
+the piped-goal interface on Windows.
+
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, retained
 external data, daemon restart, authenticated CLI/doctor/backup/MCP discovery, and

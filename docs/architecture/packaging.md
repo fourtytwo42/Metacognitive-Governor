@@ -38,7 +38,7 @@ Run Windows package UAT from an interactive owner session:
 ./scripts/test-windows-installer.ps1 -InstallerPath C:\path\to\MCG_0.1.0_x64-setup.exe
 ```
 
-The harness refuses an existing registered installation, installs into a unique temporary root, verifies the complete payload and licenses, exercises valid and tampered packaged plugins, proves daemon restart, CLI status/doctor/backup, modern MCP discovery and tool listing, launches the packaged desktop on its fixed loopback port, captures and validates a real nonblank Windows screenshot, then proves repair, uninstall, retained external data, reinstall, final removal, and failure cleanup. `-SkipDesktop` exists only for an owner-host preflight whose port 7777 is deliberately occupied; clean-machine release UAT must not use it.
+The harness refuses an existing registered installation, installs into a unique temporary root, verifies the complete payload and licenses, exercises valid and tampered packaged plugins, proves daemon restart, CLI status/doctor/backup plus bare/JSON/NDJSON/piped/oversized consumer behavior, canonical project reuse and token exclusion, modern MCP discovery and tool listing, launches the packaged desktop on its fixed loopback port, captures and validates a real nonblank Windows screenshot, then proves repair, uninstall, retained external data, reinstall, final removal, and failure cleanup. The interactive prompt remains a visible console UAT gate because redirected Windows standard input deliberately selects piped mode. `-SkipDesktop` exists only for an owner-host preflight whose port 7777 is deliberately occupied; clean-machine release UAT must not use it.
 
 Linux:
 
