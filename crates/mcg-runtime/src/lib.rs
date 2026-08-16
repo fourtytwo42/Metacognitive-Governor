@@ -4782,7 +4782,7 @@ impl AppRuntime {
         let mut registry = self.provider_registry.write().await;
         registry.unregister(connection_id);
         if let Err(error) =
-            clear_provider_credentials(self.provider_credentials.as_ref(), connection_id)
+            Self::clear_connection_credentials(self.provider_credentials.as_ref(), &connection)
         {
             if self
                 .restore_provider_registration(&mut registry, &connection, &credentials)
@@ -4819,6 +4819,16 @@ impl AppRuntime {
         self.oauth_refresh.forget_connection(connection_id).await;
         let _ = self.event_sender.send(event.clone());
         Ok(event)
+    }
+
+    fn clear_connection_credentials(
+        store: &dyn ProviderCredentialStore,
+        connection: &ProviderConnection,
+    ) -> Result<(), ProviderError> {
+        if connection.auth_mode == mcg_providers::ProviderAuthMode::None {
+            return Ok(());
+        }
+        clear_provider_credentials(store, &connection.id)
     }
 
     fn provider_credential_snapshot(
@@ -10648,6 +10658,70 @@ mod tests {
     };
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    struct RejectingProviderCredentialStore(AtomicUsize);
+
+    impl ProviderCredentialStore for RejectingProviderCredentialStore {
+        fn load(
+            &self,
+            _connection_id: &str,
+            _slot: ProviderSecretSlot,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Authentication(
+                "credential store must not be touched".into(),
+            ))
+        }
+
+        fn save(
+            &self,
+            _connection_id: &str,
+            _slot: ProviderSecretSlot,
+            _credential: &ProviderCredential,
+        ) -> Result<(), ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Authentication(
+                "credential store must not be touched".into(),
+            ))
+        }
+
+        fn delete(
+            &self,
+            _connection_id: &str,
+            _slot: ProviderSecretSlot,
+        ) -> Result<(), ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Authentication(
+                "credential store must not be touched".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn anonymous_provider_disconnect_does_not_touch_the_os_credential_store() {
+        let store = RejectingProviderCredentialStore(AtomicUsize::new(0));
+        let connection = ProviderConnection {
+            contract_version: CONTRACT_VERSION,
+            id: "anonymous-local".into(),
+            display_name: "Anonymous local".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            auth_mode: ProviderAuthMode::None,
+            organization: None,
+            project: None,
+        };
+
+        AppRuntime::clear_connection_credentials(&store, &connection)
+            .expect("anonymous provider has no credentials to clear");
+        assert_eq!(store.0.load(Ordering::SeqCst), 0);
+
+        let authenticated = ProviderConnection {
+            auth_mode: ProviderAuthMode::ApiKey,
+            ..connection
+        };
+        assert!(AppRuntime::clear_connection_credentials(&store, &authenticated).is_err());
+        assert_eq!(store.0.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn model_tool_paths_resolve_inside_the_granted_project_root() {
