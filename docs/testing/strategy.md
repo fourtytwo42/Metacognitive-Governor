@@ -139,6 +139,10 @@ Linux release qualification additionally runs the real `.deb` and AppImage throu
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, retained
 external data, daemon restart, authenticated CLI/doctor/backup/MCP discovery, and
 both GUI formats under an owner-controlled X11 display with captured screenshots.
+The installed CLI lane also executes bare-goal, single-JSON, durable NDJSON stream,
+piped-context, oversized-input, and real pseudo-terminal interactive forms; it
+requires blocked work to fail visibly when no provider exists, preserves one
+canonical project, and rejects bearer-token leakage from every captured stream.
 
 Every major workflow is tested in simple and advanced mode. Accessibility checks
 cover keyboard navigation, focus, labels, contrast, reduced motion, and readable

@@ -19,7 +19,7 @@ uat_user="${MCG_UAT_USER:-${SUDO_USER:-$(stat -c '%U' "$repository_root")}}"
 [[ -f "$appimage" ]] || { echo "Missing AppImage package: $appimage" >&2; exit 1; }
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
-for command in curl dpkg dpkg-deb find identify import pgrep python3 runuser ss stat xdotool Xvfb; do
+for command in curl dpkg dpkg-deb find identify import pgrep python3 runuser script ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 
@@ -83,6 +83,136 @@ run_cli() {
   runuser -u "$uat_user" -- env \
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$data_root" \
     "$executable" --host "http://127.0.0.1:$port" "$@"
+}
+
+test_consumer_cli() {
+  local executable="$1"
+  local data_root="$2"
+  local port="$3"
+  local label="$4"
+  local project="$uat_root/$label-consumer-project"
+  mkdir -p "$project"
+  chown -R "$uat_user":"$(id -gn "$uat_user")" "$project"
+  runuser -u "$uat_user" -- env \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$data_root" \
+    python3 - "$executable" "$data_root" "$port" "$uat_home" "$project" "$uat_root/$label-consumer-cli.json" <<'PY'
+import json
+import os
+import pathlib
+import shlex
+import subprocess
+import sys
+
+executable, data_root, port, home, project, report_path = sys.argv[1:]
+project_path = pathlib.Path(project)
+project_path.joinpath("package.json").write_text(
+    '{"scripts":{"test":"node --test"}}\n', encoding="utf-8"
+)
+env = os.environ.copy()
+env.update({
+    "HOME": home,
+    "XDG_DATA_HOME": str(pathlib.Path(home) / ".local" / "share"),
+    "MCG_DATA_DIR": data_root,
+})
+base = [
+    executable,
+    "--host", f"http://127.0.0.1:{port}",
+    "--token-file", str(pathlib.Path(data_root) / "local-auth-token"),
+    "-C", project,
+]
+
+def invoke(name, arguments=(), stdin=b""):
+    result = subprocess.run(
+        [*base, *arguments],
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    pathlib.Path(report_path).with_name(f"{name}.stdout").write_bytes(result.stdout)
+    pathlib.Path(report_path).with_name(f"{name}.stderr").write_bytes(result.stderr)
+    return result
+
+bare = invoke(
+    "consumer-bare",
+    ["review this diff"],
+    b"diff --git a/file.txt b/file.txt\n+private fixture content\n",
+)
+assert bare.returncode != 0
+assert b"Status: blocked" in bare.stdout and b"requires attention" in bare.stderr
+assert b"private fixture content" not in bare.stdout
+
+structured = invoke("consumer-json", ["run", "--json", "fix", "the", "tests"])
+assert structured.returncode != 0
+structured_value = json.loads(structured.stdout)
+assert structured_value["task"]["goal"] == "fix the tests"
+assert structured_value["task"]["state"] == "blocked"
+
+stream = invoke(
+    "consumer-stream", ["run", "--stream-json", "inspect", "the", "project"]
+)
+assert stream.returncode != 0
+records = [json.loads(line) for line in stream.stdout.splitlines() if line]
+assert records[0]["type"] == "task" and records[-1]["type"] == "result"
+assert any(record["type"] == "event" for record in records)
+
+piped = invoke("consumer-piped", stdin=b"summarize this project\n")
+assert piped.returncode != 0 and b"Status: blocked" in piped.stdout
+
+oversized = invoke(
+    "consumer-oversized", ["review oversized input"], b"x" * 1_048_577
+)
+assert oversized.returncode != 0 and b"1048576-byte limit" in oversized.stderr
+
+interactive_command = [
+    "script", "--quiet", "--return", "--command", shlex.join(base), "/dev/null"
+]
+interactive = subprocess.run(
+    interactive_command,
+    input=b"inspect through the interactive prompt\n:quit\n",
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    env=env,
+    timeout=30,
+    check=False,
+)
+pathlib.Path(report_path).with_name("consumer-interactive.stdout").write_bytes(
+    interactive.stdout
+)
+pathlib.Path(report_path).with_name("consumer-interactive.stderr").write_bytes(
+    interactive.stderr
+)
+assert interactive.returncode == 0
+assert b"MCG interactive mode" in interactive.stdout
+assert b"Status: blocked" in interactive.stdout and b"mcg>" in interactive.stdout
+
+tasks = invoke("consumer-tasks", ["task", "list", "--json"])
+projects = invoke("consumer-projects", ["project", "list", "--json"])
+task_values = json.loads(tasks.stdout)["tasks"]
+project_values = json.loads(projects.stdout)["projects"]
+assert len(task_values) == 5 and len(project_values) == 1
+
+token = pathlib.Path(data_root, "local-auth-token").read_bytes().strip()
+for result in [bare, structured, stream, piped, oversized, interactive, tasks, projects]:
+    assert token not in result.stdout and token not in result.stderr
+
+pathlib.Path(report_path).write_text(
+    json.dumps({
+        "schema_version": 1,
+        "bare_blocked": True,
+        "json_blocked": True,
+        "stream_ndjson": True,
+        "piped_context_private": True,
+        "oversized_rejected": True,
+        "interactive_tty": True,
+        "task_count": len(task_values),
+        "project_count": len(project_values),
+    }),
+    encoding="utf-8",
+)
+PY
 }
 
 test_plugin_runner() {
@@ -177,6 +307,7 @@ wait_for_health "$installed_port"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg status --json >"$uat_root/status.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg doctor --json >"$uat_root/doctor.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg backup create --json >"$uat_root/backup.json"
+test_consumer_cli /usr/bin/mcg "$installed_data" "$installed_port" installed
 
 python3 - "http://127.0.0.1:$installed_port/mcp" "$installed_data/local-auth-token" "$uat_root/mcp.json" <<'PY'
 import json
@@ -331,6 +462,7 @@ UAT_ROOT=$uat_root
 DEB_PACKAGE=$package_name
 INSTALLED_HEALTH_PORT=$installed_port
 MCP_REPORT=$uat_root/mcp.json
+CONSUMER_CLI_REPORT=$uat_root/installed-consumer-cli.json
 INSTALLED_SCREENSHOT=$uat_root/installed.png
 APPIMAGE_SCREENSHOT=$uat_root/appimage.png
 DATA_RETAINED=true

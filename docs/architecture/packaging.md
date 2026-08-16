@@ -54,7 +54,7 @@ Run Linux package UAT as root while naming the non-root desktop owner:
 sudo MCG_UAT_USER="$USER" ./scripts/test-linux-packages.sh
 ```
 
-The harness refuses to replace an existing MCG package. In a unique external data directory it proves `.deb` install and same-version repair, daemon health and restart, authenticated CLI status/doctor/backup, modern MCP discovery and tool listing, installed desktop launch, AppImage extraction and launch, real X11 window creation, screenshot capture, uninstall, retained data, reinstall, and final application-file removal. Its temporary evidence directory is retained for review; it never writes credentials to output.
+The harness refuses to replace an existing MCG package. In a unique external data directory it proves `.deb` install and same-version repair, daemon health and restart, authenticated CLI status/doctor/backup, bare/JSON/NDJSON/piped/oversized/interactive consumer CLI behavior, canonical project reuse and token exclusion, modern MCP discovery and tool listing, installed desktop launch, AppImage extraction and launch, real X11 window creation, screenshot capture, uninstall, retained data, reinstall, and final application-file removal. Its temporary evidence directory is retained for review; it never writes credentials to output.
 
 macOS:
 
