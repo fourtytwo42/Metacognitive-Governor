@@ -224,13 +224,19 @@ path-prefix confusion, and produces no evidence or workspace effect when the CLI
 is absent.
 The helper separately proves bounded link/reparse-safe copying, exact internal
 paths, one-shot destination creation, environment clearing, and normalized
-command failure. Live Win11 qualification on the current Store-delivered Sandbox
-CLI proves official-package discovery, start/exec/probe/stop compatibility,
-ephemeral command writes, and no persistence through the read-only host mapping.
-Windows Sandbox may satisfy a mapped-folder write through its disposable view,
-so the gate measures host non-persistence rather than assuming the child must
-fail. Live blocked-network, timeout/stop, and setup-failure scenarios remain
-required before the Windows backend is production-qualified.
+command failure. Unit coverage also rejects a missing, malformed, oversized, or
+non-integer nested `ExitCode` envelope instead of confusing the host CLI's zero
+transport status with runner success. The Windows sidecar builder statically
+links the runner's C runtime and rejects Visual C++ redistributable DLL imports.
+Live Win11 qualification on the current Store-delivered Sandbox CLI proves
+official-package discovery, serialized start/exec/probe/stop compatibility,
+real nested runner execution, ephemeral command writes, and no persistence
+through the read-only host mapping. Windows Sandbox may satisfy a mapped-folder
+write through its disposable view, so the gate measures host non-persistence
+rather than assuming the child must fail. The same owner-controlled gate proves
+no default route or non-loopback IPv4 address, a two-second command timeout with
+verified session teardown, deliberate schema-invalid runner setup rejection,
+and an empty session list after every case.
 The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision promotes only the
 independently verified candidate while retaining one evaluation, benchmark, and

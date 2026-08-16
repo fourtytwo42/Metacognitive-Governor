@@ -101,8 +101,7 @@ insufficient. The trusted runtime reopens and hashes the versioned transcript,
 requires it to bind the exact condition, independently verifies optional output
 artifacts, and derives pass/fail from timeout and exit status rather than
 trusting a backend-supplied verdict. Linux adversarial host qualification and
-the Windows ephemeral-workspace/host-mapping qualification pass; the remaining
-Windows live negative gates are tracked in the testing strategy. The Windows
+the complete Windows positive/negative lifecycle qualification pass. The Windows
 backend requires the Windows Sandbox CLI available in current Windows 11
 releases and the package-adjacent internal `mcg-shadow-runner.exe`. It prefers a
 fixed non-reparse System32 CLI when present. Current Store-delivered releases
@@ -117,12 +116,18 @@ clipboard disabled and Protected Client enabled. The retained source and the
 two-file harness are separate read-only mappings; the bounded runner copies the
 source to an unmapped disposable workspace, clears the command environment,
 executes a direct argument vector as `System`, and normalizes objective failure
-separately from setup failure. Preflight and postflight runner probes prevent a
-missing or lost sandbox session from masquerading as test failure. Wall timeout
-always triggers a best-effort session stop, and no writable host share or host
-process fallback exists. The Windows CLI cannot return child process I/O, so
-the transcript records only the independently interpreted exit/timeout
-disposition. Because the Store CLI accepts one `--command` value rather than a
+separately from setup failure. The Windows package build statically links this
+small helper's C runtime and rejects imports of Visual C++ redistributable DLLs,
+because those DLLs are absent from a pristine Sandbox image. Preflight and
+postflight runner probes prevent a missing or lost sandbox session from
+masquerading as test failure. The host CLI's own process status is only transport
+status: every `exec --raw` response must contain a bounded JSON `ExitCode`, and
+MCG uses that nested runner status for preflight, objective, setup-failure, and
+postflight decisions. Wall timeout always triggers a best-effort session stop,
+and no writable host share or host process fallback exists. The Windows CLI
+cannot return child process I/O, so the transcript records only the independently
+interpreted exit/timeout disposition. Because the Store CLI accepts one
+`--command` value rather than a
 POSIX `--` argument tail, MCG selects only two compile-time runner command lines
 (probe or request); the untrusted objective executable and argument array remain
 inside the bounded JSON request and never enter that CLI string.

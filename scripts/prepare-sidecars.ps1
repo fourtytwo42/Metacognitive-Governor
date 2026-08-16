@@ -13,7 +13,7 @@ if (-not $targetTriple) {
 }
 
 if (-not $SkipBuild) {
-    $cargoArguments = @("build", "-p", "mcg-cli", "-p", "mcg-plugin-runner", "-p", "mcg-shadow-runner")
+    $cargoArguments = @("build", "-p", "mcg-cli", "-p", "mcg-plugin-runner")
     $existingDebugDaemon = Join-Path $repositoryRoot "target/debug/mcg-daemon.exe"
     if ($Profile -eq "release" -or -not (Test-Path -LiteralPath $existingDebugDaemon -PathType Leaf)) {
         $cargoArguments += @("-p", "mcg-daemon")
@@ -25,9 +25,33 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) {
         throw "Sidecar build failed with exit code $LASTEXITCODE."
     }
+
+    # Windows Sandbox starts from a pristine image that does not include the
+    # redistributable VCRUNTIME DLL. Keep this security-critical helper
+    # self-contained instead of weakening the sandbox or installing host state.
+    $runnerArguments = @("rustc", "-p", "mcg-shadow-runner")
+    if ($Profile -eq "release") {
+        $runnerArguments += "--release"
+    }
+    $runnerArguments += @("--", "-C", "target-feature=+crt-static")
+    & cargo @runnerArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Static Windows Sandbox runner build failed with exit code $LASTEXITCODE."
+    }
 }
 
 $sourceDirectory = Join-Path $repositoryRoot "target/$Profile"
+$sandboxRunner = Join-Path $sourceDirectory "mcg-shadow-runner.exe"
+if (-not (Test-Path -LiteralPath $sandboxRunner -PathType Leaf)) {
+    throw "Required Windows Sandbox runner is missing: $sandboxRunner"
+}
+$runnerImage = [System.Text.Encoding]::ASCII.GetString(
+    [System.IO.File]::ReadAllBytes($sandboxRunner)
+)
+if ($runnerImage -match '(?i)(VCRUNTIME|MSVCP)[^\x00]*\.dll') {
+    throw "Windows Sandbox runner depends on a Visual C++ redistributable DLL."
+}
+
 $sidecarDirectory = Join-Path $repositoryRoot "apps/desktop/src-tauri/binaries"
 New-Item -ItemType Directory -Force -Path $sidecarDirectory | Out-Null
 

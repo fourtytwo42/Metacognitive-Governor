@@ -1,9 +1,11 @@
 #[cfg(target_os = "windows")]
+use std::path::Path as StdPath;
+#[cfg(target_os = "windows")]
 use std::process::Command;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use std::{
     fs::{self, OpenOptions},
-    path::{Path as StdPath, PathBuf},
+    path::PathBuf,
 };
 use std::{path::Path, sync::Arc};
 
@@ -117,6 +119,7 @@ pub(crate) fn default_shadow_command_verifier() -> Arc<dyn ShadowCommandVerifier
             executable,
             runner,
             lifecycle: tokio::sync::Mutex::new(()),
+            timeouts: WindowsSandboxTimeouts::default(),
         });
     }
     Arc::new(UnavailableShadowCommandVerifier)
@@ -240,6 +243,26 @@ struct WindowsSandboxVerifier {
     executable: PathBuf,
     runner: PathBuf,
     lifecycle: tokio::sync::Mutex<()>,
+    timeouts: WindowsSandboxTimeouts,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy)]
+struct WindowsSandboxTimeouts {
+    start: u64,
+    command: u64,
+    stop: u64,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Default for WindowsSandboxTimeouts {
+    fn default() -> Self {
+        Self {
+            start: WSB_START_TIMEOUT_SECONDS,
+            command: WSB_COMMAND_TIMEOUT_SECONDS,
+            stop: WSB_STOP_TIMEOUT_SECONDS,
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -264,6 +287,17 @@ impl ShadowCommandVerifier for WindowsSandboxVerifier {
 
 #[cfg(any(target_os = "windows", test))]
 impl WindowsSandboxVerifier {
+    async fn stop_session(&self, process: &ProcessExecutor, harness_root: &Path, session_id: &str) {
+        stop_windows_sandbox(
+            process,
+            &self.executable,
+            harness_root,
+            session_id,
+            self.timeouts.stop,
+        )
+        .await;
+    }
+
     async fn verify_inner(
         &self,
         workspace_root: &Path,
@@ -321,14 +355,14 @@ impl WindowsSandboxVerifier {
             &self.executable,
             harness_root,
             start,
-            WSB_START_TIMEOUT_SECONDS,
+            self.timeouts.start,
             "start Windows Sandbox shadow session",
         )
         .await;
         if let Err(error) = started
             .and_then(|outcome| require_success(&outcome, "start Windows Sandbox shadow session"))
         {
-            stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
+            self.stop_session(process, harness_root, &session_id).await;
             return Err(error);
         }
 
@@ -339,63 +373,98 @@ impl WindowsSandboxVerifier {
             &self.executable,
             harness_root,
             probe.clone(),
-            WSB_START_TIMEOUT_SECONDS,
+            self.timeouts.start,
             "probe Windows Sandbox shadow session",
         )
-        .await;
-        if preflight.as_ref().ok().and_then(|value| value.exit_code) != Some(0) {
-            stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
+        .await
+        .and_then(|outcome| {
+            let exit_code =
+                windows_sandbox_exec_exit_code(&outcome, "probe Windows Sandbox shadow session")?;
+            Ok((outcome, exit_code))
+        });
+        if preflight.as_ref().ok().map(|(_, exit_code)| *exit_code) != Some(0) {
+            self.stop_session(process, harness_root, &session_id).await;
             let detail = preflight.map_or_else(
                 |error| error.to_string(),
-                |outcome| windows_sandbox_outcome_detail(&outcome),
+                |(outcome, exit_code)| {
+                    format!(
+                        "nested exit={exit_code}; {}",
+                        windows_sandbox_outcome_detail(&outcome)
+                    )
+                },
             );
             return Err(ToolError::Unavailable(format!(
                 "Windows Sandbox runner preflight failed: {detail}"
             )));
         }
 
+        let disposition = self
+            .execute_command_and_postflight(process, harness_root, &session_id, probe)
+            .await;
+        self.stop_session(process, harness_root, &session_id).await;
+        disposition
+    }
+
+    async fn execute_command_and_postflight(
+        &self,
+        process: &ProcessExecutor,
+        harness_root: &Path,
+        session_id: &str,
+        probe: Vec<String>,
+    ) -> Result<(Option<i32>, bool), ToolError> {
         let command = run_windows_sandbox_cli(
             process,
             &self.executable,
             harness_root,
-            windows_sandbox_exec_arguments(&session_id, WindowsSandboxRunnerInvocation::Request),
-            WSB_COMMAND_TIMEOUT_SECONDS,
+            windows_sandbox_exec_arguments(session_id, WindowsSandboxRunnerInvocation::Request),
+            self.timeouts.command,
             "execute Windows Sandbox shadow command",
         )
         .await;
-        let disposition = match command {
+        match command {
             Err(ToolError::TimedOut) => Ok((None, true)),
             Err(error) => Err(error),
-            Ok(outcome) => {
-                let postflight = run_windows_sandbox_cli(
-                    process,
-                    &self.executable,
-                    harness_root,
-                    probe,
-                    WSB_START_TIMEOUT_SECONDS,
-                    "postflight Windows Sandbox shadow session",
-                )
-                .await?;
-                if postflight.exit_code == Some(0) {
-                    match outcome.exit_code {
-                        Some(0) => Ok((Some(0), false)),
-                        Some(1) => Ok((Some(1), false)),
-                        Some(WSB_SETUP_FAILURE_EXIT_CODE) => Err(ToolError::Unavailable(
-                            "Windows Sandbox runner rejected its setup".into(),
-                        )),
-                        _ => Err(ToolError::Unavailable(
-                            "Windows Sandbox returned an unrecognized command disposition".into(),
-                        )),
+            Ok(outcome) => match windows_sandbox_exec_exit_code(
+                &outcome,
+                "execute Windows Sandbox shadow command",
+            ) {
+                Err(error) => Err(error),
+                Ok(command_exit_code) => {
+                    let postflight = run_windows_sandbox_cli(
+                        process,
+                        &self.executable,
+                        harness_root,
+                        probe,
+                        self.timeouts.start,
+                        "postflight Windows Sandbox shadow session",
+                    )
+                    .await;
+                    match postflight.and_then(|postflight| {
+                        windows_sandbox_exec_exit_code(
+                            &postflight,
+                            "postflight Windows Sandbox shadow session",
+                        )
+                    }) {
+                        Err(error) => Err(error),
+                        Ok(postflight_exit_code) if postflight_exit_code != 0 => {
+                            Err(ToolError::Unavailable(format!(
+                                "Windows Sandbox runner postflight failed with nested exit {postflight_exit_code}"
+                            )))
+                        }
+                        Ok(_) => match command_exit_code {
+                            0 => Ok((Some(0), false)),
+                            1 => Ok((Some(1), false)),
+                            WSB_SETUP_FAILURE_EXIT_CODE => Err(ToolError::Unavailable(
+                                "Windows Sandbox runner rejected its setup".into(),
+                            )),
+                            _ => Err(ToolError::Unavailable(format!(
+                                "Windows Sandbox returned unrecognized nested exit {command_exit_code}"
+                            ))),
+                        },
                     }
-                } else {
-                    Err(ToolError::Unavailable(
-                        "Windows Sandbox runner postflight failed".into(),
-                    ))
                 }
-            }
-        };
-        stop_windows_sandbox(process, &self.executable, harness_root, &session_id).await;
-        disposition
+            },
+        }
     }
 }
 
@@ -587,6 +656,37 @@ async fn run_windows_sandbox_cli(
 }
 
 #[cfg(any(target_os = "windows", test))]
+#[derive(Deserialize)]
+struct WindowsSandboxExecEnvelope {
+    #[serde(rename = "ExitCode")]
+    exit_code: i32,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_sandbox_exec_exit_code(raw: &str) -> Option<i32> {
+    if raw.len() > 512 {
+        return None;
+    }
+    serde_json::from_str::<WindowsSandboxExecEnvelope>(raw)
+        .ok()
+        .map(|envelope| envelope.exit_code)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_sandbox_exec_exit_code(outcome: &ToolOutcome, purpose: &str) -> Result<i32, ToolError> {
+    require_success(outcome, purpose)?;
+    outcome
+        .stdout
+        .as_deref()
+        .and_then(parse_windows_sandbox_exec_exit_code)
+        .ok_or_else(|| {
+            ToolError::Unavailable(format!(
+                "{purpose} returned no valid nested exit-code envelope"
+            ))
+        })
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn require_success(outcome: &ToolOutcome, purpose: &str) -> Result<(), ToolError> {
     if outcome.exit_code == Some(0) {
         Ok(())
@@ -622,13 +722,14 @@ async fn stop_windows_sandbox(
     executable: &Path,
     cwd: &Path,
     session_id: &str,
+    timeout_seconds: u64,
 ) {
     let _ = run_windows_sandbox_cli(
         process,
         executable,
         cwd,
         windows_sandbox_stop_arguments(session_id),
-        WSB_STOP_TIMEOUT_SECONDS,
+        timeout_seconds,
         "stop Windows Sandbox shadow session",
     )
     .await;
@@ -1079,6 +1180,8 @@ fn trusted_windows_package_file(path: &StdPath) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     #[test]
     fn bubblewrap_profile_is_networkless_read_only_and_argument_vector_safe() {
@@ -1248,6 +1351,25 @@ mod tests {
     }
 
     #[test]
+    fn windows_sandbox_raw_exec_requires_the_nested_exit_code() {
+        assert_eq!(
+            parse_windows_sandbox_exec_exit_code("{\"ExitCode\":0}"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_windows_sandbox_exec_exit_code("{\r\n  \"ExitCode\": -1073741515\r\n}"),
+            Some(-1_073_741_515)
+        );
+        assert_eq!(parse_windows_sandbox_exec_exit_code("{}"), None);
+        assert_eq!(
+            parse_windows_sandbox_exec_exit_code("{\"ExitCode\":\"0\"}"),
+            None
+        );
+        assert_eq!(parse_windows_sandbox_exec_exit_code("not-json"), None);
+        assert_eq!(parse_windows_sandbox_exec_exit_code(&" ".repeat(513)), None);
+    }
+
+    #[test]
     fn windows_sandbox_cli_uses_system_context_and_never_writable_shares() {
         let configuration =
             windows_sandbox_configuration(Path::new(r"C:\source"), Path::new(r"C:\harness"))
@@ -1295,6 +1417,7 @@ mod tests {
             executable: fixture_root.path().join("missing-wsb.exe"),
             runner,
             lifecycle: tokio::sync::Mutex::new(()),
+            timeouts: WindowsSandboxTimeouts::default(),
         };
         let result = verifier
             .verify(
@@ -1316,9 +1439,7 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    #[tokio::test]
-    #[ignore = "requires the current Microsoft Windows Sandbox package and nested virtualization"]
-    async fn installed_windows_sandbox_executes_ephemerally_and_keeps_host_mappings_read_only() {
+    fn installed_windows_sandbox_verifier() -> WindowsSandboxVerifier {
         let windows = std::env::var_os("WINDIR")
             .map(PathBuf::from)
             .expect("WINDIR");
@@ -1336,19 +1457,81 @@ mod tests {
             })
             .and_then(|path| trusted_windows_regular_file(&path))
             .expect("built mcg-shadow-runner.exe");
-        let verifier = WindowsSandboxVerifier {
+        WindowsSandboxVerifier {
             executable,
             runner,
             lifecycle: tokio::sync::Mutex::new(()),
-        };
+            timeouts: WindowsSandboxTimeouts::default(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_sandbox_live_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn encoded_powershell_condition(script: &str) -> SuccessCondition {
+        let mut bytes = Vec::with_capacity(script.len().saturating_mul(2));
+        for unit in script.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        SuccessCondition::Test {
+            command: format!(
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+                STANDARD.encode(bytes)
+            ),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn assert_no_windows_sandbox_sessions(verifier: &WindowsSandboxVerifier, cwd: &Path) {
+        let process =
+            ProcessExecutor::new([cwd.to_path_buf()], Arc::new(RejectingCredentialResolver))
+                .expect("list process boundary");
+        let outcome = run_windows_sandbox_cli(
+            &process,
+            &verifier.executable,
+            cwd,
+            vec!["list".into(), "--raw".into()],
+            verifier.timeouts.stop,
+            "list Windows Sandbox environments",
+        )
+        .await
+        .expect("list Windows Sandbox environments");
+        assert_eq!(outcome.exit_code, Some(0));
+        let value: serde_json::Value = serde_json::from_str(
+            outcome
+                .stdout
+                .as_deref()
+                .expect("Windows Sandbox list output"),
+        )
+        .expect("Windows Sandbox list JSON");
+        assert_eq!(
+            value
+                .get("WindowsSandboxEnvironments")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0),
+            "every live qualification session must be stopped"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires the current Microsoft Windows Sandbox package and nested virtualization"]
+    async fn installed_windows_sandbox_executes_ephemerally_and_keeps_host_mappings_read_only() {
+        let _live_test = windows_sandbox_live_test_lock().lock().await;
+        let verifier = installed_windows_sandbox_verifier();
         let workspace = tempfile::tempdir().expect("workspace");
         fs::write(workspace.path().join("input.txt"), b"input").expect("input");
         let artifact_root = tempfile::tempdir().expect("artifacts");
         let artifacts = ArtifactStore::open(artifact_root.path()).expect("artifacts");
 
-        let ephemeral = SuccessCondition::Test {
-            command: r#"cmd.exe /D /S /C "if exist input.txt (echo sandbox-only>sandbox-only.txt) else exit /b 7""#.into(),
-        };
+        let ephemeral = encoded_powershell_condition(
+            "if(Test-Path -LiteralPath 'input.txt'){Set-Content -LiteralPath 'sandbox-only.txt' -Value 'sandbox-only'; exit 0}; exit 7",
+        );
         let ShadowCommandVerification::Completed { transcript } = verifier
             .verify_inner(workspace.path(), &ephemeral, &artifacts)
             .await
@@ -1364,9 +1547,9 @@ mod tests {
         assert!(!record.timed_out);
         assert!(!workspace.path().join("sandbox-only.txt").exists());
 
-        let host_write = SuccessCondition::Test {
-            command: r#"cmd.exe /D /S /C "echo escaped>C:\mcg-source\escaped.txt""#.into(),
-        };
+        let host_write = encoded_powershell_condition(
+            "try { Set-Content -LiteralPath 'C:\\mcg-source\\escaped.txt' -Value 'escaped' -ErrorAction Stop; exit 0 } catch { exit 9 }",
+        );
         let ShadowCommandVerification::Completed { transcript } = verifier
             .verify_inner(workspace.path(), &host_write, &artifacts)
             .await
@@ -1383,6 +1566,85 @@ mod tests {
         // Windows Sandbox may satisfy a write through its disposable view even when the
         // mapped host folder is read-only. Host non-persistence is the security invariant.
         assert!(!workspace.path().join("escaped.txt").exists());
+        assert_no_windows_sandbox_sessions(&verifier, workspace.path()).await;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires the current Microsoft Windows Sandbox package and nested virtualization"]
+    async fn installed_windows_sandbox_blocks_network_stops_timeouts_and_rejects_bad_setup() {
+        let _live_test = windows_sandbox_live_test_lock().lock().await;
+        let mut verifier = installed_windows_sandbox_verifier();
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::write(workspace.path().join("input.txt"), b"input").expect("input");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let artifacts = ArtifactStore::open(artifact_root.path()).expect("artifacts");
+
+        let network = encoded_powershell_condition(
+            "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue); $ips=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '127.0.0.1' }); if($routes.Count -eq 0 -and $ips.Count -eq 0){exit 0}; exit 9",
+        );
+        let ShadowCommandVerification::Completed { transcript } = verifier
+            .verify_inner(workspace.path(), &network, &artifacts)
+            .await
+            .expect("network-disabled sandbox command")
+        else {
+            panic!("network-disabled sandbox returned no completed evidence");
+        };
+        let bytes = artifacts
+            .read_verified_reference(&transcript, 1024 * 1024)
+            .expect("network transcript");
+        let record: ShadowCommandTranscript = serde_json::from_slice(&bytes).expect("record");
+        assert_eq!(record.exit_code, Some(0));
+        assert!(!record.timed_out);
+        assert_no_windows_sandbox_sessions(&verifier, workspace.path()).await;
+
+        verifier.timeouts.command = 2;
+        let timeout = encoded_powershell_condition("Start-Sleep -Seconds 30; exit 9");
+        let ShadowCommandVerification::Completed { transcript } = verifier
+            .verify_inner(workspace.path(), &timeout, &artifacts)
+            .await
+            .expect("timed-out sandbox command")
+        else {
+            panic!("timed-out sandbox returned no completed evidence");
+        };
+        let bytes = artifacts
+            .read_verified_reference(&transcript, 1024 * 1024)
+            .expect("timeout transcript");
+        let record: ShadowCommandTranscript = serde_json::from_slice(&bytes).expect("record");
+        assert_eq!(record.exit_code, None);
+        assert!(record.timed_out);
+        assert_no_windows_sandbox_sessions(&verifier, workspace.path()).await;
+
+        let arguments = vec!["/D".into(), "/C".into(), "exit 0".into()];
+        let harness = WindowsSandboxHarness::create(
+            workspace.path(),
+            &verifier.runner,
+            "cmd.exe",
+            &arguments,
+        )
+        .expect("setup-failure harness");
+        fs::write(
+            harness.path.join("request.json"),
+            br#"{"schema_version":999}"#,
+        )
+        .expect("corrupt request");
+        let configuration = windows_sandbox_configuration(workspace.path(), &harness.path)
+            .expect("setup-failure profile");
+        let process = ProcessExecutor::new(
+            [harness.path.clone()],
+            Arc::new(RejectingCredentialResolver),
+        )
+        .expect("setup-failure process boundary");
+        let error = verifier
+            .execute_session(&process, &harness.path, &configuration)
+            .await
+            .expect_err("bad runner setup must remain unavailable");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable(message)
+                if message.contains("Windows Sandbox runner rejected its setup")
+        ));
+        assert_no_windows_sandbox_sessions(&verifier, workspace.path()).await;
     }
 
     #[cfg(target_os = "linux")]

@@ -85,6 +85,9 @@ for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [li
   for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-plugin-runner", "mcg-shadow-runner"]) requireText(source, binary, label);
   requireText(source, "rustc -vV", label);
 }
+for (const invariant of ["target-feature=+crt-static", "VCRUNTIME", "MSVCP", "ReadAllBytes", '"rustc", "-p", "mcg-shadow-runner"']) {
+  requireText(windowsPrepare, invariant, "Windows self-contained Sandbox runner build");
+}
 requireText(notices, "OpenAI Codex", "third-party notices");
 for (const section of ["1. Definitions.", "2. Grant of Copyright License.", "9. Accepting Warranty or Additional Liability.", "END OF TERMS AND CONDITIONS"]) {
   requireText(apache, section, "Apache-2.0 license payload");
