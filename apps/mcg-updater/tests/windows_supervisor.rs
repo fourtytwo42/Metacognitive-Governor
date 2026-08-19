@@ -25,7 +25,7 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     fs::copy(system32.join("PING.EXE"), &desktop).unwrap();
 
     let mut desktop_process = Command::new(&desktop)
-        .args(["-n", "4", "127.0.0.1"])
+        .args(["-n", "8", "127.0.0.1"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -42,15 +42,20 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     )
     .unwrap();
 
-    let status = Command::new(&staged.supervisor_path)
+    let packaged_supervisor_bytes = fs::read(&supervisor).unwrap();
+    let mut update_process = Command::new(&staged.supervisor_path)
         .arg("--apply")
         .arg(&staged.request_path)
         .env("MCG_DATA_DIR", &data)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .spawn()
         .unwrap();
+    thread::sleep(Duration::from_millis(750));
+    fs::write(&supervisor, b"replaceable while the staged supervisor runs").unwrap();
+    fs::write(&supervisor, packaged_supervisor_bytes).unwrap();
+    let status = update_process.wait().unwrap();
     assert!(!status.success());
     let _ = desktop_process.wait();
     thread::sleep(Duration::from_millis(500));
