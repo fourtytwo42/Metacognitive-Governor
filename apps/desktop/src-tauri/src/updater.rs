@@ -369,12 +369,6 @@ fn launch_windows_update_supervisor(
     installer: &[u8],
 ) -> Result<(), String> {
     let config = mcg_config::AppConfig::default();
-    let staged = mcg_updater::stage_verified_windows_installer(
-        &config.data_directory,
-        request_id,
-        std::process::id(),
-        installer,
-    )?;
     let current = std::env::current_exe().map_err(|error| {
         format!("The MCG desktop executable location could not be determined: {error}")
     })?;
@@ -388,7 +382,17 @@ fn launch_windows_update_supervisor(
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("The packaged update supervisor is not a regular installation file.".into());
     }
-    let mut command = Command::new(&supervisor);
+    let supervisor_bytes = fs::read(&supervisor)
+        .map_err(|error| format!("The packaged update supervisor could not be staged: {error}"))?;
+    let staged = mcg_updater::stage_verified_windows_installer(
+        &config.data_directory,
+        parent,
+        request_id,
+        std::process::id(),
+        installer,
+        &supervisor_bytes,
+    )?;
+    let mut command = Command::new(&staged.supervisor_path);
     command
         .arg("--apply")
         .arg(&staged.request_path)
@@ -400,6 +404,7 @@ fn launch_windows_update_supervisor(
     if let Err(error) = command.spawn() {
         let _ = fs::remove_file(&staged.request_path);
         let _ = fs::remove_file(&staged.installer_path);
+        let _ = fs::remove_file(&staged.supervisor_path);
         return Err(format!(
             "The supervised Windows updater could not start: {error}"
         ));

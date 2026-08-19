@@ -20,9 +20,10 @@ use sha2::{Digest, Sha256};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use uuid::Uuid;
 
-const REQUEST_SCHEMA: u32 = 1;
+const REQUEST_SCHEMA: u32 = 2;
 #[cfg(windows)]
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+const MAX_SUPERVISOR_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 #[cfg(windows)]
 const PARENT_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,6 +40,9 @@ pub struct WindowsUpdateRequest {
     pub desktop_pid: u32,
     pub installer_sha256: String,
     pub installer_name: String,
+    pub supervisor_sha256: String,
+    pub supervisor_name: String,
+    pub install_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +58,7 @@ pub struct WindowsUpdateOutcome {
 pub struct StagedWindowsUpdate {
     pub request_path: PathBuf,
     pub installer_path: PathBuf,
+    pub supervisor_path: PathBuf,
 }
 
 /// Stages an already signature-verified Windows installer and its bounded supervisor request.
@@ -62,19 +67,40 @@ pub struct StagedWindowsUpdate {
 /// Returns an error when the private update directory or files cannot be created safely.
 pub fn stage_verified_windows_installer(
     data_directory: &Path,
+    install_root: &Path,
     request_id: Uuid,
     desktop_pid: u32,
     installer: &[u8],
+    supervisor: &[u8],
 ) -> Result<StagedWindowsUpdate, String> {
     if installer.is_empty()
         || u64::try_from(installer.len()).unwrap_or(u64::MAX) > MAX_INSTALLER_BYTES
     {
         return Err("The verified Windows installer is empty or oversized.".into());
     }
+    if supervisor.is_empty()
+        || u64::try_from(supervisor.len()).unwrap_or(u64::MAX) > MAX_SUPERVISOR_BYTES
+    {
+        return Err("The packaged Windows update supervisor is empty or oversized.".into());
+    }
+    #[cfg(windows)]
+    let install_root = canonical_install_root(install_root)?;
+    #[cfg(not(windows))]
+    let install_root = install_root.to_path_buf();
     let updates = private_updates_directory(data_directory)?;
     let installer_name = format!("mcg-update-{request_id}.exe");
     let installer_path = updates.join(&installer_name);
     write_new_file(&installer_path, installer, "verified Windows installer")?;
+    let supervisor_name = format!("mcg-update-supervisor-{request_id}.exe");
+    let supervisor_path = updates.join(&supervisor_name);
+    if let Err(error) = write_new_file(
+        &supervisor_path,
+        supervisor,
+        "staged Windows update supervisor",
+    ) {
+        let _ = fs::remove_file(&installer_path);
+        return Err(error);
+    }
     sync_parent(&updates)?;
 
     let installer_sha256 = hex_sha256(installer);
@@ -84,26 +110,32 @@ pub fn stage_verified_windows_installer(
         desktop_pid,
         installer_sha256,
         installer_name,
+        supervisor_sha256: hex_sha256(supervisor),
+        supervisor_name,
+        install_root,
     };
     let request_bytes = serde_json::to_vec(&request)
         .map_err(|error| format!("The Windows update request could not be encoded: {error}"))?;
     let request_path = updates.join(format!("request-{request_id}.json"));
     if let Err(error) = write_new_file(&request_path, &request_bytes, "Windows update request") {
         let _ = fs::remove_file(&installer_path);
+        let _ = fs::remove_file(&supervisor_path);
         return Err(error);
     }
     sync_parent(&updates)?;
     Ok(StagedWindowsUpdate {
         request_path,
         installer_path,
+        supervisor_path,
     })
 }
 
 /// Executes one staged Windows update request from the packaged supervisor process.
 ///
 /// This function never interprets caller-provided executable paths. The request and installer
-/// must be regular files in the configured private update directory, while the desktop is fixed
-/// to the supervisor's installation directory.
+/// must be regular files in the configured private update directory. The staged supervisor and
+/// unchanged packaged supervisor are digest-matched before the desktop is resolved from the
+/// canonical installation directory retained by the packaged desktop.
 ///
 /// # Errors
 /// Returns an error when validation, process supervision, outcome retention, or recovery fails.
@@ -123,26 +155,40 @@ pub fn run_staged_windows_update(request_path: &Path) -> Result<WindowsUpdateOut
 ///
 /// # Errors
 /// Returns an error when the packaged desktop identity or launch cannot be verified.
-pub fn recover_packaged_desktop_after_supervisor_error() -> Result<(), String> {
+pub fn recover_packaged_desktop_after_supervisor_error(request_path: &Path) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         Err("Windows update recovery is available only on Windows.".into())
     }
     #[cfg(windows)]
     {
-        let supervisor = std::env::current_exe()
-            .map_err(|error| format!("The update supervisor location is unavailable: {error}"))?;
-        let install_root = supervisor
-            .parent()
-            .ok_or_else(|| "The update supervisor has no installation directory.".to_owned())?;
-        let desktop = canonical_packaged_desktop(install_root)?;
+        let config = AppConfig::default();
+        let updates = canonical_private_updates_directory(&config.data_directory)?;
+        let request_path =
+            canonical_regular_child(request_path, &updates, MAX_REQUEST_BYTES, "request")?;
+        let request: WindowsUpdateRequest =
+            serde_json::from_slice(&fs::read(&request_path).map_err(|error| {
+                format!("The Windows update request could not be read: {error}")
+            })?)
+            .map_err(|_| "The Windows update request is invalid.".to_owned())?;
+        validate_request(&request)?;
+        let staged_supervisor = validate_running_staged_supervisor(&request, &updates)?;
+        let install_root = canonical_install_root(&request.install_root)?;
+        validate_packaged_supervisor(&install_root, &request.supervisor_sha256)?;
+        let desktop = canonical_packaged_desktop(&install_root)?;
         thread::sleep(Duration::from_millis(500));
         launch_desktop(
             &desktop,
-            &AppConfig::default(),
+            &config,
             Some(
                 "The update could not start safely. MCG restarted the previous installation and preserved its data.",
             ),
+        )?;
+        launch_supervisor_cleanup(
+            &install_root.join("mcg-updater.exe"),
+            &staged_supervisor,
+            std::process::id(),
+            &config,
         )
     }
 }
@@ -174,12 +220,9 @@ fn run_staged_windows_update_inner(request_path: &Path) -> Result<WindowsUpdateO
         return Err("The staged Windows installer digest changed.".into());
     }
 
-    let supervisor = std::env::current_exe()
-        .map_err(|error| format!("The update supervisor location is unavailable: {error}"))?;
-    let install_root = supervisor
-        .parent()
-        .ok_or_else(|| "The update supervisor has no installation directory.".to_owned())?
-        .to_path_buf();
+    let staged_supervisor = validate_running_staged_supervisor(&request, &updates)?;
+    let install_root = canonical_install_root(&request.install_root)?;
+    validate_packaged_supervisor(&install_root, &request.supervisor_sha256)?;
     let desktop = canonical_packaged_desktop(&install_root)?;
     wait_for_desktop_exit(request.desktop_pid, &desktop)?;
 
@@ -203,11 +246,20 @@ fn run_staged_windows_update_inner(request_path: &Path) -> Result<WindowsUpdateO
     if !succeeded {
         launch_desktop(&desktop, &config, Some(&outcome.detail))?;
     }
+    launch_supervisor_cleanup(
+        &install_root.join("mcg-updater.exe"),
+        &staged_supervisor,
+        std::process::id(),
+        &config,
+    )?;
     Ok(outcome)
 }
 
 fn validate_request(request: &WindowsUpdateRequest) -> Result<(), String> {
-    if request.schema_version != REQUEST_SCHEMA || request.desktop_pid == 0 {
+    if request.schema_version != REQUEST_SCHEMA
+        || request.desktop_pid == 0
+        || !request.install_root.is_absolute()
+    {
         return Err("The Windows update request contract is invalid.".into());
     }
     if request.installer_sha256.len() != 64
@@ -222,6 +274,17 @@ fn validate_request(request: &WindowsUpdateRequest) -> Result<(), String> {
     let expected_name = format!("mcg-update-{}.exe", request.request_id);
     if request.installer_name != expected_name {
         return Err("The Windows installer name is invalid.".into());
+    }
+    let expected_supervisor = format!("mcg-update-supervisor-{}.exe", request.request_id);
+    if request.supervisor_name != expected_supervisor
+        || request.supervisor_sha256.len() != 64
+        || !request
+            .supervisor_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || request.supervisor_sha256 != request.supervisor_sha256.to_ascii_uppercase()
+    {
+        return Err("The Windows update supervisor identity is invalid.".into());
     }
     Ok(())
 }
@@ -285,6 +348,61 @@ fn canonical_regular_child(
         return Err(format!(
             "The Windows update {label} escaped the private update directory."
         ));
+    }
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn canonical_install_root(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("The MCG installation directory must be absolute.".into());
+    }
+    reject_link(path, "MCG installation directory")?;
+    path.canonicalize()
+        .map_err(|error| format!("The MCG installation directory could not be resolved: {error}"))
+}
+
+#[cfg(windows)]
+fn validate_running_staged_supervisor(
+    request: &WindowsUpdateRequest,
+    updates: &Path,
+) -> Result<PathBuf, String> {
+    let expected = canonical_regular_child(
+        &updates.join(&request.supervisor_name),
+        updates,
+        MAX_SUPERVISOR_BYTES,
+        "supervisor",
+    )?;
+    let current = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("The update supervisor location is unavailable: {error}"))?;
+    if current != expected || file_sha256(&current)? != request.supervisor_sha256 {
+        return Err("The running Windows update supervisor identity changed.".into());
+    }
+    Ok(current)
+}
+
+#[cfg(windows)]
+fn validate_packaged_supervisor(
+    install_root: &Path,
+    expected_sha256: &str,
+) -> Result<PathBuf, String> {
+    let candidate = install_root.join("mcg-updater.exe");
+    let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        format!("The packaged update supervisor could not be inspected: {error}")
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_SUPERVISOR_BYTES
+    {
+        return Err("The packaged update supervisor is not a bounded regular file.".into());
+    }
+    let canonical = candidate.canonicalize().map_err(|error| {
+        format!("The packaged update supervisor could not be resolved: {error}")
+    })?;
+    if canonical.parent() != Some(install_root) || file_sha256(&canonical)? != expected_sha256 {
+        return Err("The packaged update supervisor identity changed.".into());
     }
     Ok(canonical)
 }
@@ -424,6 +542,95 @@ fn launch_desktop(
         .map_err(|error| format!("The previous MCG installation could not be restarted: {error}"))
 }
 
+#[cfg(windows)]
+fn launch_supervisor_cleanup(
+    packaged_supervisor: &Path,
+    staged_supervisor: &Path,
+    parent_pid: u32,
+    config: &AppConfig,
+) -> Result<(), String> {
+    let mut command = Command::new(packaged_supervisor);
+    command
+        .arg("--cleanup")
+        .arg(staged_supervisor)
+        .arg(parent_pid.to_string())
+        .env("MCG_DATA_DIR", &config.data_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+        .spawn()
+        .map(drop)
+        .map_err(|error| format!("The staged update supervisor cleanup could not start: {error}"))
+}
+
+/// Waits for a staged supervisor to exit and removes only that exact private copy.
+///
+/// # Errors
+/// Returns an error when the packaged cleanup identity, parent process, or exact staged file
+/// cannot be validated and cleaned within the bounded timeout.
+pub fn cleanup_staged_windows_supervisor(
+    staged_supervisor: &Path,
+    parent_pid: u32,
+) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (staged_supervisor, parent_pid);
+        Err("Windows update cleanup is available only on Windows.".into())
+    }
+    #[cfg(windows)]
+    {
+        if parent_pid == 0 || parent_pid == std::process::id() {
+            return Err("The staged update cleanup parent identity is invalid.".into());
+        }
+        let config = AppConfig::default();
+        let updates = canonical_private_updates_directory(&config.data_directory)?;
+        let staged = canonical_regular_child(
+            staged_supervisor,
+            &updates,
+            MAX_SUPERVISOR_BYTES,
+            "supervisor cleanup target",
+        )?;
+        let name = staged
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "The staged update supervisor name is invalid.".to_owned())?;
+        let request_id = name
+            .strip_prefix("mcg-update-supervisor-")
+            .and_then(|value| value.strip_suffix(".exe"))
+            .ok_or_else(|| "The staged update supervisor name is invalid.".to_owned())?;
+        Uuid::parse_str(request_id)
+            .map_err(|_| "The staged update supervisor name is invalid.".to_owned())?;
+
+        let current = std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .map_err(|error| format!("The packaged cleanup helper is unavailable: {error}"))?;
+        if current.file_name().and_then(|value| value.to_str()) != Some("mcg-updater.exe")
+            || current.parent() == Some(updates.as_path())
+        {
+            return Err(
+                "The staged update cleanup was not launched by a packaged supervisor.".into(),
+            );
+        }
+
+        let pid = Pid::from_u32(parent_pid);
+        let started = Instant::now();
+        let mut system = System::new_all();
+        while started.elapsed() < PARENT_EXIT_TIMEOUT {
+            system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+            if system.process(pid).is_none() {
+                fs::remove_file(&staged).map_err(|error| {
+                    format!("The staged update supervisor could not be removed: {error}")
+                })?;
+                return Ok(());
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        Err("The staged update supervisor did not exit before cleanup timed out.".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,12 +639,21 @@ mod tests {
     fn stages_exact_bounded_request_and_refuses_reuse() {
         let temporary = tempfile::tempdir().unwrap();
         let data = temporary.path().join("data");
+        let install = temporary.path().join("install");
+        fs::create_dir(&install).unwrap();
         let request_id = Uuid::new_v4();
-        let staged =
-            stage_verified_windows_installer(&data, request_id, 42, b"signed installer").unwrap();
+        let staged = stage_verified_windows_installer(
+            &data,
+            &install,
+            request_id,
+            42,
+            b"signed installer",
+            b"packaged supervisor",
+        )
+        .unwrap();
         let request: WindowsUpdateRequest =
             serde_json::from_slice(&fs::read(&staged.request_path).unwrap()).unwrap();
-        assert_eq!(request.schema_version, 1);
+        assert_eq!(request.schema_version, 2);
         assert_eq!(request.request_id, request_id);
         assert_eq!(request.desktop_pid, 42);
         assert_eq!(
@@ -445,18 +661,40 @@ mod tests {
             format!("mcg-update-{request_id}.exe")
         );
         assert_eq!(request.installer_sha256, hex_sha256(b"signed installer"));
-        assert!(stage_verified_windows_installer(&data, request_id, 42, b"replacement").is_err());
+        assert_eq!(
+            request.supervisor_name,
+            format!("mcg-update-supervisor-{request_id}.exe")
+        );
+        assert_eq!(
+            request.supervisor_sha256,
+            hex_sha256(b"packaged supervisor")
+        );
+        assert_eq!(request.install_root, install.canonicalize().unwrap());
+        assert!(
+            stage_verified_windows_installer(
+                &data,
+                &install,
+                request_id,
+                42,
+                b"replacement",
+                b"packaged supervisor",
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn request_contract_rejects_noncanonical_identity_and_digest() {
         let request_id = Uuid::new_v4();
         let valid = WindowsUpdateRequest {
-            schema_version: 1,
+            schema_version: 2,
             request_id,
             desktop_pid: 9,
             installer_sha256: "A".repeat(64),
             installer_name: format!("mcg-update-{request_id}.exe"),
+            supervisor_sha256: "B".repeat(64),
+            supervisor_name: format!("mcg-update-supervisor-{request_id}.exe"),
+            install_root: std::env::current_dir().unwrap(),
         };
         assert!(validate_request(&valid).is_ok());
         let mut invalid = valid.clone();
@@ -470,15 +708,35 @@ mod tests {
     #[test]
     fn staging_rejects_empty_relative_and_linked_roots() {
         let temporary = tempfile::tempdir().unwrap();
+        let install = temporary.path().join("install");
+        fs::create_dir(&install).unwrap();
         assert!(
-            stage_verified_windows_installer(Path::new("relative"), Uuid::new_v4(), 1, b"x")
-                .is_err()
+            stage_verified_windows_installer(
+                Path::new("relative"),
+                &install,
+                Uuid::new_v4(),
+                1,
+                b"x",
+                b"y"
+            )
+            .is_err()
         );
         assert!(
-            stage_verified_windows_installer(temporary.path(), Uuid::new_v4(), 1, b"").is_err()
+            stage_verified_windows_installer(
+                temporary.path(),
+                &install,
+                Uuid::new_v4(),
+                1,
+                b"",
+                b"y"
+            )
+            .is_err()
         );
         let file = temporary.path().join("not-a-directory");
         fs::write(&file, b"x").unwrap();
-        assert!(stage_verified_windows_installer(&file, Uuid::new_v4(), 1, b"x").is_err());
+        assert!(
+            stage_verified_windows_installer(&file, &install, Uuid::new_v4(), 1, b"x", b"y")
+                .is_err()
+        );
     }
 }

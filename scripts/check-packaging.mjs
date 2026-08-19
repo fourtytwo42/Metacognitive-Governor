@@ -179,7 +179,7 @@ for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 3', 'toolchain_root', 'C
 for (const invariant of ["NODE_TOOLCHAIN_MAX_BYTES", "NODE_TOOLCHAIN_MAX_FILES", "NODE_TOOLCHAIN_MAX_DEPTH", '"--ro-bind"', 'r"C:\\mcg-toolchain"']) {
   requireText(shadowVerification, invariant, "bounded read-only shadow toolchain contract");
 }
-for (const invariant of ["stage_verified_windows_installer", "canonical_regular_child", "installer_sha256", "wait_for_desktop_exit", 'args(["/P", "/R", "/UPDATE", "/ARGS"])', "MCG_UPDATE_RECOVERY_NOTICE", "The update did not complete"]) {
+for (const invariant of ["stage_verified_windows_installer", "canonical_regular_child", "installer_sha256", "supervisor_sha256", "validate_running_staged_supervisor", "cleanup_staged_windows_supervisor", "wait_for_desktop_exit", 'args(["/P", "/R", "/UPDATE", "/ARGS"])', "MCG_UPDATE_RECOVERY_NOTICE", "The update did not complete"]) {
   requireText(updaterSupervisor, invariant, "supervised Windows updater contract");
 }
 for (const invariant of ["1b80120ef26a28e065e67f89bfef873f13bdd317", "support_setuid=false", "meson test", "bubblewrap-v0.11.2.tar.gz", "SHA256SUMS"]) {

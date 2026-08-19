@@ -34,13 +34,15 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     let request_id = Uuid::new_v4();
     let staged = stage_verified_windows_installer(
         &data,
+        &install,
         request_id,
         desktop_process.id(),
         &fs::read(system32.join("cmd.exe")).unwrap(),
+        &fs::read(&supervisor).unwrap(),
     )
     .unwrap();
 
-    let status = Command::new(&supervisor)
+    let status = Command::new(&staged.supervisor_path)
         .arg("--apply")
         .arg(&staged.request_path)
         .env("MCG_DATA_DIR", &data)
@@ -73,4 +75,5 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     );
     assert!(!staged.request_path.exists());
     assert!(!staged.installer_path.exists());
+    assert!(!staged.supervisor_path.exists());
 }
