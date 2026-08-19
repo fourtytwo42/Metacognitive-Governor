@@ -158,7 +158,7 @@ requireText(windowsBuilder, "tauri.release.conf.json", "Windows release builder"
 requireText(linuxBuilder, "tauri.release.conf.json", "Linux release builder");
 requireText(macosBuilder, "tauri.release.conf.json", "macOS release builder");
 for (const [source, label] of [[windowsBuilder, "Windows release builder"], [linuxBuilder, "Linux release builder"], [macosBuilder, "macOS release builder"]]) {
-  for (const invariant of ["MCG_UPDATER_ENDPOINT", "MCG_UPDATER_PUBKEY", "TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PATH", "exactly one of", "tauri.updater.conf.json", "write-updater-build-config.mjs", "updater.json", "build --ci"]) {
+  for (const invariant of ["MCG_UPDATER_ENDPOINT", "MCG_UPDATER_PUBKEY", "TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PATH", "exactly one of", "tauri.updater.conf.json", "write-updater-build-config.mjs", "updater.json", "build --ci", "loadedSigningKeyFromPath"]) {
     requireText(source, invariant, label);
   }
 }

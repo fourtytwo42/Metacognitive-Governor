@@ -2,6 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $updaterConfigDirectory = $null
+$loadedSigningKeyFromPath = $false
+$signingKeyPath = $null
 Push-Location $repositoryRoot
 try {
     node scripts/check-release-source.mjs
@@ -32,6 +34,12 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Signed updater configuration validation failed with exit code $LASTEXITCODE."
         }
+        if ($pathKey) {
+            $signingKeyPath = $env:TAURI_SIGNING_PRIVATE_KEY_PATH
+            $env:TAURI_SIGNING_PRIVATE_KEY = [IO.File]::ReadAllText($signingKeyPath)
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH
+            $loadedSigningKeyFromPath = $true
+        }
         $updaterConfigDirectory = Join-Path ([IO.Path]::GetTempPath()) ("mcg-updater-build-" + [Guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $updaterConfigDirectory -ErrorAction Stop | Out-Null
         $updaterConfig = Join-Path $updaterConfigDirectory "updater.json"
@@ -50,6 +58,10 @@ try {
         throw "Windows release manifest failed with exit code $LASTEXITCODE."
     }
 } finally {
+    if ($loadedSigningKeyFromPath) {
+        Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+        $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $signingKeyPath
+    }
     if ($null -ne $updaterConfigDirectory -and (Test-Path -LiteralPath $updaterConfigDirectory)) {
         Remove-Item -LiteralPath $updaterConfigDirectory -Recurse -Force
     }
