@@ -8,7 +8,14 @@ automated installation gates.
 The report checks SQLite integrity and schema compatibility, loopback bearer
 authentication, every portable backup, provider/model discovery inventory,
 optional MCP and platform capability inventory, and durable task, schedule, and
-approval counts. Checks have stable codes and `pass`, `warning`, or `error`
+approval counts. Migration-29 provider-dispatch recovery is also counted without
+identities: completed and definitely failed requests are counted separately,
+while any still-started request is reported as active or indeterminate with
+explicit guidance to review provider billing/logs and use a new owner-authorized
+call identity. A confirmed authentication, rate-limit, HTTP, configuration, or
+invalid-response failure does not create a permanent indeterminate warning.
+Diagnostics never resend a request. Checks
+have stable codes and `pass`, `warning`, or `error`
 severity. The overall result is the highest severity. The current report schema
 version is `1`.
 
@@ -16,7 +23,7 @@ Diagnostics never call a model provider, discover a remote endpoint, execute a
 tool, or write application state. They report counts and capability summaries,
 not content. Reports exclude credentials, bearer tokens, filesystem paths,
 connection identifiers, model inputs and outputs, task goals, event payloads,
-and artifact contents. A backup verification failure is described generically
+physical client request IDs, and artifact contents. A backup verification failure is described generically
 so an underlying filesystem error cannot leak a local path.
 
 `mcg doctor` prints a concise human report. `mcg doctor --json` emits the exact

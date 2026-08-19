@@ -57,8 +57,9 @@ impl ProviderCredential {
     /// # Errors
     /// Returns [`ProviderError::Configuration`] when the secret is empty.
     pub fn new(secret: impl Into<String>) -> Result<Self, ProviderError> {
-        let secret = secret.into();
+        let mut secret = secret.into();
         if secret.trim().is_empty() {
+            secret.zeroize();
             return Err(ProviderError::Configuration(
                 "provider credential cannot be empty".into(),
             ));
@@ -274,6 +275,11 @@ pub struct ReasoningConfig {
 pub struct ModelRequest {
     pub contract_version: u16,
     pub model: String,
+    /// Stable, content-free client trace identity for one physical upstream
+    /// request. First-party `OpenAI` transports send this as
+    /// `X-Client-Request-Id`; compatible providers are left untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
     #[serde(default)]
     pub instructions: Option<String>,
     pub messages: Vec<Message>,
@@ -313,6 +319,113 @@ pub enum ProxyInterface {
     ChatCompletions,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyCallOutcome {
+    #[default]
+    Completed,
+    Failed,
+    Denied,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyModelCallPurpose {
+    Primary,
+    ManagedContinuation,
+    EnsembleMember,
+    EnsembleSynthesis,
+    Shadow,
+}
+
+pub const PROVIDER_DISPATCH_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDispatchState {
+    Started,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDispatchFailure {
+    Configuration,
+    Authentication,
+    RateLimited,
+    Http,
+    InvalidResponse,
+}
+
+/// Content-free durable evidence that one physical provider request crossed or
+/// may have crossed the network boundary. Prompt, output, credentials, and
+/// arbitrary metadata are never retained here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDispatchRecord {
+    pub schema_version: u16,
+    pub call_id: ProxyCallId,
+    pub client_request_id: String,
+    pub target: crate::ProviderModelRef,
+    pub purpose: ProxyModelCallPurpose,
+    pub ordinal: u32,
+    pub state: ProviderDispatchState,
+    pub response_id: Option<String>,
+    #[serde(default)]
+    pub failure: Option<ProviderDispatchFailure>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderDispatchBegin {
+    Begun,
+    AlreadyExists(ProviderDispatchRecord),
+}
+
+/// Content-free accounting evidence for one successful physical model call
+/// inside a logical proxy call. Prompt and output content are never retained.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyModelCallEvidence {
+    pub target: crate::ProviderModelRef,
+    pub purpose: ProxyModelCallPurpose,
+    pub response_id: String,
+    pub usage: Usage,
+    pub actual_cost_usd: Option<f64>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyShadowOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyShadowFailure {
+    Indeterminate,
+    Authentication,
+    RateLimited,
+    Unavailable,
+    InvalidResponse,
+    Rejected,
+    Other,
+}
+
+/// Content-free evidence that an explicitly opted-in secondary model was
+/// attempted. Successful usage is retained separately as a `Shadow` model call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyShadowReceipt {
+    pub target: crate::ProviderModelRef,
+    pub outcome: ProxyShadowOutcome,
+    pub failure: Option<ProxyShadowFailure>,
+    pub duration_ms: u64,
+}
+
 /// Secret-free grouping metadata for calls made through the local provider proxy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyConversation {
@@ -342,6 +455,18 @@ pub struct ProxyCallRecord {
     pub usage: Usage,
     pub estimated_cost_usd: Option<f64>,
     pub actual_cost_usd: Option<f64>,
+    /// End-to-end provider time for this logical call. Older schema-1 records
+    /// deserialize as zero and are excluded from evidence-based latency routing.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Exact successful physical calls comprising this logical call. Older
+    /// records deserialize empty and retain their legacy aggregate fields.
+    #[serde(default)]
+    pub model_calls: Vec<ProxyModelCallEvidence>,
+    #[serde(default)]
+    pub shadow: Option<ProxyShadowReceipt>,
+    #[serde(default)]
+    pub outcome: ProxyCallOutcome,
     pub completed_at: DateTime<Utc>,
 }
 
@@ -518,5 +643,35 @@ mod tests {
         }))
         .expect("older catalog capabilities");
         assert_eq!(capabilities.reasoning_control, None);
+    }
+
+    #[test]
+    fn older_proxy_ledgers_default_missing_duration_to_unknown() {
+        let record: ProxyCallRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": PROXY_LEDGER_SCHEMA_VERSION,
+            "id": mcg_domain::ProxyCallId::new(),
+            "conversation_id": mcg_domain::ProxyConversationId::new(),
+            "interface": "responses",
+            "alias": "mcg:auto",
+            "provider_id": "fixture",
+            "model_id": "fixture-model",
+            "response_id": "response",
+            "request_sha256": "a".repeat(64),
+            "streamed": false,
+            "usage": {
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 0
+            },
+            "estimated_cost_usd": null,
+            "actual_cost_usd": null,
+            "completed_at": chrono::Utc::now()
+        }))
+        .expect("schema-1 proxy record");
+        assert_eq!(record.duration_ms, 0);
+        assert!(record.model_calls.is_empty());
+        assert_eq!(record.outcome, ProxyCallOutcome::Completed);
     }
 }

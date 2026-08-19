@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -10,6 +10,11 @@ use fs2::FileExt;
 use mcg_domain::{
     PluginInstallation, PluginInvocationRecord, PluginInvocationState, PluginRevision,
 };
+use mcg_mcp::{McpAuthMode, McpConnection, McpCredential, McpCredentialStore};
+use mcg_providers::{
+    ProviderAuthMode, ProviderConnection, ProviderCredential, ProviderCredentialStore,
+    ProviderSecretSlot, clear_provider_credentials, save_provider_credentials,
+};
 use rusqlite::{Connection, MAIN_DB, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,13 +22,19 @@ use uuid::Uuid;
 
 use crate::{
     STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
+    backup_secrets::{
+        BACKUP_SECRET_ENTRY, BackupMcpSecret, BackupPassphrase, BackupProviderSecret,
+        BackupSecretEncryptionMetadata, BackupSecretSnapshot, MAX_SECRET_CIPHERTEXT_BYTES,
+        decrypt_backup_secrets, encrypt_backup_secrets, validate_backup_secret_metadata,
+    },
     plugins::{
         validate_plugin_backup_head, validate_plugin_invocation_backup_record,
         validate_plugin_revision,
     },
 };
 
-pub const BACKUP_BUNDLE_SCHEMA_VERSION: u16 = 1;
+pub const BACKUP_BUNDLE_SCHEMA_VERSION: u16 = 2;
+const MIN_BACKUP_BUNDLE_SCHEMA_VERSION: u16 = 1;
 const MAGIC: &[u8; 8] = b"MCGB0001";
 const DATABASE_ENTRY: &str = "state/mcg.sqlite3";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -73,6 +84,8 @@ pub struct BackupBundleManifest {
     pub application_version: String,
     pub created_at: DateTime<Utc>,
     pub secrets_included: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_encryption: Option<BackupSecretEncryptionMetadata>,
     pub entries: Vec<BackupBundleEntry>,
 }
 
@@ -110,8 +123,36 @@ pub fn create_backup_bundle(
             now,
         )
     })();
-    let _ = fs::remove_file(snapshot);
-    result
+    let cleanup = remove_online_snapshot_files(&snapshot);
+    match result {
+        Ok(summary) => {
+            cleanup?;
+            Ok(summary)
+        }
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
+        }
+    }
+}
+
+fn remove_online_snapshot_files(snapshot: &Path) -> Result<(), StorageError> {
+    let mut wal = snapshot.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = snapshot.as_os_str().to_os_string();
+    shm.push("-shm");
+    for path in [
+        snapshot.to_path_buf(),
+        PathBuf::from(wal),
+        PathBuf::from(shm),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StorageError::Io(error)),
+        }
+    }
+    Ok(())
 }
 
 impl SqliteEventStore {
@@ -136,6 +177,49 @@ pub fn create_backup_bundle_from_snapshot(
     application_version: &str,
     now: DateTime<Utc>,
 ) -> Result<BackupBundleSummary, StorageError> {
+    create_backup_bundle_from_snapshot_inner(
+        snapshot,
+        data_directory,
+        destination,
+        application_version,
+        now,
+        None,
+    )
+}
+
+/// Creates an explicit passphrase-encrypted backup containing provider and MCP credentials.
+///
+/// # Errors
+/// Returns filesystem, validation, protected-snapshot, KDF, encryption, or integrity failures.
+pub fn create_encrypted_backup_bundle_from_snapshot(
+    snapshot: &Path,
+    data_directory: &Path,
+    destination: &Path,
+    application_version: &str,
+    now: DateTime<Utc>,
+    secrets: &BackupSecretSnapshot,
+    passphrase: &BackupPassphrase,
+) -> Result<BackupBundleSummary, StorageError> {
+    validate_secret_snapshot_against_database(snapshot, secrets)?;
+    create_backup_bundle_from_snapshot_inner(
+        snapshot,
+        data_directory,
+        destination,
+        application_version,
+        now,
+        Some((secrets, passphrase)),
+    )
+}
+
+#[allow(clippy::too_many_lines)] // Keeps the audited create-new/write/verify/publish sequence in one cleanup scope.
+fn create_backup_bundle_from_snapshot_inner(
+    snapshot: &Path,
+    data_directory: &Path,
+    destination: &Path,
+    application_version: &str,
+    now: DateTime<Utc>,
+    secret_input: Option<(&BackupSecretSnapshot, &BackupPassphrase)>,
+) -> Result<BackupBundleSummary, StorageError> {
     validate_destination(destination)?;
     let destination_parent = destination.parent().ok_or_else(|| {
         StorageError::InvalidData("backup destination has no parent directory".into())
@@ -157,7 +241,11 @@ pub fn create_backup_bundle_from_snapshot(
     let result = (|| {
         let mut sources = vec![(DATABASE_ENTRY.to_owned(), snapshot.to_path_buf())];
         sources.extend(artifact_sources(&data_directory.join("artifacts"))?);
-        if sources.len() > MAX_ENTRY_COUNT {
+        if sources
+            .len()
+            .saturating_add(usize::from(secret_input.is_some()))
+            > MAX_ENTRY_COUNT
+        {
             return Err(StorageError::InvalidData(
                 "backup contains too many entries".into(),
             ));
@@ -167,11 +255,22 @@ pub fn create_backup_bundle_from_snapshot(
             entries.push(inspect_source(path, source)?);
         }
         validate_plugin_catalog_backup(snapshot, &entries)?;
+        let (secret_encryption, secret_ciphertext) =
+            if let Some((secrets, passphrase)) = secret_input {
+                let associated_data = secret_binding_bytes(application_version, now, &entries)?;
+                let (metadata, ciphertext) =
+                    encrypt_backup_secrets(secrets, passphrase, &associated_data)?;
+                entries.push(inspect_bytes(BACKUP_SECRET_ENTRY, &ciphertext)?);
+                (Some(metadata), Some(ciphertext))
+            } else {
+                (None, None)
+            };
         let manifest = BackupBundleManifest {
             schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             application_version: application_version.to_owned(),
             created_at: now,
-            secrets_included: false,
+            secrets_included: secret_encryption.is_some(),
+            secret_encryption,
             entries,
         };
         validate_manifest(&manifest)?;
@@ -200,6 +299,12 @@ pub fn create_backup_bundle_from_snapshot(
         output.write_all(&manifest_bytes)?;
         for ((_, source), entry) in sources.iter().zip(&manifest.entries) {
             copy_verified_source(source, entry, &mut output)?;
+        }
+        if let Some(ciphertext) = secret_ciphertext.as_deref() {
+            let entry = manifest.entries.last().ok_or_else(|| {
+                StorageError::InvalidData("encrypted backup entry is missing".into())
+            })?;
+            copy_verified_bytes(ciphertext, entry, &mut output)?;
         }
         output.sync_all()?;
         drop(output);
@@ -281,6 +386,50 @@ pub fn verify_backup_bundle(path: &Path) -> Result<BackupBundleSummary, StorageE
     })
 }
 
+/// Verifies, authenticates, and decrypts the explicit credential entry in one bundle.
+///
+/// # Errors
+/// Returns format, integrity, passphrase, authentication, or credential-shape failures.
+pub fn decrypt_backup_bundle_secrets(
+    path: &Path,
+    passphrase: &BackupPassphrase,
+) -> Result<(BackupBundleSummary, BackupSecretSnapshot), StorageError> {
+    let summary = verify_backup_bundle(path)?;
+    let metadata = summary.manifest.secret_encryption.as_ref().ok_or_else(|| {
+        StorageError::InvalidData("backup contains no encrypted credentials".into())
+    })?;
+    let secret_entry = summary.manifest.entries.last().ok_or_else(|| {
+        StorageError::InvalidData("backup encrypted credential entry is missing".into())
+    })?;
+    let base_entries = &summary.manifest.entries[..summary.manifest.entries.len() - 1];
+    let associated_data = secret_binding_bytes(
+        &summary.manifest.application_version,
+        summary.manifest.created_at,
+        base_entries,
+    )?;
+    let mut input = File::open(path)?;
+    let (reopened_manifest, _) = read_header(&mut input)?;
+    if reopened_manifest != summary.manifest {
+        return Err(StorageError::Conflict(
+            "backup changed while encrypted credentials were being authenticated".into(),
+        ));
+    }
+    let base_bytes = base_entries.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.size_bytes)
+            .ok_or_else(|| StorageError::InvalidData("backup size overflow".into()))
+    })?;
+    let offset = i64::try_from(base_bytes)
+        .map_err(|_| StorageError::InvalidData("backup size overflow".into()))?;
+    input.seek(SeekFrom::Current(offset))?;
+    let ciphertext_len = usize::try_from(secret_entry.size_bytes)
+        .map_err(|_| StorageError::InvalidData("encrypted credential entry is too large".into()))?;
+    let mut ciphertext = vec![0_u8; ciphertext_len];
+    input.read_exact(&mut ciphertext)?;
+    let secrets = decrypt_backup_secrets(metadata, &ciphertext, passphrase, &associated_data)?;
+    Ok((summary, secrets))
+}
+
 /// Restores a verified bundle while retaining the previous database for rollback.
 ///
 /// # Errors
@@ -293,12 +442,17 @@ pub fn restore_backup_bundle(
 ) -> Result<BackupBundleSummary, StorageError> {
     let _data_lock = acquire_data_directory_lock(data_directory)?;
     let summary = verify_backup_bundle(bundle)?;
+    if summary.manifest.secrets_included {
+        return Err(StorageError::InvalidData(
+            "encrypted credentials require explicit passphrase restore".into(),
+        ));
+    }
     fs::create_dir_all(data_directory)?;
     let nonce = Uuid::new_v4();
     let staging = data_directory.join(format!(".restore-{nonce}"));
     fs::create_dir(&staging)?;
     let result = (|| {
-        extract_bundle(bundle, &staging)?;
+        extract_bundle(bundle, &staging, &summary.manifest)?;
         let restored_database =
             staging.join(DATABASE_ENTRY.replace('/', std::path::MAIN_SEPARATOR_STR));
         validate_restored_database(&restored_database)?;
@@ -312,6 +466,345 @@ pub fn restore_backup_bundle(
     })();
     let _ = fs::remove_dir_all(&staging);
     result
+}
+
+/// Restores one explicitly passphrase-encrypted bundle and its protected credentials.
+///
+/// The daemon must be stopped. The passphrase and complete bundle are authenticated before any
+/// destination state changes. Credential identities and authentication modes must match the
+/// staged database exactly. Protected-store writes are rolled back if any credential, artifact,
+/// plugin-safety, or database installation step fails.
+///
+/// # Errors
+/// Returns a conflict while the data directory is active, or authentication, protected-store,
+/// filesystem, database, schema, format, integrity, or rollback failures.
+pub fn restore_encrypted_backup_bundle<P, M>(
+    bundle: &Path,
+    data_directory: &Path,
+    now: DateTime<Utc>,
+    passphrase: &BackupPassphrase,
+    provider_store: &P,
+    mcp_store: &M,
+) -> Result<BackupBundleSummary, StorageError>
+where
+    P: ProviderCredentialStore + ?Sized,
+    M: McpCredentialStore + ?Sized,
+{
+    let _data_lock = acquire_data_directory_lock(data_directory)?;
+    let (summary, secrets) = decrypt_backup_bundle_secrets(bundle, passphrase)?;
+    fs::create_dir_all(data_directory)?;
+    let nonce = Uuid::new_v4();
+    let staging = data_directory.join(format!(".restore-{nonce}"));
+    fs::create_dir(&staging)?;
+    let result = (|| {
+        extract_bundle(bundle, &staging, &summary.manifest)?;
+        let restored_database =
+            staging.join(DATABASE_ENTRY.replace('/', std::path::MAIN_SEPARATOR_STR));
+        validate_restored_database(&restored_database)?;
+        validate_plugin_catalog_backup(&restored_database, &summary.manifest.entries)?;
+        validate_secret_snapshot_against_database(&restored_database, &secrets)?;
+        disable_restored_plugins(&restored_database, now)?;
+
+        let rollback = capture_credential_rollback(&secrets, provider_store, mcp_store)?;
+        if let Err(error) = install_secret_snapshot(&secrets, provider_store, mcp_store) {
+            return match restore_credential_rollback(&rollback, provider_store, mcp_store) {
+                Ok(()) => Err(error),
+                Err(()) => Err(StorageError::Conflict(
+                    "credential import failed and protected-store rollback also failed".into(),
+                )),
+            };
+        }
+
+        let install_result = (|| {
+            merge_restored_artifacts(
+                &staging.join("artifacts"),
+                &data_directory.join("artifacts"),
+            )?;
+            install_restored_database(&restored_database, data_directory, now)?;
+            Ok(summary)
+        })();
+        match install_result {
+            Ok(summary) => Ok(summary),
+            Err(error) => match restore_credential_rollback(&rollback, provider_store, mcp_store) {
+                Ok(()) => Err(error),
+                Err(()) => Err(StorageError::Conflict(
+                    "backup restore failed and protected-store rollback also failed".into(),
+                )),
+            },
+        }
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+struct ProviderCredentialRollback {
+    connection_id: String,
+    primary: Option<ProviderCredential>,
+    oauth_id_token: Option<ProviderCredential>,
+    oauth_refresh_token: Option<ProviderCredential>,
+}
+
+struct McpCredentialRollback {
+    connection_id: String,
+    bearer: Option<McpCredential>,
+}
+
+struct CredentialRollback {
+    providers: Vec<ProviderCredentialRollback>,
+    mcp_connections: Vec<McpCredentialRollback>,
+}
+
+fn capture_credential_rollback<P, M>(
+    secrets: &BackupSecretSnapshot,
+    provider_store: &P,
+    mcp_store: &M,
+) -> Result<CredentialRollback, StorageError>
+where
+    P: ProviderCredentialStore + ?Sized,
+    M: McpCredentialStore + ?Sized,
+{
+    let providers = secrets
+        .providers
+        .iter()
+        .map(|secret| {
+            let connection_id = provider_secret_connection_id(secret);
+            Ok(ProviderCredentialRollback {
+                connection_id: connection_id.to_owned(),
+                primary: provider_store
+                    .load(connection_id, ProviderSecretSlot::Primary)
+                    .map_err(protected_store_error)?,
+                oauth_id_token: provider_store
+                    .load(connection_id, ProviderSecretSlot::OAuthIdToken)
+                    .map_err(protected_store_error)?,
+                oauth_refresh_token: provider_store
+                    .load(connection_id, ProviderSecretSlot::OAuthRefreshToken)
+                    .map_err(protected_store_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    let mcp_connections = secrets
+        .mcp_connections
+        .iter()
+        .map(|secret| {
+            let connection_id = mcp_secret_connection_id(secret);
+            Ok(McpCredentialRollback {
+                connection_id: connection_id.to_owned(),
+                bearer: mcp_store
+                    .load(connection_id)
+                    .map_err(protected_store_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    Ok(CredentialRollback {
+        providers,
+        mcp_connections,
+    })
+}
+
+fn install_secret_snapshot<P, M>(
+    secrets: &BackupSecretSnapshot,
+    provider_store: &P,
+    mcp_store: &M,
+) -> Result<(), StorageError>
+where
+    P: ProviderCredentialStore + ?Sized,
+    M: McpCredentialStore + ?Sized,
+{
+    for secret in &secrets.providers {
+        let connection_id = provider_secret_connection_id(secret);
+        clear_provider_credentials(provider_store, connection_id).map_err(protected_store_error)?;
+        match secret {
+            BackupProviderSecret::None { .. } => {}
+            BackupProviderSecret::Primary {
+                auth_mode,
+                credential,
+                ..
+            } => save_provider_credentials(
+                provider_store,
+                connection_id,
+                *auth_mode,
+                Some(credential),
+                None,
+            )
+            .map_err(protected_store_error)?,
+            BackupProviderSecret::OAuth {
+                auth_mode, tokens, ..
+            } => save_provider_credentials(
+                provider_store,
+                connection_id,
+                *auth_mode,
+                None,
+                Some(tokens),
+            )
+            .map_err(protected_store_error)?,
+        }
+    }
+    for secret in &secrets.mcp_connections {
+        let connection_id = mcp_secret_connection_id(secret);
+        mcp_store
+            .delete(connection_id)
+            .map_err(protected_store_error)?;
+        if let BackupMcpSecret::Bearer { credential, .. } = secret {
+            mcp_store
+                .save(connection_id, credential)
+                .map_err(protected_store_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_credential_rollback<P, M>(
+    rollback: &CredentialRollback,
+    provider_store: &P,
+    mcp_store: &M,
+) -> Result<(), ()>
+where
+    P: ProviderCredentialStore + ?Sized,
+    M: McpCredentialStore + ?Sized,
+{
+    let mut failed = false;
+    for provider in &rollback.providers {
+        for (slot, credential) in [
+            (ProviderSecretSlot::Primary, provider.primary.as_ref()),
+            (
+                ProviderSecretSlot::OAuthIdToken,
+                provider.oauth_id_token.as_ref(),
+            ),
+            (
+                ProviderSecretSlot::OAuthRefreshToken,
+                provider.oauth_refresh_token.as_ref(),
+            ),
+        ] {
+            let result = credential.map_or_else(
+                || provider_store.delete(&provider.connection_id, slot),
+                |credential| provider_store.save(&provider.connection_id, slot, credential),
+            );
+            failed |= result.is_err();
+        }
+    }
+    for connection in &rollback.mcp_connections {
+        let result = connection.bearer.as_ref().map_or_else(
+            || mcp_store.delete(&connection.connection_id),
+            |credential| mcp_store.save(&connection.connection_id, credential),
+        );
+        failed |= result.is_err();
+    }
+    if failed { Err(()) } else { Ok(()) }
+}
+
+fn validate_secret_snapshot_against_database(
+    database: &Path,
+    secrets: &BackupSecretSnapshot,
+) -> Result<(), StorageError> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if !table_exists(&connection, "provider_connections")?
+        || !table_exists(&connection, "mcp_connections")?
+    {
+        return Err(StorageError::InvalidData(
+            "encrypted credential backup database lacks connection projections".into(),
+        ));
+    }
+    let providers = read_backup_connections::<ProviderConnection>(
+        &connection,
+        "SELECT connection_id, connection_json FROM provider_connections ORDER BY connection_id",
+    )?;
+    let mcp_connections = read_backup_connections::<McpConnection>(
+        &connection,
+        "SELECT connection_id, connection_json FROM mcp_connections ORDER BY connection_id",
+    )?;
+    if providers.len() != secrets.providers.len()
+        || mcp_connections.len() != secrets.mcp_connections.len()
+    {
+        return Err(StorageError::InvalidData(
+            "encrypted credentials do not cover the database connection catalog exactly".into(),
+        ));
+    }
+    for (connection, secret) in providers.iter().zip(&secrets.providers) {
+        connection
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let matches = match secret {
+            BackupProviderSecret::None { connection_id } => {
+                connection.id == *connection_id && connection.auth_mode == ProviderAuthMode::None
+            }
+            BackupProviderSecret::Primary {
+                connection_id,
+                auth_mode,
+                ..
+            }
+            | BackupProviderSecret::OAuth {
+                connection_id,
+                auth_mode,
+                ..
+            } => connection.id == *connection_id && connection.auth_mode == *auth_mode,
+        };
+        if !matches {
+            return Err(StorageError::InvalidData(
+                "encrypted provider credential does not match its database connection".into(),
+            ));
+        }
+    }
+    for (connection, secret) in mcp_connections.iter().zip(&secrets.mcp_connections) {
+        connection
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let matches = match secret {
+            BackupMcpSecret::None { connection_id } => {
+                connection.id == *connection_id && connection.auth_mode == McpAuthMode::None
+            }
+            BackupMcpSecret::Bearer { connection_id, .. } => {
+                connection.id == *connection_id && connection.auth_mode == McpAuthMode::BearerToken
+            }
+        };
+        if !matches {
+            return Err(StorageError::InvalidData(
+                "encrypted MCP credential does not match its database connection".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_backup_connections<T>(connection: &Connection, query: &str) -> Result<Vec<T>, StorageError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut statement = connection.prepare(query)?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (stored_id, json) = row?;
+        let value: serde_json::Value = serde_json::from_str(&json)?;
+        if value.get("id").and_then(serde_json::Value::as_str) != Some(stored_id.as_str()) {
+            return Err(StorageError::InvalidData(
+                "connection projection identity is inconsistent".into(),
+            ));
+        }
+        result.push(serde_json::from_value(value)?);
+    }
+    Ok(result)
+}
+
+fn provider_secret_connection_id(secret: &BackupProviderSecret) -> &str {
+    match secret {
+        BackupProviderSecret::None { connection_id }
+        | BackupProviderSecret::Primary { connection_id, .. }
+        | BackupProviderSecret::OAuth { connection_id, .. } => connection_id,
+    }
+}
+
+fn mcp_secret_connection_id(secret: &BackupMcpSecret) -> &str {
+    match secret {
+        BackupMcpSecret::None { connection_id } | BackupMcpSecret::Bearer { connection_id, .. } => {
+            connection_id
+        }
+    }
+}
+
+fn protected_store_error(error: impl std::fmt::Display) -> StorageError {
+    StorageError::ProtectedStore(error.to_string())
 }
 
 fn validate_destination(destination: &Path) -> Result<(), StorageError> {
@@ -389,6 +882,44 @@ fn inspect_source(path: &str, source: &Path) -> Result<BackupBundleEntry, Storag
     })
 }
 
+fn inspect_bytes(path: &str, bytes: &[u8]) -> Result<BackupBundleEntry, StorageError> {
+    let size_bytes = u64::try_from(bytes.len())
+        .map_err(|_| StorageError::InvalidData("backup entry size overflow".into()))?;
+    if size_bytes > MAX_ENTRY_BYTES {
+        return Err(StorageError::InvalidData(format!(
+            "backup source exceeds the per-entry bound: {path}"
+        )));
+    }
+    Ok(BackupBundleEntry {
+        path: path.to_owned(),
+        size_bytes,
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    })
+}
+
+#[derive(Serialize)]
+struct BackupSecretBinding<'a> {
+    domain: &'static str,
+    bundle_schema_version: u16,
+    application_version: &'a str,
+    created_at: DateTime<Utc>,
+    entries: &'a [BackupBundleEntry],
+}
+
+fn secret_binding_bytes(
+    application_version: &str,
+    created_at: DateTime<Utc>,
+    entries: &[BackupBundleEntry],
+) -> Result<Vec<u8>, StorageError> {
+    Ok(serde_json::to_vec(&BackupSecretBinding {
+        domain: "metacognitive-governor.encrypted-backup-credentials.v1",
+        bundle_schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
+        application_version,
+        created_at,
+        entries,
+    })?)
+}
+
 fn copy_verified_source(
     source: &Path,
     entry: &BackupBundleEntry,
@@ -423,6 +954,25 @@ fn copy_verified_source(
     require_digest(entry, &digest.finalize())
 }
 
+fn copy_verified_bytes(
+    bytes: &[u8],
+    entry: &BackupBundleEntry,
+    output: &mut File,
+) -> Result<(), StorageError> {
+    if entry.size_bytes
+        != u64::try_from(bytes.len())
+            .map_err(|_| StorageError::InvalidData("backup entry size overflow".into()))?
+    {
+        return Err(StorageError::InvalidData(format!(
+            "backup source changed while reading: {}",
+            entry.path
+        )));
+    }
+    require_digest(entry, &Sha256::digest(bytes))?;
+    output.write_all(bytes)?;
+    Ok(())
+}
+
 fn read_header(input: &mut File) -> Result<(BackupBundleManifest, Vec<u8>), StorageError> {
     let mut magic = [0_u8; 8];
     input.read_exact(&mut magic)?;
@@ -450,15 +1000,27 @@ fn read_header(input: &mut File) -> Result<(BackupBundleManifest, Vec<u8>), Stor
 }
 
 fn validate_manifest(manifest: &BackupBundleManifest) -> Result<(), StorageError> {
-    if manifest.schema_version != BACKUP_BUNDLE_SCHEMA_VERSION {
+    if !(MIN_BACKUP_BUNDLE_SCHEMA_VERSION..=BACKUP_BUNDLE_SCHEMA_VERSION)
+        .contains(&manifest.schema_version)
+    {
         return Err(StorageError::InvalidData(
             "backup schema version is unsupported".into(),
         ));
     }
-    if manifest.secrets_included {
+    if manifest.schema_version == MIN_BACKUP_BUNDLE_SCHEMA_VERSION
+        && (manifest.secrets_included || manifest.secret_encryption.is_some())
+    {
         return Err(StorageError::InvalidData(
-            "unencrypted backups cannot contain secrets".into(),
+            "legacy backup bundles cannot contain encrypted credentials".into(),
         ));
+    }
+    if manifest.secrets_included != manifest.secret_encryption.is_some() {
+        return Err(StorageError::InvalidData(
+            "backup credential encryption claim is inconsistent".into(),
+        ));
+    }
+    if let Some(metadata) = manifest.secret_encryption.as_ref() {
+        validate_backup_secret_metadata(metadata)?;
     }
     if manifest.application_version.trim().is_empty() || manifest.application_version.len() > 128 {
         return Err(StorageError::InvalidData(
@@ -473,6 +1035,7 @@ fn validate_manifest(manifest: &BackupBundleManifest) -> Result<(), StorageError
     let mut paths = BTreeSet::new();
     let mut total = 0_u64;
     let mut database_entries = 0_u8;
+    let mut secret_entries = 0_u8;
     for entry in &manifest.entries {
         validate_entry(entry)?;
         if !paths.insert(&entry.path) {
@@ -482,6 +1045,8 @@ fn validate_manifest(manifest: &BackupBundleManifest) -> Result<(), StorageError
         }
         if entry.path == DATABASE_ENTRY {
             database_entries = database_entries.saturating_add(1);
+        } else if entry.path == BACKUP_SECRET_ENTRY {
+            secret_entries = secret_entries.saturating_add(1);
         }
         total = total
             .checked_add(entry.size_bytes)
@@ -493,6 +1058,15 @@ fn validate_manifest(manifest: &BackupBundleManifest) -> Result<(), StorageError
     if database_entries != 1 {
         return Err(StorageError::InvalidData(
             "backup must contain exactly one database snapshot".into(),
+        ));
+    }
+    if secret_entries != u8::from(manifest.secrets_included)
+        || (manifest.secrets_included
+            && manifest.entries.last().map(|entry| entry.path.as_str())
+                != Some(BACKUP_SECRET_ENTRY))
+    {
+        return Err(StorageError::InvalidData(
+            "backup encrypted credential entry is inconsistent".into(),
         ));
     }
     Ok(())
@@ -510,6 +1084,16 @@ fn validate_entry(entry: &BackupBundleEntry) -> Result<(), StorageError> {
     if entry.path == DATABASE_ENTRY {
         return Ok(());
     }
+    if entry.path == BACKUP_SECRET_ENTRY {
+        let maximum = u64::try_from(MAX_SECRET_CIPHERTEXT_BYTES)
+            .map_err(|_| StorageError::InvalidData("backup size overflow".into()))?;
+        if !(16..=maximum).contains(&entry.size_bytes) {
+            return Err(StorageError::InvalidData(
+                "encrypted credential entry size is invalid".into(),
+            ));
+        }
+        return Ok(());
+    }
     let pieces = entry.path.split('/').collect::<Vec<_>>();
     if pieces.len() != 3
         || pieces[0] != "artifacts"
@@ -525,9 +1109,18 @@ fn validate_entry(entry: &BackupBundleEntry) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn extract_bundle(bundle: &Path, staging: &Path) -> Result<(), StorageError> {
+fn extract_bundle(
+    bundle: &Path,
+    staging: &Path,
+    expected_manifest: &BackupBundleManifest,
+) -> Result<(), StorageError> {
     let mut input = File::open(bundle)?;
     let (manifest, _) = read_header(&mut input)?;
+    if manifest != *expected_manifest {
+        return Err(StorageError::Conflict(
+            "backup changed while it was being restored".into(),
+        ));
+    }
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     for entry in manifest.entries {
         let destination = staging.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -950,7 +1543,8 @@ fn install_restored_database(
             "database sidecar files are present; stop the daemon cleanly before restore".into(),
         ));
     }
-    if database.exists() {
+    let had_database = database.exists();
+    if had_database {
         fs::rename(&database, &rollback)?;
     }
     if let Err(error) = fs::rename(restored, &database) {
@@ -959,7 +1553,19 @@ fn install_restored_database(
         }
         return Err(error.into());
     }
-    sync_parent(data_directory)?;
+    if let Err(sync_error) = sync_parent(data_directory) {
+        let mut rollback_failed = fs::rename(&database, restored).is_err();
+        if had_database {
+            rollback_failed |= fs::rename(&rollback, &database).is_err();
+        }
+        let _ = sync_parent(data_directory);
+        if rollback_failed {
+            return Err(StorageError::Conflict(
+                "database installation sync failed and filesystem rollback also failed".into(),
+            ));
+        }
+        return Err(sync_error);
+    }
     Ok(())
 }
 
@@ -1029,10 +1635,33 @@ mod tests {
         PluginInvocationRecord, PluginInvocationState, PluginRevision, PluginRevisionId,
         PluginSignature, PluginSignatureState, TaskEnvelope,
     };
+    use mcg_mcp::{
+        MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpCredential,
+        McpProtocolMode, McpTransport,
+    };
     use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest};
+    use mcg_providers::{
+        CONTRACT_VERSION, MemoryProviderCredentialStore, ProviderAuthMode, ProviderConnection,
+        ProviderCredential, ProviderCredentialStore, ProviderKind, ProviderSecretSlot,
+    };
     use tempfile::tempdir;
 
+    use crate::{BackupMcpSecret, BackupProviderSecret};
+
     use super::*;
+
+    fn assert_no_online_snapshot_files(data_directory: &Path) {
+        let backups = data_directory.join("backups");
+        let retained = fs::read_dir(backups)
+            .expect("backup directory")
+            .map(|entry| entry.expect("backup entry").file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".mcgb-"))
+            .collect::<Vec<_>>();
+        assert!(
+            retained.is_empty(),
+            "online backup retained temporary SQLite files: {retained:?}"
+        );
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One fixture proves database, module, token, and rollback behavior together.
@@ -1125,6 +1754,7 @@ mod tests {
         let summary =
             create_backup_bundle(&store, source.path(), &backup_path, "0.1.0", Utc::now())
                 .expect("create backup");
+        assert_no_online_snapshot_files(source.path());
         assert!(!summary.manifest.secrets_included);
         assert!(summary.manifest.entries.iter().any(|entry| {
             entry.sha256 == module_digest
@@ -1224,6 +1854,456 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_bundle_binds_credentials_and_legacy_secret_free_format_still_verifies() {
+        let source = tempdir().expect("source tempdir");
+        let destination = tempdir().expect("destination tempdir");
+        let store = SqliteEventStore::open(source.path().join("mcg.sqlite3")).expect("store");
+        insert_backup_connections(&store);
+        let snapshot = source.path().join("snapshot.sqlite3");
+        store.snapshot_database(&snapshot).expect("snapshot");
+        let secrets = BackupSecretSnapshot::new(
+            vec![BackupProviderSecret::Primary {
+                connection_id: "openrouter".into(),
+                auth_mode: ProviderAuthMode::ApiKey,
+                credential: ProviderCredential::new("encrypted-provider-key")
+                    .expect("provider credential"),
+            }],
+            vec![BackupMcpSecret::Bearer {
+                connection_id: "private-mcp".into(),
+                credential: McpCredential::new("encrypted-mcp-token").expect("MCP credential"),
+            }],
+        )
+        .expect("secret snapshot");
+        let passphrase = BackupPassphrase::new("correct horse battery staple").expect("passphrase");
+        let encrypted_path = source.path().join("backups/encrypted.mcgb");
+        let encrypted = create_encrypted_backup_bundle_from_snapshot(
+            &snapshot,
+            source.path(),
+            &encrypted_path,
+            "0.1.0",
+            Utc::now(),
+            &secrets,
+            &passphrase,
+        )
+        .expect("encrypted backup");
+        assert_eq!(
+            encrypted.manifest.schema_version,
+            BACKUP_BUNDLE_SCHEMA_VERSION
+        );
+        assert!(encrypted.manifest.secrets_included);
+        assert!(encrypted.manifest.secret_encryption.is_some());
+        assert_eq!(
+            encrypted
+                .manifest
+                .entries
+                .last()
+                .map(|entry| entry.path.as_str()),
+            Some(BACKUP_SECRET_ENTRY)
+        );
+        let bytes = fs::read(&encrypted_path).expect("encrypted bytes");
+        for secret in ["encrypted-provider-key", "encrypted-mcp-token"] {
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+            );
+        }
+        let (_, decrypted) = decrypt_backup_bundle_secrets(&encrypted_path, &passphrase)
+            .expect("decrypt bundle secrets");
+        assert_eq!(decrypted.providers.len(), 1);
+        assert_eq!(decrypted.mcp_connections.len(), 1);
+        let wrong = BackupPassphrase::new("definitely not the right passphrase").expect("wrong");
+        assert!(decrypt_backup_bundle_secrets(&encrypted_path, &wrong).is_err());
+        assert!(restore_backup_bundle(&encrypted_path, destination.path(), Utc::now()).is_err());
+        assert!(!destination.path().join("mcg.sqlite3").exists());
+
+        let current_path = source.path().join("backups/current-secret-free.mcgb");
+        create_backup_bundle_from_snapshot(
+            &snapshot,
+            source.path(),
+            &current_path,
+            "0.1.0",
+            Utc::now(),
+        )
+        .expect("secret-free backup");
+        let mut legacy_bytes = fs::read(&current_path).expect("current bytes");
+        let marker = b"\"schema_version\":2";
+        let position = legacy_bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("schema marker");
+        legacy_bytes[position + marker.len() - 1] = b'1';
+        let legacy_path = source.path().join("backups/legacy-secret-free.mcgb");
+        fs::write(&legacy_path, legacy_bytes).expect("legacy bundle");
+        let legacy = verify_backup_bundle(&legacy_path).expect("legacy schema 1 verification");
+        assert_eq!(legacy.manifest.schema_version, 1);
+        assert!(!legacy.manifest.secrets_included);
+        assert!(legacy.manifest.secret_encryption.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One end-to-end assertion covers exact replacement, preservation, token, and rollback evidence.
+    fn encrypted_restore_replaces_exact_credentials_preserves_unrelated_slots_and_keeps_token() {
+        let source = tempdir().expect("source tempdir");
+        let destination = tempdir().expect("destination tempdir");
+        let (bundle, passphrase) = encrypted_connection_bundle(source.path());
+        let existing = SqliteEventStore::open(destination.path().join("mcg.sqlite3"))
+            .expect("existing destination store");
+        drop(existing);
+        fs::write(
+            destination.path().join("auth-token"),
+            "destination-only-token",
+        )
+        .expect("destination token");
+
+        let providers = MemoryProviderCredentialStore::default();
+        providers
+            .save(
+                "openrouter",
+                ProviderSecretSlot::Primary,
+                &ProviderCredential::new("old-provider-secret").expect("old provider"),
+            )
+            .expect("old primary");
+        providers
+            .save(
+                "openrouter",
+                ProviderSecretSlot::OAuthIdToken,
+                &ProviderCredential::new("stale-oauth-token").expect("stale OAuth"),
+            )
+            .expect("stale OAuth slot");
+        providers
+            .save(
+                "unrelated",
+                ProviderSecretSlot::Primary,
+                &ProviderCredential::new("unrelated-provider-secret").expect("unrelated provider"),
+            )
+            .expect("unrelated provider slot");
+        let mcp = mcg_mcp::MemoryMcpCredentialStore::default();
+        mcp.save(
+            "private-mcp",
+            &McpCredential::new("old-mcp-secret").expect("old MCP"),
+        )
+        .expect("old MCP slot");
+        mcp.save(
+            "unrelated-mcp",
+            &McpCredential::new("unrelated-mcp-secret").expect("unrelated MCP"),
+        )
+        .expect("unrelated MCP slot");
+
+        let restored = restore_encrypted_backup_bundle(
+            &bundle,
+            destination.path(),
+            Utc::now(),
+            &passphrase,
+            &providers,
+            &mcp,
+        )
+        .expect("encrypted restore");
+        assert!(restored.manifest.secrets_included);
+        assert_eq!(
+            providers
+                .load("openrouter", ProviderSecretSlot::Primary)
+                .expect("provider load")
+                .expect("provider credential")
+                .expose_to_host_executor(),
+            "new-provider-secret"
+        );
+        assert!(
+            providers
+                .load("openrouter", ProviderSecretSlot::OAuthIdToken)
+                .expect("OAuth slot load")
+                .is_none()
+        );
+        assert_eq!(
+            providers
+                .load("unrelated", ProviderSecretSlot::Primary)
+                .expect("unrelated load")
+                .expect("unrelated credential")
+                .expose_to_host_executor(),
+            "unrelated-provider-secret"
+        );
+        assert_eq!(
+            mcp.load("private-mcp")
+                .expect("MCP load")
+                .expect("MCP credential")
+                .expose_to_host_executor(),
+            "new-mcp-secret"
+        );
+        assert_eq!(
+            mcp.load("unrelated-mcp")
+                .expect("unrelated MCP load")
+                .expect("unrelated MCP credential")
+                .expose_to_host_executor(),
+            "unrelated-mcp-secret"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.path().join("auth-token")).expect("retained token"),
+            "destination-only-token"
+        );
+        let restored_store =
+            SqliteEventStore::open(destination.path().join("mcg.sqlite3")).expect("restored store");
+        assert_eq!(
+            restored_store
+                .provider_connection("openrouter")
+                .expect("provider projection")
+                .expect("provider connection")
+                .auth_mode,
+            ProviderAuthMode::ApiKey
+        );
+        assert_eq!(
+            restored_store
+                .mcp_connection("private-mcp")
+                .expect("MCP projection")
+                .expect("MCP connection")
+                .auth_mode,
+            McpAuthMode::BearerToken
+        );
+        drop(restored_store);
+        assert!(
+            fs::read_dir(destination.path().join("backups"))
+                .expect("rollback directory")
+                .any(|entry| entry
+                    .expect("rollback entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("pre-restore-"))
+        );
+    }
+
+    #[test]
+    fn encrypted_restore_rolls_credentials_back_when_database_installation_fails() {
+        let source = tempdir().expect("source tempdir");
+        let destination = tempdir().expect("destination tempdir");
+        let (bundle, passphrase) = encrypted_connection_bundle(source.path());
+        let existing = SqliteEventStore::open(destination.path().join("mcg.sqlite3"))
+            .expect("existing destination store");
+        drop(existing);
+        let original_database = fs::read(destination.path().join("mcg.sqlite3"))
+            .expect("original destination database");
+        fs::write(destination.path().join("mcg.sqlite3-wal"), "active-sidecar")
+            .expect("blocking sidecar");
+
+        let providers = MemoryProviderCredentialStore::default();
+        providers
+            .save(
+                "openrouter",
+                ProviderSecretSlot::Primary,
+                &ProviderCredential::new("old-provider-secret").expect("old provider"),
+            )
+            .expect("old provider slot");
+        providers
+            .save(
+                "openrouter",
+                ProviderSecretSlot::OAuthIdToken,
+                &ProviderCredential::new("old-stale-id-token").expect("old stale ID token"),
+            )
+            .expect("old stale ID slot");
+        providers
+            .save(
+                "openrouter",
+                ProviderSecretSlot::OAuthRefreshToken,
+                &ProviderCredential::new("old-stale-refresh-token")
+                    .expect("old stale refresh token"),
+            )
+            .expect("old stale refresh slot");
+        let mcp = mcg_mcp::MemoryMcpCredentialStore::default();
+        mcp.save(
+            "private-mcp",
+            &McpCredential::new("old-mcp-secret").expect("old MCP"),
+        )
+        .expect("old MCP slot");
+
+        let error = restore_encrypted_backup_bundle(
+            &bundle,
+            destination.path(),
+            Utc::now(),
+            &passphrase,
+            &providers,
+            &mcp,
+        )
+        .expect_err("sidecar must reject database installation");
+        assert!(error.to_string().contains("sidecar"));
+        assert_eq!(
+            fs::read(destination.path().join("mcg.sqlite3"))
+                .expect("unchanged destination database"),
+            original_database
+        );
+        assert_eq!(
+            providers
+                .load("openrouter", ProviderSecretSlot::Primary)
+                .expect("provider load")
+                .expect("provider credential")
+                .expose_to_host_executor(),
+            "old-provider-secret"
+        );
+        assert_eq!(
+            providers
+                .load("openrouter", ProviderSecretSlot::OAuthIdToken)
+                .expect("ID slot load")
+                .expect("old ID token")
+                .expose_to_host_executor(),
+            "old-stale-id-token"
+        );
+        assert_eq!(
+            providers
+                .load("openrouter", ProviderSecretSlot::OAuthRefreshToken)
+                .expect("refresh slot load")
+                .expect("old refresh token")
+                .expose_to_host_executor(),
+            "old-stale-refresh-token"
+        );
+        assert_eq!(
+            mcp.load("private-mcp")
+                .expect("MCP load")
+                .expect("MCP credential")
+                .expose_to_host_executor(),
+            "old-mcp-secret"
+        );
+    }
+
+    #[test]
+    fn encrypted_restore_rejects_credential_catalog_mismatch_before_mutation() {
+        let source = tempdir().expect("source tempdir");
+        let destination = tempdir().expect("destination tempdir");
+        let store = SqliteEventStore::open(source.path().join("mcg.sqlite3")).expect("store");
+        insert_backup_connections(&store);
+        let snapshot = source.path().join("snapshot.sqlite3");
+        store.snapshot_database(&snapshot).expect("snapshot");
+        let mismatched = BackupSecretSnapshot::new(
+            vec![BackupProviderSecret::None {
+                connection_id: "openrouter".into(),
+            }],
+            vec![BackupMcpSecret::Bearer {
+                connection_id: "private-mcp".into(),
+                credential: McpCredential::new("new-mcp-secret").expect("MCP credential"),
+            }],
+        )
+        .expect("shape-valid but catalog-mismatched secrets");
+        let passphrase = BackupPassphrase::new("correct horse battery staple").expect("passphrase");
+        let bundle = source.path().join("mismatch.mcgb");
+        create_backup_bundle_from_snapshot_inner(
+            &snapshot,
+            source.path(),
+            &bundle,
+            "0.1.0",
+            Utc::now(),
+            Some((&mismatched, &passphrase)),
+        )
+        .expect("mismatched fixture bundle");
+        let existing = SqliteEventStore::open(destination.path().join("mcg.sqlite3"))
+            .expect("existing destination store");
+        drop(existing);
+        let original_database = fs::read(destination.path().join("mcg.sqlite3"))
+            .expect("original destination database");
+        let providers = MemoryProviderCredentialStore::default();
+        providers
+            .save(
+                "openrouter",
+                ProviderSecretSlot::Primary,
+                &ProviderCredential::new("old-provider-secret").expect("old provider"),
+            )
+            .expect("old provider slot");
+        let mcp = mcg_mcp::MemoryMcpCredentialStore::default();
+
+        assert!(
+            restore_encrypted_backup_bundle(
+                &bundle,
+                destination.path(),
+                Utc::now(),
+                &passphrase,
+                &providers,
+                &mcp,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(destination.path().join("mcg.sqlite3"))
+                .expect("unchanged destination database"),
+            original_database
+        );
+        assert_eq!(
+            providers
+                .load("openrouter", ProviderSecretSlot::Primary)
+                .expect("provider load")
+                .expect("provider credential")
+                .expose_to_host_executor(),
+            "old-provider-secret"
+        );
+    }
+
+    fn encrypted_connection_bundle(root: &Path) -> (PathBuf, BackupPassphrase) {
+        let store = SqliteEventStore::open(root.join("mcg.sqlite3")).expect("source store");
+        insert_backup_connections(&store);
+        let snapshot = root.join("snapshot.sqlite3");
+        store.snapshot_database(&snapshot).expect("snapshot");
+        let secrets = BackupSecretSnapshot::new(
+            vec![BackupProviderSecret::Primary {
+                connection_id: "openrouter".into(),
+                auth_mode: ProviderAuthMode::ApiKey,
+                credential: ProviderCredential::new("new-provider-secret")
+                    .expect("provider credential"),
+            }],
+            vec![BackupMcpSecret::Bearer {
+                connection_id: "private-mcp".into(),
+                credential: McpCredential::new("new-mcp-secret").expect("MCP credential"),
+            }],
+        )
+        .expect("secret snapshot");
+        let passphrase = BackupPassphrase::new("correct horse battery staple").expect("passphrase");
+        let bundle = root.join("encrypted.mcgb");
+        create_encrypted_backup_bundle_from_snapshot(
+            &snapshot,
+            root,
+            &bundle,
+            "0.1.0",
+            Utc::now(),
+            &secrets,
+            &passphrase,
+        )
+        .expect("encrypted fixture bundle");
+        (bundle, passphrase)
+    }
+
+    fn insert_backup_connections(store: &SqliteEventStore) {
+        let now = Utc::now().to_rfc3339();
+        let provider = ProviderConnection {
+            contract_version: CONTRACT_VERSION,
+            id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            kind: ProviderKind::OpenRouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            auth_mode: ProviderAuthMode::ApiKey,
+            organization: None,
+            project: None,
+        };
+        let mcp = McpConnection {
+            contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+            id: "private-mcp".into(),
+            display_name: "Private MCP".into(),
+            transport: McpTransport::StreamableHttp {
+                url: "https://mcp.example.test/rpc".into(),
+            },
+            auth_mode: McpAuthMode::BearerToken,
+            protocol_mode: McpProtocolMode::Auto,
+            enabled: true,
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO provider_connections(connection_id, connection_json, updated_at) VALUES (?1, ?2, ?3)",
+                params![provider.id, serde_json::to_string(&provider).expect("provider JSON"), now],
+            )
+            .expect("provider projection");
+        store
+            .connection
+            .execute(
+                "INSERT INTO mcp_connections(connection_id, connection_json, updated_at) VALUES (?1, ?2, ?3)",
+                params![mcp.id, serde_json::to_string(&mcp).expect("MCP JSON"), now],
+            )
+            .expect("MCP projection");
+    }
+
+    #[test]
     fn backup_refuses_a_plugin_catalog_without_its_exact_module_artifact() {
         let source = tempdir().expect("source tempdir");
         let backup_path = source.path().join("backups").join("missing-module.mcgb");
@@ -1258,6 +2338,7 @@ mod tests {
             .expect_err("missing module must fail backup");
         assert!(error.to_string().contains("module evidence"));
         assert!(!backup_path.exists());
+        assert_no_online_snapshot_files(source.path());
     }
 
     #[test]
@@ -1336,6 +2417,7 @@ mod tests {
             .expect_err("missing result artifact must fail backup");
         assert!(error.to_string().contains("invocation evidence"));
         assert!(!backup_path.exists());
+        assert_no_online_snapshot_files(source.path());
     }
 
     #[test]
@@ -1350,6 +2432,7 @@ mod tests {
             application_version: "0.1.0".into(),
             created_at: Utc::now(),
             secrets_included: false,
+            secret_encryption: None,
             entries: vec![database.clone()],
         };
         assert!(validate_manifest(&base).is_ok());

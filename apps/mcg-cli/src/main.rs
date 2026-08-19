@@ -7,70 +7,77 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
-    OrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition, SupervisionObservation,
-    TaskComplexity,
+    OrganizationGenome, PortableOrganizationComparison, PortableOrganizationGenome, RoleKind,
+    ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
     AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    CorrectMemoryClaimRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
-    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
-    DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    CorrectMemoryClaimRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
+    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
+    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
+    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest, LaunchExecution,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    ImportOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
+    InstallRegistryPluginRequest, InvokePluginRequest, LaunchExecution, LaunchTaskRequest,
+    LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
+    MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
     OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
     ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
     SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
-    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
-    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
-    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionAgentRunRequest, TransitionExperimentRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
-    UpdateUserSettingsRequest, UserSettingsHistoryResponse, WakeScheduleRequest,
+    SetScheduleStateRequest, ShadowExecutionListResponse, ShutdownResponse,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionAgentRunRequest, TransitionExperimentRequest, TransitionMemoryClaimRequest,
+    TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId,
-    NotificationSeverity, OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
-    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
-    PluginSignatureState, ProjectId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
-    TaskEnvelope, TaskId, TaskState, WorkItemId,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
+    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
+    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId, RunId,
+    ScheduleId, ScheduleState, ScheduleTrigger, SchedulerNotification, SchedulerNotificationId,
+    Site, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId,
+    SiteMonitor, SiteState, SshHost, SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId,
+    TaskState, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
     MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection, McpProtocolMode, McpToolCatalog,
-    McpTransport,
+    McpTransport, OsMcpCredentialStore,
 };
 use mcg_plugin_protocol::PluginManifest;
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
-    CONTRACT_VERSION, ContentPart, MessageRole, ModelProbeReport, OutputItem, ProviderAuthMode,
-    ProviderConnection, ProviderKind, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
+    CONTRACT_VERSION, ContentPart, MessageRole, ModelProbeReport, OsProviderCredentialStore,
+    OutputItem, ProviderAuthMode, ProviderConnection, ProviderKind, ProviderModelCatalog,
+    ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, CandidateRevisionMutation, DiagnosticReport, DiagnosticSeverity,
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PluginInvocationMutation, ProjectMutation, ProviderMutation,
-    RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
-    SshHostMutation, SshOperationMutation, SupervisionMutation,
+    PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
+    ProjectMutation, ProviderMutation, RunReplayReport, RuntimeStatus, SiteDeploymentMutation,
+    SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
+    SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
 };
-use mcg_storage::{restore_backup_bundle, verify_backup_bundle};
+use mcg_storage::{
+    BackupPassphrase, restore_backup_bundle, restore_encrypted_backup_bundle, verify_backup_bundle,
+};
 use mcg_tools::{
     ApprovalRequest, ApprovalState, ComputerUseFrame, PersistentBrowserMode,
     PersistentBrowserObservation,
@@ -136,6 +143,12 @@ struct Cli {
 enum Command {
     /// Show daemon status.
     Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask the authenticated local daemon to drain and stop cleanly.
+    Stop {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -269,6 +282,12 @@ enum BackupCommand {
     Create {
         #[arg(long)]
         backup_id: Option<uuid::Uuid>,
+        /// Include provider and MCP credentials under passphrase encryption.
+        #[arg(long)]
+        include_secrets: bool,
+        /// Read passphrase and confirmation from redirected standard input.
+        #[arg(long, requires = "include_secrets")]
+        passphrase_stdin: bool,
         #[arg(long)]
         json: bool,
     },
@@ -288,6 +307,12 @@ enum BackupCommand {
         bundle: PathBuf,
         #[arg(long)]
         confirm: bool,
+        /// Authenticate and restore the bundle's encrypted provider and MCP credentials.
+        #[arg(long)]
+        restore_secrets: bool,
+        /// Read the encrypted-backup passphrase from redirected standard input.
+        #[arg(long, requires = "restore_secrets")]
+        passphrase_stdin: bool,
     },
 }
 
@@ -432,6 +457,16 @@ enum SshCommand {
     Update { id: String, request: PathBuf },
     /// Run a typed operation from a JSON request file.
     Run { id: String, request: PathBuf },
+    /// List all durable multi-host workflows.
+    WorkflowList,
+    /// Show one durable multi-host workflow.
+    WorkflowShow { id: String },
+    /// Create an immutable workflow graph from a JSON request file.
+    WorkflowCreate { request: PathBuf },
+    /// Run or resume all dependency-ready workflow steps.
+    WorkflowRun { id: String },
+    /// Cancel one non-terminal workflow without starting more remote work.
+    WorkflowCancel { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -986,6 +1021,43 @@ enum OrganizationCommand {
     },
     /// Inspect one current organization.
     Get { id: String },
+    /// List every immutable revision of one organization.
+    History {
+        organization_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new materialized organization pinned to the current revision of `BASE_ID`.
+    Inherit {
+        base_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export one immutable revision as a portable content-addressed JSON genome.
+    Export {
+        revision_id: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Import a portable JSON genome as a fresh local organization.
+    Import {
+        file: PathBuf,
+        #[arg(long)]
+        import_id: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare two immutable revisions without treating local identities as changes.
+    Compare {
+        left_revision_id: String,
+        right_revision_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1008,6 +1080,12 @@ enum RunCommand {
     PlanFile { task_id: String, file: PathBuf },
     /// Inspect a run, plan, instances, leases, usage, evaluations, and results.
     Get { id: String },
+    /// Deterministically verify a run from durable evidence without provider or tool side effects.
+    Replay {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Start or resume a planned/waiting/recovering run.
     Start { id: String },
     /// Execute one ready work item through configured providers and governed tools.
@@ -1111,6 +1189,9 @@ enum MemoryCommand {
         confidence: f64,
         #[arg(long, default_value = "local owner via CLI")]
         source: String,
+        /// Optional RFC 3339 deadline after which automatic consolidation starts decay.
+        #[arg(long, value_name = "RFC3339")]
+        fresh_until: Option<DateTime<Utc>>,
     },
     /// List current claim heads.
     List {
@@ -1127,6 +1208,9 @@ enum MemoryCommand {
         confidence: f64,
         #[arg(long, default_value = "local owner correction via CLI")]
         source: String,
+        /// Optional RFC 3339 replacement freshness deadline.
+        #[arg(long, value_name = "RFC3339")]
+        fresh_until: Option<DateTime<Utc>>,
     },
     /// Reinforce, decay, or retract a claim with a successor version.
     Transition {
@@ -1276,14 +1360,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_backup_bundle(&verify_backup_bundle(bundle)?, *json)?;
                 return Ok(());
             }
-            BackupCommand::Restore { bundle, confirm } => {
+            BackupCommand::Restore {
+                bundle,
+                confirm,
+                restore_secrets,
+                passphrase_stdin,
+            } => {
                 if !confirm {
                     return Err("backup restore requires --confirm and a stopped daemon".into());
                 }
-                let summary = restore_backup_bundle(bundle, &config.data_directory, Utc::now())?;
+                let summary = if *restore_secrets {
+                    let passphrase = BackupPassphrase::new(read_backup_passphrase(
+                        "Encrypted backup passphrase: ",
+                        *passphrase_stdin,
+                    )?)?;
+                    restore_encrypted_backup_bundle(
+                        bundle,
+                        &config.data_directory,
+                        Utc::now(),
+                        &passphrase,
+                        &OsProviderCredentialStore,
+                        &OsMcpCredentialStore,
+                    )?
+                } else {
+                    restore_backup_bundle(bundle, &config.data_directory, Utc::now())?
+                };
                 println!(
-                    "Restored {}. A pre-restore database backup was retained. Start mcg-daemon to migrate and recover projections.",
-                    summary.path.display()
+                    "Restored {}{}. A pre-restore database backup was retained. Start mcg-daemon to migrate and recover projections.",
+                    summary.path.display(),
+                    if *restore_secrets {
+                        " with encrypted credentials"
+                    } else {
+                        ""
+                    }
                 );
                 return Ok(());
             }
@@ -1307,6 +1416,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Some(Command::Status { json }) => run_status(&client, host, token.trim(), json).await?,
+        Some(Command::Stop { json }) => run_stop(&client, host, token.trim(), json).await?,
         Some(Command::Doctor { json, strict }) => {
             run_doctor(&client, host, token.trim(), json, strict).await?;
         }
@@ -1785,6 +1895,7 @@ fn consumer_result_text(result: &LaunchTaskResponse) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the complete host and workflow HTTP contract together.
 async fn run_ssh(
     client: &reqwest::Client,
     host: &str,
@@ -1871,6 +1982,67 @@ async fn run_ssh(
                 .post(format!("{host}/api/v1/ssh/hosts/{id}/operations"))
                 .bearer_auth(token)
                 .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::WorkflowList => {
+            let response: SshWorkflowListResponse = client
+                .get(format!("{host}/api/v1/ssh/workflows"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::WorkflowShow { id } => {
+            let id = SshWorkflowId::from_str(&id)?;
+            let response: SshWorkflow = client
+                .get(format!("{host}/api/v1/ssh/workflows/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::WorkflowCreate { request } => {
+            let request: SshWorkflowCreateRequest =
+                serde_json::from_reader(std::fs::File::open(request)?)?;
+            let response: SshWorkflowMutation = client
+                .post(format!("{host}/api/v1/ssh/workflows"))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::WorkflowRun { id } => {
+            let id = SshWorkflowId::from_str(&id)?;
+            let response: SshWorkflowMutation = client
+                .post(format!("{host}/api/v1/ssh/workflows/{id}/run"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SshCommand::WorkflowCancel { id } => {
+            let id = SshWorkflowId::from_str(&id)?;
+            let response: SshWorkflowMutation = client
+                .post(format!("{host}/api/v1/ssh/workflows/{id}/cancel"))
+                .bearer_auth(token)
                 .send()
                 .await?
                 .error_for_status()?
@@ -3159,6 +3331,28 @@ async fn run_status(
     Ok(())
 }
 
+async fn run_stop(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response: ShutdownResponse = client
+        .post(format!("{host}/api/v1/system/shutdown"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("MCG daemon is draining and will stop cleanly.");
+    }
+    Ok(())
+}
+
 async fn run_doctor(
     client: &reqwest::Client,
     host: &str,
@@ -3292,16 +3486,43 @@ async fn run_backup(
     command: BackupCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        BackupCommand::Create { backup_id, json } => {
+        BackupCommand::Create {
+            backup_id,
+            include_secrets,
+            passphrase_stdin,
+            json,
+        } => {
             let backup_id = backup_id.unwrap_or_else(uuid::Uuid::new_v4);
-            let summary: BackupSummaryResponse = client
-                .post(format!("{host}/api/v1/backups/{backup_id}"))
-                .bearer_auth(token)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+            let request = if include_secrets {
+                let mut passphrase =
+                    read_backup_passphrase("Encrypted backup passphrase: ", passphrase_stdin)?;
+                let mut confirmation = read_backup_passphrase(
+                    "Confirm encrypted backup passphrase: ",
+                    passphrase_stdin,
+                )?;
+                if passphrase != confirmation {
+                    passphrase.zeroize();
+                    confirmation.zeroize();
+                    return Err("encrypted backup passphrases do not match".into());
+                }
+                confirmation.zeroize();
+                Some(CreateEncryptedBackupRequest { passphrase })
+            } else {
+                None
+            };
+            let endpoint = if include_secrets {
+                format!("{host}/api/v1/backups/{backup_id}/encrypted")
+            } else {
+                format!("{host}/api/v1/backups/{backup_id}")
+            };
+            let builder = client.post(endpoint).bearer_auth(token);
+            let builder = if let Some(request) = request.as_ref() {
+                builder.json(request)
+            } else {
+                builder
+            };
+            let summary: BackupSummaryResponse =
+                builder.send().await?.error_for_status()?.json().await?;
             print_backup_summary(&summary, json)?;
         }
         BackupCommand::List { json } => {
@@ -3328,6 +3549,42 @@ async fn run_backup(
         }
     }
     Ok(())
+}
+
+fn read_backup_passphrase(
+    prompt: &str,
+    passphrase_stdin: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::{BufRead as _, Read as _};
+
+    if !passphrase_stdin {
+        return Ok(rpassword::prompt_password(prompt)?);
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err("--passphrase-stdin requires redirected standard input".into());
+    }
+    let stdin = std::io::stdin();
+    let mut limited = stdin.lock().take(1_026);
+    let mut bytes = Vec::new();
+    limited.read_until(b'\n', &mut bytes)?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    if bytes.len() > 1_024 {
+        bytes.zeroize();
+        return Err("encrypted backup passphrase exceeds 1024 bytes".into());
+    }
+    let passphrase = if let Ok(value) = std::str::from_utf8(&bytes) {
+        value.to_owned()
+    } else {
+        bytes.zeroize();
+        return Err("encrypted backup passphrase must be UTF-8".into());
+    };
+    bytes.zeroize();
+    Ok(passphrase)
 }
 
 fn print_backup_summary(
@@ -3567,6 +3824,7 @@ async fn list_tasks(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One exhaustive CLI command adapter keeps every organization operation visibly aligned with its REST route.
 async fn run_organization(
     client: &reqwest::Client,
     host: &str,
@@ -3627,6 +3885,172 @@ async fn run_organization(
                 .json()
                 .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        OrganizationCommand::History {
+            organization_id,
+            json,
+        } => {
+            let organization_id = OrganizationId::from_str(&organization_id)?;
+            let response: OrganizationHistoryResponse = client
+                .get(format!(
+                    "{host}/api/v1/organizations/{organization_id}/history"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                for revision in response.revisions {
+                    println!(
+                        "{}  revision {}  {}",
+                        revision.revision_id, revision.revision, revision.name
+                    );
+                }
+            }
+        }
+        OrganizationCommand::Inherit {
+            base_id,
+            name,
+            json,
+        } => {
+            let mutation: OrganizationMutationResponse = client
+                .post(format!("{host}/api/v1/organizations/{base_id}/inherit"))
+                .bearer_auth(token)
+                .json(&InheritOrganizationRequest { name })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  inherits {}  {}",
+                    mutation.organization.organization_id,
+                    mutation
+                        .organization
+                        .inherited_from_revision_id
+                        .map_or_else(|| "none".into(), |id| id.to_string()),
+                    mutation.organization.name
+                );
+            }
+        }
+        OrganizationCommand::Export {
+            revision_id,
+            output,
+        } => {
+            let revision_id = OrganizationRevisionId::from_str(&revision_id)?;
+            let portable: PortableOrganizationGenome = client
+                .get(format!(
+                    "{host}/api/v1/organization-revisions/{revision_id}/export"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let encoded = serde_json::to_vec_pretty(&portable)?;
+            if let Some(output) = output {
+                std::fs::write(&output, encoded)?;
+                println!(
+                    "Exported {} to {}",
+                    portable.content_sha256,
+                    output.display()
+                );
+            } else {
+                println!("{}", String::from_utf8(encoded)?);
+            }
+        }
+        OrganizationCommand::Import {
+            file,
+            import_id,
+            name,
+            json,
+        } => {
+            let portable: PortableOrganizationGenome =
+                serde_json::from_reader(std::fs::File::open(file)?)?;
+            let generated_import_id = import_id.is_none();
+            let import_id = import_id
+                .as_deref()
+                .map(OrganizationImportId::from_str)
+                .transpose()?
+                .unwrap_or_default();
+            if generated_import_id {
+                eprintln!(
+                    "Import identity: {import_id} (reuse with --import-id if this request must be retried)"
+                );
+            }
+            let mutation: PortableOrganizationImportMutation = client
+                .post(format!("{host}/api/v1/organizations/import"))
+                .bearer_auth(token)
+                .json(&ImportOrganizationRequest {
+                    import_id,
+                    portable,
+                    name,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  revision {}  import {}  {}",
+                    mutation.organization.organization_id,
+                    mutation.organization.revision_id,
+                    import_id,
+                    if mutation.replayed {
+                        "replayed"
+                    } else {
+                        "created"
+                    }
+                );
+            }
+        }
+        OrganizationCommand::Compare {
+            left_revision_id,
+            right_revision_id,
+            json,
+        } => {
+            let left = OrganizationRevisionId::from_str(&left_revision_id)?;
+            let right = OrganizationRevisionId::from_str(&right_revision_id)?;
+            let comparison: PortableOrganizationComparison = client
+                .get(format!(
+                    "{host}/api/v1/organization-revisions/{left}/compare/{right}"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&comparison)?);
+            } else if comparison.equivalent {
+                println!("Equivalent portable organization definitions.");
+            } else {
+                println!(
+                    "Different: {} role changes, {} relationship changes, changed sections={}",
+                    comparison.roles_added.len()
+                        + comparison.roles_removed.len()
+                        + comparison.roles_changed.len(),
+                    comparison.relationships_added.len() + comparison.relationships_removed.len(),
+                    comparison
+                        .sections_changed
+                        .iter()
+                        .map(|section| format!("{section:?}").to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
         }
     }
     Ok(())
@@ -3691,6 +4115,28 @@ async fn run_agent(
                 .json()
                 .await?;
             println!("{}", serde_json::to_string_pretty(&view)?);
+        }
+        RunCommand::Replay { id, json } => {
+            let run_id = RunId::from_str(&id)?;
+            let report: RunReplayReport = client
+                .get(format!("{host}/api/v1/runs/{run_id}/replay"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let passed = report.invariants.iter().filter(|item| item.passed).count();
+                println!(
+                    "verified run {}: {passed}/{} invariants passed; evidence sha256 {}",
+                    report.run_id,
+                    report.invariants.len(),
+                    report.evidence_sha256
+                );
+            }
         }
         RunCommand::Start { id } => {
             transition_run(client, host, token, &id, AgentRunState::Running).await?;
@@ -4674,6 +5120,7 @@ async fn run_memory(
             value,
             confidence,
             source,
+            fresh_until,
         } => {
             let mutation: MemoryClaimMutation = client
                 .post(&base)
@@ -4684,7 +5131,7 @@ async fn run_memory(
                     value: parse_cli_value(&value),
                     confidence,
                     provenance: owner_provenance(source),
-                    fresh_until: None,
+                    fresh_until,
                 })
                 .send()
                 .await?
@@ -4712,6 +5159,7 @@ async fn run_memory(
             value,
             confidence,
             source,
+            fresh_until,
         } => {
             let claim_id = MemoryClaimId::from_str(&claim_id)?;
             let mutation: MemoryClaimMutation = client
@@ -4721,7 +5169,7 @@ async fn run_memory(
                     value: parse_cli_value(&value),
                     confidence,
                     provenance: owner_provenance(source),
-                    fresh_until: None,
+                    fresh_until,
                 })
                 .send()
                 .await?
@@ -4961,6 +5409,152 @@ mod tests {
             } if id == "00000000-0000-0000-0000-000000000001"
                 && file == std::path::Path::new("evaluation.json")
         ));
+    }
+
+    #[test]
+    fn run_replay_command_supports_machine_readable_evidence() {
+        let cli = Cli::try_parse_from([
+            "mcg",
+            "run",
+            "replay",
+            "00000000-0000-0000-0000-000000000001",
+            "--json",
+        ])
+        .expect("replay command");
+        assert!(matches!(
+            cli.command.expect("command"),
+            Command::Run {
+                command: Some(RunCommand::Replay { id, json: true }),
+                ..
+            } if id == "00000000-0000-0000-0000-000000000001"
+        ));
+    }
+
+    #[test]
+    fn organization_inheritance_command_requires_a_named_base() {
+        let cli = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "inherit",
+            "00000000-0000-0000-0000-000000000001",
+            "--name",
+            "Website specialists",
+            "--json",
+        ])
+        .expect("organization inheritance command");
+        assert!(matches!(
+            cli.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::Inherit {
+                    base_id,
+                    name,
+                    json: true,
+                }
+            } if base_id == "00000000-0000-0000-0000-000000000001"
+                && name == "Website specialists"
+        ));
+    }
+
+    #[test]
+    fn organization_portability_commands_preserve_explicit_file_and_import_identity() {
+        let import_id = "00000000-0000-0000-0000-000000000042";
+        let cli = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "import",
+            "portable.json",
+            "--import-id",
+            import_id,
+            "--name",
+            "Imported team",
+            "--json",
+        ])
+        .expect("organization import command");
+        assert!(matches!(
+            cli.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::Import {
+                    file,
+                    import_id: Some(parsed),
+                    name: Some(name),
+                    json: true,
+                }
+            } if file == std::path::Path::new("portable.json")
+                && parsed == import_id
+                && name == "Imported team"
+        ));
+
+        let compare = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "compare",
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+            "--json",
+        ])
+        .expect("organization compare command");
+        assert!(matches!(
+            compare.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::Compare { json: true, .. }
+            }
+        ));
+
+        let history = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "history",
+            "00000000-0000-0000-0000-000000000001",
+            "--json",
+        ])
+        .expect("organization history command");
+        assert!(matches!(
+            history.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::History { json: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn project_memory_accepts_an_explicit_rfc3339_freshness_deadline() {
+        let cli = Cli::try_parse_from([
+            "mcg",
+            "project",
+            "memory",
+            "00000000-0000-0000-0000-000000000001",
+            "add",
+            "project",
+            "temporary_endpoint",
+            "http://127.0.0.1:4173",
+            "--fresh-until",
+            "2026-08-20T12:00:00Z",
+        ])
+        .expect("memory freshness deadline");
+        assert!(matches!(
+            cli.command.expect("command"),
+            Command::Project {
+                command: ProjectCommand::Memory {
+                    command: MemoryCommand::Add { fresh_until: Some(deadline), .. },
+                    ..
+                }
+            } if deadline == "2026-08-20T12:00:00Z".parse::<DateTime<Utc>>().expect("deadline")
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "mcg",
+                "project",
+                "memory",
+                "00000000-0000-0000-0000-000000000001",
+                "add",
+                "project",
+                "temporary_endpoint",
+                "value",
+                "--fresh-until",
+                "tomorrow",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -5348,6 +5942,47 @@ mod tests {
     }
 
     #[test]
+    fn ssh_workflow_commands_expose_create_inspect_run_and_cancel() {
+        let workflow_id = "00000000-0000-4000-8000-000000000211";
+        let create = Cli::try_parse_from(["mcg", "ssh", "workflow-create", "workflow.json"])
+            .expect("workflow create");
+        assert!(matches!(
+            create.command.expect("command"),
+            Command::Ssh {
+                command: SshCommand::WorkflowCreate { request }
+            } if request.as_path() == std::path::Path::new("workflow.json")
+        ));
+        for (verb, expected) in [
+            ("workflow-show", "show"),
+            ("workflow-run", "run"),
+            ("workflow-cancel", "cancel"),
+        ] {
+            let parsed =
+                Cli::try_parse_from(["mcg", "ssh", verb, workflow_id]).expect("workflow command");
+            let matched = match parsed.command.expect("command") {
+                Command::Ssh {
+                    command: SshCommand::WorkflowShow { id },
+                } => expected == "show" && id == workflow_id,
+                Command::Ssh {
+                    command: SshCommand::WorkflowRun { id },
+                } => expected == "run" && id == workflow_id,
+                Command::Ssh {
+                    command: SshCommand::WorkflowCancel { id },
+                } => expected == "cancel" && id == workflow_id,
+                _ => false,
+            };
+            assert!(matched, "{verb} did not preserve workflow identity");
+        }
+        let list = Cli::try_parse_from(["mcg", "ssh", "workflow-list"]).expect("workflow list");
+        assert!(matches!(
+            list.command.expect("command"),
+            Command::Ssh {
+                command: SshCommand::WorkflowList
+            }
+        ));
+    }
+
+    #[test]
     fn experiment_commands_keep_versioned_json_and_compare_and_set_state_explicit() {
         let candidate = Cli::try_parse_from(["mcg", "experiment", "candidate", "candidate.json"])
             .expect("candidate command");
@@ -5431,6 +6066,8 @@ mod tests {
             Command::Backup {
                 command: BackupCommand::Create {
                     backup_id: Some(_),
+                    include_secrets: false,
+                    passphrase_stdin: false,
                     json: true
                 }
             }
@@ -5442,6 +6079,53 @@ mod tests {
             Command::Backup {
                 command: BackupCommand::Restore { confirm: true, .. }
             }
+        ));
+        let encrypted = Cli::try_parse_from([
+            "mcg",
+            "backup",
+            "restore",
+            "owner.mcgb",
+            "--confirm",
+            "--restore-secrets",
+            "--passphrase-stdin",
+        ])
+        .expect("encrypted backup restore command");
+        assert!(matches!(
+            encrypted.command.expect("command"),
+            Command::Backup {
+                command: BackupCommand::Restore {
+                    confirm: true,
+                    restore_secrets: true,
+                    passphrase_stdin: true,
+                    ..
+                }
+            }
+        ));
+        assert!(Cli::try_parse_from(["mcg", "backup", "create", "--passphrase-stdin"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "mcg",
+                "backup",
+                "restore",
+                "owner.mcgb",
+                "--confirm",
+                "--passphrase-stdin",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stop_supports_human_and_machine_readable_daemon_shutdown() {
+        let human = Cli::try_parse_from(["mcg", "stop"]).expect("stop command");
+        assert!(matches!(
+            human.command.expect("command"),
+            Command::Stop { json: false }
+        ));
+        let json = Cli::try_parse_from(["mcg", "stop", "--json"]).expect("JSON stop command");
+        assert!(matches!(
+            json.command.expect("command"),
+            Command::Stop { json: true }
         ));
     }
 

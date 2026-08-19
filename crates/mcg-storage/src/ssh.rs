@@ -357,6 +357,7 @@ fn validate_host(host: &SshHost) -> Result<(), StorageError> {
         && host.known_hosts_entry.chars().count() <= 8_192
         && host.host_key_sha256.starts_with("SHA256:")
         && host.host_key_sha256.chars().count() <= 96
+        && valid_capabilities(&host.capabilities)
         && host.created_at <= host.updated_at;
     if !valid {
         return Err(StorageError::InvalidData(
@@ -364,6 +365,20 @@ fn validate_host(host: &SshHost) -> Result<(), StorageError> {
         ));
     }
     Ok(())
+}
+
+fn valid_capabilities(values: &[String]) -> bool {
+    values.len() <= 64
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+        && values.iter().all(|value| {
+            !value.is_empty()
+                && value.chars().count() <= 96
+                && value.chars().all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || matches!(character, ':' | '.' | '_' | '-')
+                })
+        })
 }
 
 fn validate_revision(host: &SshHost, revision: &SshHostRevision) -> Result<(), StorageError> {
@@ -430,6 +445,7 @@ mod tests {
             authentication: SshAuthentication::Agent,
             known_hosts_entry: "192.0.2.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture".into(),
             host_key_sha256: "SHA256:fixtureFingerprint".into(),
+            capabilities: vec!["os:linux".into()],
             state: SshHostState::Active,
             created_at: now,
             updated_at: now,

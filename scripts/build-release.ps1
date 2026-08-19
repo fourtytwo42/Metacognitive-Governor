@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$updaterConfigDirectory = $null
 Push-Location $repositoryRoot
 try {
     node scripts/check-release-source.mjs
@@ -11,7 +12,36 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Sidecar preparation failed with exit code $LASTEXITCODE."
     }
-    npm run tauri --workspace @mcg/desktop -- build --config src-tauri/tauri.release.conf.json --bundles nsis
+    $updaterRequested = -not [string]::IsNullOrWhiteSpace($env:MCG_UPDATER_ENDPOINT) -or
+        -not [string]::IsNullOrWhiteSpace($env:MCG_UPDATER_PUBKEY) -or
+        -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+        -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH)
+    $tauriConfig = @("--config", "src-tauri/tauri.release.conf.json")
+    if ($updaterRequested) {
+        foreach ($name in @("MCG_UPDATER_ENDPOINT", "MCG_UPDATER_PUBKEY")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                throw "Signed updater builds require $name."
+            }
+        }
+        $contentKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+        $pathKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH)
+        if ($contentKey -eq $pathKey) {
+            throw "Signed updater builds require exactly one of TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH."
+        }
+        node scripts/check-updater-config.mjs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Signed updater configuration validation failed with exit code $LASTEXITCODE."
+        }
+        $updaterConfigDirectory = Join-Path ([IO.Path]::GetTempPath()) ("mcg-updater-build-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $updaterConfigDirectory -ErrorAction Stop | Out-Null
+        $updaterConfig = Join-Path $updaterConfigDirectory "updater.json"
+        node scripts/write-updater-build-config.mjs $updaterConfig
+        if ($LASTEXITCODE -ne 0) {
+            throw "Signed updater bundler configuration failed with exit code $LASTEXITCODE."
+        }
+        $tauriConfig += @("--config", "src-tauri/tauri.updater.conf.json", "--config", $updaterConfig)
+    }
+    npm run tauri --workspace @mcg/desktop -- build --ci @tauriConfig --bundles nsis
     if ($LASTEXITCODE -ne 0) {
         throw "Windows installer build failed with exit code $LASTEXITCODE."
     }
@@ -20,5 +50,8 @@ try {
         throw "Windows release manifest failed with exit code $LASTEXITCODE."
     }
 } finally {
+    if ($null -ne $updaterConfigDirectory -and (Test-Path -LiteralPath $updaterConfigDirectory)) {
+        Remove-Item -LiteralPath $updaterConfigDirectory -Recurse -Force
+    }
     Pop-Location
 }

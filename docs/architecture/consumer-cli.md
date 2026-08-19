@@ -50,6 +50,22 @@ sent to a selected model as governed context. Users should not pipe credentials
 or other material they do not want retained. Tokens used to authenticate the
 CLI are never included in human, JSON, or event output.
 
+The process-level integration matrix runs the real `mcg` executable against a
+real loopback daemon and deterministic OpenAI-compatible provider. Separate
+human, JSON, and NDJSON journeys each complete a worker turn plus independent
+Evaluator turn, execute the discovered project test command, settle objective
+evidence, reuse one canonical project, and exclude the bearer token and piped
+owner context from captured output. A complementary no-provider matrix requires
+honest blocked state, nonzero exit, complete terminal records, bounded input, and
+the same privacy guarantees.
+
 Existing administrative families such as `mcg task`, `mcg run plan-atomic`,
 `mcg provider`, `mcg schedule`, and `mcg doctor` remain available. A quoted bare
 goal avoids ambiguity when its first word is also an administrative command.
+
+`mcg organization` also exposes the complete portable lifecycle: `history`
+lists immutable revisions, `export` writes a bounded content-addressed secret-free
+genome, `import` creates fresh local authority, and `compare` reports semantic
+definition changes without treating UUID changes as differences. Import accepts
+`--import-id`; when omitted, the CLI prints the generated identity before making
+the request so the same identity can be reused after an uncertain response.

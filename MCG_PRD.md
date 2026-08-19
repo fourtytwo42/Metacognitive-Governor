@@ -17,6 +17,7 @@ and delivery work can evolve independently while remaining navigable.
 ## Supporting documents
 
 - [Product and engineering baseline](docs/decisions/0001-product-engineering-baseline.md)
+- [Production-readiness evidence matrix](docs/roadmap/production-readiness.md)
 - [Original PRD archive](docs/archive/MCG_PRD.original.md)
 
 The archived file preserves the initial source, including its original encoding

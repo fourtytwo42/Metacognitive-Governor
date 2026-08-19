@@ -116,6 +116,11 @@ Must support:
 - Usage accounting.
 - Model aliases.
 
+Project/task metadata binds a provider request to the same bounded project
+instructions, discovered facts, task requirements, and fresh durable memory
+used by MCG agents. The proxy returns a hash-only context receipt and must not
+retain the injected content in its usage ledger.
+
 Example aliases:
 
 ```text
@@ -128,6 +133,35 @@ mcg:local
 mcg:cheap
 mcg:ensemble
 ```
+
+`mcg:fast` must be based on locally measured successful-call latency with a
+minimum sample floor and deterministic cold-start behavior; model names or
+provider marketing are not speed evidence. `mcg:best` must disclose and use
+actual discovered/validated capability evidence rather than infer quality from a
+name. `mcg:ensemble` is a separate multi-model execution contract and must not be
+advertised by `/v1/models` until member selection, synthesis, per-member
+accounting, failure policy, tools, restart, and streaming are implemented.
+The current implementation satisfies that gate and advertises the alias, while
+its `metadata.available` value remains false until at least two distinct
+qualified physical provider/model targets are present.
+It requires two to three distinct qualified members, one bounded synthesis call,
+stable caller identities, exact governed-context reuse, durable phase/member
+checkpoints, aggregate accounting, and one final public result. Member tool calls
+are proposals only; no caller, host, or MCG tool executes before synthesis selects
+the single public continuation. Direct shadow execution is independently opt-in
+at both owner-setting and request levels and can never affect the active result.
+
+The migration-28 ensemble engine currently runs behind the unadvertised alias.
+It has durable member/synthesis/managed-tool phases, two-of-three partial-failure
+settlement, private candidate synthesis, structured-output preservation,
+proposal-only member tools, exact per-model evidence, final-only Responses/Chat
+streaming, and approval/restart recovery. Direct shadow execution now requires
+the owner setting, `metadata.mcg_shadow: true`, and stable conversation/call UUIDs;
+it preflights a distinct secondary and retains no secondary content. Managed-tool
+turns pin the shadow route and content-free result in their durable continuation,
+execute the shadow at most once across approval/restart, and add successful physical
+usage only to ledger accounting rather than the public active response. Discovery
+remains closed until exact Windows/Linux regression and packaging gates pass.
 
 ---
 
@@ -158,6 +192,19 @@ Executed by MCG's local execution plane.
 Internal cognitive/runtime operations.
 
 MCG must not accidentally hijack caller-owned tool calls.
+
+Ownership prefixes are exact and fail closed. Unqualified tools and
+`caller::*` belong to the external harness. Reserved `host::*` and `mcg::*`
+turns require caller-owned task, conversation, and call identities so approval,
+restart, and response-loss recovery can resume one durable turn rather than
+replaying inference or effects. MCG replaces reserved caller schemas with its
+own strict canonical definitions. Host operations execute only through normal
+project-confined policy, approval, lease, redaction, and audit. MCG operations
+are bounded read-only task/project/memory queries with immutable content-free
+audit. Internal reserved calls are buffered and never leak through public
+streams; only the durably settled final response is returned. Terminal duplicate
+call identities fail closed because generated content is deliberately absent
+from the privacy-preserving usage ledger.
 
 ---
 

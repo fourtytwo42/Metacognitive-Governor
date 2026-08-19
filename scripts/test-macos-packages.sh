@@ -108,7 +108,7 @@ verify_signature() {
 
 verify_payload() {
   local app="$1"
-  for file in mcg-desktop mcg-service mcg mcg-plugin-runner mcg-shadow-runner; do
+  for file in mcg-desktop mcg-service mcg mcg-plugin-runner mcg-shadow-runner mcg-updater; do
     [[ -x "$app/Contents/MacOS/$file" ]] || { echo "App bundle is missing executable $file." >&2; exit 1; }
   done
   [[ "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" == "dev.mcg.desktop" ]] || {

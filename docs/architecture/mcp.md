@@ -57,6 +57,8 @@ identity metadata on every successful tool result.
 | --- | --- |
 | `mcg_system_status` | Reads readiness, version, mode, and recovery counts. |
 | `mcg_query_project` | Lists current project models or reads one exact project UUID. |
+| `mcg_query_organization` | Lists immutable revision history, exports one bounded content-addressed genome, or compares two identity-independent revisions. |
+| `mcg_import_organization` | Imports one validated portable genome under caller-owned idempotent authority; conflicting retries fail closed. |
 | `mcg_project_context` | Assembles current target-aware context within a caller-selected, server-bounded token budget. |
 | `mcg_memory_search` | Searches current provenance-bearing claims by project, optional namespace, freshness, and bounded result count. |
 | `mcg_query_task` | Reads one task with cursor-bounded authoritative events, offset-bounded governed-tool audit, and its consumer run when present. |
@@ -69,6 +71,10 @@ identity metadata on every successful tool result.
 | `mcg_cancel_task` | Atomically cancels a nonterminal task and its consumer run while retaining evidence; exact retries replay. |
 | `mcg_record_evaluation` | Validates and records a complete immutable evaluation report; exact evaluation-id retries replay. |
 | `mcg_run_agent` | Idempotently creates an active task/running one-work-item run and executes one bounded provider/tool turn. |
+
+`mcg_query_run` accepts optional `replay: true`. The ordinary form returns the
+durable run view; replay mode returns the same deterministic digest-bearing report
+as REST, CLI, Tauri, and desktop and is observation-only.
 
 The query tools, including scheduler listing, declare read-only, idempotent,
 non-destructive, closed-world behavior. Project context does not accept
@@ -226,7 +232,8 @@ rediscovery.
 The API contract fixture proves authentication, pre-auth Origin rejection,
 mirrored-header failure, discovery, stable tool order, project lookup, bounded
 context assembly, memory search, a real provider-backed governed turn, exact-key
-replay with one result/instance, conflicting-key rejection, run querying, and
+replay with one result/instance, conflicting-key rejection, ordinary and
+deterministic run querying, and
 structured status results. A file-backed storage fixture proves atomic reservation,
 immutable request-key conflict handling, restart replay, and zero duplicate events.
 Unit fixtures cover loopback-Origin classification and encoded `Mcp-Name` handling.
@@ -271,6 +278,11 @@ of a daemon build, and it currently advertises no prompts or resources. It
 therefore deliberately does not advertise or open a `subscriptions/listen`
 stream: an empty permanent stream would provide no useful catalog-change event.
 Add that capability when a server-side tool, prompt, or resource catalog becomes
-runtime-mutable. Remaining M6 qualification is installed native MCP UAT on both
-Windows and Linux; additional SDK/client matrix entries can deepen compatibility
-evidence without weakening that release gate.
+runtime-mutable. Owner-controlled installed-package UAT now passes on both Windows
+and Linux: each packaged daemon negotiates modern MCP discovery, exposes the fixed
+typed catalog, and completes authenticated read-only status/tool-list calls through
+the adjacent production CLI/service layout. The broader provider-backed lifecycle
+and progress/cancellation matrix remains covered by the source integration fixtures
+above. Additional SDK/client matrix entries can deepen compatibility evidence; the
+remaining release work is final-candidate regression/signing rather than a missing
+native MCP transport.

@@ -145,13 +145,17 @@ import. The MCP server exposes bounded list, configure, and invoke tools; packag
 bytes remain on REST/CLI/Tauri transports so an MCP tool call cannot become a
 large-package upload channel.
 
-## Remaining integration gates
+## Qualification status
 
-Before plugin support is release-qualified, MCG still must complete native
-Windows/Linux package UAT. That UAT now executes a real digest-bound WASI module
-and requires a changed module digest to fail closed from each installed plugin
-runner. The package contract also requires the complete Wasmtime
-Apache-2.0-with-LLVM-exceptions license anywhere the runner is shipped.
+Owner-controlled native Windows and Linux package UAT now executes a real
+digest-bound WASI module and proves that a changed module digest fails closed from
+each installed plugin runner. The package contract and both installed layouts also
+verify the complete Wasmtime Apache-2.0-with-LLVM-exceptions license wherever the
+runner is shipped. Cross-platform adversarial source tests cover capability scope,
+tamper rejection, restart uncertainty, content-addressed replay, and brokered host
+operations.
 
-Until those gates pass, plugins remain an explicitly managed preview surface and
-must not be represented as release-qualified plugin support.
+Plugin support is therefore implementation- and owner-package-qualified for the
+current unsigned candidate. Public production release still inherits the product's
+global trusted signing and final matched-candidate regression gates; passing an
+unsigned owner build does not satisfy those distribution requirements.

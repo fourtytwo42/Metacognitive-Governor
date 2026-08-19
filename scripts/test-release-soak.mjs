@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 const isWindows = process.platform === "win32";
+const useWindowsCommandBroker = isWindows && process.env.MCG_SOAK_WINDOWS_COMMAND_BROKER === "1";
 const defaults = process.argv.includes("--quick")
   ? { durationSeconds: 10, taskCount: 300, concurrency: 8 }
   : { durationSeconds: 60, taskCount: 2_000, concurrency: 16 };
@@ -34,7 +35,11 @@ const daemonPath = resolve(process.env.MCG_SOAK_DAEMON || defaultDaemon);
 await access(daemonPath);
 
 const dataRoot = await mkdtemp(join(tmpdir(), "mcg-release-soak-"));
+const brokerPidPath = join(dataRoot, "broker-daemon.pid");
+const brokerStopPath = join(dataRoot, "broker-daemon.stop");
+const brokerRssPath = join(dataRoot, "broker-daemon.rss");
 let daemon;
+let daemonProcessPid;
 let daemonOutput = "";
 
 function appendOutput(chunk) {
@@ -59,7 +64,27 @@ const baseUrl = `http://127.0.0.1:${port}`;
 
 function startDaemon() {
   daemonOutput = "";
-  const child = spawn(daemonPath, [], {
+  daemonProcessPid = undefined;
+  const executable = useWindowsCommandBroker ? "powershell.exe" : daemonPath;
+  const arguments_ = useWindowsCommandBroker
+    ? [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      join(repositoryRoot, "scripts", "windows-soak-process-broker.ps1"),
+      "-FilePath",
+      daemonPath,
+      "-PidFile",
+      brokerPidPath,
+      "-StopFile",
+      brokerStopPath,
+      "-RssFile",
+      brokerRssPath,
+      "-ParentPid",
+      String(process.pid),
+    ]
+    : [];
+  const child = spawn(executable, arguments_, {
     env: {
       ...process.env,
       MCG_BIND_ADDRESS: `127.0.0.1:${port}`,
@@ -67,24 +92,61 @@ function startDaemon() {
       MCG_SHADOW_EXPERIMENTS: "0",
       RUST_LOG: "mcg=warn",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: useWindowsCommandBroker ? ["ignore", "inherit", "inherit"] : ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
-  child.stdout.on("data", appendOutput);
-  child.stderr.on("data", appendOutput);
+  child.stdout?.on("data", appendOutput);
+  child.stderr?.on("data", appendOutput);
   return child;
 }
 
 async function stopDaemon(signal = "SIGTERM") {
   const child = daemon;
   daemon = undefined;
-  if (!child || child.exitCode !== null) return;
+  daemonProcessPid = undefined;
+  if (!child) return;
+  if (child.exitCode !== null) {
+    if (useWindowsCommandBroker) {
+      await rm(brokerPidPath, { force: true });
+      await rm(brokerStopPath, { force: true });
+      await rm(brokerRssPath, { force: true });
+    }
+    return;
+  }
   const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
-  child.kill(signal);
+  if (useWindowsCommandBroker) {
+    await writeFile(brokerStopPath, "stop\n", { flag: "wx" });
+  } else {
+    child.kill(signal);
+  }
   await Promise.race([
     exited,
     new Promise((_, reject) => setTimeout(() => reject(new Error("daemon did not exit")), 10_000)),
   ]);
+  if (useWindowsCommandBroker) {
+    await rm(brokerPidPath, { force: true });
+    await rm(brokerStopPath, { force: true });
+    await rm(brokerRssPath, { force: true });
+  }
+}
+
+async function currentDaemonProcessId() {
+  if (!useWindowsCommandBroker) return daemon?.pid;
+  if (daemonProcessPid) return daemonProcessPid;
+  const startedAt = performance.now();
+  while (performance.now() - startedAt <= startupLimitMs) {
+    try {
+      const pid = Number((await readFile(brokerPidPath, "utf8")).trim());
+      if (Number.isInteger(pid) && pid > 0) {
+        daemonProcessPid = pid;
+        return pid;
+      }
+    } catch {
+      // The broker publishes the PID immediately after a successful launch.
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  throw new Error("broker did not publish a valid daemon process ID");
 }
 
 async function waitForHealth() {
@@ -125,6 +187,14 @@ async function authenticatedFetch(path, token, options = {}) {
 
 async function residentBytes(pid) {
   if (isWindows) {
+    if (useWindowsCommandBroker) {
+      try {
+        const bytes = Number((await readFile(brokerRssPath, "utf8")).trim());
+        return Number.isFinite(bytes) ? bytes : undefined;
+      } catch {
+        return undefined;
+      }
+    }
     const command = `(Get-Process -Id ${pid} -ErrorAction Stop).WorkingSet64`;
     const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -151,13 +221,14 @@ function percentile(values, fraction) {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
 }
 
+let primaryError;
 try {
   daemon = startDaemon();
   const coldStartupMs = await waitForHealth();
   const token = (await readFile(join(dataRoot, "local-auth-token"), "utf8")).trim();
   if (!token) throw new Error("daemon created an empty authentication token");
 
-  const baselineRss = await residentBytes(daemon.pid);
+  const baselineRss = await residentBytes(await currentDaemonProcessId());
   const latencies = [];
   const taskIds = new Array(taskCount);
   const eventSequences = new Array(taskCount);
@@ -200,7 +271,7 @@ try {
   while (performance.now() < soakDeadline) {
     const health = await fetch(`${baseUrl}/api/v1/system/health`, { signal: AbortSignal.timeout(2_000) });
     if (!health.ok) throw new Error(`health polling returned ${health.status}`);
-    const rss = await residentBytes(daemon.pid);
+    const rss = await residentBytes(await currentDaemonProcessId());
     if (rss !== undefined) peakRss = Math.max(peakRss || 0, rss);
     await new Promise((resolveWait) => setTimeout(resolveWait, 500));
   }
@@ -208,6 +279,7 @@ try {
   await stopDaemon("SIGKILL");
   daemon = startDaemon();
   const restartMs = await waitForHealth();
+  await currentDaemonProcessId();
   const restartedToken = (await readFile(join(dataRoot, "local-auth-token"), "utf8")).trim();
   if (restartedToken !== token) throw new Error("daemon restart unexpectedly rotated loopback authentication");
 
@@ -234,7 +306,7 @@ try {
     throw new Error("post-crash diagnostic counts do not match the admitted workload");
   }
 
-  const finalRss = await residentBytes(daemon.pid);
+  const finalRss = await residentBytes(await currentDaemonProcessId());
   peakRss = Math.max(peakRss || 0, finalRss || 0);
   const mib = 1_024 * 1_024;
   const growthBytes = baselineRss === undefined ? undefined : Math.max(0, peakRss - baselineRss);
@@ -263,7 +335,26 @@ try {
     database_integrity: integrity.severity,
     schema_compatibility: schema.severity,
   }, null, 2));
+} catch (error) {
+  primaryError = error;
+  throw error;
 } finally {
-  await stopDaemon().catch(() => {});
-  await rm(dataRoot, { recursive: true, force: true });
+  let cleanupError;
+  try {
+    await stopDaemon();
+  } catch (error) {
+    cleanupError = error;
+  }
+  try {
+    await rm(dataRoot, { recursive: true, force: true });
+  } catch (error) {
+    cleanupError ||= error;
+  }
+  if (cleanupError) {
+    if (primaryError) {
+      console.error(`[soak] cleanup also failed: ${cleanupError.message}`);
+    } else {
+      throw cleanupError;
+    }
+  }
 }

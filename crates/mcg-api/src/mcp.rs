@@ -14,19 +14,22 @@ use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, EvaluationReport, ExecutivePlanner,
     ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
-    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
-    ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
+    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
+    PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition,
+    SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
-    ExperimentId, OrganizationId, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInvocationId, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState,
-    SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId, SshOperationKind,
-    TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ExperimentId, OrganizationId, OrganizationImportId, OrganizationRevisionId, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInvocationId, ProjectId, RiskLevel, RunId,
+    ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
+    SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, SshWorkflowId, TaskBudget,
+    TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
-    SiteUpdateRequest, SshHostRegistrationRequest,
+    SiteUpdateRequest, SshHostRegistrationRequest, SshWorkflowCreateRequest,
+    SshWorkflowStepRequest,
 };
 use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
@@ -715,6 +718,51 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_annotations,
         }),
         json!({
+            "name": "mcg_query_organization",
+            "title": "Query MCG Organizations",
+            "description": "List one organization's immutable history, export one revision as a bounded content-addressed portable genome, or compare two revisions without treating local identities as semantic changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "organization_id": {"type": "string", "format": "uuid"},
+                    "revision_id": {"type": "string", "format": "uuid"},
+                    "compare_revision_id": {"type": "string", "format": "uuid"}
+                },
+                "oneOf": [
+                    {"required": ["organization_id"]},
+                    {"required": ["revision_id"]}
+                ],
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_import_organization",
+            "title": "Import an MCG Organization",
+            "description": "Idempotently import one bounded content-addressed portable genome as a fresh local organization with no inherited source authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "import_id": {"type": "string", "format": "uuid"},
+                    "portable": {
+                        "type": "object",
+                        "properties": {
+                            "schema_version": {"type": "integer", "const": 1},
+                            "source": {"type": "object"},
+                            "definition": {"type": "object"},
+                            "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                        },
+                        "required": ["schema_version", "source", "definition", "content_sha256"],
+                        "additionalProperties": false
+                    },
+                    "name": {"type": "string", "minLength": 1, "maxLength": 100}
+                },
+                "required": ["import_id", "portable"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
             "name": "mcg_query_task",
             "title": "Query an MCG Consumer Task",
             "description": "Read one durable task together with its authoritative event history, governed-tool audit, and consumer run when present.",
@@ -734,11 +782,12 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "mcg_query_run",
             "title": "Query MCG Agent Run",
-            "description": "Read the complete durable plan, authority, usage, evaluation, and turn-result view for one run UUID.",
+            "description": "Read one durable run, or deterministically replay and verify its complete retained evidence without provider or tool side effects.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "format": "uuid"}
+                    "run_id": {"type": "string", "format": "uuid"},
+                    "replay": {"type": "boolean", "default": false, "description": "Return the deterministic replay report instead of the ordinary run view."}
                 },
                 "required": ["run_id"],
                 "additionalProperties": false
@@ -1096,11 +1145,12 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "mcg_ssh_register",
             "title": "Register an MCG SSH Host",
-            "description": "Idempotently register a POSIX SSH-agent host with an owner-verified pinned known_hosts entry and fingerprint.",
+            "description": "Idempotently register a POSIX SSH-agent host with an owner-verified pinned known_hosts entry, fingerprint, and optional normalized routing capabilities.",
             "inputSchema": {"type":"object","properties":{
                 "host_id":{"type":"string","format":"uuid"},"display_name":{"type":"string"},
                 "hostname":{"type":"string"},"port":{"type":"integer","minimum":1,"maximum":65535,"default":22},
-                "username":{"type":"string"},"known_hosts_entry":{"type":"string"},"host_key_sha256":{"type":"string"}
+                "username":{"type":"string"},"known_hosts_entry":{"type":"string"},"host_key_sha256":{"type":"string"},
+                "capabilities":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":96}}
             },"required":["host_id","display_name","hostname","username","known_hosts_entry","host_key_sha256"],"additionalProperties":false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
         }),
@@ -1113,6 +1163,44 @@ fn tool_definitions() -> Vec<Value> {
                 "task_id":{"type":"string","format":"uuid"},"operation":{"type":"object"},
                 "timeout_seconds":{"type":"integer","minimum":1,"maximum":3600,"default":60}
             },"required":["host_id","operation_id","operation"],"additionalProperties":false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
+        }),
+        json!({
+            "name": "mcg_ssh_workflows",
+            "title": "Inspect MCG SSH Workflows",
+            "description": "List durable multi-host workflow graphs or inspect one workflow and its pinned step state.",
+            "inputSchema": {"type":"object","properties":{"workflow_id":{"type":"string","format":"uuid"}},"additionalProperties":false},
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_ssh_workflow_mutate",
+            "title": "Create, Run, or Cancel an MCG SSH Workflow",
+            "description": "Create one immutable dependency graph or safely run, resume, or cancel it through the durable typed SSH broker.",
+            "inputSchema": {"type":"object","properties":{
+                "action":{"type":"string","enum":["create","run","cancel"]},
+                "workflow_id":{"type":"string","format":"uuid"},
+                "display_name":{"type":"string","minLength":1,"maxLength":160},
+                "task_id":{"type":"string","format":"uuid"},
+                "steps":{"type":"array","minItems":1,"maxItems":128,"items":{
+                    "type":"object",
+                    "properties":{
+                        "id":{"type":"string","format":"uuid"},
+                        "name":{"type":"string","minLength":1,"maxLength":160},
+                        "host_id":{"type":"string","format":"uuid"},
+                        "host_revision":{"type":"integer","minimum":1},
+                        "required_capabilities":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":96}},
+                        "dependencies":{"type":"array","maxItems":64,"items":{"type":"string","format":"uuid"}},
+                        "operation":{"type":"object","properties":{"kind":{"type":"string","enum":["inspect","execute","upload","download"]}},"required":["kind"]},
+                        "timeout_seconds":{"type":"integer","minimum":1,"maximum":3600,"default":60}
+                    },
+                    "required":["id","name","operation"],
+                    "additionalProperties":false,
+                    "oneOf":[
+                        {"required":["host_id","host_revision"]},
+                        {"required":["required_capabilities"],"not":{"anyOf":[{"required":["host_id"]},{"required":["host_revision"]}]}}
+                    ]
+                }}
+            },"required":["action","workflow_id"],"additionalProperties":false},
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
         }),
         json!({
@@ -1449,6 +1537,8 @@ async fn call_tool(
             tool_success(serde_json::to_value(state.runtime.status()))
         }
         "mcg_query_project" => query_project(state, &arguments),
+        "mcg_query_organization" => query_organization(state, &arguments),
+        "mcg_import_organization" => import_organization(state, &arguments),
         "mcg_query_task" => query_task(state, &arguments),
         "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
@@ -1480,6 +1570,8 @@ async fn call_tool(
         "mcg_ssh_hosts" => ssh_hosts(state, &arguments),
         "mcg_ssh_register" => ssh_register(state, &arguments),
         "mcg_ssh_run" => ssh_run(state, &arguments).await,
+        "mcg_ssh_workflows" => ssh_workflows(state, &arguments),
+        "mcg_ssh_workflow_mutate" => ssh_workflow_mutate(state, &arguments).await,
         "mcg_plugins_list" => plugins_list(state, &arguments),
         "mcg_plugins_configure" => plugins_configure(state, &arguments),
         "mcg_plugins_invoke" => plugins_invoke(state, &arguments).await,
@@ -2434,6 +2526,7 @@ fn ssh_register(
             authentication: SshAuthentication::Agent,
             known_hosts_entry: request.known_hosts_entry,
             host_key_sha256: request.host_key_sha256,
+            capabilities: request.capabilities,
             state: SshHostState::Active,
         }) {
         Ok(mutation) => tool_success(Ok(json!(mutation))),
@@ -2465,6 +2558,88 @@ async fn ssh_run(
     {
         Ok(mutation) => tool_success(Ok(json!(mutation))),
         Err(error) => Ok(ssh_error(&error, "run")),
+    }
+}
+
+fn ssh_workflows(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SshWorkflowsArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "SSH workflow query arguments are invalid",
+        ));
+    };
+    if let Some(workflow_id) = request.workflow_id {
+        match state.runtime.ssh_workflow(workflow_id) {
+            Ok(Some(workflow)) => tool_success(Ok(json!({"workflow": workflow}))),
+            Ok(None) => Ok(tool_error(
+                "ssh_workflow_not_found",
+                "The requested SSH workflow is not known to MCG",
+            )),
+            Err(error) => Err(RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INTERNAL_ERROR,
+                error.to_string(),
+            )),
+        }
+    } else {
+        let workflows = state.runtime.ssh_workflows().map_err(|error| {
+            RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+        })?;
+        tool_success(Ok(json!({"workflows": workflows})))
+    }
+}
+
+async fn ssh_workflow_mutate(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<SshWorkflowMutateArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "SSH workflow mutation arguments are invalid",
+        ));
+    };
+    let result = match request.action.as_str() {
+        "create" if request.display_name.is_some() && request.steps.is_some() => state
+            .runtime
+            .create_ssh_workflow(&SshWorkflowCreateRequest {
+                id: request.workflow_id,
+                display_name: request.display_name.unwrap_or_default(),
+                task_id: request.task_id,
+                steps: request.steps.unwrap_or_default(),
+            }),
+        "run"
+            if request.display_name.is_none()
+                && request.task_id.is_none()
+                && request.steps.is_none() =>
+        {
+            state.runtime.run_ssh_workflow(request.workflow_id).await
+        }
+        "cancel"
+            if request.display_name.is_none()
+                && request.task_id.is_none()
+                && request.steps.is_none() =>
+        {
+            state.runtime.cancel_ssh_workflow(request.workflow_id)
+        }
+        _ => {
+            return Ok(tool_error(
+                "invalid_arguments",
+                "Create requires display_name and steps; run/cancel accept only action and workflow_id",
+            ));
+        }
+    };
+    match result {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) => Ok(ssh_error(&error, "mutate workflow")),
     }
 }
 
@@ -2751,6 +2926,8 @@ struct SshRegisterArguments {
     username: String,
     known_hosts_entry: String,
     host_key_sha256: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2763,6 +2940,26 @@ struct SshRunArguments {
     operation: SshOperationKind,
     #[serde(default = "default_ssh_timeout")]
     timeout_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshWorkflowsArguments {
+    #[serde(default)]
+    workflow_id: Option<SshWorkflowId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshWorkflowMutateArguments {
+    action: String,
+    workflow_id: SshWorkflowId,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    task_id: Option<TaskId>,
+    #[serde(default)]
+    steps: Option<Vec<SshWorkflowStepRequest>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2798,7 +2995,7 @@ fn query_run(
     state: &ApiState,
     arguments: &serde_json::Map<String, Value>,
 ) -> Result<Value, RpcFailure> {
-    require_only_keys(arguments, &["run_id"])?;
+    require_only_keys(arguments, &["run_id", "replay"])?;
     let run_id = required_string(arguments, "run_id")?
         .parse::<RunId>()
         .map_err(|_| {
@@ -2809,8 +3006,18 @@ fn query_run(
                 "run_id must be a UUID",
             )
         })?;
-    match state.runtime.agent_run_view(run_id) {
-        Ok(view) => tool_success(serde_json::to_value(view)),
+    let result = if optional_bool(arguments, "replay")?.unwrap_or(false) {
+        match state.runtime.replay_agent_run(run_id) {
+            Ok(report) => return tool_success(serde_json::to_value(report)),
+            Err(error) => Err(error),
+        }
+    } else {
+        match state.runtime.agent_run_view(run_id) {
+            Ok(view) => return tool_success(serde_json::to_value(view)),
+            Err(error) => Err(error),
+        }
+    };
+    match result {
         Err(error) if error.is_not_found() => Ok(tool_error(
             "run_not_found",
             "The requested agent run is not known to MCG",
@@ -2819,6 +3026,7 @@ fn query_run(
             "runtime_error",
             "MCG could not read the agent run",
         )),
+        Ok(()) => unreachable!("successful queries return above"),
     }
 }
 
@@ -4037,6 +4245,135 @@ fn query_project(
         }
     };
     tool_success(Ok(value))
+}
+
+fn query_organization(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(
+        arguments,
+        &["organization_id", "revision_id", "compare_revision_id"],
+    )?;
+    if let Some(organization_id) = optional_string(arguments, "organization_id")? {
+        if arguments.contains_key("revision_id") || arguments.contains_key("compare_revision_id") {
+            return Err(RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "organization_id cannot be combined with revision ids",
+            ));
+        }
+        let organization_id = OrganizationId::from_str(&organization_id).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "organization_id must be a UUID",
+            )
+        })?;
+        return match state.runtime.organization_history(organization_id) {
+            Ok(revisions) if revisions.is_empty() => Ok(tool_error(
+                "organization_not_found",
+                "The requested organization is not known to MCG",
+            )),
+            Ok(revisions) => tool_success(Ok(json!({"revisions": revisions}))),
+            Err(_) => Ok(tool_error(
+                "runtime_error",
+                "MCG could not load organization history",
+            )),
+        };
+    }
+    let revision_id = OrganizationRevisionId::from_str(required_string(arguments, "revision_id")?)
+        .map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "revision_id must be a UUID",
+            )
+        })?;
+    if let Some(compare) = optional_string(arguments, "compare_revision_id")? {
+        let compare = OrganizationRevisionId::from_str(&compare).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "compare_revision_id must be a UUID",
+            )
+        })?;
+        return match state.runtime.compare_organizations(revision_id, compare) {
+            Ok(comparison) => tool_success(serde_json::to_value(comparison)),
+            Err(error) if error.is_not_found() => Ok(tool_error(
+                "organization_not_found",
+                "One of the requested organization revisions is not known to MCG",
+            )),
+            Err(_) => Ok(tool_error(
+                "runtime_error",
+                "MCG could not compare the organization revisions",
+            )),
+        };
+    }
+    match state.runtime.export_organization(revision_id) {
+        Ok(portable) => tool_success(serde_json::to_value(portable)),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "organization_not_found",
+            "The requested organization revision is not known to MCG",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not export the organization revision",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportOrganizationArguments {
+    import_id: OrganizationImportId,
+    portable: PortableOrganizationGenome,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn import_organization(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request: ImportOrganizationArguments =
+        serde_json::from_value(Value::Object(arguments.clone())).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Organization import arguments do not match the advertised schema",
+            )
+        })?;
+    let name = request.name.as_deref().map(str::trim);
+    if name.is_some_and(|name| name.is_empty() || name.chars().count() > 100) {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "name must contain 1-100 characters",
+        ));
+    }
+    match state
+        .runtime
+        .import_organization(request.import_id, &request.portable, name)
+    {
+        Ok(mutation) => tool_success(serde_json::to_value(mutation)),
+        Err(error) if error.is_conflict() => Ok(tool_error(
+            "import_conflict",
+            "import_id was already bound to different organization content",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_portable_organization",
+            "The portable organization failed bounded validation",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not import the organization",
+        )),
+    }
 }
 
 fn project_context(

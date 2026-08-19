@@ -13,7 +13,7 @@ if (-not $targetTriple) {
 }
 
 if (-not $SkipBuild) {
-    $cargoArguments = @("build", "-p", "mcg-cli", "-p", "mcg-plugin-runner")
+    $cargoArguments = @("build", "-p", "mcg-cli", "-p", "mcg-plugin-runner", "-p", "mcg-updater")
     $existingDebugDaemon = Join-Path $repositoryRoot "target/debug/mcg-daemon.exe"
     if ($Profile -eq "release" -or -not (Test-Path -LiteralPath $existingDebugDaemon -PathType Leaf)) {
         $cargoArguments += @("-p", "mcg-daemon")
@@ -60,6 +60,7 @@ $sidecars = @{
     "mcg-daemon" = "mcg-service"
     "mcg-plugin-runner" = "mcg-plugin-runner"
     "mcg-shadow-runner" = "mcg-shadow-runner"
+    "mcg-updater" = "mcg-updater"
 }
 foreach ($binary in $sidecars.Keys) {
     $source = Join-Path $sourceDirectory "$binary.exe"

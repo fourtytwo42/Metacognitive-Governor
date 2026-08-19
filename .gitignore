@@ -35,3 +35,9 @@ Thumbs.db
 /.mcg/
 /.local-test/
 /artifacts/
+
+# Local qualification workspaces, evidence, and transfer bundles
+/tmp/
+/qualification-evidence/
+/*.tar.gz
+/*.zip

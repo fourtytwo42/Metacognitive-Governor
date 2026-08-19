@@ -11,6 +11,26 @@ export interface LocalServiceStatus {
   detail: string;
 }
 
+export interface UpdateConfiguration {
+  schema_version: number;
+  configured: boolean;
+  current_version: string;
+  trusted_origin: string | null;
+  detail: string;
+  recovery_notice: string | null;
+}
+
+export interface UpdateCheck {
+  schema_version: number;
+  configured: boolean;
+  current_version: string;
+  available_version: string | null;
+  notes: string | null;
+  published_at: string | null;
+  target: string | null;
+  detail: string;
+}
+
 export type DiagnosticSeverity = "pass" | "warning" | "error";
 
 export interface DiagnosticCheck {
@@ -41,6 +61,9 @@ export interface DiagnosticReport {
     mcp_tools: number;
     schedules: number;
     pending_approvals: number;
+    provider_dispatch_started: number;
+    provider_dispatch_completed: number;
+    provider_dispatch_failed: number;
   };
 }
 
@@ -77,6 +100,19 @@ export interface BackupBundleEntry {
   sha256: string;
 }
 
+export interface BackupSecretEncryptionMetadata {
+  schema_version: number;
+  entry_path: string;
+  algorithm: string;
+  kdf: string;
+  argon2_version: number;
+  memory_kib: number;
+  iterations: number;
+  parallelism: number;
+  salt_base64: string;
+  nonce_base64: string;
+}
+
 export interface BackupSummary {
   backup_id: string;
   file_name: string;
@@ -87,6 +123,7 @@ export interface BackupSummary {
     application_version: string;
     created_at: string;
     secrets_included: boolean;
+    secret_encryption?: BackupSecretEncryptionMetadata;
     entries: BackupBundleEntry[];
   };
 }
@@ -337,6 +374,96 @@ export interface ExperimentDefinition {
   updated_at: string;
 }
 
+export interface OrganizationGenome {
+  schema_version: number;
+  organization_id: string;
+  revision_id: string;
+  revision: number;
+  parent_revision_id?: string;
+  inherited_from_revision_id?: string;
+  name: string;
+  roles: Array<{
+    id: string;
+    kind: string;
+    name: string;
+    purpose: string;
+    tool_capabilities: string[];
+  }>;
+  relationships: Array<{ from: string; to: string; kind: string }>;
+  policy: {
+    prefer_minimal_organization: boolean;
+    max_parallel_agents: number;
+    max_total_agents: number;
+    max_organizational_overhead_ratio: number;
+    default_lease_seconds: number;
+  };
+  evaluation: {
+    require_independent_evaluation: boolean;
+    require_objective_evidence: boolean;
+    minimum_confidence: number;
+    calibration_window: number;
+  };
+  created_at: string;
+}
+
+export interface OrganizationListResponse { organizations: OrganizationGenome[] }
+export interface OrganizationHistoryResponse { revisions: OrganizationGenome[] }
+export interface OrganizationMutationResponse {
+  organization: OrganizationGenome;
+  event: { sequence: number; kind: string; occurred_at: string; payload?: Record<string, unknown> };
+}
+
+export interface PortableOrganizationGenome {
+  schema_version: number;
+  source: {
+    organization_id: string;
+    revision_id: string;
+    revision: number;
+    exported_at: string;
+  };
+  definition: {
+    name: string;
+    roles: Array<{
+      key: string;
+      kind: string;
+      name: string;
+      purpose: string;
+      prompt_policy: string;
+      model_policy: {
+        capability_class: string;
+        preferred_models: string[];
+        allow_fallback: boolean;
+        max_escalation_tier: number;
+      };
+      tool_capabilities: string[];
+      memory_namespace: string;
+    }>;
+    relationships: Array<{ from: string; to: string; kind: string }>;
+    policy: OrganizationGenome["policy"];
+    evaluation: OrganizationGenome["evaluation"];
+  };
+  content_sha256: string;
+}
+
+export interface PortableOrganizationImportMutation {
+  organization: OrganizationGenome;
+  portable_sha256: string;
+  replayed: boolean;
+  event?: { sequence: number; kind: string; occurred_at: string; payload?: Record<string, unknown> };
+}
+
+export interface PortableOrganizationComparison {
+  equivalent: boolean;
+  left_sha256: string;
+  right_sha256: string;
+  sections_changed: Array<"name" | "policy" | "evaluation">;
+  roles_added: string[];
+  roles_removed: string[];
+  roles_changed: string[];
+  relationships_added: string[];
+  relationships_removed: string[];
+}
+
 export interface SupervisionObservationListResponse { observations: SupervisionObservation[] }
 export interface ExperimentListResponse { experiments: ExperimentDefinition[] }
 export interface ShadowExecutionListResponse { receipts: Array<Record<string, unknown>> }
@@ -383,15 +510,33 @@ export interface CreateTaskRequest {
 }
 
 export interface ProjectModel {
+  schema_version: number;
   id: string;
   project_id: string;
   root: string;
+  fingerprint: string;
   observed_at: string;
-  repository: { is_git: boolean; branch?: string; dirty: boolean };
+  repository: { is_git: boolean; branch?: string; head?: string; dirty: boolean; recent_commits: Array<{ id: string; summary: string }> };
   languages: string[];
   build_systems: string[];
   test_systems: string[];
+  package_managers: string[];
+  services: string[];
+  ci_systems: string[];
+  important_directories: string[];
+  commands: Array<{ name: string; command: string; source: string; confidence_basis: string }>;
   instructions: { conflicts: unknown[] };
+  existing_memory?: string;
+  world: {
+    nodes: Array<{
+      id: string;
+      kind: "service" | "database" | "domain" | "api" | "deployment" | "dependency" | "repository" | "runtime" | "command";
+      label: string;
+      source: string;
+    }>;
+    relationships: Array<{ from: string; relation: string; to: string; source: string }>;
+  };
+  watched_inputs: Record<string, string>;
 }
 
 export interface ProjectMutation {
@@ -401,6 +546,43 @@ export interface ProjectMutation {
 export interface ProjectListResponse {
   projects: ProjectModel[];
 }
+
+export type MemoryState = "new" | "working" | "durable" | "decaying" | "superseded" | "retracted";
+export type MemoryLifecycleAction = "reinforce" | "decay" | "retract";
+
+export interface ClaimProvenance {
+  source_kind: "user" | "file" | "tool_observation" | "provider_observation" | "derived" | "imported";
+  source: string;
+  task_id?: string;
+  artifact_sha256?: string;
+}
+
+export interface MemoryClaim {
+  schema_version: number;
+  id: string;
+  project_id: string;
+  namespace: string;
+  key: string;
+  value: unknown;
+  state: MemoryState;
+  confidence: number;
+  provenance: ClaimProvenance;
+  observed_at: string;
+  fresh_until?: string;
+  supersedes?: string;
+  correction_count: number;
+  usefulness_count: number;
+}
+
+export interface MemoryClaimMutation {
+  claim: MemoryClaim;
+  previous?: MemoryClaim;
+  event: { sequence: number; kind: string; occurred_at: string };
+}
+
+export interface MemoryClaimListResponse { claims: MemoryClaim[]; }
+export interface MemoryClaimHistoryResponse { claims: MemoryClaim[]; }
+export interface ManagedMemoryResponse { markdown: string; }
 
 export interface TaskListResponse {
   tasks: TaskEnvelope[];
@@ -535,15 +717,23 @@ export type SshOperationKind =
   | { kind: "execute"; executable: string; arguments: string[]; working_directory?: string }
   | { kind: "upload"; local_path: string; remote_path: string; overwrite: boolean; expected_sha256: string }
   | { kind: "download"; remote_path: string; local_path: string; overwrite: boolean; expected_sha256?: string };
-export interface SshHost { id: string; revision: number; definition_hash: string; display_name: string; hostname: string; port: number; username: string; known_hosts_entry: string; host_key_sha256: string; state: SshHostState; created_at: string; updated_at: string; }
+export interface SshHost { id: string; revision: number; definition_hash: string; display_name: string; hostname: string; port: number; username: string; known_hosts_entry: string; host_key_sha256: string; capabilities: string[]; state: SshHostState; created_at: string; updated_at: string; }
 export interface SshOperation { id: string; host_id: string; host_revision: number; state: "executing" | "succeeded" | "failed" | "uncertain"; kind: SshOperationKind; detail: string; exit_code?: number; artifact_sha256: string[]; created_at: string; updated_at: string; }
-export interface CreateSshHostRequest { host_id: string; display_name: string; hostname: string; port: number; username: string; platform: "posix"; authentication: "agent"; known_hosts_entry: string; host_key_sha256: string; state: SshHostState; }
+export interface CreateSshHostRequest { host_id: string; display_name: string; hostname: string; port: number; username: string; platform: "posix"; authentication: "agent"; known_hosts_entry: string; host_key_sha256: string; capabilities: string[]; state: SshHostState; }
 export interface UpdateSshHostRequest extends Omit<CreateSshHostRequest, "host_id"> { expected_revision: number; reason: string; }
 export interface RunSshOperationRequest { operation_id: string; task_id?: string; operation: SshOperationKind; timeout_seconds: number; }
 export interface SshHostListResponse { hosts: SshHost[]; }
 export interface SshOperationListResponse { operations: SshOperation[]; }
 export interface SshHostMutation { host: SshHost; replayed: boolean; }
 export interface SshOperationMutation { operation: SshOperation; replayed: boolean; }
+export type SshWorkflowState = "planned" | "running" | "waiting" | "succeeded" | "failed" | "uncertain" | "cancelled";
+export type SshWorkflowStepState = "pending" | "succeeded" | "failed" | "uncertain" | "skipped";
+export interface SshWorkflowStepRequest { id: string; name: string; host_id?: string; host_revision?: number; required_capabilities: string[]; dependencies: string[]; operation: SshOperationKind; timeout_seconds: number; }
+export interface CreateSshWorkflowRequest { id: string; display_name: string; task_id?: string; steps: SshWorkflowStepRequest[]; }
+export interface SshWorkflowStep extends Omit<SshWorkflowStepRequest, "host_id" | "host_revision"> { host_id: string; host_revision: number; routed_automatically: boolean; operation_id: string; state: SshWorkflowStepState; detail: string; }
+export interface SshWorkflow { schema_version: number; id: string; definition_hash: string; display_name: string; task_id?: string; state: SshWorkflowState; steps: SshWorkflowStep[]; created_at: string; updated_at: string; }
+export interface SshWorkflowListResponse { workflows: SshWorkflow[]; }
+export interface SshWorkflowMutation { workflow: SshWorkflow; replayed: boolean; }
 
 export type PlatformCapabilityKind = "browser_automation" | "computer_use" | "native_desktop" | "ssh_client" | "sites";
 export type PlatformCapabilityAvailability = "available" | "unavailable" | "unsupported";
@@ -675,6 +865,7 @@ export interface TaskEventsResponse {
       outcome?: "passed" | "failed" | "inconclusive";
       conditions?: Array<{ passed: boolean; detail: string }>;
       evidence?: Array<{ method: string; detail: string }>;
+      run?: { id: string };
     };
   }>;
 }
@@ -721,6 +912,28 @@ export interface LaunchTaskResponse {
     state: "not_started" | "awaiting_approval" | "awaiting_evaluation" | "blocked" | "completed" | "failed";
     detail: string;
   };
+}
+
+export interface RunReplayReport {
+  schema_version: number;
+  run_id: string;
+  task_id: string;
+  organization_revision_id: string;
+  terminal: boolean;
+  side_effect_free: boolean;
+  evidence_sha256: string;
+  counts: {
+    events: number;
+    tool_audit_records: number;
+    work_items: number;
+    instances: number;
+    leases: number;
+    usage_records: number;
+    evaluations: number;
+    turn_results: number;
+  };
+  invariants: Array<{ code: string; passed: boolean; detail: string }>;
+  evidence: unknown;
 }
 
 export interface ApprovalRequest {
@@ -770,6 +983,18 @@ export function runDiagnostics(): Promise<DiagnosticReport> {
   return invoke("run_diagnostics");
 }
 
+export function getUpdateConfiguration(): Promise<UpdateConfiguration> {
+  return invoke("update_configuration");
+}
+
+export function checkForUpdate(): Promise<UpdateCheck> {
+  return invoke("check_for_update");
+}
+
+export function installUpdate(expectedVersion: string, backupId: string): Promise<void> {
+  return invoke("install_update", { expectedVersion, backupId });
+}
+
 export function getUserSettings(): Promise<UserSettings> {
   return invoke("get_user_settings");
 }
@@ -788,6 +1013,10 @@ export function listBackups(): Promise<BackupListResponse> {
 
 export function createBackup(backupId: string): Promise<BackupSummary> {
   return invoke("create_backup", { backupId });
+}
+
+export function createEncryptedBackup(backupId: string, passphrase: string): Promise<BackupSummary> {
+  return invoke("create_encrypted_backup", { backupId, passphrase });
 }
 
 export function verifyBackup(backupId: string): Promise<BackupSummary> {
@@ -887,6 +1116,10 @@ export function registerSshHost(request: CreateSshHostRequest): Promise<SshHost>
 export function updateSshHost(hostId: string, request: UpdateSshHostRequest): Promise<SshHostMutation> { return invoke("update_ssh_host", { hostId, request }); }
 export function loadSshOperations(hostId: string): Promise<SshOperationListResponse> { return invoke("ssh_operation_history", { hostId }); }
 export function runSshOperation(hostId: string, request: RunSshOperationRequest): Promise<SshOperationMutation> { return invoke("run_ssh_operation", { hostId, request }); }
+export function listSshWorkflows(): Promise<SshWorkflowListResponse> { return invoke("list_ssh_workflows"); }
+export function createSshWorkflow(request: CreateSshWorkflowRequest): Promise<SshWorkflowMutation> { return invoke("create_ssh_workflow", { request }); }
+export function runSshWorkflow(workflowId: string): Promise<SshWorkflowMutation> { return invoke("run_ssh_workflow", { workflowId }); }
+export function cancelSshWorkflow(workflowId: string): Promise<SshWorkflowMutation> { return invoke("cancel_ssh_workflow", { workflowId }); }
 
 export function loadPlatformCapabilities(): Promise<PlatformCapabilitySnapshot> {
   return invoke("platform_capabilities");
@@ -1041,6 +1274,10 @@ export function loadTaskAudit(taskId: string): Promise<ToolAuditResponse> {
   return invoke("task_tool_audit", { taskId });
 }
 
+export function replayAgentRun(runId: string): Promise<RunReplayReport> {
+  return invoke("replay_agent_run", { runId });
+}
+
 export function pickProjectDirectory(): Promise<string | null> {
   return invoke("pick_project_directory");
 }
@@ -1053,8 +1290,101 @@ export function listProjects(): Promise<ProjectListResponse> {
   return invoke("list_projects");
 }
 
+export function listProjectMemory(projectId: string): Promise<MemoryClaimListResponse> {
+  return invoke("list_project_memory", { projectId });
+}
+
+export function createProjectMemory(
+  projectId: string,
+  request: {
+    namespace: string;
+    key: string;
+    value: unknown;
+    confidence: number;
+    provenance: ClaimProvenance;
+    fresh_until?: string;
+  }
+): Promise<MemoryClaimMutation> {
+  return invoke("create_project_memory", { projectId, request });
+}
+
+export function correctProjectMemory(
+  projectId: string,
+  claimId: string,
+  request: { value: unknown; confidence: number; provenance: ClaimProvenance; fresh_until?: string }
+): Promise<MemoryClaimMutation> {
+  return invoke("correct_project_memory", { projectId, claimId, request });
+}
+
+export function transitionProjectMemory(
+  projectId: string,
+  claimId: string,
+  action: MemoryLifecycleAction
+): Promise<MemoryClaimMutation> {
+  return invoke("transition_project_memory", {
+    projectId,
+    claimId,
+    request: {
+      action,
+      provenance: { source_kind: "user", source: "Desktop owner" }
+    }
+  });
+}
+
+export function loadProjectMemoryHistory(
+  projectId: string,
+  namespace: string,
+  key: string
+): Promise<MemoryClaimHistoryResponse> {
+  return invoke("project_memory_history", { projectId, namespace, key });
+}
+
+export function loadManagedProjectMemory(projectId: string): Promise<ManagedMemoryResponse> {
+  return invoke("managed_project_memory", { projectId });
+}
+
 export function listSupervisionObservations(): Promise<SupervisionObservationListResponse> {
   return invoke("list_supervision_observations");
+}
+
+export function listOrganizations(): Promise<OrganizationListResponse> {
+  return invoke("list_organizations");
+}
+
+export function loadOrganizationHistory(organizationId: string): Promise<OrganizationHistoryResponse> {
+  return invoke("organization_history", { organizationId });
+}
+
+export function createOrganization(name?: string): Promise<OrganizationMutationResponse> {
+  return invoke("create_organization", { request: { name: name?.trim() || null } });
+}
+
+export function inheritOrganization(organizationId: string, name: string): Promise<OrganizationMutationResponse> {
+  return invoke("inherit_organization", {
+    organizationId,
+    request: { name: name.trim() }
+  });
+}
+
+export function exportOrganization(revisionId: string): Promise<PortableOrganizationGenome> {
+  return invoke("export_organization", { revisionId });
+}
+
+export function importOrganization(
+  portable: PortableOrganizationGenome,
+  importId: string,
+  name?: string
+): Promise<PortableOrganizationImportMutation> {
+  return invoke("import_organization", {
+    request: { import_id: importId, portable, name: name?.trim() || null }
+  });
+}
+
+export function compareOrganizations(
+  leftRevisionId: string,
+  rightRevisionId: string
+): Promise<PortableOrganizationComparison> {
+  return invoke("compare_organizations", { leftRevisionId, rightRevisionId });
 }
 
 export function recordSupervisionObservation(observation: SupervisionObservation): Promise<unknown> {

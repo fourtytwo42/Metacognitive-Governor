@@ -1,5 +1,31 @@
 # Third-Party Notices
 
+## Tauri updater
+
+The native desktop uses `tauri-plugin-updater` 2.10.1 and its
+`minisign-verify` dependency to download and verify owner-signed application
+updates before installation.
+
+- Upstream: <https://github.com/tauri-apps/plugins-workspace>
+- License: Apache License 2.0 OR MIT; MCG distributes it under the Apache-2.0 option.
+- Local boundary: update endpoints and public keys are compile-time release inputs;
+  unsigned builds fail closed, downgrades remain disabled, and installation requires
+  a verified portable backup plus clean daemon shutdown.
+
+The complete Apache License 2.0 text is shipped in MCG release packages.
+
+## yaml-rust2
+
+`crates/mcg-projects` uses `yaml-rust2` 0.11.1 to parse bounded Docker Compose
+and OpenAPI manifests into the provenance-bearing project world model.
+
+- Upstream: <https://github.com/Ethiraric/yaml-rust2>
+- License: MIT OR Apache License 2.0; MCG distributes it under the Apache-2.0 option.
+- Local boundary: Inputs are capped at 2 MiB, documents/services/items and the
+  resulting graph are bounded, and credential-bearing server URLs are discarded.
+
+The complete Apache License 2.0 text is shipped in MCG release packages.
+
 ## OpenAI Codex login protocol
 
 Parts of `crates/mcg-providers/src/oauth_device.rs` are adapted from the
@@ -34,6 +60,28 @@ The complete upstream license, including the LLVM exceptions appended to the
 Apache 2.0 terms, is shipped as
 `licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt` in every package that
 contains the plugin runtime.
+
+## Bubblewrap
+
+The Linux `.deb` package contains Bubblewrap 0.11.2 as the namespace boundary
+for automatic shadow command and service verification.
+
+- Upstream: <https://github.com/containers/bubblewrap>
+- Reviewed commit: `1b80120ef26a28e065e67f89bfef873f13bdd317`
+- Copyright: Alexander Larsson and Bubblewrap contributors
+- License: GNU General Public License version 2 or later
+- Local configuration: non-setuid build with SELinux support; MCG supplies a
+  path-specific AppArmor profile that strips capabilities from sandbox children.
+
+The `.deb` ships the upstream `COPYING` file and the complete corresponding
+source archive under `/usr/lib/MCG`. The AppImage does not embed Bubblewrap or
+install privileged host policy.
+
+The path-specific `metacognitive-governor-bwrap` policy is adapted from the
+AppArmor project's `bwrap-userns-restrict` extra profile.
+
+- Upstream: <https://gitlab.com/apparmor/apparmor>
+- License: GNU General Public License version 2
 
 ## ed25519-dalek and curve25519-dalek
 

@@ -22,6 +22,7 @@ use mcg_tools::{
     ToolExecutor, ToolRequest, ToolRequestKind,
 };
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use uuid::Uuid;
 
@@ -50,6 +51,12 @@ const BWRAP_MAX_OPEN_FILES: u32 = 1024;
 const BWRAP_MAX_ARGUMENTS: usize = 128;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BWRAP_MAX_COMMAND_BYTES: usize = 32 * 1024;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const NODE_TOOLCHAIN_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const NODE_TOOLCHAIN_MAX_FILES: u64 = 100_000;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const NODE_TOOLCHAIN_MAX_DEPTH: usize = 24;
 #[cfg(any(target_os = "windows", test))]
 const WSB_START_TIMEOUT_SECONDS: u64 = 180;
 #[cfg(any(target_os = "windows", test))]
@@ -90,6 +97,19 @@ pub(crate) enum ShadowCommandVerification {
     },
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeToolchain {
+    host_root: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShadowServiceProbe {
+    url: String,
+    expected_status: Option<u16>,
+}
+
 /// Capability boundary for build, test, and static-analysis verification in a
 /// retained shadow workspace.
 ///
@@ -104,6 +124,16 @@ pub(crate) trait ShadowCommandVerifier: Send + Sync {
         condition: &SuccessCondition,
         artifacts: &ArtifactStore,
     ) -> ShadowCommandVerification;
+
+    async fn verify_service(
+        &self,
+        _workspace_root: &Path,
+        _service_command: &str,
+        _condition: &SuccessCondition,
+        _artifacts: &ArtifactStore,
+    ) -> ShadowCommandVerification {
+        ShadowCommandVerification::Unavailable
+    }
 }
 
 /// Selects a backend only after its immutable executable boundary passes local
@@ -164,6 +194,22 @@ impl ShadowCommandVerifier for LinuxBubblewrapVerifier {
             Err(_) => ShadowCommandVerification::Unavailable,
         }
     }
+
+    async fn verify_service(
+        &self,
+        workspace_root: &Path,
+        service_command: &str,
+        condition: &SuccessCondition,
+        artifacts: &ArtifactStore,
+    ) -> ShadowCommandVerification {
+        match self
+            .verify_service_inner(workspace_root, service_command, condition, artifacts)
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => ShadowCommandVerification::Unavailable,
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -181,9 +227,15 @@ impl LinuxBubblewrapVerifier {
         let command = condition_command(condition)
             .ok_or_else(|| ToolError::Invalid("shadow verifier requires a command".into()))?;
         let (executable, command_arguments) = split_command(command)?;
+        let toolchain = discover_node_toolchain(executable)?;
         let proof = EphemeralProof::create(&workspace_root)?;
-        let argv =
-            bubblewrap_arguments(&workspace_root, &proof.path, executable, &command_arguments)?;
+        let argv = bubblewrap_arguments(
+            &workspace_root,
+            &proof.path,
+            executable,
+            &command_arguments,
+            toolchain.as_ref(),
+        )?;
         let process = ProcessExecutor::new(
             [workspace_root.clone()],
             Arc::new(RejectingCredentialResolver),
@@ -221,19 +273,75 @@ impl LinuxBubblewrapVerifier {
             Err(ToolError::TimedOut) => (None, true, None, None),
             Err(error) => return Err(error),
         };
-        let transcript = ShadowCommandTranscript {
-            schema_version: SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION,
-            condition: condition.clone(),
-            exit_code,
-            timed_out,
-            stdout,
-            stderr,
+        capture_shadow_transcript(artifacts, condition, exit_code, timed_out, stdout, stderr)
+    }
+
+    async fn verify_service_inner(
+        &self,
+        workspace_root: &Path,
+        service_command: &str,
+        condition: &SuccessCondition,
+        artifacts: &ArtifactStore,
+    ) -> Result<ShadowCommandVerification, ToolError> {
+        let workspace_root = workspace_root
+            .canonicalize()
+            .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
+        verify_workspace_bounds(&workspace_root)?;
+        let probe = shadow_service_probe(condition)?;
+        if !Path::new("/usr/bin/curl").is_file() || !Path::new("/usr/bin/sleep").is_file() {
+            return Err(ToolError::Unavailable(
+                "Linux shadow service verification requires trusted system curl and sleep".into(),
+            ));
+        }
+        let (executable, command_arguments) = split_command(service_command)?;
+        let toolchain = discover_node_toolchain(executable)?;
+        let proof = EphemeralProof::create(&workspace_root)?;
+        let argv = bubblewrap_service_arguments(
+            &workspace_root,
+            &proof.path,
+            executable,
+            &command_arguments,
+            &probe,
+            toolchain.as_ref(),
+        )?;
+        let process = ProcessExecutor::new(
+            [workspace_root.clone()],
+            Arc::new(RejectingCredentialResolver),
+        )?;
+        let options = ProcessOptions {
+            executable: self.executable.to_string_lossy().into_owned(),
+            argv,
+            cwd: workspace_root.to_string_lossy().into_owned(),
+            env: Vec::new(),
+            stdin: ProcessStream::Null,
+            stdin_data: None,
+            stdout: ProcessStream::Piped,
+            stderr: ProcessStream::Piped,
         };
-        let bytes = serde_json::to_vec(&transcript)
-            .map_err(|error| ToolError::Execution(format!("serialize transcript: {error}")))?;
-        let transcript =
-            artifacts.capture(&bytes, "application/vnd.mcg.shadow-command+json;version=1")?;
-        Ok(ShadowCommandVerification::Completed { transcript })
+        let mut request = ToolRequest::new(
+            TaskId::new(),
+            "verify a service beside its HTTP probe in one Linux shadow sandbox",
+            ToolRequestKind::ProcessExec { options },
+        );
+        request.timeout_seconds = BWRAP_TIMEOUT_SECONDS;
+        let execution = process.execute(ToolExecutionId::new(), &request).await;
+        let proof_valid = fs::read(&proof.path).is_ok_and(|bytes| bytes == BWRAP_PROOF);
+        if !proof_valid {
+            return Err(ToolError::Unavailable(
+                "bubblewrap did not prove entry into the configured service sandbox".into(),
+            ));
+        }
+        let (exit_code, timed_out, stdout, stderr) = match execution {
+            Ok(outcome) => (
+                outcome.exit_code,
+                false,
+                capture_optional_output(artifacts, outcome.stdout.as_deref())?,
+                capture_optional_output(artifacts, outcome.stderr.as_deref())?,
+            ),
+            Err(ToolError::TimedOut) => (None, true, None, None),
+            Err(error) => return Err(error),
+        };
+        capture_shadow_transcript(artifacts, condition, exit_code, timed_out, stdout, stderr)
     }
 }
 
@@ -283,6 +391,23 @@ impl ShadowCommandVerifier for WindowsSandboxVerifier {
             Err(_) => ShadowCommandVerification::Unavailable,
         }
     }
+
+    async fn verify_service(
+        &self,
+        workspace_root: &Path,
+        service_command: &str,
+        condition: &SuccessCondition,
+        artifacts: &ArtifactStore,
+    ) -> ShadowCommandVerification {
+        let _lifecycle = self.lifecycle.lock().await;
+        match self
+            .verify_service_inner(workspace_root, service_command, condition, artifacts)
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => ShadowCommandVerification::Unavailable,
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -311,14 +436,18 @@ impl WindowsSandboxVerifier {
         let command = condition_command(condition)
             .ok_or_else(|| ToolError::Invalid("shadow verifier requires a command".into()))?;
         let (executable, command_arguments) = split_command(command)?;
+        let toolchain = discover_node_toolchain(executable)?;
         let executable = windows_command_name(executable);
         let harness = WindowsSandboxHarness::create(
             &workspace_root,
             &self.runner,
             &executable,
             &command_arguments,
+            toolchain.as_ref(),
+            None,
         )?;
-        let configuration = windows_sandbox_configuration(&workspace_root, &harness.path)?;
+        let configuration =
+            windows_sandbox_configuration(&workspace_root, &harness.path, toolchain.as_ref())?;
         let process = ProcessExecutor::new(
             [harness.path.clone()],
             Arc::new(RejectingCredentialResolver),
@@ -327,19 +456,42 @@ impl WindowsSandboxVerifier {
         let (exit_code, timed_out) = self
             .execute_session(&process, &harness.path, &configuration)
             .await?;
-        let transcript = ShadowCommandTranscript {
-            schema_version: SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION,
-            condition: condition.clone(),
-            exit_code,
-            timed_out,
-            stdout: None,
-            stderr: None,
-        };
-        let bytes = serde_json::to_vec(&transcript)
-            .map_err(|error| ToolError::Execution(format!("serialize transcript: {error}")))?;
-        let transcript =
-            artifacts.capture(&bytes, "application/vnd.mcg.shadow-command+json;version=1")?;
-        Ok(ShadowCommandVerification::Completed { transcript })
+        capture_shadow_transcript(artifacts, condition, exit_code, timed_out, None, None)
+    }
+
+    async fn verify_service_inner(
+        &self,
+        workspace_root: &Path,
+        service_command: &str,
+        condition: &SuccessCondition,
+        artifacts: &ArtifactStore,
+    ) -> Result<ShadowCommandVerification, ToolError> {
+        let workspace_root = workspace_root
+            .canonicalize()
+            .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
+        verify_workspace_bounds(&workspace_root)?;
+        let probe = shadow_service_probe(condition)?;
+        let (executable, command_arguments) = split_command(service_command)?;
+        let toolchain = discover_node_toolchain(executable)?;
+        let executable = windows_command_name(executable);
+        let harness = WindowsSandboxHarness::create(
+            &workspace_root,
+            &self.runner,
+            &executable,
+            &command_arguments,
+            toolchain.as_ref(),
+            Some(&probe),
+        )?;
+        let configuration =
+            windows_sandbox_configuration(&workspace_root, &harness.path, toolchain.as_ref())?;
+        let process = ProcessExecutor::new(
+            [harness.path.clone()],
+            Arc::new(RejectingCredentialResolver),
+        )?;
+        let (exit_code, timed_out) = self
+            .execute_session(&process, &harness.path, &configuration)
+            .await?;
+        capture_shadow_transcript(artifacts, condition, exit_code, timed_out, None, None)
     }
 
     async fn execute_session(
@@ -476,6 +628,18 @@ struct WindowsRunnerRequest<'a> {
     workspace_root: &'a str,
     executable: &'a str,
     argv: &'a [String],
+    toolchain_root: Option<&'a str>,
+    probe: Option<WindowsRunnerProbe<'a>>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum WindowsRunnerProbe<'a> {
+    HttpStatus {
+        url: &'a str,
+        expected_status: Option<u16>,
+    },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -490,6 +654,8 @@ impl WindowsSandboxHarness {
         runner: &Path,
         executable: &str,
         argv: &[String],
+        toolchain: Option<&NodeToolchain>,
+        probe: Option<&ShadowServiceProbe>,
     ) -> Result<Self, ToolError> {
         let parent = workspace_root
             .parent()
@@ -502,11 +668,16 @@ impl WindowsSandboxHarness {
                 ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
             })?;
             let request = WindowsRunnerRequest {
-                schema_version: 1,
+                schema_version: 3,
                 source_root: r"C:\mcg-source",
                 workspace_root: r"C:\mcg-workspace",
                 executable,
                 argv,
+                toolchain_root: toolchain.map(|_| r"C:\mcg-toolchain"),
+                probe: probe.map(|probe| WindowsRunnerProbe::HttpStatus {
+                    url: &probe.url,
+                    expected_status: probe.expected_status,
+                }),
             };
             let bytes = serde_json::to_vec(&request).map_err(|error| {
                 ToolError::Execution(format!("serialize Windows Sandbox request: {error}"))
@@ -541,11 +712,25 @@ impl Drop for WindowsSandboxHarness {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_sandbox_configuration(source: &Path, harness: &Path) -> Result<String, ToolError> {
+fn windows_sandbox_configuration(
+    source: &Path,
+    harness: &Path,
+    toolchain: Option<&NodeToolchain>,
+) -> Result<String, ToolError> {
     let source = xml_escape_path(source)?;
     let harness = xml_escape_path(harness)?;
+    let toolchain_mapping = toolchain.map_or_else(
+        || Ok(String::new()),
+        |toolchain| {
+            xml_escape_path(&toolchain.host_root).map(|root| {
+                format!(
+                    "<MappedFolder><HostFolder>{root}</HostFolder><SandboxFolder>C:\\mcg-toolchain</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>"
+                )
+            })
+        },
+    )?;
     Ok(format!(
-        "<Configuration><vGPU>Disable</vGPU><Networking>Disable</Networking><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><ClipboardRedirection>Disable</ClipboardRedirection><ProtectedClient>Enable</ProtectedClient><MemoryInMB>8192</MemoryInMB><MappedFolders><MappedFolder><HostFolder>{source}</HostFolder><SandboxFolder>C:\\mcg-source</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder><MappedFolder><HostFolder>{harness}</HostFolder><SandboxFolder>C:\\mcg-harness</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder></MappedFolders></Configuration>"
+        "<Configuration><vGPU>Disable</vGPU><Networking>Disable</Networking><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><ClipboardRedirection>Disable</ClipboardRedirection><ProtectedClient>Enable</ProtectedClient><MemoryInMB>8192</MemoryInMB><MappedFolders><MappedFolder><HostFolder>{source}</HostFolder><SandboxFolder>C:\\mcg-source</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder><MappedFolder><HostFolder>{harness}</HostFolder><SandboxFolder>C:\\mcg-harness</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>{toolchain_mapping}</MappedFolders></Configuration>"
     ))
 }
 
@@ -622,7 +807,9 @@ fn windows_sandbox_stop_arguments(session_id: &str) -> Vec<String> {
 #[cfg(any(target_os = "windows", test))]
 fn windows_command_name(executable: &str) -> String {
     match executable.to_ascii_lowercase().as_str() {
-        "npm" | "npx" | "pnpm" | "yarn" | "bun" => format!("{executable}.cmd"),
+        "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" | "corepack" => {
+            format!("{executable}.cmd")
+        }
         _ => executable.to_owned(),
     }
 }
@@ -740,7 +927,8 @@ fn condition_command(condition: &SuccessCondition) -> Option<&str> {
     match condition {
         SuccessCondition::Build { command }
         | SuccessCondition::Test { command }
-        | SuccessCondition::StaticAnalysis { command } => Some(command),
+        | SuccessCondition::StaticAnalysis { command }
+        | SuccessCondition::ConfigurationValid { command } => Some(command),
         SuccessCondition::Custom { description } => description
             .strip_prefix("COMMAND SUCCEEDS ")
             .map(str::trim)
@@ -769,12 +957,236 @@ fn split_command(command: &str) -> Result<(&str, Vec<String>), ToolError> {
     Ok((executable, arguments))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServiceProbe, ToolError> {
+    let (value, expected_status) = match condition {
+        SuccessCondition::HttpResponds { url, status } => (url, Some(*status)),
+        SuccessCondition::ServiceHealthy { endpoint } => (endpoint, None),
+        _ => {
+            return Err(ToolError::Invalid(
+                "shadow service verifier requires an HTTP or service-health condition".into(),
+            ));
+        }
+    };
+    if value.len() > 2 * 1024 || value.chars().any(char::is_control) {
+        return Err(ToolError::Invalid(
+            "shadow service URL exceeds its boundary".into(),
+        ));
+    }
+    let url = Url::parse(value)
+        .map_err(|error| ToolError::Invalid(format!("invalid shadow service URL: {error}")))?;
+    let loopback = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(host)) => host == std::net::Ipv4Addr::LOCALHOST,
+        Some(Host::Ipv6(host)) => host == std::net::Ipv6Addr::LOCALHOST,
+        None => false,
+    };
+    if url.scheme() != "http"
+        || !loopback
+        || url.port().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || expected_status.is_some_and(|status| !(100..=599).contains(&status))
+    {
+        return Err(ToolError::Denied(
+            "shadow service probes require credential-free loopback HTTP with an explicit port"
+                .into(),
+        ));
+    }
+    Ok(ShadowServiceProbe {
+        url: value.clone(),
+        expected_status,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn discover_node_toolchain(executable: &str) -> Result<Option<NodeToolchain>, ToolError> {
+    let name = Path::new(executable)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(executable)
+        .to_ascii_lowercase();
+    if !matches!(
+        name.as_str(),
+        "node" | "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" | "corepack"
+    ) {
+        return Ok(None);
+    }
+    let Some(requested_candidate) = resolve_path_executable(executable) else {
+        return Ok(None);
+    };
+    let runtime_candidate = if name == "node" {
+        requested_candidate.clone()
+    } else {
+        resolve_path_executable("node").ok_or_else(|| {
+            ToolError::Unavailable(
+                "Node package-manager command has no runtime in the same environment".into(),
+            )
+        })?
+    };
+    let runtime_candidate = runtime_candidate
+        .canonicalize()
+        .map_err(|error| ToolError::Unavailable(format!("resolve Node runtime: {error}")))?;
+    #[cfg(not(target_os = "windows"))]
+    if runtime_candidate.starts_with("/usr/bin") || runtime_candidate.starts_with("/bin") {
+        return Ok(None);
+    }
+    let toolchain = node_toolchain_from_candidate(&runtime_candidate)?;
+    let requested_candidate = requested_candidate
+        .canonicalize()
+        .map_err(|error| ToolError::Unavailable(format!("resolve Node command: {error}")))?;
+    if !requested_candidate.starts_with(&toolchain.host_root) {
+        return Err(ToolError::Denied(
+            "Node-family command resolves outside its runtime distribution".into(),
+        ));
+    }
+    Ok(Some(toolchain))
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn node_toolchain_from_candidate(candidate: &Path) -> Result<NodeToolchain, ToolError> {
+    let candidate = candidate
+        .canonicalize()
+        .map_err(|error| ToolError::Unavailable(format!("resolve Node command: {error}")))?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| ToolError::Unavailable("Node executable has no parent directory".into()))?;
+    let root = if parent.file_name().is_some_and(|value| value == "bin") {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    }
+    .canonicalize()
+    .map_err(|error| ToolError::Unavailable(format!("resolve Node toolchain: {error}")))?;
+    let node = if cfg!(target_os = "windows") {
+        root.join("node.exe")
+    } else {
+        root.join("bin/node")
+    };
+    let node_metadata = fs::symlink_metadata(&node)
+        .map_err(|error| ToolError::Unavailable(format!("inspect Node runtime: {error}")))?;
+    if metadata_is_link_or_reparse(&node_metadata) || !node_metadata.is_file() {
+        return Err(ToolError::Unavailable(
+            "Node toolchain does not contain one regular runtime executable".into(),
+        ));
+    }
+    if !candidate.starts_with(&root) {
+        return Err(ToolError::Denied(
+            "Node command resolves outside its toolchain root".into(),
+        ));
+    }
+    verify_node_toolchain_bounds(&root)?;
+    Ok(NodeToolchain { host_root: root })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn resolve_path_executable(executable: &str) -> Option<PathBuf> {
+    let path = Path::new(executable);
+    if path.components().count() > 1 {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    let path_value = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path_value) {
+        #[cfg(target_os = "windows")]
+        let names = if path.extension().is_some() {
+            vec![executable.to_owned()]
+        } else {
+            vec![
+                executable.to_owned(),
+                format!("{executable}.exe"),
+                format!("{executable}.cmd"),
+                format!("{executable}.bat"),
+            ]
+        };
+        #[cfg(not(target_os = "windows"))]
+        let names = vec![executable.to_owned()];
+        for name in names {
+            let candidate = directory.join(name);
+            if fs::symlink_metadata(&candidate)
+                .ok()
+                .is_some_and(|metadata| metadata.is_file() || metadata.file_type().is_symlink())
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn verify_node_toolchain_bounds(root: &Path) -> Result<(), ToolError> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| ToolError::Unavailable(format!("inspect Node toolchain: {error}")))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(ToolError::Denied(
+            "Node toolchain root must be a real directory".into(),
+        ));
+    }
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > NODE_TOOLCHAIN_MAX_DEPTH {
+            return Err(ToolError::Unavailable(
+                "Node toolchain exceeds the depth limit".into(),
+            ));
+        }
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| ToolError::Unavailable(format!("read Node toolchain: {error}")))?
+        {
+            let entry = entry.map_err(|error| ToolError::Unavailable(error.to_string()))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| ToolError::Unavailable(error.to_string()))?;
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path)
+                    .map_err(|error| ToolError::Unavailable(error.to_string()))?;
+                if target.is_absolute()
+                    || path
+                        .canonicalize()
+                        .ok()
+                        .is_none_or(|resolved| !resolved.starts_with(root))
+                {
+                    return Err(ToolError::Denied(
+                        "Node toolchain contains an escaping symbolic link".into(),
+                    ));
+                }
+                files = files.saturating_add(1);
+            } else if metadata_is_link_or_reparse(&metadata) {
+                return Err(ToolError::Denied(
+                    "Node toolchain contains a reparse point".into(),
+                ));
+            } else if metadata.is_dir() {
+                pending.push((path, depth.saturating_add(1)));
+            } else if metadata.is_file() {
+                files = files.saturating_add(1);
+                bytes = bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| ToolError::Unavailable("Node toolchain size overflow".into()))?;
+            } else {
+                return Err(ToolError::Denied(
+                    "Node toolchain contains a non-regular entry".into(),
+                ));
+            }
+            if files > NODE_TOOLCHAIN_MAX_FILES || bytes > NODE_TOOLCHAIN_MAX_BYTES {
+                return Err(ToolError::Unavailable(
+                    "Node toolchain exceeds its file or byte limit".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "linux", test))]
+#[allow(clippy::too_many_lines)] // Keep the complete mount, namespace, limit, and toolchain profile auditable.
 fn bubblewrap_arguments(
     workspace_root: &Path,
     proof_path: &Path,
     executable: &str,
     command_arguments: &[String],
+    toolchain: Option<&NodeToolchain>,
 ) -> Result<Vec<String>, ToolError> {
     let workspace = workspace_root
         .to_str()
@@ -782,8 +1194,14 @@ fn bubblewrap_arguments(
     let proof = proof_path
         .to_str()
         .ok_or_else(|| ToolError::Invalid("shadow proof path is not Unicode".into()))?;
+    let sandbox_path = if toolchain.is_some() {
+        "/mcg-toolchain/bin:/usr/bin:/bin"
+    } else {
+        "/usr/bin:/bin"
+    };
     let mut argv = vec![
         "--unshare-all".into(),
+        "--unshare-user".into(),
         "--disable-userns".into(),
         "--die-with-parent".into(),
         "--new-session".into(),
@@ -794,7 +1212,7 @@ fn bubblewrap_arguments(
         "--clearenv".into(),
         "--setenv".into(),
         "PATH".into(),
-        "/usr/bin:/bin".into(),
+        sandbox_path.into(),
         "--setenv".into(),
         "HOME".into(),
         "/nonexistent".into(),
@@ -841,6 +1259,19 @@ fn bubblewrap_arguments(
         BWRAP_TMPFS_BYTES.to_string(),
         "--tmpfs".into(),
         "/workspace".into(),
+    ];
+    if let Some(toolchain) = toolchain {
+        let host_root = toolchain
+            .host_root
+            .to_str()
+            .ok_or_else(|| ToolError::Invalid("Node toolchain path is not Unicode".into()))?;
+        argv.extend([
+            "--ro-bind".into(),
+            host_root.into(),
+            "/mcg-toolchain".into(),
+        ]);
+    }
+    argv.extend([
         "--bind".into(),
         proof.into(),
         "/mcg-proof".into(),
@@ -859,9 +1290,154 @@ fn bubblewrap_arguments(
         "umask 077; /bin/cp -R /source/. /workspace/ || exit 125; printf 'mcg-shadow-bwrap-v1\\n' > /mcg-proof || exit 125; cd /workspace || exit 125; exec \"$@\"".into(),
         "mcg-shadow".into(),
         executable.into(),
-    ];
+    ]);
     argv.extend(command_arguments.iter().cloned());
     Ok(argv)
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[allow(clippy::too_many_lines)] // Keep the complete same-sandbox service and probe profile auditable.
+fn bubblewrap_service_arguments(
+    workspace_root: &Path,
+    proof_path: &Path,
+    executable: &str,
+    command_arguments: &[String],
+    probe: &ShadowServiceProbe,
+    toolchain: Option<&NodeToolchain>,
+) -> Result<Vec<String>, ToolError> {
+    let workspace = workspace_root
+        .to_str()
+        .ok_or_else(|| ToolError::Invalid("shadow workspace path is not Unicode".into()))?;
+    let proof = proof_path
+        .to_str()
+        .ok_or_else(|| ToolError::Invalid("shadow proof path is not Unicode".into()))?;
+    let sandbox_path = if toolchain.is_some() {
+        "/mcg-toolchain/bin:/usr/bin:/bin"
+    } else {
+        "/usr/bin:/bin"
+    };
+    let mut argv = vec![
+        "--unshare-all".into(),
+        "--unshare-user".into(),
+        "--disable-userns".into(),
+        "--die-with-parent".into(),
+        "--new-session".into(),
+        "--cap-drop".into(),
+        "ALL".into(),
+        "--hostname".into(),
+        "mcg-shadow".into(),
+        "--clearenv".into(),
+        "--setenv".into(),
+        "PATH".into(),
+        sandbox_path.into(),
+        "--setenv".into(),
+        "HOME".into(),
+        "/nonexistent".into(),
+        "--setenv".into(),
+        "TMPDIR".into(),
+        "/tmp".into(),
+        "--ro-bind".into(),
+        "/usr".into(),
+        "/usr".into(),
+        "--ro-bind-try".into(),
+        "/bin".into(),
+        "/bin".into(),
+        "--ro-bind-try".into(),
+        "/lib".into(),
+        "/lib".into(),
+        "--ro-bind-try".into(),
+        "/lib64".into(),
+        "/lib64".into(),
+        "--dir".into(),
+        "/etc".into(),
+        "--ro-bind-try".into(),
+        "/etc/ld.so.cache".into(),
+        "/etc/ld.so.cache".into(),
+        "--ro-bind-try".into(),
+        "/etc/alternatives".into(),
+        "/etc/alternatives".into(),
+        "--ro-bind-try".into(),
+        "/etc/ssl/certs".into(),
+        "/etc/ssl/certs".into(),
+        "--proc".into(),
+        "/proc".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--tmpfs".into(),
+        "/tmp".into(),
+        "--dir".into(),
+        "/home".into(),
+        "--dir".into(),
+        "/run".into(),
+        "--ro-bind".into(),
+        workspace.into(),
+        "/source".into(),
+        "--size".into(),
+        BWRAP_TMPFS_BYTES.to_string(),
+        "--tmpfs".into(),
+        "/workspace".into(),
+    ];
+    if let Some(toolchain) = toolchain {
+        let host_root = toolchain
+            .host_root
+            .to_str()
+            .ok_or_else(|| ToolError::Invalid("Node toolchain path is not Unicode".into()))?;
+        argv.extend([
+            "--ro-bind".into(),
+            host_root.into(),
+            "/mcg-toolchain".into(),
+        ]);
+    }
+    argv.extend([
+        "--bind".into(),
+        proof.into(),
+        "/mcg-proof".into(),
+        "--chdir".into(),
+        "/workspace".into(),
+        "--".into(),
+        "/usr/bin/prlimit".into(),
+        format!("--cpu={BWRAP_TIMEOUT_SECONDS}"),
+        format!("--as={BWRAP_ADDRESS_SPACE_BYTES}"),
+        format!("--fsize={BWRAP_MAX_FILE_BYTES}"),
+        format!("--nproc={BWRAP_MAX_PROCESSES}"),
+        format!("--nofile={BWRAP_MAX_OPEN_FILES}"),
+        "--".into(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "umask 077; /bin/cp -R /source/. /workspace/ || exit 125; printf 'mcg-shadow-bwrap-v1\\n' > /mcg-proof || exit 125; cd /workspace || exit 125; probe_url=$1; expected=$2; host=$3; port=$4; shift 4; HOST=\"$host\" PORT=\"$port\" \"$@\" >/dev/null 2>/dev/null & service_pid=$!; cleanup_service() { kill -TERM \"$service_pid\" 2>/dev/null || true; wait \"$service_pid\" 2>/dev/null || true; }; trap cleanup_service EXIT INT TERM; attempt=0; while [ \"$attempt\" -lt 300 ]; do status=$(/usr/bin/curl --silent --output /dev/null --write-out '%{http_code}' --max-time 1 --max-filesize 1048576 -- \"$probe_url\") || status=''; if [ -n \"$status\" ]; then if [ \"$expected\" = 2xx ]; then case \"$status\" in 2??) exit 0;; *) exit 1;; esac; elif [ \"$status\" = \"$expected\" ]; then exit 0; else exit 1; fi; fi; kill -0 \"$service_pid\" 2>/dev/null || exit 1; attempt=$((attempt + 1)); /usr/bin/sleep 0.1; done; exit 1".into(),
+        "mcg-shadow-service".into(),
+        probe.url.clone(),
+        probe
+            .expected_status
+            .map_or_else(|| "2xx".into(), |status| status.to_string()),
+        probe_host(&probe.url)?.into(),
+        probe_port(&probe.url)?.to_string(),
+        executable.into(),
+    ]);
+    argv.extend(command_arguments.iter().cloned());
+    Ok(argv)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn probe_port(value: &str) -> Result<u16, ToolError> {
+    Url::parse(value)
+        .ok()
+        .and_then(|url| url.port())
+        .ok_or_else(|| ToolError::Invalid("shadow service URL has no explicit port".into()))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn probe_host(value: &str) -> Result<&'static str, ToolError> {
+    let url = Url::parse(value)
+        .map_err(|error| ToolError::Invalid(format!("invalid shadow service URL: {error}")))?;
+    match url.host() {
+        Some(Host::Ipv6(host)) if host == std::net::Ipv6Addr::LOCALHOST => Ok("::1"),
+        Some(Host::Domain(host)) if host.eq_ignore_ascii_case("localhost") => Ok("127.0.0.1"),
+        Some(Host::Ipv4(host)) if host == std::net::Ipv4Addr::LOCALHOST => Ok("127.0.0.1"),
+        _ => Err(ToolError::Denied(
+            "shadow service probe host is not exact loopback".into(),
+        )),
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -873,6 +1449,30 @@ fn capture_optional_output(
         .filter(|output| !output.is_empty())
         .map(|output| artifacts.capture(output.as_bytes(), "text/plain; charset=utf-8"))
         .transpose()
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn capture_shadow_transcript(
+    artifacts: &ArtifactStore,
+    condition: &SuccessCondition,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    stdout: Option<ArtifactReference>,
+    stderr: Option<ArtifactReference>,
+) -> Result<ShadowCommandVerification, ToolError> {
+    let transcript = ShadowCommandTranscript {
+        schema_version: SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION,
+        condition: condition.clone(),
+        exit_code,
+        timed_out,
+        stdout,
+        stderr,
+    };
+    let bytes = serde_json::to_vec(&transcript)
+        .map_err(|error| ToolError::Execution(format!("serialize transcript: {error}")))?;
+    let transcript =
+        artifacts.capture(&bytes, "application/vnd.mcg.shadow-command+json;version=1")?;
+    Ok(ShadowCommandVerification::Completed { transcript })
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -976,21 +1576,25 @@ impl Drop for EphemeralProof {
 fn trusted_bubblewrap_executable() -> Option<PathBuf> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
-        .into_iter()
-        .filter_map(|path| path.canonicalize().ok())
-        .find(|path| {
-            let Ok(metadata) = fs::metadata(path) else {
-                return false;
-            };
-            metadata.is_file()
-                && metadata.uid() == 0
-                && metadata.permissions().mode() & 0o6022 == 0
-                && Path::new("/usr/bin/prlimit").is_file()
-                && Path::new("/bin/sh").is_file()
-                && Path::new("/bin/cp").is_file()
-                && installed_bubblewrap_version_is_supported(path)
-        })
+    [
+        Path::new("/usr/lib/MCG/mcg-bwrap"),
+        Path::new("/usr/bin/bwrap"),
+        Path::new("/bin/bwrap"),
+    ]
+    .into_iter()
+    .filter_map(|path| path.canonicalize().ok())
+    .find(|path| {
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        metadata.is_file()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o6022 == 0
+            && Path::new("/usr/bin/prlimit").is_file()
+            && Path::new("/bin/sh").is_file()
+            && Path::new("/bin/cp").is_file()
+            && installed_bubblewrap_version_is_supported(path)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1192,11 +1796,13 @@ mod tests {
             &proof.path,
             "npm",
             &["test;touch".into(), "/outside".into()],
+            None,
         )
         .expect("profile");
         assert!(
-            argv.windows(2)
-                .any(|pair| pair == ["--unshare-all", "--disable-userns"])
+            argv.windows(3)
+                .any(|arguments| arguments
+                    == ["--unshare-all", "--unshare-user", "--disable-userns"])
         );
         assert!(
             argv.windows(2)
@@ -1214,6 +1820,97 @@ mod tests {
         );
         assert_eq!(argv[argv.len() - 3..], ["npm", "test;touch", "/outside"]);
         assert_eq!(fs::read(&proof.path).expect("empty proof"), b"");
+    }
+
+    #[test]
+    fn service_probe_and_bubblewrap_profile_are_loopback_only_and_argument_safe() {
+        let accepted = [
+            "http://127.0.0.1:43123/health",
+            "http://localhost:43123/health?ready=1",
+            "http://[::1]:43123/health",
+        ];
+        for url in accepted {
+            let probe = shadow_service_probe(&SuccessCondition::HttpResponds {
+                url: url.into(),
+                status: 204,
+            })
+            .expect("exact loopback URL");
+            assert_eq!(probe.expected_status, Some(204));
+        }
+        for url in [
+            "https://127.0.0.1:43123/health",
+            "http://127.0.0.1/health",
+            "http://127.0.0.2:43123/health",
+            "http://example.com:43123/health",
+            "http://user@127.0.0.1:43123/health",
+            "http://127.0.0.1:43123/health#fragment",
+            "http://127.0.0.1:43123/health\r\nX-Test: bad",
+        ] {
+            assert!(
+                shadow_service_probe(&SuccessCondition::ServiceHealthy {
+                    endpoint: url.into(),
+                })
+                .is_err(),
+                "unsafe URL accepted: {url:?}"
+            );
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let proof = EphemeralProof::create(workspace.path()).expect("proof");
+        let probe = ShadowServiceProbe {
+            url: "http://127.0.0.1:43123/health?value=literal;touch".into(),
+            expected_status: Some(204),
+        };
+        let argv = bubblewrap_service_arguments(
+            workspace.path(),
+            &proof.path,
+            "node",
+            &["server.js;touch".into(), "literal argument".into()],
+            &probe,
+            Some(&NodeToolchain {
+                host_root: workspace.path().to_path_buf(),
+            }),
+        )
+        .expect("service profile");
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| *argument == "--unshare-all")
+                .count(),
+            1
+        );
+        assert!(
+            argv.windows(3)
+                .any(|arguments| arguments
+                    == ["--unshare-all", "--unshare-user", "--disable-userns"])
+        );
+        assert!(!argv.iter().any(|argument| argument == "--share-net"));
+        assert!(argv.windows(2).any(|pair| pair
+            == [
+                "--ro-bind",
+                workspace.path().to_str().expect("workspace path")
+            ]));
+        assert!(argv.windows(2).any(|pair| pair
+            == [
+                "--ro-bind",
+                workspace.path().to_str().expect("toolchain path")
+            ]));
+        let shell_index = argv
+            .iter()
+            .position(|argument| argument == "mcg-shadow-service")
+            .expect("shell argument boundary");
+        assert!(!argv[shell_index - 1].contains(&probe.url));
+        assert_eq!(
+            &argv[shell_index + 1..],
+            [
+                probe.url,
+                "204".into(),
+                "127.0.0.1".into(),
+                "43123".into(),
+                "node".into(),
+                "server.js;touch".into(),
+                "literal argument".into(),
+            ]
+        );
     }
 
     #[test]
@@ -1238,6 +1935,12 @@ mod tests {
                 description: "please run npm test".into(),
             })
             .is_none()
+        );
+        assert_eq!(
+            condition_command(&SuccessCondition::ConfigurationValid {
+                command: "npm run check:config".into(),
+            }),
+            Some("npm run check:config")
         );
 
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1271,6 +1974,77 @@ mod tests {
         }
         fs::create_dir_all(&deep).expect("deep fixture");
         assert!(verify_workspace_bounds(workspace.path()).is_err());
+    }
+
+    #[test]
+    fn node_toolchain_mapping_is_read_only_bounded_and_rejects_link_escape() {
+        let root = tempfile::tempdir().expect("toolchain");
+        #[cfg(target_os = "windows")]
+        let candidate = {
+            fs::write(root.path().join("node.exe"), b"node").expect("node runtime");
+            fs::write(root.path().join("npm.cmd"), b"npm").expect("npm command");
+            root.path().join("npm.cmd")
+        };
+        #[cfg(not(target_os = "windows"))]
+        let candidate = {
+            fs::create_dir_all(root.path().join("bin")).expect("bin");
+            fs::write(root.path().join("bin/node"), b"node").expect("node runtime");
+            fs::write(root.path().join("bin/npm"), b"npm").expect("npm command");
+            root.path().join("bin/npm")
+        };
+        let toolchain = node_toolchain_from_candidate(&candidate).expect("bounded toolchain");
+        assert_eq!(
+            toolchain.host_root,
+            root.path().canonicalize().expect("root")
+        );
+        #[cfg(unix)]
+        {
+            let launchers = tempfile::tempdir().expect("launcher directory");
+            let launcher = launchers.path().join("node");
+            std::os::unix::fs::symlink(root.path().join("bin/node"), &launcher)
+                .expect("owner-local launcher symlink");
+            assert_eq!(
+                node_toolchain_from_candidate(&launcher)
+                    .expect("canonical launcher")
+                    .host_root,
+                toolchain.host_root
+            );
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let proof = EphemeralProof::create(workspace.path()).expect("proof");
+        let argv = bubblewrap_arguments(
+            workspace.path(),
+            &proof.path,
+            "npm",
+            &["test".into()],
+            Some(&toolchain),
+        )
+        .expect("Node profile");
+        assert!(argv.windows(3).any(|values| {
+            values
+                == [
+                    "--ro-bind",
+                    toolchain.host_root.to_str().expect("Unicode toolchain"),
+                    "/mcg-toolchain",
+                ]
+        }));
+        assert!(
+            argv.windows(2)
+                .any(|values| { values == ["PATH", "/mcg-toolchain/bin:/usr/bin:/bin"] })
+        );
+
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), b"secret").expect("secret");
+        let link = root.path().join("escape");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(outside.path().join("secret"), &link).is_ok();
+        #[cfg(windows)]
+        let linked =
+            std::os::windows::fs::symlink_file(outside.path().join("secret"), &link).is_ok();
+        if linked {
+            assert!(verify_node_toolchain_bounds(root.path()).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1328,7 +2102,7 @@ mod tests {
         let source = Path::new(r"C:\source & fixtures");
         let harness = Path::new(r"C:\harness <private>");
         let configuration =
-            windows_sandbox_configuration(source, harness).expect("Windows Sandbox profile");
+            windows_sandbox_configuration(source, harness, None).expect("Windows Sandbox profile");
         for setting in [
             "<vGPU>Disable</vGPU>",
             "<Networking>Disable</Networking>",
@@ -1348,6 +2122,53 @@ mod tests {
         assert!(configuration.contains(r"C:\source &amp; fixtures"));
         assert!(configuration.contains(r"C:\harness &lt;private&gt;"));
         assert!(!configuration.contains("<LogonCommand>"));
+
+        let toolchain = NodeToolchain {
+            host_root: PathBuf::from(r"C:\node & tools"),
+        };
+        let configuration = windows_sandbox_configuration(source, harness, Some(&toolchain))
+            .expect("Windows Sandbox Node profile");
+        assert_eq!(configuration.matches("<MappedFolder>").count(), 3);
+        assert_eq!(
+            configuration.matches("<ReadOnly>true</ReadOnly>").count(),
+            3
+        );
+        assert!(configuration.contains(r"C:\node &amp; tools"));
+        assert!(configuration.contains(r"C:\mcg-toolchain"));
+    }
+
+    #[test]
+    fn windows_service_request_is_schema_bound_and_probe_tagged() {
+        let parent = tempfile::tempdir().expect("parent");
+        let workspace = parent.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let runner = parent.path().join("mcg-shadow-runner.exe");
+        fs::write(&runner, b"runner fixture").expect("runner");
+        let probe = ShadowServiceProbe {
+            url: "http://127.0.0.1:43123/health".into(),
+            expected_status: Some(204),
+        };
+        let harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&probe),
+        )
+        .expect("service harness");
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(harness.path.join("request.json")).expect("request"))
+                .expect("request JSON");
+        assert_eq!(request["schema_version"], 3);
+        assert_eq!(request["source_root"], r"C:\mcg-source");
+        assert_eq!(request["workspace_root"], r"C:\mcg-workspace");
+        assert_eq!(request["executable"], "npm.cmd");
+        assert_eq!(request["argv"], serde_json::json!(["run", "start"]));
+        assert_eq!(request["toolchain_root"], serde_json::Value::Null);
+        assert_eq!(request["probe"]["kind"], "http_status");
+        assert_eq!(request["probe"]["url"], probe.url);
+        assert_eq!(request["probe"]["expected_status"], 204);
     }
 
     #[test]
@@ -1372,7 +2193,7 @@ mod tests {
     #[test]
     fn windows_sandbox_cli_uses_system_context_and_never_writable_shares() {
         let configuration =
-            windows_sandbox_configuration(Path::new(r"C:\source"), Path::new(r"C:\harness"))
+            windows_sandbox_configuration(Path::new(r"C:\source"), Path::new(r"C:\harness"), None)
                 .expect("profile");
         let start = windows_sandbox_start_arguments("session", &configuration);
         assert_eq!(
@@ -1519,6 +2340,72 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    async fn assert_windows_node_service_isolated(
+        verifier: &WindowsSandboxVerifier,
+        workspace: &Path,
+        artifacts: &ArtifactStore,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt as _;
+
+        fs::write(
+            workspace.join("server.js"),
+            r"const http = require('http');
+const host = process.env.HOST || '127.0.0.1';
+const port = Number(process.env.PORT);
+http.createServer((request, response) => {
+  response.writeHead(request.url === '/health' ? 204 : 404);
+  response.end();
+}).listen(port, host);",
+        )
+        .expect("service fixture");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("host collision listener");
+        let address = listener.local_addr().expect("host collision address");
+        let service_hits = Arc::new(AtomicUsize::new(0));
+        let fixture_hits = service_hits.clone();
+        let host_service = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                fixture_hits.fetch_add(1, Ordering::SeqCst);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+
+        for (expected_status, expected_exit_code) in [(204, 0), (201, 1)] {
+            let condition = SuccessCondition::HttpResponds {
+                url: format!("http://{address}/health"),
+                status: expected_status,
+            };
+            let ShadowCommandVerification::Completed { transcript } = verifier
+                .verify_service(workspace, "node server.js", &condition, artifacts)
+                .await
+            else {
+                panic!("same-sandbox Windows service probe must produce measured evidence");
+            };
+            let bytes = artifacts
+                .read_verified_reference(&transcript, 1024 * 1024)
+                .expect("service transcript");
+            let record: ShadowCommandTranscript =
+                serde_json::from_slice(&bytes).expect("service record");
+            assert_eq!(record.exit_code, Some(expected_exit_code));
+            assert!(!record.timed_out);
+            assert_no_windows_sandbox_sessions(verifier, workspace).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(service_hits.load(Ordering::SeqCst), 0);
+        host_service.abort();
+        eprintln!(
+            "qualified same-sandbox Windows Node service pass/fail with zero host-network hits"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
     #[tokio::test]
     #[ignore = "requires the current Microsoft Windows Sandbox package and nested virtualization"]
     async fn installed_windows_sandbox_executes_ephemerally_and_keeps_host_mappings_read_only() {
@@ -1546,6 +2433,34 @@ mod tests {
         assert_eq!(record.exit_code, Some(0));
         assert!(!record.timed_out);
         assert!(!workspace.path().join("sandbox-only.txt").exists());
+
+        if discover_node_toolchain("node")
+            .expect("inspect Node toolchain")
+            .is_some()
+        {
+            eprintln!("qualified owner-local Node mapping inside Windows Sandbox");
+            for command in ["node --version", "npm --version"] {
+                let condition = SuccessCondition::Test {
+                    command: command.into(),
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_inner(workspace.path(), &condition, &artifacts)
+                    .await
+                    .expect("mapped Node toolchain must enter Windows Sandbox")
+                else {
+                    panic!("mapped Node toolchain returned no evidence for {command}");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("Node transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("Node record");
+                assert_eq!(record.exit_code, Some(0), "mapped command: {command}");
+                assert!(!record.timed_out);
+                assert_no_windows_sandbox_sessions(&verifier, workspace.path()).await;
+            }
+            assert_windows_node_service_isolated(&verifier, workspace.path(), &artifacts).await;
+        }
 
         let host_write = encoded_powershell_condition(
             "try { Set-Content -LiteralPath 'C:\\mcg-source\\escaped.txt' -Value 'escaped' -ErrorAction Stop; exit 0 } catch { exit 9 }",
@@ -1621,6 +2536,8 @@ mod tests {
             &verifier.runner,
             "cmd.exe",
             &arguments,
+            None,
+            None,
         )
         .expect("setup-failure harness");
         fs::write(
@@ -1628,7 +2545,7 @@ mod tests {
             br#"{"schema_version":999}"#,
         )
         .expect("corrupt request");
-        let configuration = windows_sandbox_configuration(workspace.path(), &harness.path)
+        let configuration = windows_sandbox_configuration(workspace.path(), &harness.path, None)
             .expect("setup-failure profile");
         let process = ProcessExecutor::new(
             [harness.path.clone()],
@@ -1649,8 +2566,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Keep the complete live isolation gate auditable in one fixture.
     async fn installed_bubblewrap_executes_ephemerally_and_hides_host_etc() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt as _;
 
         let Some(executable) = trusted_bubblewrap_executable() else {
             return;
@@ -1691,6 +2610,113 @@ mod tests {
             .expect("escape transcript");
         let record: ShadowCommandTranscript = serde_json::from_slice(&bytes).expect("record");
         assert_ne!(record.exit_code, Some(0));
+
+        let node_toolchain = discover_node_toolchain("node").expect("inspect Node toolchain");
+        if std::env::var_os("MCG_REQUIRE_NODE_TOOLCHAIN").is_some() {
+            assert!(
+                node_toolchain.is_some(),
+                "required owner-local Node distribution was not discovered; resolved={:?}",
+                resolve_path_executable("node")
+            );
+        }
+        if node_toolchain.is_some() {
+            eprintln!("qualified owner-local Node mapping inside bubblewrap");
+            for command in ["node --version", "npm --version"] {
+                let condition = SuccessCondition::Test {
+                    command: command.into(),
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify(workspace.path(), &condition, &artifacts)
+                    .await
+                else {
+                    panic!("mapped Node toolchain must produce measured evidence for {command}");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("Node transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("Node record");
+                assert_eq!(record.exit_code, Some(0), "mapped command: {command}");
+                assert!(!record.timed_out);
+            }
+
+            if Path::new("/usr/bin/curl").is_file() && Path::new("/usr/bin/sleep").is_file() {
+                fs::write(
+                    workspace.path().join("server.js"),
+                    r"const http = require('http');
+const host = process.env.HOST || '127.0.0.1';
+const port = Number(process.env.PORT);
+http.createServer((request, response) => {
+  response.writeHead(request.url === '/health' ? 204 : 404);
+  response.end();
+}).listen(port, host);",
+                )
+                .expect("service fixture");
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("host collision listener");
+                let address = listener.local_addr().expect("host collision address");
+                let service_hits = Arc::new(AtomicUsize::new(0));
+                let fixture_hits = service_hits.clone();
+                let host_service = tokio::spawn(async move {
+                    loop {
+                        let Ok((mut stream, _)) = listener.accept().await else {
+                            break;
+                        };
+                        fixture_hits.fetch_add(1, Ordering::SeqCst);
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                            .await;
+                    }
+                });
+                let condition = SuccessCondition::HttpResponds {
+                    url: format!("http://{address}/health"),
+                    status: 204,
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(workspace.path(), "node server.js", &condition, &artifacts)
+                    .await
+                else {
+                    panic!("same-sandbox service probe must produce measured evidence");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("service transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("service record");
+                assert_eq!(record.exit_code, Some(0));
+                assert!(!record.timed_out);
+
+                let wrong_status = SuccessCondition::HttpResponds {
+                    url: format!("http://{address}/health"),
+                    status: 201,
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(
+                        workspace.path(),
+                        "node server.js",
+                        &wrong_status,
+                        &artifacts,
+                    )
+                    .await
+                else {
+                    panic!("wrong-status service probe must produce measured evidence");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("wrong-status transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("wrong-status record");
+                assert_eq!(record.exit_code, Some(1));
+                assert!(!record.timed_out);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                assert_eq!(service_hits.load(Ordering::SeqCst), 0);
+                host_service.abort();
+                eprintln!(
+                    "qualified same-sandbox Node service pass/fail with zero host-network hits"
+                );
+            }
+        }
 
         if Path::new("/usr/bin/curl").is_file() {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

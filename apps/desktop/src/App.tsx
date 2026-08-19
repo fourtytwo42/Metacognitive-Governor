@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   approveRequest,
@@ -9,7 +9,11 @@ import {
   closePlatformSession,
   checkSiteHealth,
   createBackup,
+  createEncryptedBackup,
+  createProjectMemory,
+  createOrganization,
   createSiteMonitor,
+  createSshWorkflow,
   completeOpenAiOAuth,
   configureMcpConnection,
   configureProvider,
@@ -23,39 +27,51 @@ import {
   discoverMcpConnection,
   discoverProvider,
   disconnectProvider,
+  exportOrganization,
   handoffBrowserSession,
   handoffComputerSession,
+  inheritOrganization,
+  importOrganization,
   listMcpConnections,
+  listOrganizations,
   listPlugins,
   listExperiments,
   listSupervisionObservations,
   listProviders,
   providerProxyConversations,
   providerProxyUsage,
+  replayAgentRun,
   listApprovals,
   listBackups,
   listSchedules,
   listSchedulerNotifications,
   listProjects,
+  listProjectMemory,
   listPlatformSessions,
   listSites,
   listSshHosts,
+  listSshWorkflows,
   listTasks,
   launchTask,
   loadTaskAudit,
   loadTaskEvents,
   loadExperimentEvidence,
+  loadOrganizationHistory,
   loadScheduleHistory,
   loadPlatformCapabilities,
   loadPlatformSessionHistory,
+  loadProjectMemoryHistory,
+  loadManagedProjectMemory,
   loadSiteDeployments,
   loadSiteHealth,
   loadSshOperations,
   getSiteMonitor,
   getLocalServiceStatus,
+  getUpdateConfiguration,
   getUserSettings,
   loadUserSettingsHistory,
   navigateBrowserSession,
+  compareOrganizations,
   type McpAuthMode,
   type ExperimentDefinition,
   type ExperimentState,
@@ -70,6 +86,9 @@ import {
   type InstallRegistryPluginRequest,
   openExternalUrl,
   type OAuthLoginStart,
+  type OrganizationGenome,
+  type PortableOrganizationComparison,
+  type PortableOrganizationGenome,
   type OpenAiOAuthMethod,
   type ProviderAuthMode,
   type ProviderKind,
@@ -85,7 +104,11 @@ import {
   type PersistentBrowserObservation,
   pickProjectDirectory,
   type ProjectModel,
+  type MemoryClaim,
+  type MemoryClaimHistoryResponse,
+  type MemoryLifecycleAction,
   type RiskLevel,
+  type RunReplayReport,
   type ScheduleDefinition,
   type ScheduleHistoryResponse,
   type ScheduleTrigger,
@@ -98,6 +121,8 @@ import {
   type SshHost,
   type SshOperationKind,
   type SshOperationListResponse,
+  type SshWorkflow,
+  type SshWorkflowStepRequest,
   retryTask,
   resumeTask,
   requestPlatformSession,
@@ -110,7 +135,11 @@ import {
   recordSupervisionObservation,
   registerSshHost,
   runSshOperation,
+  runSshWorkflow,
+  cancelSshWorkflow,
   runDiagnostics,
+  checkForUpdate,
+  installUpdate,
   installLocalPlugin,
   installRegistryPlugin,
   invokePlugin,
@@ -124,12 +153,16 @@ import {
   type BackupSummary,
   type DiagnosticReport,
   type LocalServiceStatus,
+  type UpdateCheck,
+  type UpdateConfiguration,
   type TaskEventsResponse,
   type ToolAuditResponse,
   type UserSettings,
   type UserSettingsRevision,
   transitionTask,
+  transitionProjectMemory,
   transitionExperiment,
+  correctProjectMemory,
   updateSite,
   updateUserSettings,
   verifyBackup,
@@ -149,6 +182,29 @@ function positiveWholeNumber(value: string, label: string): number {
   }
   return parsed;
 }
+
+function memoryValue(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("Enter a memory value.");
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
+function memoryText(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function worldNodeLabel(project: ProjectModel, id: string): string {
+  return project.world?.nodes.find((node) => node.id === id)?.label ?? id;
+}
+
+const desktopMemoryProvenance = {
+  source_kind: "user" as const,
+  source: "Desktop owner"
+};
 
 const SCHEDULE_EVENT_KINDS = [
   "task_created", "task_started", "task_state_changed", "task_completed", "task_failed",
@@ -208,12 +264,18 @@ function TaskEvidence({
   history,
   audit,
   advanced,
-  state
+  state,
+  replay,
+  replayBusy,
+  onReplay
 }: {
   history: TaskEventsResponse;
   audit: ToolAuditResponse;
   advanced: boolean;
   state: TaskEnvelope["state"];
+  replay?: RunReplayReport;
+  replayBusy: boolean;
+  onReplay?: () => void;
 }) {
   const evaluation = history.events
     .slice()
@@ -245,6 +307,18 @@ function TaskEvidence({
         <div><span>Tool runs</span><strong>{completions.length}</strong></div>
         <div><span>Artifacts</span><strong>{artifacts.length}</strong></div>
       </div>
+      {onReplay && <div className="task-actions">
+        <button className="secondary" type="button" disabled={replayBusy} onClick={onReplay}>
+          {replayBusy ? "Verifying replay..." : "Verify replay"}
+        </button>
+        {replay && <span role="status">Verified · {replay.invariants.filter((item) => item.passed).length}/{replay.invariants.length} invariants</span>}
+      </div>}
+      {replay && <div className="replay-verification" aria-label="Deterministic replay verification">
+        <strong>Durable replay verified</strong>
+        <span>{replay.side_effect_free ? "No provider or tool side effects" : "Side effects reported"}</span>
+        <code title={replay.evidence_sha256}>SHA-256 {replay.evidence_sha256}</code>
+        {advanced && <small>{replay.counts.events} events · {replay.counts.tool_audit_records} tool records · {replay.counts.evaluations} evaluations</small>}
+      </div>}
       {conditions.length > 0 && <ul className="condition-results">
         {conditions.map((condition, index) => (
           <li className={condition.passed ? "condition-pass" : "condition-fail"} key={index}>
@@ -291,6 +365,7 @@ function TaskEvidence({
 }
 
 export function App() {
+  const modeButtonRef = useRef<HTMLButtonElement>(null);
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
@@ -300,9 +375,16 @@ export function App() {
   const [backups, setBackups] = useState<BackupSummary[]>([]);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupError, setBackupError] = useState<string | null>(null);
+  const [backupPassphrase, setBackupPassphrase] = useState("");
+  const [backupConfirmation, setBackupConfirmation] = useState("");
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [updateConfiguration, setUpdateConfiguration] = useState<UpdateConfiguration | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateReview, setUpdateReview] = useState(false);
   const [login, setLogin] = useState<OAuthLoginStart | null>(null);
   const [providerStatus, setProviderStatus] = useState("Not connected");
   const [busy, setBusy] = useState(false);
@@ -352,8 +434,34 @@ export function App() {
   const [taskLaunch, setTaskLaunch] = useState<Record<string, string>>({});
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
   const [taskAudit, setTaskAudit] = useState<Record<string, ToolAuditResponse | undefined>>({});
+  const [taskRunIds, setTaskRunIds] = useState<Record<string, string | undefined>>({});
+  const [taskReplays, setTaskReplays] = useState<Record<string, RunReplayReport | undefined>>({});
+  const [replayBusyTask, setReplayBusyTask] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
+  const [memoryClaims, setMemoryClaims] = useState<MemoryClaim[]>([]);
+  const [memoryNamespace, setMemoryNamespace] = useState("project");
+  const [memoryKey, setMemoryKey] = useState("");
+  const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryConfidence, setMemoryConfidence] = useState("0.8");
+  const [memoryFreshUntil, setMemoryFreshUntil] = useState("");
+  const [memoryCorrections, setMemoryCorrections] = useState<Record<string, string>>({});
+  const [memoryHistory, setMemoryHistory] = useState<Record<string, MemoryClaimHistoryResponse | undefined>>({});
+  const [managedMemory, setManagedMemory] = useState("");
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [organizations, setOrganizations] = useState<OrganizationGenome[]>([]);
+  const [organizationName, setOrganizationName] = useState("");
+  const [organizationBaseId, setOrganizationBaseId] = useState("");
+  const [organizationBusy, setOrganizationBusy] = useState(false);
+  const [organizationError, setOrganizationError] = useState<string | null>(null);
+  const [portableOrganizationJson, setPortableOrganizationJson] = useState("");
+  const [organizationImportId, setOrganizationImportId] = useState(() => crypto.randomUUID());
+  const [organizationDuplicateIds, setOrganizationDuplicateIds] = useState<Record<string, string>>({});
+  const [organizationHistory, setOrganizationHistory] = useState<Record<string, OrganizationGenome[] | undefined>>({});
+  const [organizationCompareLeft, setOrganizationCompareLeft] = useState("");
+  const [organizationCompareRight, setOrganizationCompareRight] = useState("");
+  const [organizationComparison, setOrganizationComparison] = useState<PortableOrganizationComparison | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectErrorSurface, setProjectErrorSurface] = useState<"task" | "projects">("projects");
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -412,8 +520,14 @@ export function App() {
   const [sshUsername, setSshUsername] = useState("");
   const [sshKnownHosts, setSshKnownHosts] = useState("");
   const [sshFingerprint, setSshFingerprint] = useState("");
+  const [sshCapabilities, setSshCapabilities] = useState("");
   const [sshOperationJson, setSshOperationJson] = useState<Record<string, string>>({});
   const [sshOperations, setSshOperations] = useState<Record<string, SshOperationListResponse | undefined>>({});
+  const [sshWorkflows, setSshWorkflows] = useState<SshWorkflow[]>([]);
+  const [sshWorkflowId, setSshWorkflowId] = useState(() => crypto.randomUUID());
+  const [sshWorkflowName, setSshWorkflowName] = useState("");
+  const [sshWorkflowHosts, setSshWorkflowHosts] = useState<string[]>([]);
+  const [sshWorkflowStepsJson, setSshWorkflowStepsJson] = useState("");
   const [sshBusy, setSshBusy] = useState(false);
   const [sshError, setSshError] = useState<string | null>(null);
   const [observations, setObservations] = useState<SupervisionObservation[]>([]);
@@ -440,6 +554,13 @@ export function App() {
           version: "unknown",
           detail: errorMessage(error)
         });
+      });
+    getUpdateConfiguration()
+      .then((configuration) => {
+        if (active) setUpdateConfiguration(configuration);
+      })
+      .catch((error) => {
+        if (active) setUpdateError(errorMessage(error));
       });
     getUserSettings()
       .then((settings) => {
@@ -514,6 +635,16 @@ export function App() {
       .catch((error) => {
         if (active) setProjectError(errorMessage(error));
       });
+    listOrganizations()
+      .then((response) => {
+        if (active) {
+          setOrganizations(response.organizations);
+          setOrganizationBaseId((current) => current || response.organizations[0]?.organization_id || "");
+        }
+      })
+      .catch((error) => {
+        if (active) setOrganizationError(errorMessage(error));
+      });
     listApprovals()
       .then((response) => {
         if (active) setApprovals(response.approvals);
@@ -564,6 +695,9 @@ export function App() {
     listSshHosts()
       .then((response) => { if (active) setSshHosts(response.hosts); })
       .catch((error) => { if (active) setSshError(errorMessage(error)); });
+    listSshWorkflows()
+      .then((response) => { if (active) setSshWorkflows(response.workflows); })
+      .catch((error) => { if (active) setSshError(errorMessage(error)); });
     listSupervisionObservations()
       .then((response) => { if (active) setObservations(response.observations); })
       .catch((error) => { if (active) setExperimentError(errorMessage(error)); });
@@ -571,6 +705,31 @@ export function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    setMemoryError(null);
+    setMemoryHistory({});
+    if (!selectedProject) {
+      setMemoryClaims([]);
+      setManagedMemory("");
+      return () => { active = false; };
+    }
+    Promise.all([
+      listProjectMemory(selectedProject.project_id),
+      loadManagedProjectMemory(selectedProject.project_id)
+    ])
+      .then(([claims, managed]) => {
+        if (active) {
+          setMemoryClaims(claims.claims);
+          setManagedMemory(managed.markdown);
+        }
+      })
+      .catch((error) => {
+        if (active) setMemoryError(errorMessage(error));
+      });
+    return () => { active = false; };
+  }, [selectedProject]);
 
   async function saveUserSettings(next: UserSettings, reason: string) {
     if (!userSettings) return;
@@ -601,16 +760,24 @@ export function App() {
 
   async function toggleAdvancedMode() {
     if (!userSettings || settingsBusy) return;
+    const restoreFocus = document.activeElement === modeButtonRef.current;
     const nextAdvanced = !advanced;
     if (!nextAdvanced && scheduleKind !== "interval") {
       setScheduleKind("interval");
       setScheduleDetail("3600");
       setScheduleSecondary("30");
     }
+    if (!nextAdvanced) {
+      setBackupPassphrase("");
+      setBackupConfirmation("");
+    }
     await saveUserSettings(
       { ...userSettings, advanced_mode: nextAdvanced },
       nextAdvanced ? "Enabled advanced interface" : "Enabled simple interface"
     );
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => modeButtonRef.current?.focus());
+    }
   }
 
   async function makeBackup() {
@@ -619,6 +786,25 @@ export function App() {
     try {
       const backup = await createBackup(crypto.randomUUID());
       setBackups((current) => [...current.filter((item) => item.backup_id !== backup.backup_id), backup]);
+    } catch (error) {
+      setBackupError(errorMessage(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function makeEncryptedBackup() {
+    setBackupError(null);
+    if (backupPassphrase !== backupConfirmation) {
+      setBackupError("Encrypted backup passphrases do not match.");
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const backup = await createEncryptedBackup(crypto.randomUUID(), backupPassphrase);
+      setBackups((current) => [...current.filter((item) => item.backup_id !== backup.backup_id), backup]);
+      setBackupPassphrase("");
+      setBackupConfirmation("");
     } catch (error) {
       setBackupError(errorMessage(error));
     } finally {
@@ -648,6 +834,32 @@ export function App() {
       setDiagnosticsError(errorMessage(error));
     } finally {
       setDiagnosticsBusy(false);
+    }
+  }
+
+  async function checkUpdates() {
+    setUpdateBusy(true);
+    setUpdateError(null);
+    setUpdateReview(false);
+    try {
+      setUpdateCheck(await checkForUpdate());
+    } catch (error) {
+      setUpdateError(errorMessage(error));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function applyUpdate() {
+    if (!updateCheck?.available_version) return;
+    setUpdateBusy(true);
+    setUpdateError(null);
+    try {
+      await installUpdate(updateCheck.available_version, crypto.randomUUID());
+    } catch (error) {
+      setUpdateError(errorMessage(error));
+      setUpdateReview(false);
+      setUpdateBusy(false);
     }
   }
 
@@ -1082,6 +1294,7 @@ export function App() {
     try {
       const launched = await launchTask(taskId);
       replaceTask(launched.task);
+      setTaskRunIds((runs) => ({ ...runs, [taskId]: launched.run.run.id }));
       setTaskLaunch((statuses) => ({ ...statuses, [taskId]: launched.execution.detail }));
     } catch (error) {
       setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Launch failed." }));
@@ -1098,6 +1311,7 @@ export function App() {
     try {
       const retried = await retryTask(taskId);
       replaceTask(retried.task);
+      setTaskRunIds((runs) => ({ ...runs, [taskId]: retried.run.run.id }));
       setTaskLaunch((statuses) => ({ ...statuses, [taskId]: retried.execution.detail }));
     } catch (error) {
       setTaskLaunch((statuses) => ({ ...statuses, [taskId]: "Retry failed." }));
@@ -1115,6 +1329,7 @@ export function App() {
       await approveRequest(approvalId);
       const resumed = await resumeTask(taskId);
       replaceTask(resumed.task);
+      setTaskRunIds((runs) => ({ ...runs, [taskId]: resumed.run.run.id }));
       setApprovals((current) => current.filter((approval) => approval.id !== approvalId));
       setTaskLaunch((statuses) => ({ ...statuses, [taskId]: resumed.execution.detail }));
     } catch (error) {
@@ -1169,6 +1384,11 @@ export function App() {
       const [events, audit] = await Promise.all([loadTaskEvents(taskId), loadTaskAudit(taskId)]);
       setTaskHistory((history) => ({ ...history, [taskId]: events }));
       setTaskAudit((current) => ({ ...current, [taskId]: audit }));
+      const durableRunId = events.events
+        .slice()
+        .reverse()
+        .find((event) => event.payload?.run?.id)?.payload?.run?.id;
+      if (durableRunId) setTaskRunIds((runs) => ({ ...runs, [taskId]: durableRunId }));
     } catch (error) {
       setTaskError(errorMessage(error));
     } finally {
@@ -1176,12 +1396,129 @@ export function App() {
     }
   }
 
+  async function verifyTaskReplay(taskId: string, runId: string) {
+    setReplayBusyTask(taskId);
+    setTaskError(null);
+    try {
+      const report = await replayAgentRun(runId);
+      setTaskReplays((replays) => ({ ...replays, [taskId]: report }));
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    } finally {
+      setReplayBusyTask(null);
+    }
+  }
+
   function taskEvidence(task: TaskEnvelope) {
     const history = taskHistory[task.id];
     const audit = taskAudit[task.id];
     return history && audit
-      ? <TaskEvidence history={history} audit={audit} advanced={advanced} state={task.state} />
+      ? <TaskEvidence
+          history={history}
+          audit={audit}
+          advanced={advanced}
+          state={task.state}
+          replay={taskReplays[task.id]}
+          replayBusy={replayBusyTask === task.id}
+          onReplay={taskRunIds[task.id] ? () => verifyTaskReplay(task.id, taskRunIds[task.id]!) : undefined}
+        />
       : null;
+  }
+
+  async function refreshProjectMemory(project: ProjectModel) {
+    const [claims, managed] = await Promise.all([
+      listProjectMemory(project.project_id),
+      loadManagedProjectMemory(project.project_id)
+    ]);
+    setMemoryClaims(claims.claims);
+    setManagedMemory(managed.markdown);
+  }
+
+  async function addProjectMemory() {
+    if (!selectedProject) {
+      setMemoryError("Select a project before adding memory.");
+      return;
+    }
+    if (!memoryKey.trim()) {
+      setMemoryError("Name the fact you want MCG to remember.");
+      return;
+    }
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      const confidence = Number(memoryConfidence);
+      if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+        throw new Error("Memory confidence must be between zero and one.");
+      }
+      await createProjectMemory(selectedProject.project_id, {
+        namespace: advanced ? memoryNamespace.trim() || "project" : "project",
+        key: memoryKey.trim(),
+        value: memoryValue(memoryDraft),
+        confidence,
+        provenance: desktopMemoryProvenance,
+        fresh_until: advanced && memoryFreshUntil ? new Date(memoryFreshUntil).toISOString() : undefined
+      });
+      setMemoryKey("");
+      setMemoryDraft("");
+      setMemoryFreshUntil("");
+      await refreshProjectMemory(selectedProject);
+    } catch (error) {
+      setMemoryError(errorMessage(error));
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function correctMemory(claim: MemoryClaim) {
+    if (!selectedProject) return;
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      await correctProjectMemory(selectedProject.project_id, claim.id, {
+        value: memoryValue(memoryCorrections[claim.id] ?? JSON.stringify(claim.value)),
+        confidence: claim.confidence,
+        provenance: desktopMemoryProvenance,
+        fresh_until: claim.fresh_until
+      });
+      setMemoryCorrections((current) => ({ ...current, [claim.id]: "" }));
+      await refreshProjectMemory(selectedProject);
+    } catch (error) {
+      setMemoryError(errorMessage(error));
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function transitionMemory(claim: MemoryClaim, action: MemoryLifecycleAction) {
+    if (!selectedProject) return;
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      await transitionProjectMemory(selectedProject.project_id, claim.id, action);
+      await refreshProjectMemory(selectedProject);
+    } catch (error) {
+      setMemoryError(errorMessage(error));
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function inspectMemoryHistory(claim: MemoryClaim) {
+    if (!selectedProject) return;
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      const history = await loadProjectMemoryHistory(
+        selectedProject.project_id,
+        claim.namespace,
+        claim.key
+      );
+      setMemoryHistory((current) => ({ ...current, [claim.id]: history }));
+    } catch (error) {
+      setMemoryError(errorMessage(error));
+    } finally {
+      setMemoryBusy(false);
+    }
   }
 
   async function chooseProject(surface: "task" | "projects") {
@@ -1638,11 +1975,12 @@ export function App() {
       const host = await registerSshHost({
         host_id: sshHostId, display_name: sshName.trim(), hostname: sshHostname.trim(), port: 22,
         username: sshUsername.trim(), platform: "posix", authentication: "agent",
-        known_hosts_entry: sshKnownHosts.trim(), host_key_sha256: sshFingerprint.trim(), state: "active"
+        known_hosts_entry: sshKnownHosts.trim(), host_key_sha256: sshFingerprint.trim(),
+        capabilities: sshCapabilities.split(/[\s,]+/).map((value) => value.trim().toLowerCase()).filter(Boolean), state: "active"
       });
       setSshHosts((current) => [host, ...current.filter((item) => item.id !== host.id)]);
       setSshHostId(crypto.randomUUID()); setSshName(""); setSshHostname(""); setSshUsername("");
-      setSshKnownHosts(""); setSshFingerprint("");
+      setSshKnownHosts(""); setSshFingerprint(""); setSshCapabilities("");
     } catch (error) { setSshError(errorMessage(error)); } finally { setSshBusy(false); }
   }
 
@@ -1653,6 +1991,72 @@ export function App() {
       await runSshOperation(host.id, { operation_id: crypto.randomUUID(), operation: selected, timeout_seconds: 60 });
       const history = await loadSshOperations(host.id);
       setSshOperations((current) => ({ ...current, [host.id]: history }));
+    } catch (error) { setSshError(errorMessage(error)); } finally { setSshBusy(false); }
+  }
+
+  function toggleSshWorkflowHost(hostId: string) {
+    setSshWorkflowHosts((current) => current.includes(hostId)
+      ? current.filter((id) => id !== hostId)
+      : [...current, hostId]);
+  }
+
+  async function addSshWorkflow() {
+    if (!sshWorkflowName.trim()) {
+      setSshError("Give the workflow a name.");
+      return;
+    }
+    let steps: SshWorkflowStepRequest[];
+    try {
+      if (advanced && sshWorkflowStepsJson.trim()) {
+        steps = JSON.parse(sshWorkflowStepsJson) as SshWorkflowStepRequest[];
+      } else {
+        const selected = sshWorkflowHosts
+          .map((id) => sshHosts.find((host) => host.id === id))
+          .filter((host): host is SshHost => host !== undefined && host.state === "active");
+        if (selected.length === 0) {
+          setSshError("Select at least one active host for the workflow.");
+          return;
+        }
+        let previous: string | undefined;
+        steps = selected.map((host) => {
+          const id = crypto.randomUUID();
+          const step = {
+            id,
+            name: `Inspect ${host.display_name}`,
+            host_id: host.id,
+            host_revision: host.revision,
+            required_capabilities: [],
+            dependencies: previous ? [previous] : [],
+            operation: { kind: "inspect" } as const,
+            timeout_seconds: 60
+          };
+          previous = id;
+          return step;
+        });
+      }
+    } catch {
+      setSshError("Advanced workflow steps must be a valid JSON array.");
+      return;
+    }
+    setSshBusy(true); setSshError(null);
+    try {
+      const mutation = await createSshWorkflow({
+        id: sshWorkflowId,
+        display_name: sshWorkflowName.trim(),
+        steps
+      });
+      setSshWorkflows((current) => [mutation.workflow, ...current.filter((item) => item.id !== mutation.workflow.id)]);
+      setSshWorkflowId(crypto.randomUUID()); setSshWorkflowName(""); setSshWorkflowHosts([]); setSshWorkflowStepsJson("");
+    } catch (error) { setSshError(errorMessage(error)); } finally { setSshBusy(false); }
+  }
+
+  async function mutateSshWorkflow(workflow: SshWorkflow, action: "run" | "cancel") {
+    setSshBusy(true); setSshError(null);
+    try {
+      const mutation = action === "run"
+        ? await runSshWorkflow(workflow.id)
+        : await cancelSshWorkflow(workflow.id);
+      setSshWorkflows((current) => current.map((item) => item.id === mutation.workflow.id ? mutation.workflow : item));
     } catch (error) { setSshError(errorMessage(error)); } finally { setSshBusy(false); }
   }
 
@@ -1770,6 +2174,135 @@ export function App() {
     }
   }
 
+  async function refreshOrganizations(preferredId?: string) {
+    const response = await listOrganizations();
+    setOrganizations(response.organizations);
+    const next = preferredId
+      ?? (response.organizations.some((item) => item.organization_id === organizationBaseId)
+        ? organizationBaseId
+        : response.organizations[0]?.organization_id);
+    setOrganizationBaseId(next ?? "");
+    setOrganizationCompareLeft((current) => current || response.organizations[0]?.revision_id || "");
+    setOrganizationCompareRight((current) => current || response.organizations[1]?.revision_id || response.organizations[0]?.revision_id || "");
+  }
+
+  async function addOrganization() {
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    try {
+      const mutation = await createOrganization(organizationName);
+      setOrganizationName("");
+      await refreshOrganizations(mutation.organization.organization_id);
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
+  async function addInheritedOrganization() {
+    if (!organizationBaseId) {
+      setOrganizationError("Choose an organization to inherit from.");
+      return;
+    }
+    if (!organizationName.trim()) {
+      setOrganizationError("Enter a name for the inherited organization.");
+      return;
+    }
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    try {
+      const mutation = await inheritOrganization(organizationBaseId, organizationName);
+      setOrganizationName("");
+      await refreshOrganizations(mutation.organization.organization_id);
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
+  async function duplicateOrganization(organization: OrganizationGenome) {
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    const importId = organizationDuplicateIds[organization.organization_id] ?? crypto.randomUUID();
+    setOrganizationDuplicateIds((current) => ({ ...current, [organization.organization_id]: importId }));
+    try {
+      const portable = await exportOrganization(organization.revision_id);
+      const mutation = await importOrganization(portable, importId, `${organization.name} copy`);
+      setOrganizationDuplicateIds((current) => {
+        const next = { ...current };
+        delete next[organization.organization_id];
+        return next;
+      });
+      await refreshOrganizations(mutation.organization.organization_id);
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
+  async function showPortableOrganization(organization: OrganizationGenome) {
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    try {
+      const portable = await exportOrganization(organization.revision_id);
+      setPortableOrganizationJson(JSON.stringify(portable, null, 2));
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
+  async function applyPortableOrganization() {
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    try {
+      const portable = JSON.parse(portableOrganizationJson) as PortableOrganizationGenome;
+      const mutation = await importOrganization(portable, organizationImportId);
+      setOrganizationImportId(crypto.randomUUID());
+      await refreshOrganizations(mutation.organization.organization_id);
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
+  async function inspectOrganizationHistory(organization: OrganizationGenome) {
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    try {
+      const response = await loadOrganizationHistory(organization.organization_id);
+      setOrganizationHistory((current) => ({
+        ...current,
+        [organization.organization_id]: response.revisions
+      }));
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
+  async function compareOrganizationRevisions() {
+    if (!organizationCompareLeft || !organizationCompareRight) {
+      setOrganizationError("Choose two organization revisions to compare.");
+      return;
+    }
+    setOrganizationBusy(true);
+    setOrganizationError(null);
+    try {
+      setOrganizationComparison(await compareOrganizations(organizationCompareLeft, organizationCompareRight));
+    } catch (error) {
+      setOrganizationError(errorMessage(error));
+    } finally {
+      setOrganizationBusy(false);
+    }
+  }
+
   async function refreshExperiments() {
     if (!experimentOrganizationId.trim()) {
       setExperimentError("Enter an organization ID to load its experiments.");
@@ -1831,6 +2364,14 @@ export function App() {
     }
   }
 
+  const organizationRevisionChoices = Array.from(
+    new Map(
+      organizations
+        .flatMap((organization) => organizationHistory[organization.organization_id] ?? [organization])
+        .map((revision) => [revision.revision_id, revision])
+    ).values()
+  );
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -1853,6 +2394,7 @@ export function App() {
           <a className="nav-item" href="#settings">Settings</a>
         </nav>
         <button
+          ref={modeButtonRef}
           className="mode-button"
           type="button"
           aria-pressed={advanced}
@@ -2018,6 +2560,54 @@ export function App() {
               })}
             </div>}
             {projectError && projectErrorSurface === "projects" && <p className="error-message" role="alert">{projectError}</p>}
+            {selectedProject && <div className="project-intelligence" aria-label="Project intelligence and memory">
+              <div className="section-heading compact-heading">
+                <div>
+                  <h3>What MCG remembers</h3>
+                  <p className="muted">Important project facts stay local, versioned, and tied to their source.</p>
+                </div>
+                <span className="count-badge">{memoryClaims.length} current</span>
+              </div>
+              <div className="memory-composer">
+                {advanced && <label>Namespace<input aria-label="Memory namespace" value={memoryNamespace} onChange={(event) => setMemoryNamespace(event.target.value)} /></label>}
+                <label>Fact name<input aria-label="Memory fact name" value={memoryKey} onChange={(event) => setMemoryKey(event.target.value)} placeholder="package manager" /></label>
+                <label>What should MCG remember?<textarea aria-label="Memory value" value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} placeholder="This project uses pnpm." /></label>
+                {advanced && <label>Confidence<input aria-label="Memory confidence" type="number" min="0" max="1" step="0.05" value={memoryConfidence} onChange={(event) => setMemoryConfidence(event.target.value)} /></label>}
+                {advanced && <label>Fresh until (optional)<input aria-label="Memory fresh until" type="datetime-local" value={memoryFreshUntil} onChange={(event) => setMemoryFreshUntil(event.target.value)} /><small>After this time, MCG automatically marks the fact stale and retains its history.</small></label>}
+                <button className="primary" type="button" disabled={memoryBusy || !memoryKey.trim() || !memoryDraft.trim()} onClick={addProjectMemory}>Remember this</button>
+              </div>
+              {memoryError && <p className="error-message" role="alert">{memoryError}</p>}
+              {memoryClaims.length === 0 ? <p className="empty-state">No managed project facts yet.</p> : <div className="memory-list">
+                {memoryClaims.map((claim) => <article className="memory-card" key={claim.id}>
+                  <div>
+                    <strong>{claim.key}</strong>
+                    <span className={`task-state state-${claim.state}`}>{claim.state}</span>
+                    <p>{memoryText(claim.value)}</p>
+                    <small>{claim.namespace} · confidence {Math.round(claim.confidence * 100)}% · {claim.provenance.source}</small>
+                  </div>
+                  {advanced && <div className="memory-actions">
+                    <textarea aria-label={`Correction for ${claim.key}`} value={memoryCorrections[claim.id] ?? ""} onChange={(event) => setMemoryCorrections((current) => ({ ...current, [claim.id]: event.target.value }))} placeholder={memoryText(claim.value)} />
+                    <button className="secondary" type="button" disabled={memoryBusy || !(memoryCorrections[claim.id] ?? "").trim()} onClick={() => correctMemory(claim)}>Correct</button>
+                    {!(["superseded", "retracted"] as string[]).includes(claim.state) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "reinforce")}>Reinforce</button>}
+                    {(["new", "working"] as string[]).includes(claim.state) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "decay")}>Mark stale</button>}
+                    {!(["superseded", "retracted"] as string[]).includes(claim.state) && <button className="link-button" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "retract")}>Retract</button>}
+                    <button className="secondary" type="button" disabled={memoryBusy} onClick={() => inspectMemoryHistory(claim)}>History</button>
+                  </div>}
+                  {advanced && memoryHistory[claim.id] && <ol className="memory-history">
+                    {memoryHistory[claim.id]!.claims.map((version) => <li key={version.id}><strong>{version.state}</strong> · {new Date(version.observed_at).toLocaleString()} · {memoryText(version.value)}</li>)}
+                  </ol>}
+                </article>)}
+              </div>}
+              {advanced && <details className="advanced-details">
+                <summary>World model and managed MEMORY.md</summary>
+                <p>{selectedProject.world?.nodes.length ?? 0} nodes · {selectedProject.world?.relationships.length ?? 0} relationships · {selectedProject.commands?.length ?? 0} discovered commands</p>
+                <ul className="world-model" aria-label="Project world model">
+                  {(selectedProject.world?.nodes ?? []).map((node) => <li key={node.id}><strong>{node.kind}</strong> {node.label}<small>{node.source}</small></li>)}
+                  {(selectedProject.world?.relationships ?? []).map((edge, index) => <li key={`${edge.from}-${edge.relation}-${edge.to}-${index}`}><code>{worldNodeLabel(selectedProject, edge.from)} → {edge.relation.replaceAll("_", " ")} → {worldNodeLabel(selectedProject, edge.to)}</code><small>{edge.source}</small></li>)}
+                </ul>
+                <pre className="managed-memory">{managedMemory}</pre>
+              </details>}
+            </div>}
           </article>
 
           <article className="panel runtime-panel">
@@ -2052,9 +2642,60 @@ export function App() {
             </div>
             <span className="count-badge">{experiments.filter((item) => item.state === "running").length} running</span>
           </div>
+          <div className="scheduler-layout" aria-label="Agent organizations">
+            <div className="schedule-composer">
+              <h3>Agent organizations</h3>
+              <p className="muted">Create, duplicate, or import a safe organization before specializing it through measured experiments.</p>
+              <label>
+                New organization name
+                <input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} placeholder="Website specialists" />
+              </label>
+              <button className="secondary" type="button" disabled={organizationBusy} onClick={addOrganization}>
+                {organizationBusy ? "Saving..." : "Create default organization"}
+              </button>
+              {advanced && <div className="advanced-fields">
+                <label>
+                  Inherit current revision from
+                  <select value={organizationBaseId} onChange={(event) => setOrganizationBaseId(event.target.value)}>
+                    <option value="">Choose a base organization</option>
+                    {organizations.map((organization) => <option key={organization.organization_id} value={organization.organization_id}>{organization.name} · revision {organization.revision}</option>)}
+                  </select>
+                </label>
+                <button className="secondary" type="button" disabled={organizationBusy || !organizationBaseId || !organizationName.trim()} onClick={addInheritedOrganization}>Create inherited organization</button>
+                <small>Inheritance pins the exact base revision. Later changes to the base cannot silently alter this organization.</small>
+                <label>Portable organization JSON<textarea aria-label="Portable organization JSON" value={portableOrganizationJson} onChange={(event) => setPortableOrganizationJson(event.target.value)} placeholder="Export a revision or paste a portable MCG organization" /></label>
+                <button className="secondary" type="button" disabled={organizationBusy || !portableOrganizationJson.trim()} onClick={applyPortableOrganization}>Import as new organization</button>
+                <small>Retry identity: <code>{organizationImportId}</code>. It changes only after a confirmed import.</small>
+                <div className="inline-fields">
+                  <label>Compare from<select value={organizationCompareLeft} onChange={(event) => setOrganizationCompareLeft(event.target.value)}><option value="">Choose revision</option>{organizationRevisionChoices.map((organization) => <option key={`left-${organization.revision_id}`} value={organization.revision_id}>{organization.name} · r{organization.revision}</option>)}</select></label>
+                  <label>Compare to<select value={organizationCompareRight} onChange={(event) => setOrganizationCompareRight(event.target.value)}><option value="">Choose revision</option>{organizationRevisionChoices.map((organization) => <option key={`right-${organization.revision_id}`} value={organization.revision_id}>{organization.name} · r{organization.revision}</option>)}</select></label>
+                </div>
+                <button className="secondary" type="button" disabled={organizationBusy || !organizationCompareLeft || !organizationCompareRight} onClick={compareOrganizationRevisions}>Compare portable definitions</button>
+                {organizationComparison && <p className="muted" role="status">{organizationComparison.equivalent ? "Definitions are equivalent." : `Different: ${organizationComparison.roles_added.length + organizationComparison.roles_removed.length + organizationComparison.roles_changed.length} role changes, ${organizationComparison.relationships_added.length + organizationComparison.relationships_removed.length} relationship changes.`}</p>}
+              </div>}
+              {organizationError && <p className="error-message" role="alert">{organizationError}</p>}
+            </div>
+            <div className="schedule-list">
+              {organizations.length === 0 ? <p className="empty-state">No reusable organizations yet.</p> : organizations.map((organization) => <article className="schedule-card organization-card" key={organization.organization_id}>
+                <div className="organization-summary">
+                  <strong>{organization.name}</strong>
+                  <span>{organization.roles.length} roles · revision {organization.revision}</span>
+                  <small>{organization.inherited_from_revision_id ? "Inherited from a pinned revision" : "Root organization"}</small>
+                  {advanced && <><code>{organization.organization_id}</code><code>revision {organization.revision_id}</code>{organization.inherited_from_revision_id && <code>base {organization.inherited_from_revision_id}</code>}</>}
+                </div>
+                <div className="organization-actions">
+                  <button className="secondary" type="button" disabled={organizationBusy} onClick={() => duplicateOrganization(organization)}>Duplicate</button>
+                  {advanced && <button className="secondary" type="button" disabled={organizationBusy} onClick={() => showPortableOrganization(organization)}>Show portable JSON</button>}
+                  {advanced && <button className="secondary" type="button" disabled={organizationBusy} onClick={() => inspectOrganizationHistory(organization)}>Revision history</button>}
+                  <button className="secondary" type="button" onClick={() => setExperimentOrganizationId(organization.organization_id)}>Use for experiments</button>
+                </div>
+                {advanced && organizationHistory[organization.organization_id] && <ol className="organization-history" aria-label={`${organization.name} revision history`}>{organizationHistory[organization.organization_id]!.map((revision) => <li key={revision.revision_id}>Revision {revision.revision} · <code>{revision.revision_id}</code></li>)}</ol>}
+              </article>)}
+            </div>
+          </div>
           <div className="scheduler-layout">
             <div className="schedule-composer">
-              <label>Organization ID<input value={experimentOrganizationId} onChange={(event) => setExperimentOrganizationId(event.target.value)} placeholder="Organization UUID" /></label>
+              <label>Organization for experiments<select value={experimentOrganizationId} onChange={(event) => setExperimentOrganizationId(event.target.value)}><option value="">Choose an organization</option>{organizations.map((organization) => <option key={organization.organization_id} value={organization.organization_id}>{organization.name}</option>)}</select></label>
               <button className="primary" type="button" disabled={experimentBusy} onClick={refreshExperiments}>{experimentBusy ? "Loading..." : "Load experiments"}</button>
               <div className="evidence-overview">
                 <div><span>Observations</span><strong>{observations.length}</strong></div>
@@ -2185,6 +2826,7 @@ export function App() {
               <label>SSH username<input value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="user" /></label>
               <label>Pinned known_hosts line<textarea value={sshKnownHosts} onChange={(event) => setSshKnownHosts(event.target.value)} placeholder="host ssh-ed25519 AAAA..." /></label>
               <label>Verified host fingerprint<input value={sshFingerprint} onChange={(event) => setSshFingerprint(event.target.value)} placeholder="SHA256:..." /></label>
+              {advanced && <label>Routing capabilities<input value={sshCapabilities} onChange={(event) => setSshCapabilities(event.target.value)} placeholder="os:linux, arch:x86_64, gpu:nvidia" /></label>}
               {advanced && <code>Retry identity: {sshHostId}</code>}
               <button className="primary" type="button" disabled={sshBusy} onClick={addSshHost}>{sshBusy ? "Saving..." : "Register pinned host"}</button>
               {sshError && <p className="error-message" role="alert">{sshError}</p>}
@@ -2199,7 +2841,7 @@ export function App() {
                     <small>{host.username}@{host.hostname}:{host.port}</small>
                     {latest && <small>Last operation: {latest.kind.kind} · {latest.state}</small>}
                     {latest && latest.state !== "succeeded" && <small role="status">{latest.detail || "The SSH operation did not complete successfully."}{latest.exit_code !== undefined ? ` · exit ${latest.exit_code}` : ""}</small>}
-                    {advanced && <><code>{host.id}</code><code>revision {host.revision} · {host.host_key_sha256}</code></>}
+                    {advanced && <><code>{host.id}</code><code>revision {host.revision} · {host.host_key_sha256}</code><small>{host.capabilities.length ? `Capabilities: ${host.capabilities.join(", ")}` : "No routing capabilities declared"}</small></>}
                   </div>
                   <div className="task-actions">
                     <button className="primary" type="button" disabled={sshBusy || host.state !== "active"} onClick={() => executeSsh(host, { kind: "inspect" })}>Inspect host</button>
@@ -2214,6 +2856,47 @@ export function App() {
                   </div>}
                 </article>;
               })}
+            </div>
+          </div>
+          <div className="workflow-area" role="region" aria-label="SSH workflows">
+            <div className="section-heading compact-heading">
+              <div>
+                <p className="eyebrow">MULTI-HOST WORKFLOWS</p>
+                <h3>Coordinate remote work safely</h3>
+                <p className="muted">Select hosts in execution order. Each step is pinned to the current host revision and survives daemon restarts.</p>
+              </div>
+              <span className="count-badge">{sshWorkflows.length} retained</span>
+            </div>
+            <div className="scheduler-layout">
+              <div className="schedule-composer">
+                <label>Workflow name<input value={sshWorkflowName} onChange={(event) => setSshWorkflowName(event.target.value)} placeholder="Build, test, and inspect" /></label>
+                <fieldset>
+                  <legend>Hosts in workflow order</legend>
+                  {sshHosts.filter((host) => host.state === "active").map((host) => <label className="checkbox-row" key={host.id}>
+                    <input type="checkbox" checked={sshWorkflowHosts.includes(host.id)} onChange={() => toggleSshWorkflowHost(host.id)} />
+                    {host.display_name} <small>revision {host.revision}</small>
+                  </label>)}
+                  {sshHosts.every((host) => host.state !== "active") && <p className="empty-state">Register an active SSH host first.</p>}
+                </fieldset>
+                {advanced && <label>Advanced step graph JSON<textarea value={sshWorkflowStepsJson} onChange={(event) => setSshWorkflowStepsJson(event.target.value)} placeholder={'[{"id":"UUID","name":"GPU test","required_capabilities":["os:linux","gpu:nvidia"],"dependencies":[],"operation":{"kind":"execute","executable":"cargo","arguments":["test"]},"timeout_seconds":600}]'} /></label>}
+                {advanced && <code>Workflow retry identity: {sshWorkflowId}</code>}
+                <button className="primary" type="button" disabled={sshBusy} onClick={addSshWorkflow}>Create durable workflow</button>
+              </div>
+              <div className="schedule-list">
+                {sshWorkflows.length === 0 ? <p className="empty-state">No multi-host workflows yet.</p> : sshWorkflows.map((workflow) => <article className="schedule-card" key={workflow.id}>
+                  <div>
+                    <span className={`task-state state-${workflow.state}`}>{workflow.state}</span>
+                    <h3>{workflow.display_name}</h3>
+                    <small>{workflow.steps.length} dependency-ordered step{workflow.steps.length === 1 ? "" : "s"}</small>
+                    {workflow.steps.map((step) => <small key={step.id}>{step.name} · {step.state}{step.detail ? ` · ${step.detail}` : ""}</small>)}
+                    {advanced && <><code>{workflow.id}</code><code>{workflow.definition_hash}</code></>}
+                  </div>
+                  <div className="task-actions">
+                    {!['succeeded', 'failed', 'uncertain', 'cancelled'].includes(workflow.state) && <button className="primary" type="button" disabled={sshBusy} onClick={() => mutateSshWorkflow(workflow, "run")}>{workflow.state === "planned" ? "Run workflow" : "Resume workflow"}</button>}
+                    {!['succeeded', 'failed', 'uncertain', 'cancelled'].includes(workflow.state) && <button className="secondary" type="button" disabled={sshBusy} onClick={() => mutateSshWorkflow(workflow, "cancel")}>Cancel</button>}
+                  </div>
+                </article>)}
+              </div>
             </div>
           </div>
         </section>
@@ -2988,6 +3671,53 @@ export function App() {
               </ul>
             </div>}
           </div> : <p className="empty-state">Loading durable settings…</p>}
+          <div className="provider-connections" aria-label="Application updates">
+            <div className="section-heading compact-heading">
+              <div>
+                <h3>Application updates</h3>
+                <p className="muted">MCG checks only the trusted release service embedded by the owner-controlled build and accepts only packages signed by its embedded update key.</p>
+              </div>
+              {updateConfiguration && <span className="count-badge">Version {updateConfiguration.current_version}</span>}
+            </div>
+            {!updateConfiguration && !updateError && <p className="empty-state">Loading update policy…</p>}
+            {updateConfiguration?.recovery_notice && <p className="error-message" role="status">
+              {updateConfiguration.recovery_notice}
+            </p>}
+            {updateConfiguration && !updateConfiguration.configured && <p className="empty-state">
+              Updates are unavailable in this build. Install a newer owner-signed package manually; MCG will never accept an unsigned fallback.
+            </p>}
+            {advanced && updateConfiguration && !updateConfiguration.configured && <p className="form-note">{updateConfiguration.detail}</p>}
+            {updateConfiguration?.configured && <>
+              <div className="composer-actions">
+                <button className="primary" type="button" disabled={updateBusy} onClick={checkUpdates}>
+                  {updateBusy ? "Checking…" : "Check for updates"}
+                </button>
+              </div>
+              {updateCheck && !updateCheck.available_version && <p role="status">{updateCheck.detail}</p>}
+              {updateCheck?.available_version && <article className="provider-card update-card">
+                <div>
+                  <h3>MCG {updateCheck.available_version}</h3>
+                  <p>{updateCheck.detail}</p>
+                  {updateCheck.notes && <p className="update-notes">{updateCheck.notes}</p>}
+                  {advanced && <small>
+                    {updateCheck.target ?? "current platform"}
+                    {updateCheck.published_at ? ` · published ${new Date(updateCheck.published_at).toLocaleString()}` : ""}
+                  </small>}
+                </div>
+                {!updateReview && <button className="primary" type="button" disabled={updateBusy} onClick={() => setUpdateReview(true)}>Review update</button>}
+              </article>}
+              {updateCheck?.available_version && updateReview && <div className="provider-form" aria-label="Confirm application update">
+                <h3>Install signed MCG {updateCheck.available_version}?</h3>
+                <p className="form-note">MCG will download and verify the signed package, create and verify a credential-free portable backup, stop the local service cleanly, install the update, and restart. It will stop without installing if any verification fails.</p>
+                <div className="composer-actions">
+                  <button className="primary" type="button" disabled={updateBusy} onClick={applyUpdate}>{updateBusy ? "Preparing verified update…" : "Back up and install"}</button>
+                  <button className="secondary" type="button" disabled={updateBusy} onClick={() => setUpdateReview(false)}>Cancel</button>
+                </div>
+              </div>}
+              {advanced && updateConfiguration.trusted_origin && <p className="form-note">Trusted release origin: <code>{updateConfiguration.trusted_origin}</code></p>}
+            </>}
+            {updateError && <p className="error-message" role="alert">{updateError}</p>}
+          </div>
           <div className="provider-connections" aria-label="System diagnostics">
             <div className="section-heading compact-heading">
               <div>
@@ -3012,7 +3742,7 @@ export function App() {
               </ul>
               {!advanced && diagnostics.checks.every((check) => check.severity === "pass") && <p className="empty-state">All checks passed.</p>}
               {advanced && <p className="form-note">
-                Format {diagnostics.schema_version} · {diagnostics.architecture} · {diagnostics.counts.events} events · {diagnostics.counts.tasks} tasks · {diagnostics.counts.artifacts} artifacts · {diagnostics.counts.models} models
+                Format {diagnostics.schema_version} · {diagnostics.architecture} · {diagnostics.counts.events} events · {diagnostics.counts.tasks} tasks · {diagnostics.counts.artifacts} artifacts · {diagnostics.counts.models} models · {diagnostics.counts.provider_dispatch_completed} completed provider calls · {diagnostics.counts.provider_dispatch_failed} definite provider failures · {diagnostics.counts.provider_dispatch_started} active or indeterminate provider calls
               </p>}
             </div>}
             {!diagnostics && !diagnosticsError && <p className="empty-state">Diagnostics have not been run in this session.</p>}
@@ -3021,7 +3751,7 @@ export function App() {
             <div className="section-heading compact-heading">
               <div>
                 <h3>Portable backups</h3>
-                <p className="muted">Preserve the database and immutable artifacts. Credentials and the local authentication token are always excluded.</p>
+                <p className="muted">Preserve the database and immutable artifacts. Routine backups always exclude credentials and the local authentication token.</p>
               </div>
               <button className="primary" type="button" disabled={backupBusy} onClick={makeBackup}>
                 {backupBusy ? "Working…" : "Create backup"}
@@ -3032,13 +3762,24 @@ export function App() {
               <article className="provider-card" key={backup.backup_id}>
                 <div>
                   <h3>{backup.file_name}</h3>
-                  <p>{formatBytes(backup.size_bytes)} · {new Date(backup.manifest.created_at).toLocaleString()} · secrets excluded</p>
+                  <p>{formatBytes(backup.size_bytes)} · {new Date(backup.manifest.created_at).toLocaleString()} · {backup.manifest.secrets_included ? "credentials encrypted" : "secrets excluded"}</p>
                   {advanced && <><code>{backup.sha256}</code><small>{backup.manifest.entries.length} verified entries · format {backup.manifest.schema_version}</small></>}
                 </div>
                 <button className="secondary" type="button" disabled={backupBusy} onClick={() => checkBackup(backup.backup_id)}>Verify</button>
               </article>
             ))}
-            <p className="form-note">Restore is intentionally offline: stop the daemon, then run <code>mcg backup restore PATH --confirm</code>. MCG retains the previous database for rollback.</p>
+            {advanced && <div className="provider-form" aria-label="Encrypted credential backup">
+              <h3>Encrypted credential backup</h3>
+              <p className="form-note">Explicitly includes provider and MCP credentials using Argon2id and authenticated XChaCha20-Poly1305 encryption. The local daemon token is never included. Losing this passphrase makes the credentials unrecoverable.</p>
+              <label>Passphrase
+                <input type="password" autoComplete="new-password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} />
+              </label>
+              <label>Confirm passphrase
+                <input type="password" autoComplete="new-password" value={backupConfirmation} onChange={(event) => setBackupConfirmation(event.target.value)} />
+              </label>
+              <button className="secondary" type="button" disabled={backupBusy || backupPassphrase.length < 12} onClick={makeEncryptedBackup}>Create encrypted backup</button>
+            </div>}
+            <p className="form-note">Restore is intentionally offline: stop the daemon, then run <code>mcg backup restore PATH --confirm</code>. Add <code>--restore-secrets</code> only for an encrypted credential backup. MCG retains the previous database for rollback.</p>
           </div>
         </section>
       </main>

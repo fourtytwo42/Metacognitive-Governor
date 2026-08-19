@@ -1,0 +1,45 @@
+# This is the Ubuntu/AppArmor bwrap-userns-restrict profile adapted only to
+# MCG's fixed packaged executable path and unique profile names. Bubblewrap may
+# create the sandbox namespaces; the process it launches has no capabilities.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile metacognitive-governor-bwrap /usr/lib/MCG/mcg-bwrap flags=(attach_disconnected) {
+  allow capability,
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+  allow px /** -> metacognitive-governor-bwrap//&metacognitive-governor-unpriv-bwrap,
+
+  include if exists <local/metacognitive-governor-bwrap>
+}
+
+profile metacognitive-governor-unpriv-bwrap flags=(attach_disconnected) {
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow pix /** -> &metacognitive-governor-unpriv-bwrap,
+  audit deny capability,
+
+  include if exists <local/metacognitive-governor-unpriv-bwrap>
+}

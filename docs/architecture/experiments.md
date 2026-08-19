@@ -91,7 +91,8 @@ credential-rejecting research executor refetches only the exact baseline URL
 set and independently checks schema, scope, source minimum, freshness,
 conflicts, and bounded quote grounding. The report and fetched bodies remain
 content-addressed; query values are omitted from failure details.
-Build, test, static-analysis, and exact `COMMAND SUCCEEDS` conditions now cross
+Build, test, static-analysis, typed configuration-validation, and exact
+`COMMAND SUCCEEDS` conditions now cross
 an explicit shadow-command-verifier boundary. A conforming backend must enforce
 filesystem, child-process, credential, and network isolation at the operating
 system boundary and return a bounded content-addressed transcript. The default
@@ -100,12 +101,20 @@ hosts without a trusted root-owned, non-setuid/non-setgid, non-writable
 `/usr/bin/bwrap` plus `/usr/bin/prlimit`; bubblewrap must be version 0.11.2 or
 newer. Otherwise it launches no process and keeps those conditions
 inconclusive. The Linux backend uses an empty mount namespace, unshares the
-network and every supported namespace, disables nested user namespaces, starts
+network and every supported namespace, explicitly unshares the user namespace
+before disabling nested user namespaces, starts
 a new session, drops all capabilities, clears the environment, exposes only
 read-only system runtime paths and the retained source, and copies that source
 into a size-bounded private tmpfs. CPU time, address space, individual file
 size, process count, open files, output, source size/count/depth, and wall time
-are bounded. Command filesystem changes disappear with the tmpfs. A separate
+are bounded. For recognized Node-family commands, a non-system executable can
+contribute one optional distribution-root mapping after its root and every entry
+pass fixed 2 GiB, 100,000-file, depth-24, regular-file, and relative-symlink
+bounds. That root is exposed read-only at `/mcg-toolchain`, and the cleared
+`PATH` contains only its `bin` directory plus the already mapped system paths.
+This permits owner-installed Node/npm without exposing the owner's home or
+silently claiming support for arbitrary language toolchains. Command filesystem
+changes disappear with the tmpfs. A separate
 private proof file must show that setup completed before any exit can count as
 command evidence. Constraining only the child working directory is explicitly
 insufficient. The trusted runtime reopens and hashes the versioned transcript,
@@ -127,8 +136,13 @@ clipboard disabled and Protected Client enabled. The retained source and the
 two-file harness are separate read-only mappings; the bounded runner copies the
 source to an unmapped disposable workspace, clears the command environment,
 executes a direct argument vector as `System`, and normalizes objective failure
-separately from setup failure. The Windows package build statically links this
-small helper's C runtime and rejects imports of Visual C++ redistributable DLLs,
+separately from setup failure. Recognized Node-family commands may add exactly
+one bounded read-only distribution mapping at `C:\mcg-toolchain`; request schema
+3 binds that exact internal root plus an optional typed probe, and the runner prepends it to its otherwise
+fixed system `PATH`. Windows `.cmd` launch normalization covers the Node package
+manager shims, while native Bun executables remain native rather than being
+misclassified as command scripts. The Windows package build statically links
+this small helper's C runtime and rejects imports of Visual C++ redistributable DLLs,
 because those DLLs are absent from a pristine Sandbox image. Preflight and
 postflight runner probes prevent a missing or lost sandbox session from
 masquerading as test failure. The host CLI's own process status is only transport
@@ -142,6 +156,23 @@ interpreted exit/timeout disposition. Because the Store CLI accepts one
 POSIX `--` argument tail, MCG selects only two compile-time runner command lines
 (probe or request); the untrusted objective executable and argument array remain
 inside the bounded JSON request and never enter that CLI string.
+`HttpResponds` and `ServiceHealthy` automatic assessment additionally require
+the source evaluation to contain exactly one passing identical condition and a
+retained completed consumer-evaluation checkpoint whose run matches that source
+evaluation. The checkpoint selects the exact immutable project snapshot; MCG
+uses its single `start` command, or its single `dev` command only when no `start`
+exists. Missing, stale, empty, or ambiguous authority stays inconclusive and
+launches nothing. Probes accept only credential-free plaintext HTTP on exact
+loopback with an explicit nonzero port and no fragment. Service startup and the
+bounded GET probe run in the same network-isolated OS sandbox: Linux uses fixed
+system curl inside the bubblewrap namespace, while Windows runner schema 3
+performs the loopback request inside the disposable Sandbox VM. Expected status
+is exact for `HttpResponds` and 200-299 for `ServiceHealthy`; startup timeout,
+early process exit, status mismatch, malformed evidence, or sandbox loss fails
+closed. There is no host HTTP or host-process fallback. Browser-render,
+accessibility, workflow, element, and screenshot conditions remain
+inconclusive until the corresponding browser runtime is placed inside this same
+boundary.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and

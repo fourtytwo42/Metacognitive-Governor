@@ -17,9 +17,11 @@ uat_user="${MCG_UAT_USER:-${SUDO_USER:-$(stat -c '%U' "$repository_root")}}"
 
 [[ -f "$deb" ]] || { echo "Missing deb package: $deb" >&2; exit 1; }
 [[ -f "$appimage" ]] || { echo "Missing AppImage package: $appimage" >&2; exit 1; }
+deb="$(realpath -- "$deb")"
+appimage="$(realpath -- "$appimage")"
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
-for command in curl dpkg dpkg-deb find identify import pgrep python3 runuser script ss stat xdotool Xvfb; do
+for command in apparmor_parser apparmor_status curl dpkg dpkg-deb find identify import pgrep python3 runuser script ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 
@@ -83,6 +85,156 @@ run_cli() {
   runuser -u "$uat_user" -- env \
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$data_root" \
     "$executable" --host "http://127.0.0.1:$port" "$@"
+}
+
+create_encrypted_backup_fixture() {
+  local data_root="$1"
+  local port="$2"
+  local backup_id="$3"
+  local bundle="$4"
+  local report="$5"
+  python3 - "$data_root/local-auth-token" "$port" "$backup_id" "$bundle" "$report" <<'PY'
+import json
+import hashlib
+import pathlib
+import sys
+import urllib.request
+
+token_path, port, backup_id, bundle_path, report_path = sys.argv[1:]
+token = pathlib.Path(token_path).read_text(encoding="utf-8").strip()
+passphrase = "package fixture passphrase 2026 encrypted backup"
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/api/v1/backups/{backup_id}/encrypted",
+    data=json.dumps({"passphrase": passphrase}).encode(),
+    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    result = json.load(response)
+manifest = result["manifest"]
+metadata = manifest["secret_encryption"]
+assert result["backup_id"] == backup_id
+assert manifest["schema_version"] == 2
+assert manifest["secrets_included"] is True
+assert metadata["schema_version"] == 1
+assert metadata["entry_path"] == "secrets/credentials.v1.enc"
+assert metadata["algorithm"] == "xchacha20-poly1305"
+assert metadata["kdf"] == "argon2id"
+assert metadata["argon2_version"] == 19
+assert metadata["memory_kib"] == 65536
+assert metadata["iterations"] == 3
+assert metadata["parallelism"] == 1
+assert manifest["entries"][-1]["path"] == "secrets/credentials.v1.enc"
+bundle = pathlib.Path(bundle_path).read_bytes()
+assert len(bundle) == result["size_bytes"]
+assert hashlib.sha256(bundle).hexdigest() == result["sha256"]
+assert passphrase.encode() not in bundle
+assert token.encode() not in bundle
+pathlib.Path(report_path).write_text(json.dumps(result), encoding="utf-8")
+PY
+}
+
+restore_encrypted_backup_fixture() {
+  local data_root="$1"
+  local bundle="$2"
+  local report="$3"
+  runuser -u "$uat_user" -- env \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$data_root" \
+    python3 - /usr/bin/mcg "$bundle" "$data_root/local-auth-token" "$report" <<'PY'
+import errno
+import hashlib
+import json
+import os
+import pathlib
+import pty
+import select
+import signal
+import sys
+import time
+
+executable, bundle, token_path, report_path = sys.argv[1:]
+correct = "package fixture passphrase 2026 encrypted backup"
+wrong = "package fixture passphrase that must be rejected"
+token_before = pathlib.Path(token_path).read_bytes()
+
+def restore(passphrase, expected_success):
+    pid, terminal = pty.fork()
+    if pid == 0:
+        os.execv(executable, [
+            executable, "backup", "restore", bundle, "--confirm", "--restore-secrets"
+        ])
+    output = bytearray()
+    prompt = b"Encrypted backup passphrase:"
+    prompt_deadline = time.monotonic() + 30
+    while prompt not in output:
+        if time.monotonic() >= prompt_deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            raise AssertionError(f"restore prompt timed out: {output.decode(errors='replace')}")
+        readable, _, _ = select.select([terminal], [], [], 0.5)
+        if not readable:
+            exited, status = os.waitpid(pid, os.WNOHANG)
+            if exited:
+                raise AssertionError(
+                    f"restore exited before its prompt with {os.waitstatus_to_exitcode(status)}: "
+                    f"{output.decode(errors='replace')}"
+                )
+            continue
+        try:
+            output.extend(os.read(terminal, 4096))
+        except OSError as error:
+            if error.errno != errno.EIO:
+                raise
+            _, status = os.waitpid(pid, 0)
+            raise AssertionError(
+                f"restore closed before its prompt with {os.waitstatus_to_exitcode(status)}: "
+                f"{output.decode(errors='replace')}"
+            ) from error
+    os.write(terminal, passphrase.encode() + b"\n")
+    completion_deadline = time.monotonic() + 120
+    status = None
+    while True:
+        if time.monotonic() >= completion_deadline:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+            raise AssertionError(f"restore timed out: {output.decode(errors='replace')}")
+        readable, _, _ = select.select([terminal], [], [], 0.5)
+        if not readable:
+            exited, status = os.waitpid(pid, os.WNOHANG)
+            if exited:
+                break
+            continue
+        try:
+            chunk = os.read(terminal, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                _, status = os.waitpid(pid, 0)
+                break
+            raise
+        if not chunk:
+            _, status = os.waitpid(pid, 0)
+            break
+        output.extend(chunk)
+    assert status is not None
+    code = os.waitstatus_to_exitcode(status)
+    text = output.decode(errors="replace")
+    assert passphrase not in text
+    assert (code == 0) is expected_success, (code, text)
+    return code
+
+wrong_code = restore(wrong, False)
+correct_code = restore(correct, True)
+token_after = pathlib.Path(token_path).read_bytes()
+assert token_after == token_before
+rollback_files = sorted(pathlib.Path(token_path).parent.joinpath("backups").glob("pre-restore-*.sqlite3"))
+assert rollback_files
+pathlib.Path(report_path).write_text(json.dumps({
+    "wrong_passphrase_exit": wrong_code,
+    "restore_exit": correct_code,
+    "token_sha256": hashlib.sha256(token_after).hexdigest(),
+    "rollback_database_count": len(rollback_files),
+}), encoding="utf-8")
+PY
 }
 
 test_consumer_cli() {
@@ -281,7 +433,8 @@ PY
 
 dpkg -i "$deb" >"$uat_root/deb-install.log"
 package_installed=true
-for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner \
+for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner /usr/bin/mcg-updater \
+  /usr/lib/MCG/mcg-bwrap /etc/apparmor.d/metacognitive-governor-bwrap \
   /usr/share/applications/MCG.desktop; do
   [[ -f "$file" ]] || { echo "Installed payload is missing $file." >&2; exit 1; }
 done
@@ -289,6 +442,16 @@ find /usr/share/icons/hicolor -type f -name 'mcg-desktop.png' -print -quit | gre
 find /usr/lib/MCG -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find /usr/lib/MCG -type f -name Apache-2.0.txt -print -quit | grep -q .
 find /usr/lib/MCG -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
+find /usr/lib/MCG -type f -name Bubblewrap-GPL-2.0-or-later.txt -print -quit | grep -q .
+find /usr/lib/MCG -type f -name bubblewrap-v0.11.2.tar.gz -print -quit | grep -q .
+[[ "$(stat -c '%U:%G:%a' /usr/lib/MCG/mcg-bwrap)" == "root:root:755" ]] || {
+  echo "Installed Bubblewrap is not a protected root-owned executable." >&2
+  exit 1
+}
+[[ "$(/usr/lib/MCG/mcg-bwrap --version)" == "bubblewrap 0.11.2" ]]
+apparmor_status | grep -Fxq '   metacognitive-governor-unpriv-bwrap'
+/usr/lib/MCG/mcg-bwrap --unshare-all --unshare-user --disable-userns \
+  --die-with-parent --ro-bind / / -- /usr/bin/true
 test_plugin_runner /usr/bin/mcg-plugin-runner installed
 
 sentinel="$installed_data/linux-package-uat-retained.txt"
@@ -307,6 +470,14 @@ wait_for_health "$installed_port"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg status --json >"$uat_root/status.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg doctor --json >"$uat_root/doctor.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg backup create --json >"$uat_root/backup.json"
+encrypted_backup_id="00000000-0000-4000-8000-00000000b002"
+encrypted_bundle="$installed_data/backups/$encrypted_backup_id.mcgb"
+create_encrypted_backup_fixture \
+  "$installed_data" "$installed_port" "$encrypted_backup_id" "$encrypted_bundle" \
+  "$uat_root/encrypted-backup.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  /usr/bin/mcg backup verify "$encrypted_bundle" --json >"$uat_root/encrypted-backup-verified.json"
 test_consumer_cli /usr/bin/mcg "$installed_data" "$installed_port" installed
 
 python3 - "http://127.0.0.1:$installed_port/mcp" "$installed_data/local-auth-token" "$uat_root/mcp.json" <<'PY'
@@ -361,6 +532,20 @@ PY
 
 stop_tree "$installed_service_pid"
 background_pids=()
+grep -Fq "MCG daemon stopped cleanly" "$uat_root/installed-service.log" || {
+  echo "Packaged daemon did not report a graceful SIGTERM shutdown." >&2
+  exit 1
+}
+[[ ! -e "$installed_data/mcg.sqlite3-wal" && ! -e "$installed_data/mcg.sqlite3-shm" ]] || {
+  echo "Packaged daemon retained SQLite sidecars after graceful shutdown." >&2
+  exit 1
+}
+restore_encrypted_backup_fixture \
+  "$installed_data" "$encrypted_bundle" "$uat_root/encrypted-restore.json"
+if grep -Fq "package fixture passphrase" "$uat_root/installed-service.log"; then
+  echo "Encrypted backup passphrase leaked into the packaged service log." >&2
+  exit 1
+fi
 runuser -u "$uat_user" -- env \
   HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" \
   MCG_DATA_DIR="$installed_data" MCG_BIND_ADDRESS="127.0.0.1:$installed_port" \
@@ -433,7 +618,7 @@ appimage_root="$uat_root/appimage"
 mkdir "$appimage_root"
 chown "$uat_user":"$(id -gn "$uat_user")" "$appimage_root"
 runuser -u "$uat_user" -- sh -c 'cd "$1" && "$2" --appimage-extract >/dev/null' sh "$appimage_root" "$appimage"
-for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner \
+for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater \
   usr/share/applications/MCG.desktop; do
   [[ -f "$appimage_root/squashfs-root/$file" ]] || { echo "AppImage is missing $file." >&2; exit 1; }
 done
@@ -447,10 +632,22 @@ dpkg -r "$package_name" >"$uat_root/deb-uninstall.log"
 package_installed=false
 [[ -f "$sentinel" ]] || { echo "Uninstall removed external MCG data." >&2; exit 1; }
 [[ ! -e /usr/bin/mcg-desktop ]] || { echo "Uninstall retained the application executable." >&2; exit 1; }
+[[ ! -e /usr/lib/MCG/mcg-bwrap && ! -e /etc/apparmor.d/metacognitive-governor-bwrap ]] || {
+  echo "Uninstall retained the packaged Linux sandbox boundary." >&2
+  exit 1
+}
+if apparmor_status | grep -Fq 'metacognitive-governor-unpriv-bwrap'; then
+  echo "Uninstall retained the MCG Bubblewrap AppArmor profile." >&2
+  exit 1
+fi
 
 dpkg -i "$deb" >"$uat_root/deb-reinstall.log"
 package_installed=true
 [[ -x /usr/bin/mcg-desktop ]] || { echo "Reinstall did not restore the application executable." >&2; exit 1; }
+[[ -x /usr/lib/MCG/mcg-bwrap && -f /etc/apparmor.d/metacognitive-governor-bwrap ]] || {
+  echo "Reinstall did not restore the protected Linux sandbox boundary." >&2
+  exit 1
+}
 [[ -f "$sentinel" ]] || { echo "Reinstall removed external MCG data." >&2; exit 1; }
 dpkg -r "$package_name" >"$uat_root/deb-final-uninstall.log"
 package_installed=false
@@ -470,4 +667,5 @@ REPAIR_PRESERVED_DATA=true
 REINSTALL_PRESERVED_DATA=true
 APPLICATION_REMOVED=true
 PLUGIN_RUNNERS_QUALIFIED=true
+ENCRYPTED_BACKUP_RESTORE_REPORT=$uat_root/encrypted-restore.json
 EOF

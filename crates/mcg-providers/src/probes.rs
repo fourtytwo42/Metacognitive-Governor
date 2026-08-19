@@ -52,15 +52,13 @@ pub async fn probe_model(
                 "model {model_id} was not returned by provider discovery"
             ))
         })?;
-    let request = probe_request(model_id);
-    let buffered = provider
-        .create_response(request.clone())
+    let buffered = create_basic_probe_response(provider, model_id)
         .await
         .and_then(require_assistant_output);
     let mut observations = vec![observation("responses", &buffered)];
     model.capabilities.responses = Some(buffered.is_ok());
 
-    let streaming = match provider.stream_response(request).await {
+    let streaming = match start_basic_probe_stream(provider, model_id).await {
         Ok(mut stream) => tokio::time::timeout(Duration::from_secs(30), async move {
             while let Some(event) = stream.next().await {
                 match event? {
@@ -139,6 +137,45 @@ pub async fn probe_model(
     })
 }
 
+async fn create_basic_probe_response(
+    provider: &dyn ModelProvider,
+    model_id: &str,
+) -> Result<ModelResponse, ProviderError> {
+    match provider.create_response(probe_request(model_id)).await {
+        Err(error) if reasoning_field_is_unsupported(&error) => {
+            provider
+                .create_response(probe_request_without_reasoning(model_id))
+                .await
+        }
+        result => result,
+    }
+}
+
+async fn start_basic_probe_stream(
+    provider: &dyn ModelProvider,
+    model_id: &str,
+) -> Result<crate::ProviderStream, ProviderError> {
+    match provider.stream_response(probe_request(model_id)).await {
+        Err(error) if reasoning_field_is_unsupported(&error) => {
+            provider
+                .stream_response(probe_request_without_reasoning(model_id))
+                .await
+        }
+        result => result,
+    }
+}
+
+fn reasoning_field_is_unsupported(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::Http {
+            status: 400 | 422,
+            message,
+            ..
+        } if message.to_ascii_lowercase().contains("reasoning")
+    )
+}
+
 fn require_assistant_output(response: ModelResponse) -> Result<ModelResponse, ProviderError> {
     has_assistant_output(&response)
         .then_some(response)
@@ -215,6 +252,7 @@ fn probe_request(model: &str) -> ModelRequest {
     ModelRequest {
         contract_version: CONTRACT_VERSION,
         model: model.into(),
+        client_request_id: None,
         instructions: None,
         messages: vec![Message {
             role: MessageRole::User,
@@ -226,11 +264,25 @@ fn probe_request(model: &str) -> ModelRequest {
         tools: vec![],
         tool_choice: None,
         structured_output: None,
-        reasoning: None,
+        // Capability discovery should test usable final output rather than let a
+        // reasoning model spend the entire tiny synthetic budget on hidden
+        // reasoning. Older compatible endpoints that explicitly reject this
+        // optional field are retried once without it above.
+        reasoning: Some(ReasoningConfig {
+            effort: Some("none".into()),
+            summary: None,
+        }),
         temperature: Some(0.0),
         top_p: None,
-        max_output_tokens: Some(16),
+        max_output_tokens: Some(64),
         metadata: Value::Null,
+    }
+}
+
+fn probe_request_without_reasoning(model: &str) -> ModelRequest {
+    ModelRequest {
+        reasoning: None,
+        ..probe_request(model)
     }
 }
 
@@ -238,6 +290,7 @@ fn tool_probe_request(model: &str) -> ModelRequest {
     ModelRequest {
         contract_version: CONTRACT_VERSION,
         model: model.into(),
+        client_request_id: None,
         instructions: Some("Call the provided report_ok tool exactly once.".into()),
         messages: vec![Message {
             role: MessageRole::User,
@@ -290,6 +343,7 @@ mod tests {
 
     struct FakeProvider {
         connection: ProviderConnection,
+        reject_reasoning_field: bool,
     }
 
     #[async_trait]
@@ -314,6 +368,13 @@ mod tests {
             &self,
             request: ModelRequest,
         ) -> Result<ModelResponse, ProviderError> {
+            if self.reject_reasoning_field && request.reasoning.is_some() {
+                return Err(ProviderError::Http {
+                    status: 422,
+                    message: "reasoning is not supported".into(),
+                    retriable: false,
+                });
+            }
             let mut response = response();
             if !request.tools.is_empty() {
                 response.output = vec![OutputItem::ToolCall {
@@ -327,8 +388,15 @@ mod tests {
 
         async fn stream_response(
             &self,
-            _request: ModelRequest,
+            request: ModelRequest,
         ) -> Result<ProviderStream, ProviderError> {
+            if self.reject_reasoning_field && request.reasoning.is_some() {
+                return Err(ProviderError::Http {
+                    status: 422,
+                    message: "unknown reasoning field".into(),
+                    retriable: false,
+                });
+            }
             Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Completed {
                 response: response(),
             })])))
@@ -363,6 +431,7 @@ mod tests {
                 organization: None,
                 project: None,
             },
+            reject_reasoning_field: false,
         };
         let report = probe_model(&provider, "fixture").await.expect("probe");
         assert_eq!(report.model.capabilities.responses, Some(true));
@@ -374,6 +443,37 @@ mod tests {
                 .observations
                 .iter()
                 .all(|observation| observation.support == ProbeSupport::Supported)
+        );
+    }
+
+    #[tokio::test]
+    async fn basic_probes_fall_back_when_reasoning_field_is_explicitly_unsupported() {
+        let provider = FakeProvider {
+            connection: ProviderConnection {
+                contract_version: CONTRACT_VERSION,
+                id: "legacy-compatible".into(),
+                display_name: "Legacy Compatible".into(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: "http://127.0.0.1/v1".into(),
+                auth_mode: ProviderAuthMode::None,
+                organization: None,
+                project: None,
+            },
+            reject_reasoning_field: true,
+        };
+
+        let report = probe_model(&provider, "fixture").await.expect("probe");
+        assert_eq!(report.model.capabilities.responses, Some(true));
+        assert_eq!(report.model.capabilities.streaming, Some(true));
+        assert_eq!(report.model.capabilities.tools, Some(true));
+        assert_eq!(report.model.capabilities.reasoning_control, Some(false));
+        assert_eq!(
+            report
+                .observations
+                .iter()
+                .find(|observation| observation.operation == "reasoning_control")
+                .map(|observation| observation.support),
+            Some(ProbeSupport::Unsupported)
         );
     }
 }

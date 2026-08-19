@@ -10,6 +10,10 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 3px solid #f6bf54;
+  outline-offset: 3px;
+}
 
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
 .sidebar {
@@ -125,6 +129,21 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .project-card p, .project-card small { margin: 0; color: #8e9daf; font-size: .75rem; }
 .project-card code { display: block; margin-top: 7px; color: #738ba1; font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-card small { display: block; margin-top: 5px; }
+.project-intelligence { margin-top: 18px; padding-top: 16px; border-top: 1px solid #243246; }
+.memory-composer { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.memory-composer label:nth-of-type(2), .memory-composer button { grid-column: 1 / -1; }
+.memory-list { display: grid; gap: 9px; }
+.memory-card { display: grid; gap: 10px; padding: 12px; border: 1px solid #243246; background: #090f18; }
+.memory-card strong { margin-right: 8px; }
+.memory-card p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-card small { color: #8e9daf; }
+.memory-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.memory-actions textarea { flex: 1 1 240px; min-height: 60px; }
+.memory-history { grid-column: 1 / -1; margin: 0; padding-left: 22px; color: #aebed0; }
+.memory-history li { margin: 5px 0; overflow-wrap: anywhere; }
+.world-model { display: grid; gap: 6px; padding-left: 20px; }
+.world-model small { display: block; color: #738ba1; }
+.managed-memory { max-height: 320px; overflow: auto; padding: 12px; border: 1px solid #243246; background: #060b12; white-space: pre-wrap; }
 .project-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .project-tags span { padding: 3px 6px; border: 1px solid #29384b; color: #aebed0; font-size: .65rem; }
 .project-selected { padding: 9px 12px; border: 1px solid #2d756d; background: transparent; color: #65dccc; cursor: default; }
@@ -175,6 +194,12 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 .schedule-card, .scheduler-notification { border: 1px solid #243244; background: #0a111acc; border-radius: 12px; padding: 14px; display: flex; justify-content: space-between; gap: 18px; }
 .schedule-card h3, .scheduler-notification p { margin: 5px 0; }
 .schedule-card code, .schedule-card small { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.organization-card { display: grid; justify-content: stretch; gap: 12px; min-width: 0; }
+.organization-summary { min-width: 0; }
+.organization-summary strong, .organization-summary span { display: block; overflow-wrap: anywhere; }
+.organization-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.organization-actions button { flex: 1 1 150px; min-width: 0; }
+.organization-history { min-width: 0; margin: 0; padding-left: 22px; }
 .scheduler-notification { border-left: 3px solid #42d9c8; }
 .scheduler-notification.severity-warning { border-left-color: #f3b95f; }
 .scheduler-notification.severity-high { border-left-color: #ff7085; }
@@ -236,7 +261,7 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
   .sidebar { position: static; height: auto; display: grid; grid-template-columns: auto 1fr; gap: 14px; overflow: visible; border-right: 0; border-bottom: 1px solid #1d2736; }
   .sidebar nav { grid-column: 1 / -1; display: flex; overflow-x: auto; }
   .mode-button { grid-column: 2; grid-row: 1; margin: 0; justify-self: end; white-space: nowrap; }
-  .hero-card, .grid, .provider-panel, .provider-setup, .provider-advanced, .mcp-layout, .task-advanced, .scheduler-layout, .scheduler-advanced, .plugin-import, .plugin-registry-import, .plugin-card { grid-template-columns: 1fr; }
+  .hero-card, .grid, .provider-panel, .provider-setup, .provider-advanced, .mcp-layout, .task-advanced, .scheduler-layout, .scheduler-advanced, .plugin-import, .plugin-registry-import, .plugin-card, .memory-composer { grid-template-columns: 1fr; }
   .plugin-card-heading, .advanced-details { grid-column: auto; }
   .provider-setup .primary { justify-self: stretch; }
   .task-card { flex-direction: column; }

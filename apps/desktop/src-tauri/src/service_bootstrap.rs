@@ -3,7 +3,8 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    sync::mpsc::{self, Receiver},
     thread,
     time::{Duration, Instant},
 };
@@ -309,12 +310,43 @@ fn launch_daemon(executable: &Path, address: SocketAddr, config: &AppConfig) -> 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    command.spawn().map(drop).map_err(|error| {
-        format!(
-            "The packaged local MCG service could not be started from {}: {error}",
-            executable.display()
-        )
-    })
+    spawn_reaped_process(command, executable).map(drop)
+}
+
+fn spawn_reaped_process(
+    mut command: Command,
+    executable: &Path,
+) -> Result<Receiver<Result<ExitStatus, String>>, String> {
+    let executable = executable.display().to_string();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("mcg-service-reaper".into())
+        .spawn(move || match command.spawn() {
+            Ok(mut child) => {
+                if started_tx.send(Ok(())).is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                let result = child.wait().map_err(|error| {
+                    format!("The packaged local MCG service could not be reaped: {error}")
+                });
+                let _ = completed_tx.send(result);
+            }
+            Err(error) => {
+                let _ = started_tx.send(Err(format!(
+                    "The packaged local MCG service could not be started from {executable}: {error}"
+                )));
+            }
+        })
+        .map_err(|error| {
+            format!("The packaged local MCG service reaper could not start: {error}")
+        })?;
+    started_rx.recv().map_err(|_| {
+        "The packaged local MCG service reaper stopped before reporting startup".to_owned()
+    })??;
+    Ok(completed_rx)
 }
 
 #[cfg(test)]
@@ -370,5 +402,32 @@ mod tests {
             packaged_daemon_path(&desktop).expect("packaged daemon"),
             daemon
         );
+    }
+
+    #[test]
+    fn launched_service_process_is_waited_by_a_dedicated_reaper() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/D", "/C", "exit", "0"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let completion =
+            spawn_reaped_process(command, Path::new("reaper-test")).expect("launch reaped process");
+        let status = completion
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reaper completion")
+            .expect("process wait");
+        assert!(status.success());
+
+        let missing = Command::new("mcg-service-that-must-not-exist");
+        assert!(spawn_reaped_process(missing, Path::new("missing-service")).is_err());
     }
 }

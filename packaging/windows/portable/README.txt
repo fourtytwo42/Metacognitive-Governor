@@ -9,6 +9,7 @@ The folder also includes:
   mcg-daemon.exe   Local daemon/headless service
   mcg-desktop.exe  Native desktop application
   mcg-shadow-runner.exe  Internal disposable-sandbox command helper
+  mcg-updater.exe        Internal supervised Windows update helper
 
 Automatic shadow build/test/static-analysis verification additionally requires
 Windows Sandbox with its `wsb.exe` command-line interface (Windows 11 24H2 or

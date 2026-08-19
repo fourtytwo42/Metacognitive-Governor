@@ -34,6 +34,54 @@ credential. Tool usage refers to an existing typed execution identity.
 Evaluations must cover the plan's success conditions and comply with the
 organization's objective-evidence policy.
 
+## Pinned Organization Inheritance
+
+Organization schema 2 adds an optional `inherited_from_revision_id`. Creating an
+inherited organization materializes the complete role graph, policy, and
+evaluation contract from one immutable source revision into a new organization
+at revision 1. Role identities are retained so later specialization and measured
+experiments have stable semantic ancestry. Advancing the source organization
+cannot silently alter a child.
+
+Storage requires the referenced source revision to exist, rejects inheritance
+from the child's own organization, and requires every later child revision to
+retain the exact same inherited base. A child therefore cannot rebase by
+submitting an ordinary revision. Legacy schema-1 genomes deserialize with no
+inheritance and remain valid.
+
+Authenticated REST exposes `POST /api/v1/organizations/{id}/inherit`; CLI uses
+`mcg organization inherit BASE_ID --name NAME`; native Tauri and the desktop
+Improvement workspace share the same contract. Simple mode lists reusable
+organizations and creates the default topology. Advanced mode chooses a base,
+creates an inherited organization, and visibly shows both child and pinned base
+revision identities.
+
+## Portable Organization Genomes
+
+Any immutable organization revision can be exported as schema-1 portable JSON.
+The exported definition contains roles, relationships, model/tool/memory policy,
+organization policy, and evaluation policy, but no provider credentials, local
+leases, runtime state, or imported authority. Source organization and revision
+identities are provenance only. A SHA-256 digest covers the complete portable
+definition, and import rejects unsupported schemas, digest tampering, malformed
+graphs, oversized JSON, excessive roles/relationships, and unbounded text.
+
+Import always materializes a new root organization with fresh local authority.
+Callers supply an `import_id`; deterministic organization, revision, and role
+identities make a lost-response retry observational, while reuse with different
+content or a different name fails closed. The desktop retains that identity until
+success, and the CLI prints generated identities before contacting the daemon so
+operators can reuse them explicitly. A duplicate action is the same export/import
+contract with a retained per-action retry identity.
+
+Comparison exports two immutable revisions and evaluates identity-independent
+definitions. It reports typed changed sections plus role and relationship changes;
+local UUID changes alone are not differences. Immutable revision history remains
+available for selecting any prior revision. REST exposes history, export, import,
+and compare routes; CLI provides `organization history|export|import|compare`; MCP
+provides `mcg_query_organization` and `mcg_import_organization`; Tauri and desktop
+simple/advanced surfaces use the same daemon contract.
+
 ## Restart Recovery
 
 At daemon startup, an interrupted `running` or `waiting` run becomes
@@ -105,7 +153,9 @@ inventing terminal success. In guided mode, the harness stores a condition-index
 evaluation checkpoint and asks once for the exact discovered command batch. The
 approval is bound to the run, attempt, conditions, and immutable project snapshot;
 restart and resume therefore preserve evidence without granting broader process
-authority or replaying completed checks.
+authority or replaying completed checks. Passed and failed settlement converts
+the checkpoint to a retained, non-resumable completed record instead of deleting
+the only durable run-to-snapshot binding.
 Typed HTTP-status conditions use the same checkpoint and request identity. Their
 capability contains only the condition's credential-free origin, while the immutable
 request retains the exact URL and expected status. Response bytes are content-addressed;
@@ -117,6 +167,9 @@ project authority, captures a bounded regular-file artifact through `fs.verify`,
 and records its size and digest without placing file bytes in report text. Executable
 custom conditions are limited to the canonical `COMMAND SUCCEEDS ` prefix and an
 exact current discovery match; all other custom descriptions remain unsupported.
+The typed `CONFIG VALIDATES ` form has the same exact-discovery and governed
+execution boundary, but records configuration-validation evidence so automatic
+assessment does not have to infer that meaning from a command name.
 Screenshot conditions durably bind URL, project-relative baseline, baseline digest,
 viewport, per-channel threshold, and maximum changed-area basis points. The evaluator
 must revalidate the baseline digest and attach decoded-pixel evidence; PNG-byte equality

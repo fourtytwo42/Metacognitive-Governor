@@ -70,6 +70,7 @@ pub enum ConsumerEvaluationCheckpointState {
     Running,
     WaitingForApproval,
     Blocked,
+    Completed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1646,6 +1647,21 @@ impl SqliteEventStore {
             .validate()
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let current = self.organization(genome.organization_id)?;
+        let inherited_base = genome
+            .inherited_from_revision_id
+            .map(|revision_id| {
+                self.organization_revision(revision_id)?
+                    .ok_or(StorageError::OrganizationRevisionNotFound(revision_id))
+            })
+            .transpose()?;
+        if inherited_base
+            .as_ref()
+            .is_some_and(|base| base.organization_id == genome.organization_id)
+        {
+            return Err(StorageError::Conflict(
+                "an organization cannot inherit from one of its own revisions".into(),
+            ));
+        }
         match current {
             None if genome.revision != 1 || genome.parent_revision_id.is_some() => {
                 return Err(StorageError::Conflict(
@@ -1654,10 +1670,12 @@ impl SqliteEventStore {
             }
             Some(ref current)
                 if genome.revision != current.revision.saturating_add(1)
-                    || genome.parent_revision_id != Some(current.revision_id) =>
+                    || genome.parent_revision_id != Some(current.revision_id)
+                    || genome.inherited_from_revision_id != current.inherited_from_revision_id =>
             {
                 return Err(StorageError::Conflict(
-                    "organization revision does not extend the current head".into(),
+                    "organization revision does not extend the current head or changes its inherited base"
+                        .into(),
                 ));
             }
             _ => {}
@@ -3205,10 +3223,11 @@ impl SqliteEventStore {
                 ),
             )?);
         } else {
-            transaction.execute(
-                "DELETE FROM consumer_evaluation_checkpoints WHERE task_id = ?1 AND run_id = ?2",
-                params![report.task_id.to_string(), report.run_id.to_string()],
-            )?;
+            let mut completed = checkpoint.clone();
+            completed.state = ConsumerEvaluationCheckpointState::Completed;
+            completed.request_id = None;
+            completed.updated_at = at;
+            upsert_consumer_evaluation_checkpoint(&transaction, &completed)?;
         }
         events.push(Self::insert_event(
             &transaction,
@@ -3719,6 +3738,7 @@ const fn consumer_evaluation_checkpoint_state_name(
         ConsumerEvaluationCheckpointState::Running => "running",
         ConsumerEvaluationCheckpointState::WaitingForApproval => "waiting_for_approval",
         ConsumerEvaluationCheckpointState::Blocked => "blocked",
+        ConsumerEvaluationCheckpointState::Completed => "completed",
     }
 }
 
@@ -4163,6 +4183,63 @@ mod tests {
                 .expect("present")
                 .state,
             AgentState::Failed
+        );
+    }
+
+    #[test]
+    fn organization_inheritance_is_pinned_and_survives_reopen() {
+        let directory = tempdir().expect("temp directory");
+        let database = directory.path().join("mcg.sqlite3");
+        let now = Utc::now();
+        let mut store = SqliteEventStore::open(&database).expect("open store");
+        let base = OrganizationGenome::consumer_default(now);
+        store
+            .record_organization_revision(&base)
+            .expect("record base");
+        let inherited = OrganizationGenome::inherit_from(&base, "Inherited fixture", now);
+        store
+            .record_organization_revision(&inherited)
+            .expect("record inherited organization");
+
+        let mut advanced = inherited.clone();
+        advanced.revision_id = OrganizationRevisionId::new();
+        advanced.revision = 2;
+        advanced.parent_revision_id = Some(inherited.revision_id);
+        advanced.name = "Inherited fixture revision 2".into();
+        store
+            .record_organization_revision(&advanced)
+            .expect("advance inherited organization");
+
+        let mut changed_base = advanced.clone();
+        changed_base.revision_id = OrganizationRevisionId::new();
+        changed_base.revision = 3;
+        changed_base.parent_revision_id = Some(advanced.revision_id);
+        changed_base.inherited_from_revision_id = None;
+        assert!(matches!(
+            store.record_organization_revision(&changed_base),
+            Err(StorageError::Conflict(_))
+        ));
+
+        let mut missing_base = OrganizationGenome::consumer_default(now);
+        missing_base.inherited_from_revision_id = Some(OrganizationRevisionId::new());
+        assert!(matches!(
+            store.record_organization_revision(&missing_base),
+            Err(StorageError::OrganizationRevisionNotFound(_))
+        ));
+        drop(store);
+
+        let reopened = SqliteEventStore::open(&database).expect("reopen store");
+        let recovered = reopened
+            .organization(advanced.organization_id)
+            .expect("load inherited organization")
+            .expect("inherited organization present");
+        assert_eq!(recovered, advanced);
+        assert_eq!(recovered.inherited_from_revision_id, Some(base.revision_id));
+        assert_eq!(
+            reopened
+                .organization_revision(base.revision_id)
+                .expect("load base revision"),
+            Some(base)
         );
     }
 

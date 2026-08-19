@@ -133,8 +133,9 @@ impl McpCredential {
     /// # Errors
     /// Returns a configuration error for an empty value.
     pub fn new(value: impl Into<String>) -> Result<Self, McpError> {
-        let value = value.into();
+        let mut value = value.into();
         if value.trim().is_empty() {
+            value.zeroize();
             return Err(McpError::Configuration(
                 "MCP credential cannot be empty".into(),
             ));
@@ -142,8 +143,15 @@ impl McpCredential {
         Ok(Self(value))
     }
 
-    pub(crate) fn expose(&self) -> &str {
+    /// Exposes the secret only to a host boundary that has already received
+    /// explicit credential authority. Callers must never log or return it.
+    #[must_use]
+    pub fn expose_to_host_executor(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        self.expose_to_host_executor()
     }
 }
 

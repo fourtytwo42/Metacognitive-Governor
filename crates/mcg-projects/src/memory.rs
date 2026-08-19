@@ -212,6 +212,38 @@ impl MemoryLifecycle {
         ))
     }
 
+    /// Produces a decaying successor when an explicit freshness deadline has
+    /// elapsed. Unlike an owner-requested decay, expiration also applies to a
+    /// durable claim: durability records prior usefulness, not perpetual truth.
+    ///
+    /// # Errors
+    ///
+    /// Claims already decaying or in a terminal state cannot expire again.
+    pub fn expired(
+        previous: &mut MemoryClaim,
+        provenance: ClaimProvenance,
+    ) -> Result<MemoryClaim, MemoryError> {
+        if !matches!(
+            previous.state,
+            MemoryState::New | MemoryState::Working | MemoryState::Durable
+        ) {
+            return Err(MemoryError::InvalidTransition(
+                previous.id,
+                previous.state,
+                MemoryState::Decaying,
+            ));
+        }
+        let correction_count = previous.correction_count;
+        let usefulness_count = previous.usefulness_count;
+        Ok(successor(
+            previous,
+            MemoryState::Decaying,
+            provenance,
+            correction_count,
+            usefulness_count,
+        ))
+    }
+
     /// Produces a retracted terminal successor while retaining prior versions.
     ///
     /// # Errors
@@ -272,11 +304,21 @@ fn successor(
 
 #[must_use]
 pub fn render_managed_memory(project_id: ProjectId, claims: &[MemoryClaim]) -> String {
+    render_managed_memory_at(project_id, claims, Utc::now())
+}
+
+#[must_use]
+pub fn render_managed_memory_at(
+    project_id: ProjectId,
+    claims: &[MemoryClaim],
+    now: DateTime<Utc>,
+) -> String {
     let mut active = claims
         .iter()
         .filter(|claim| {
             claim.project_id == project_id
                 && matches!(claim.state, MemoryState::Working | MemoryState::Durable)
+                && claim.is_fresh_at(now)
         })
         .collect::<Vec<_>>();
     active.sort_by(|left, right| {
@@ -405,5 +447,38 @@ mod tests {
             None,
         );
         assert_eq!(disguised, Err(MemoryError::SecretNamespace));
+    }
+
+    #[test]
+    fn explicit_expiration_can_decay_durable_memory_without_losing_evidence() {
+        let project_id = ProjectId::new();
+        let mut durable = MemoryLifecycle::create(
+            project_id,
+            "project",
+            "deployment",
+            serde_json::json!("staging"),
+            0.9,
+            user_provenance("owner"),
+            None,
+        )
+        .expect("claim");
+        durable.state = MemoryState::Durable;
+        durable.usefulness_count = 3;
+        let replacement = MemoryLifecycle::expired(
+            &mut durable,
+            ClaimProvenance {
+                source_kind: ProvenanceKind::Derived,
+                source: "automatic freshness consolidation".into(),
+                task_id: None,
+                artifact_sha256: None,
+            },
+        )
+        .expect("expiration");
+
+        assert_eq!(durable.state, MemoryState::Superseded);
+        assert_eq!(replacement.state, MemoryState::Decaying);
+        assert_eq!(replacement.value, serde_json::json!("staging"));
+        assert_eq!(replacement.usefulness_count, 3);
+        assert_eq!(replacement.supersedes, Some(durable.id));
     }
 }

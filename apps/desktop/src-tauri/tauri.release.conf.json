@@ -17,7 +17,8 @@
       "binaries/mcg-service",
       "binaries/mcg",
       "binaries/mcg-plugin-runner",
-      "binaries/mcg-shadow-runner"
+      "binaries/mcg-shadow-runner",
+      "binaries/mcg-updater"
     ],
     "resources": [
       "../../../THIRD_PARTY_NOTICES.md",

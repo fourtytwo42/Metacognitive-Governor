@@ -25,31 +25,35 @@ use mcg_agents::{
     EXPERIMENT_SCHEMA_VERSION, EvaluationEvidence, EvaluationOutcome, EvaluationReport,
     ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
     ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
-    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, ProspectiveAnalysis,
-    RoleKind, RunSupervisionSnapshot, SHADOW_WORKSPACE_SCHEMA_VERSION, ShadowAuthority,
-    ShadowExecutionReceipt, ShadowWorkspace, ShadowWorkspaceState, SuccessCondition,
-    SupervisionAnalyzer, SupervisionObservation, SupervisionSignal, TaskComplexity, WorkPlan,
+    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
+    PortableOrganizationComparison, PortableOrganizationGenome, ProspectiveAnalysis,
+    ProviderProxyEnsembleCheckpoint, ProviderProxyTurnCheckpoint, RoleKind, RunSupervisionSnapshot,
+    SHADOW_WORKSPACE_SCHEMA_VERSION, ShadowAuthority, ShadowExecutionReceipt, ShadowWorkspace,
+    ShadowWorkspaceState, SuccessCondition, SupervisionAnalyzer, SupervisionObservation,
+    SupervisionSignal, TaskComplexity, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
     ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, EvaluationId,
     ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, LeaseId, MemoryClaimId,
-    NotificationSeverity, OrganizationId, OrganizationRevisionId, PLATFORM_SCHEMA_VERSION,
-    PlatformCapability, PlatformCapabilityAvailability, PlatformCapabilityKind,
-    PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId, PlatformSession,
-    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PlatformSessionOwner,
-    PlatformSessionState, PluginCapabilityGrant, PluginCapabilityScope, PluginInstallation,
-    PluginInvocationId, PluginInvocationRecord, PluginInvocationState, PluginRevision, ProjectId,
-    ProxyConversationId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
-    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
-    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
-    SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
-    SshOperationId, SshOperationKind, SshOperationState, SupervisionObservationId, TaskBudget,
-    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
+    PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
+    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
+    PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant, PluginCapabilityScope,
+    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginInvocationState,
+    PluginRevision, ProjectId, ProxyCallId, ProxyConversationId, RiskLevel, RunId,
+    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck,
+    SiteHealthCheckId, SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId,
+    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
+    SshHostRevisionId, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    SshOperationState, SshWorkflow, SshWorkflowId, SshWorkflowState, SshWorkflowStep,
+    SshWorkflowStepId, SshWorkflowStepState, SupervisionObservationId, TaskBudget, TaskEnvelope,
+    TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -72,27 +76,31 @@ use mcg_plugin_trust::{
 use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
     ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
-    MemoryError, MemoryLifecycle, MemoryLifecycleAction, ProjectDiscoverer, ProjectDiscoveryError,
-    ProjectModel, SnapshotInvalidation, render_managed_memory,
+    MemoryError, MemoryLifecycle, MemoryLifecycleAction, MemoryState, ProjectDiscoverer,
+    ProjectDiscoveryError, ProjectModel, ProvenanceKind, SnapshotInvalidation,
+    render_managed_memory,
 };
 use mcg_providers::{
     BrowserAuthorizationConfig, DeviceAuthorizationConfig, MemoryProviderCredentialStore,
     ModelProbeReport, ModelRequest, ModelResponse, OAuthTokenSet, OsProviderCredentialStore,
     PROXY_LEDGER_SCHEMA_VERSION, ProviderConnection, ProviderCredential, ProviderCredentialStore,
-    ProviderError, ProviderModelCatalog, ProviderModelRef, ProviderRegistry, ProviderSecretSlot,
-    ProxyCallRecord, ProxyConversation, ProxyConversationView, ProxyUsageSummary, RouteCandidate,
-    RoutingPolicy, ToolDefinition, clear_provider_credentials, save_provider_credentials,
+    ProviderDispatchBegin, ProviderDispatchFailure, ProviderDispatchRecord, ProviderError,
+    ProviderModelCatalog, ProviderModelRef, ProviderRegistry, ProviderSecretSlot, ProxyCallRecord,
+    ProxyConversation, ProxyConversationView, ProxyUsageSummary, RouteCandidate, RoutingPolicy,
+    ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
 use mcg_storage::{
-    AgentRecoveryReport, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
-    ConsumerEvaluationCheckpointState, DataDirectoryLock, RecoveryReport, STORAGE_SCHEMA_VERSION,
+    AgentRecoveryReport, AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret,
+    BackupSecretSnapshot, DataDirectoryLock, RecoveryReport, STORAGE_SCHEMA_VERSION,
     SqliteEventStore, StorageError, acquire_data_directory_lock,
+    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
-    AutomaticSupervisionMutation, BackupBundleManifest, BackupBundleSummary,
-    CandidateRevisionMutation, ExperimentMutation, ScheduleClaim, ScheduleWakeMutation,
-    ShadowWorkspaceMutation, create_backup_bundle_from_snapshot, verify_backup_bundle,
+    AutomaticSupervisionMutation, BackupBundleManifest, BackupBundleSummary, BackupPassphrase,
+    CandidateRevisionMutation, ConsumerEvaluationCheckpoint, ConsumerEvaluationCheckpointState,
+    ExperimentMutation, ScheduleClaim, ScheduleWakeMutation, ShadowWorkspaceMutation,
+    create_backup_bundle_from_snapshot, verify_backup_bundle,
 };
 use mcg_tools::{
     ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
@@ -104,9 +112,10 @@ use mcg_tools::{
     PersistentBrowserManager, PersistentBrowserMode, PersistentBrowserObservation,
     ProcessEnvironmentVariable, ProcessExecutor, ProcessOptions, ProcessStream,
     RejectingCredentialResolver, ResearchEvidenceDocument, ResearchExecutor, SecretMaterial,
-    SshExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditRecord, ToolAuditSink, ToolBroker,
-    ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
-    VerificationEvidence, browser_runtime_available, computer_use_runtime_available,
+    SshExecutor, SystemExecutor, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditRecord,
+    ToolAuditSink, ToolBroker, ToolError, ToolExecutor, ToolOutcome, ToolOutcomeStatus,
+    ToolRequest, ToolRequestKind, VerificationEvidence, browser_runtime_available,
+    computer_use_runtime_available,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -141,6 +150,7 @@ pub struct RuntimeStatus {
     pub recovered_computer_action_batches: u64,
     pub recovered_site_deployments: u64,
     pub recovered_ssh_operations: u64,
+    pub recovered_ssh_workflows: u64,
     pub recovered_shadow_workspaces: u64,
     pub recovered_plugin_invocations: u64,
 }
@@ -178,6 +188,12 @@ pub struct DiagnosticCounts {
     pub pending_approvals: u64,
     pub plugins: u64,
     pub plugin_invocations: u64,
+    #[serde(default)]
+    pub provider_dispatch_started: u64,
+    #[serde(default)]
+    pub provider_dispatch_completed: u64,
+    #[serde(default)]
+    pub provider_dispatch_failed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +298,8 @@ pub struct SshHostRegistrationRequest {
     pub authentication: SshAuthentication,
     pub known_hosts_entry: String,
     pub host_key_sha256: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub state: SshHostState,
 }
 
@@ -296,6 +314,8 @@ pub struct SshHostUpdateRequest {
     pub authentication: SshAuthentication,
     pub known_hosts_entry: String,
     pub host_key_sha256: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub state: SshHostState,
     pub reason: String,
 }
@@ -311,6 +331,42 @@ pub struct SshOperationMutation {
     pub operation: SshOperation,
     pub replayed: bool,
     pub outcome: Option<ToolOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshWorkflowStepRequest {
+    pub id: SshWorkflowStepId,
+    pub name: String,
+    #[serde(default)]
+    pub host_id: Option<SshHostId>,
+    #[serde(default)]
+    pub host_revision: Option<u32>,
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<SshWorkflowStepId>,
+    pub operation: SshOperationKind,
+    #[serde(default = "default_ssh_workflow_timeout")]
+    pub timeout_seconds: u64,
+}
+
+const fn default_ssh_workflow_timeout() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshWorkflowCreateRequest {
+    pub id: SshWorkflowId,
+    pub display_name: String,
+    pub task_id: Option<TaskId>,
+    pub steps: Vec<SshWorkflowStepRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SshWorkflowMutation {
+    pub workflow: SshWorkflow,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +451,8 @@ impl RuntimeError {
                     | StorageError::ScheduleNotFound(_)
                     | StorageError::PlatformSessionNotFound(_)
                     | StorageError::SiteNotFound(_)
+                    | StorageError::SshHostNotFound(_)
+                    | StorageError::SshWorkflowNotFound(_)
                     | StorageError::BackupNotFound(_)
                     | StorageError::PluginNotFound(_)
                     | StorageError::PluginRevisionNotFound(_)
@@ -483,6 +541,26 @@ pub struct MemoryClaimMutation {
     pub event: EventEnvelope,
 }
 
+pub const MEMORY_CONSOLIDATION_BATCH_LIMIT: usize = 64;
+pub const MEMORY_DECAY_GRACE_DAYS: i64 = 7;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryConsolidationReport {
+    pub examined: usize,
+    pub decayed: usize,
+    pub retracted: usize,
+    pub conflicts: usize,
+    pub mutations: Vec<MemoryClaimMutation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PortableOrganizationImportMutation {
+    pub organization: OrganizationGenome,
+    pub portable_sha256: String,
+    pub replayed: bool,
+    pub event: Option<EventEnvelope>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRunView {
     pub run: AgentRun,
@@ -492,6 +570,54 @@ pub struct AgentRunView {
     pub usage: Vec<AgentUsageRecord>,
     pub evaluations: Vec<EvaluationReport>,
     pub results: Vec<AgentTurnResult>,
+}
+
+pub const RUN_REPLAY_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunReplayEvidence {
+    pub task: TaskEnvelope,
+    pub organization: OrganizationGenome,
+    pub view: AgentRunView,
+    pub events: Vec<EventEnvelope>,
+    pub tool_audit: Vec<ToolAuditRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunReplayCounts {
+    pub events: u64,
+    pub tool_audit_records: u64,
+    pub work_items: u64,
+    pub instances: u64,
+    pub leases: u64,
+    pub usage_records: u64,
+    pub evaluations: u64,
+    pub turn_results: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunReplayInvariant {
+    pub code: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+/// A deterministic, observation-only reconstruction of one durable agent run.
+///
+/// The digest covers `evidence` exactly. No wall-clock value is included, so
+/// identical durable state produces an identical report across process restarts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunReplayReport {
+    pub schema_version: u16,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub terminal: bool,
+    pub side_effect_free: bool,
+    pub evidence_sha256: String,
+    pub counts: RunReplayCounts,
+    pub invariants: Vec<RunReplayInvariant>,
+    pub evidence: RunReplayEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1188,6 +1314,7 @@ pub struct AppRuntime {
     recovered_computer_action_batches: u64,
     recovered_site_deployments: u64,
     recovered_ssh_operations: u64,
+    recovered_ssh_workflows: u64,
     recovered_shadow_workspaces: u64,
     recovered_plugin_invocations: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
@@ -1201,6 +1328,7 @@ pub struct AppRuntime {
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
     plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
     plugin_trust: Arc<PluginTrustStore>,
+    _ephemeral_data_directory: Option<tempfile::TempDir>,
 }
 
 impl std::fmt::Debug for AppRuntime {
@@ -1242,6 +1370,7 @@ impl AppRuntime {
             store.recover_computer_action_batches(startup_now)?;
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
+        let (recovered_ssh_workflows, _) = store.recover_ssh_workflows(startup_now)?;
         let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
         let recovered_plugin_invocations = store
             .recover_plugin_invocations(startup_now)?
@@ -1273,6 +1402,7 @@ impl AppRuntime {
             recovered_computer_action_batches,
             recovered_site_deployments,
             recovered_ssh_operations,
+            recovered_ssh_workflows,
             recovered_shadow_workspaces,
             recovered_plugin_invocations,
             platform_capabilities,
@@ -1282,6 +1412,7 @@ impl AppRuntime {
             mcp_credentials,
             BrowserAuthorizationConfig::default(),
             DeviceAuthorizationConfig::default(),
+            None,
         )
     }
 
@@ -1306,11 +1437,22 @@ impl AppRuntime {
     ///
     /// Returns an error when storage or the supplied token is invalid.
     pub fn open_in_memory_with_oauth_configs(
-        config: AppConfig,
+        mut config: AppConfig,
         token: String,
         browser_config: BrowserAuthorizationConfig,
         device_config: DeviceAuthorizationConfig,
     ) -> Result<Self, RuntimeError> {
+        let default_data_directory = AppConfig::default().data_directory;
+        let ephemeral_data_directory = if config.data_directory == default_data_directory {
+            let temporary = tempfile::Builder::new()
+                .prefix("mcg-in-memory-")
+                .tempdir()?;
+            config.data_directory = temporary.path().join("data");
+            Some(temporary)
+        } else {
+            None
+        };
+        fs::create_dir_all(&config.data_directory)?;
         let mut store = SqliteEventStore::open_in_memory()?;
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
@@ -1323,6 +1465,7 @@ impl AppRuntime {
             store.recover_computer_action_batches(startup_now)?;
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
+        let (recovered_ssh_workflows, _) = store.recover_ssh_workflows(startup_now)?;
         let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
         let recovered_plugin_invocations = store
             .recover_plugin_invocations(startup_now)?
@@ -1333,7 +1476,7 @@ impl AppRuntime {
         let settings = store.initialize_user_settings(&config, startup_now)?;
         let browser_sessions = Arc::new(PersistentBrowserManager::new(
             config.browser_executable.clone(),
-            std::env::temp_dir().join(format!("mcg-browser-sessions-{}", Uuid::new_v4())),
+            config.data_directory.join("browser-sessions"),
         )?);
         let computer_sessions = Arc::new(ComputerUseManager::new());
         let auth = LocalAuth::from_token(token)?;
@@ -1356,6 +1499,7 @@ impl AppRuntime {
             recovered_computer_action_batches,
             recovered_site_deployments,
             recovered_ssh_operations,
+            recovered_ssh_workflows,
             recovered_shadow_workspaces,
             recovered_plugin_invocations,
             platform_capabilities,
@@ -1365,6 +1509,7 @@ impl AppRuntime {
             mcp_credentials,
             browser_config,
             device_config,
+            ephemeral_data_directory,
         )
     }
 
@@ -1384,6 +1529,7 @@ impl AppRuntime {
         recovered_computer_action_batches: u64,
         recovered_site_deployments: u64,
         recovered_ssh_operations: u64,
+        recovered_ssh_workflows: u64,
         recovered_shadow_workspaces: u64,
         recovered_plugin_invocations: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
@@ -1393,6 +1539,7 @@ impl AppRuntime {
         mcp_credentials: Arc<dyn McpCredentialStore>,
         browser_config: BrowserAuthorizationConfig,
         device_config: DeviceAuthorizationConfig,
+        ephemeral_data_directory: Option<tempfile::TempDir>,
     ) -> Result<Self, RuntimeError> {
         let plugin_trust =
             PluginTrustStore::new(config.trusted_plugin_signers.iter().map(|signer| {
@@ -1428,6 +1575,7 @@ impl AppRuntime {
             recovered_computer_action_batches,
             recovered_site_deployments,
             recovered_ssh_operations,
+            recovered_ssh_workflows,
             recovered_shadow_workspaces,
             recovered_plugin_invocations,
             platform_capabilities,
@@ -1441,6 +1589,7 @@ impl AppRuntime {
             shadow_command_verifier: default_shadow_command_verifier(),
             plugin_runner: package_plugin_runner(),
             plugin_trust: Arc::new(plugin_trust),
+            _ephemeral_data_directory: ephemeral_data_directory,
         })
     }
 
@@ -1480,6 +1629,7 @@ impl AppRuntime {
             recovered_computer_action_batches: self.recovered_computer_action_batches,
             recovered_site_deployments: self.recovered_site_deployments,
             recovered_ssh_operations: self.recovered_ssh_operations,
+            recovered_ssh_workflows: self.recovered_ssh_workflows,
             recovered_shadow_workspaces: self.recovered_shadow_workspaces,
             recovered_plugin_invocations: self.recovered_plugin_invocations,
         }
@@ -2094,6 +2244,9 @@ impl AppRuntime {
             artifacts: storage.artifact_count,
             plugins: storage.plugin_count,
             plugin_invocations: storage.plugin_invocation_count,
+            provider_dispatch_started: storage.provider_dispatch_started_count,
+            provider_dispatch_completed: storage.provider_dispatch_completed_count,
+            provider_dispatch_failed: storage.provider_dispatch_failed_count,
             ..DiagnosticCounts::default()
         };
         let mut add_check = |code: &str,
@@ -2142,6 +2295,26 @@ impl AppRuntime {
                 storage.schema_version, STORAGE_SCHEMA_VERSION
             ),
             (!schema_ok).then_some("Install a compatible MCG version before continuing."),
+        );
+
+        let dispatches_clear = counts.provider_dispatch_started == 0;
+        add_check(
+            "provider_dispatch_recovery",
+            "Provider dispatch recovery",
+            if dispatches_clear {
+                DiagnosticSeverity::Pass
+            } else {
+                DiagnosticSeverity::Warning
+            },
+            format!(
+                "{} physical provider request(s) are active or indeterminate; {} validated request(s) completed; {} definite request(s) failed.",
+                counts.provider_dispatch_started,
+                counts.provider_dispatch_completed,
+                counts.provider_dispatch_failed
+            ),
+            (!dispatches_clear).then_some(
+                "Review the affected task and provider billing/logs, then retry with a new owner-authorized call identity; MCG will not resend an indeterminate request automatically.",
+            ),
         );
 
         let durable = self.data_lock.is_some();
@@ -2373,24 +2546,141 @@ impl AppRuntime {
         restrict_to_owner(&directory, 0o700)?;
         let destination = directory.join(format!("{backup_id}.mcgb"));
         if destination.exists() {
-            return Ok(verify_backup_bundle(&destination)?);
+            let summary = verify_backup_bundle(&destination)?;
+            if summary.manifest.secrets_included {
+                return Err(StorageError::Conflict(
+                    "backup identity already belongs to an encrypted credential backup".into(),
+                )
+                .into());
+            }
+            return Ok(summary);
         }
         let snapshot = directory.join(format!(".mcgb-{backup_id}-{}.sqlite3", Uuid::new_v4()));
-        let snapshot_result = self.store()?.snapshot_database(&snapshot);
-        if let Err(error) = snapshot_result {
-            let _ = fs::remove_file(&snapshot);
-            return Err(error.into());
-        }
-        let summary = create_backup_bundle_from_snapshot(
-            &snapshot,
-            &self.config.data_directory,
-            &destination,
-            env!("CARGO_PKG_VERSION"),
-            Utc::now(),
-        );
-        let _ = fs::remove_file(&snapshot);
-        let summary = summary?;
+        let result = self.store()?.snapshot_database(&snapshot).and_then(|()| {
+            create_backup_bundle_from_snapshot(
+                &snapshot,
+                &self.config.data_directory,
+                &destination,
+                env!("CARGO_PKG_VERSION"),
+                Utc::now(),
+            )
+        });
+        let summary = finish_online_snapshot(&snapshot, result)?;
         restrict_to_owner(&destination, 0o600)?;
+        Ok(summary)
+    }
+
+    /// Creates or authenticates one explicitly passphrase-encrypted credential backup.
+    ///
+    /// # Errors
+    /// Returns protected-store, snapshot, KDF, encryption, identity-conflict, or integrity failures.
+    #[allow(clippy::too_many_lines)] // Keeps connection locks, credential capture, SQLite snapshot, and cleanup in one audited scope.
+    pub async fn create_encrypted_backup(
+        &self,
+        backup_id: Uuid,
+        passphrase: &BackupPassphrase,
+    ) -> Result<BackupBundleSummary, RuntimeError> {
+        let directory = self.config.data_directory.join("backups");
+        fs::create_dir_all(&directory)?;
+        restrict_to_owner(&directory, 0o700)?;
+        let destination = directory.join(format!("{backup_id}.mcgb"));
+        if destination.exists() {
+            let (summary, _) = decrypt_backup_bundle_secrets(&destination, passphrase)?;
+            return Ok(summary);
+        }
+
+        let (initial_providers, initial_mcp) = {
+            let store = self.store()?;
+            (store.provider_connections()?, store.mcp_connections()?)
+        };
+        let mut provider_locks = Vec::with_capacity(initial_providers.len());
+        for connection in &initial_providers {
+            provider_locks.push(self.oauth_refresh.lock_connection(&connection.id).await);
+        }
+        let (locked_providers, locked_mcp) = {
+            let store = self.store()?;
+            (store.provider_connections()?, store.mcp_connections()?)
+        };
+        if initial_providers != locked_providers || initial_mcp != locked_mcp {
+            return Err(StorageError::Conflict(
+                "connections changed while encrypted backup authority was acquired".into(),
+            )
+            .into());
+        }
+        let provider_secrets = locked_providers
+            .iter()
+            .map(|connection| {
+                Ok(match self.provider_credential_snapshot(connection)? {
+                    ProtectedProviderCredentialSnapshot::None => BackupProviderSecret::None {
+                        connection_id: connection.id.clone(),
+                    },
+                    ProtectedProviderCredentialSnapshot::Primary(credential) => {
+                        BackupProviderSecret::Primary {
+                            connection_id: connection.id.clone(),
+                            auth_mode: connection.auth_mode,
+                            credential,
+                        }
+                    }
+                    ProtectedProviderCredentialSnapshot::OAuth(tokens) => {
+                        BackupProviderSecret::OAuth {
+                            connection_id: connection.id.clone(),
+                            auth_mode: connection.auth_mode,
+                            tokens,
+                        }
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let mcp_secrets = locked_mcp
+            .iter()
+            .map(|connection| match connection.auth_mode {
+                McpAuthMode::None => Ok(BackupMcpSecret::None {
+                    connection_id: connection.id.clone(),
+                }),
+                McpAuthMode::BearerToken => self
+                    .mcp_credentials
+                    .load(&connection.id)?
+                    .map(|credential| BackupMcpSecret::Bearer {
+                        connection_id: connection.id.clone(),
+                        credential,
+                    })
+                    .ok_or_else(|| {
+                        McpError::Authentication(format!(
+                            "MCP connection {} has no protected bearer credential",
+                            connection.id
+                        ))
+                        .into()
+                    }),
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let secrets = BackupSecretSnapshot::new(provider_secrets, mcp_secrets)?;
+        let snapshot = directory.join(format!(".mcgb-{backup_id}-{}.sqlite3", Uuid::new_v4()));
+        let result = {
+            let store = self.store()?;
+            if store.provider_connections()? != locked_providers
+                || store.mcp_connections()? != locked_mcp
+            {
+                Err(StorageError::Conflict(
+                    "connections changed while encrypted backup was being captured".into(),
+                ))
+            } else {
+                store.snapshot_database(&snapshot)
+            }
+        }
+        .and_then(|()| {
+            create_encrypted_backup_bundle_from_snapshot(
+                &snapshot,
+                &self.config.data_directory,
+                &destination,
+                env!("CARGO_PKG_VERSION"),
+                Utc::now(),
+                &secrets,
+                passphrase,
+            )
+        });
+        let summary = finish_online_snapshot(&snapshot, result)?;
+        restrict_to_owner(&destination, 0o600)?;
+        drop(provider_locks);
         Ok(summary)
     }
 
@@ -4058,6 +4348,7 @@ impl AppRuntime {
             .into());
         }
         let now = Utc::now();
+        let capabilities = normalize_ssh_capabilities(&request.capabilities)?;
         let definition_hash = ssh_host_definition_hash(request)?;
         let host = SshHost {
             schema_version: SSH_SCHEMA_VERSION,
@@ -4072,6 +4363,7 @@ impl AppRuntime {
             authentication: request.authentication,
             known_hosts_entry: request.known_hosts_entry.trim().into(),
             host_key_sha256: request.host_key_sha256.trim().into(),
+            capabilities,
             state: request.state,
             created_at: now,
             updated_at: now,
@@ -4141,6 +4433,7 @@ impl AppRuntime {
             authentication: request.authentication,
             known_hosts_entry: request.known_hosts_entry.clone(),
             host_key_sha256: request.host_key_sha256.clone(),
+            capabilities: request.capabilities.clone(),
             state: request.state,
         };
         let definition_hash = ssh_host_definition_hash(&definition)?;
@@ -4160,6 +4453,7 @@ impl AppRuntime {
             .into());
         }
         let now = Utc::now();
+        let capabilities = normalize_ssh_capabilities(&request.capabilities)?;
         let host = SshHost {
             schema_version: SSH_SCHEMA_VERSION,
             id: host_id,
@@ -4173,6 +4467,7 @@ impl AppRuntime {
             authentication: request.authentication,
             known_hosts_entry: request.known_hosts_entry.trim().into(),
             host_key_sha256: request.host_key_sha256.trim().into(),
+            capabilities,
             state: request.state,
             created_at: current.created_at,
             updated_at: now,
@@ -4343,6 +4638,366 @@ impl AppRuntime {
     /// Returns an error when durable storage cannot be read.
     pub fn ssh_operations(&self, host_id: SshHostId) -> Result<Vec<SshOperation>, RuntimeError> {
         Ok(self.store()?.ssh_operations(host_id)?)
+    }
+
+    /// Creates one immutable, dependency-ordered workflow over pinned SSH host revisions.
+    /// Exact caller identity replay is observation-only.
+    ///
+    /// # Errors
+    /// Returns an error for missing tasks/hosts, stale host pins, invalid graphs, or conflicts.
+    #[allow(clippy::too_many_lines)] // Keeps canonical replay, routing, and durable graph creation together.
+    pub fn create_ssh_workflow(
+        &self,
+        request: &SshWorkflowCreateRequest,
+    ) -> Result<SshWorkflowMutation, RuntimeError> {
+        let now = Utc::now();
+        let definition_hash = ssh_workflow_definition_hash(request)?;
+        if let Some(existing) = self.ssh_workflow(request.id)? {
+            if existing.definition_hash == definition_hash {
+                return Ok(SshWorkflowMutation {
+                    workflow: existing,
+                    replayed: true,
+                    events: Vec::new(),
+                });
+            }
+            return Err(StorageError::Conflict(format!(
+                "SSH workflow {} already exists with a different definition",
+                request.id
+            ))
+            .into());
+        }
+        let hosts = self.ssh_hosts()?;
+        let mut steps = Vec::with_capacity(request.steps.len());
+        for step in &request.steps {
+            let required_capabilities = normalize_ssh_capabilities(&step.required_capabilities)?;
+            let (host, routed_automatically) = match (step.host_id, step.host_revision) {
+                (Some(host_id), Some(host_revision)) => {
+                    let host = hosts
+                        .iter()
+                        .find(|host| host.id == host_id && host.revision == host_revision)
+                        .ok_or(StorageError::Conflict(format!(
+                            "SSH workflow step {} pins an unavailable host revision",
+                            step.id
+                        )))?;
+                    (host, false)
+                }
+                (None, None) if !required_capabilities.is_empty() => {
+                    let host = hosts
+                        .iter()
+                        .filter(|host| host.state == SshHostState::Active)
+                        .filter(|host| {
+                            required_capabilities
+                                .iter()
+                                .all(|required| host.capabilities.binary_search(required).is_ok())
+                        })
+                        .min_by_key(|host| host.id)
+                        .ok_or_else(|| {
+                            StorageError::Conflict(format!(
+                                "no active SSH host provides every capability required by step {}",
+                                step.id
+                            ))
+                        })?;
+                    (host, true)
+                }
+                _ => {
+                    return Err(StorageError::InvalidData(format!(
+                        "SSH workflow step {} must provide both host fields or capability requirements",
+                        step.id
+                    ))
+                    .into());
+                }
+            };
+            if host.state != SshHostState::Active
+                || required_capabilities
+                    .iter()
+                    .any(|required| host.capabilities.binary_search(required).is_err())
+            {
+                return Err(StorageError::Conflict(format!(
+                    "SSH workflow step {} cannot use a host missing required capabilities",
+                    step.id
+                ))
+                .into());
+            }
+            steps.push(SshWorkflowStep {
+                id: step.id,
+                name: step.name.trim().into(),
+                host_id: host.id,
+                host_revision: host.revision,
+                required_capabilities,
+                routed_automatically,
+                dependencies: step.dependencies.clone(),
+                operation_id: ssh_workflow_operation_id(request.id, step.id),
+                operation: step.operation.clone(),
+                timeout_seconds: step.timeout_seconds,
+                state: SshWorkflowStepState::Pending,
+                detail: String::new(),
+            });
+        }
+        let workflow = SshWorkflow {
+            schema_version: SSH_WORKFLOW_SCHEMA_VERSION,
+            id: request.id,
+            definition_hash,
+            display_name: request.display_name.trim().into(),
+            task_id: request.task_id,
+            state: SshWorkflowState::Planned,
+            steps,
+            created_at: now,
+            updated_at: now,
+        };
+        let (workflow, created, events) = self.store()?.create_ssh_workflow(&workflow)?;
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(SshWorkflowMutation {
+            workflow,
+            replayed: !created,
+            events,
+        })
+    }
+
+    /// Lists all retained multi-host SSH workflows.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn ssh_workflows(&self) -> Result<Vec<SshWorkflow>, RuntimeError> {
+        Ok(self.store()?.ssh_workflows()?)
+    }
+
+    /// Loads one retained multi-host SSH workflow.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot be read.
+    pub fn ssh_workflow(
+        &self,
+        workflow_id: SshWorkflowId,
+    ) -> Result<Option<SshWorkflow>, RuntimeError> {
+        Ok(self.store()?.ssh_workflow(workflow_id)?)
+    }
+
+    /// Advances every dependency-ready step through the ordinary typed SSH broker.
+    /// The first approval/setup boundary pauses the workflow; failed or uncertain
+    /// operations stop it without executing dependents.
+    ///
+    /// # Errors
+    /// Returns an error for missing workflows or invalid/stale durable authority.
+    #[allow(clippy::too_many_lines)] // Keeps the ordered durable workflow state machine auditable.
+    pub async fn run_ssh_workflow(
+        &self,
+        workflow_id: SshWorkflowId,
+    ) -> Result<SshWorkflowMutation, RuntimeError> {
+        let mut workflow = self
+            .ssh_workflow(workflow_id)?
+            .ok_or(StorageError::SshWorkflowNotFound(workflow_id))?;
+        if workflow.state.is_terminal() {
+            return Ok(SshWorkflowMutation {
+                workflow,
+                replayed: true,
+                events: Vec::new(),
+            });
+        }
+        let mut events = Vec::new();
+        if workflow.state != SshWorkflowState::Running {
+            let previous = workflow.state;
+            workflow.state = SshWorkflowState::Running;
+            workflow.updated_at = Utc::now();
+            events.push(self.commit_ssh_workflow(previous, &workflow)?);
+        }
+
+        loop {
+            let Some(index) = workflow.steps.iter().position(|step| {
+                step.state == SshWorkflowStepState::Pending
+                    && step.dependencies.iter().all(|dependency| {
+                        workflow.steps.iter().any(|candidate| {
+                            candidate.id == *dependency
+                                && candidate.state == SshWorkflowStepState::Succeeded
+                        })
+                    })
+            }) else {
+                workflow.state = if workflow
+                    .steps
+                    .iter()
+                    .all(|step| step.state == SshWorkflowStepState::Succeeded)
+                {
+                    SshWorkflowState::Succeeded
+                } else {
+                    SshWorkflowState::Failed
+                };
+                let previous = SshWorkflowState::Running;
+                workflow.updated_at = Utc::now();
+                events.push(self.commit_ssh_workflow(previous, &workflow)?);
+                return Ok(SshWorkflowMutation {
+                    workflow,
+                    replayed: false,
+                    events,
+                });
+            };
+
+            let step = workflow.steps[index].clone();
+            let host = self
+                .ssh_host(step.host_id)?
+                .ok_or(StorageError::SshHostNotFound(step.host_id))?;
+            if host.state != SshHostState::Active || host.revision != step.host_revision {
+                workflow.steps[index].state = SshWorkflowStepState::Failed;
+                workflow.steps[index].detail =
+                    "pinned SSH host was disabled, archived, or revised".into();
+                skip_ssh_workflow_dependents(&mut workflow, step.id);
+                workflow.state = SshWorkflowState::Failed;
+                workflow.updated_at = Utc::now();
+                events.push(self.commit_ssh_workflow(SshWorkflowState::Running, &workflow)?);
+                return Ok(SshWorkflowMutation {
+                    workflow,
+                    replayed: false,
+                    events,
+                });
+            }
+
+            match self
+                .run_ssh_operation(
+                    step.host_id,
+                    step.operation_id,
+                    workflow.task_id,
+                    step.operation,
+                    step.timeout_seconds,
+                )
+                .await
+            {
+                Ok(mutation) => {
+                    workflow.steps[index].detail = mutation.operation.detail;
+                    workflow.steps[index].state = match mutation.operation.state {
+                        SshOperationState::Succeeded => SshWorkflowStepState::Succeeded,
+                        SshOperationState::Failed => SshWorkflowStepState::Failed,
+                        SshOperationState::Uncertain | SshOperationState::Executing => {
+                            SshWorkflowStepState::Uncertain
+                        }
+                    };
+                }
+                Err(RuntimeError::Tool(ToolError::ApprovalRequired { .. })) => {
+                    workflow.state = SshWorkflowState::Waiting;
+                    workflow.steps[index].detail = "owner approval is required".into();
+                    workflow.updated_at = Utc::now();
+                    events.push(self.commit_ssh_workflow(SshWorkflowState::Running, &workflow)?);
+                    return Ok(SshWorkflowMutation {
+                        workflow,
+                        replayed: false,
+                        events,
+                    });
+                }
+                Err(error) => {
+                    let operation = self.store()?.ssh_operation(step.operation_id)?;
+                    match operation {
+                        Some(operation)
+                            if matches!(
+                                operation.state,
+                                SshOperationState::Uncertain | SshOperationState::Executing
+                            ) =>
+                        {
+                            workflow.steps[index].state = SshWorkflowStepState::Uncertain;
+                            workflow.state = SshWorkflowState::Uncertain;
+                            workflow.steps[index].detail = operation.detail;
+                        }
+                        Some(operation) => {
+                            workflow.steps[index].detail = operation.detail;
+                            workflow.steps[index].state =
+                                if operation.state == SshOperationState::Succeeded {
+                                    SshWorkflowStepState::Succeeded
+                                } else {
+                                    SshWorkflowStepState::Failed
+                                };
+                            workflow.state = if operation.state == SshOperationState::Succeeded {
+                                SshWorkflowState::Running
+                            } else {
+                                SshWorkflowState::Failed
+                            };
+                        }
+                        None if matches!(&error, RuntimeError::Tool(ToolError::Unavailable(_))) => {
+                            workflow.state = SshWorkflowState::Waiting;
+                            workflow.steps[index].detail = ssh_workflow_error_detail(&error);
+                        }
+                        None => {
+                            workflow.steps[index].state = SshWorkflowStepState::Failed;
+                            workflow.state = SshWorkflowState::Failed;
+                            workflow.steps[index].detail = ssh_workflow_error_detail(&error);
+                        }
+                    }
+                }
+            }
+
+            if matches!(
+                workflow.steps[index].state,
+                SshWorkflowStepState::Failed | SshWorkflowStepState::Uncertain
+            ) {
+                skip_ssh_workflow_dependents(&mut workflow, step.id);
+            }
+            workflow.updated_at = Utc::now();
+            let next = workflow.state;
+            events.push(self.commit_ssh_workflow(SshWorkflowState::Running, &workflow)?);
+            if next != SshWorkflowState::Running {
+                return Ok(SshWorkflowMutation {
+                    workflow,
+                    replayed: false,
+                    events,
+                });
+            }
+        }
+    }
+
+    /// Cancels a workflow that has no currently executing remote operation.
+    ///
+    /// # Errors
+    /// Returns an error when the workflow is missing or remote authority is in flight.
+    pub fn cancel_ssh_workflow(
+        &self,
+        workflow_id: SshWorkflowId,
+    ) -> Result<SshWorkflowMutation, RuntimeError> {
+        let mut workflow = self
+            .ssh_workflow(workflow_id)?
+            .ok_or(StorageError::SshWorkflowNotFound(workflow_id))?;
+        if workflow.state.is_terminal() {
+            return Ok(SshWorkflowMutation {
+                workflow,
+                replayed: true,
+                events: Vec::new(),
+            });
+        }
+        for step in &workflow.steps {
+            if self
+                .store()?
+                .ssh_operation(step.operation_id)?
+                .is_some_and(|operation| operation.state == SshOperationState::Executing)
+            {
+                return Err(StorageError::Conflict(
+                    "cannot cancel while an SSH operation may still be executing".into(),
+                )
+                .into());
+            }
+        }
+        let previous = workflow.state;
+        for step in &mut workflow.steps {
+            if step.state == SshWorkflowStepState::Pending {
+                step.state = SshWorkflowStepState::Skipped;
+                step.detail = "workflow cancelled by owner".into();
+            }
+        }
+        workflow.state = SshWorkflowState::Cancelled;
+        workflow.updated_at = Utc::now();
+        let event = self.commit_ssh_workflow(previous, &workflow)?;
+        Ok(SshWorkflowMutation {
+            workflow,
+            replayed: false,
+            events: vec![event],
+        })
+    }
+
+    fn commit_ssh_workflow(
+        &self,
+        expected_state: SshWorkflowState,
+        workflow: &SshWorkflow,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let (_, event) = self
+            .store()?
+            .update_ssh_workflow(expected_state, workflow)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
     }
 
     /// Creates and durably records a validated project-scoped memory claim.
@@ -4542,6 +5197,77 @@ impl AppRuntime {
         Ok(render_managed_memory(project_id, &claims))
     }
 
+    /// Applies one bounded deterministic freshness-consolidation batch.
+    ///
+    /// Claims with an elapsed explicit freshness deadline enter decay, including
+    /// previously durable claims. A decaying successor is retained for seven
+    /// days before a later batch retracts it. Every change creates an immutable
+    /// successor and ordinary memory event; concurrent owner edits win and are
+    /// counted rather than overwritten.
+    ///
+    /// # Errors
+    ///
+    /// Storage or invariant failures other than a concurrent-head conflict stop
+    /// the batch and are returned.
+    pub fn consolidate_memory_at(
+        &self,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<MemoryConsolidationReport, RuntimeError> {
+        let decay_cutoff = now - Duration::days(MEMORY_DECAY_GRACE_DAYS);
+        let candidates = self
+            .store()?
+            .memory_consolidation_candidates(now, decay_cutoff, limit)?;
+        let mut report = MemoryConsolidationReport {
+            examined: candidates.len(),
+            decayed: 0,
+            retracted: 0,
+            conflicts: 0,
+            mutations: Vec::with_capacity(candidates.len()),
+        };
+        for mut previous in candidates {
+            let provenance = ClaimProvenance {
+                source_kind: ProvenanceKind::Derived,
+                source: "automatic freshness consolidation".into(),
+                task_id: None,
+                artifact_sha256: None,
+            };
+            let mut claim = match previous.state {
+                MemoryState::New | MemoryState::Working | MemoryState::Durable
+                    if previous.fresh_until.is_some_and(|deadline| deadline <= now) =>
+                {
+                    MemoryLifecycle::expired(&mut previous, provenance)?
+                }
+                MemoryState::Decaying if previous.observed_at <= decay_cutoff => {
+                    MemoryLifecycle::retracted(&mut previous, provenance)?
+                }
+                _ => continue,
+            };
+            claim.observed_at = now;
+            let stored = self.store()?.revise_memory_claim(&claim);
+            let (stored_previous, event) = match stored {
+                Ok(value) => value,
+                Err(StorageError::Conflict(_)) => {
+                    report.conflicts += 1;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match claim.state {
+                MemoryState::Decaying => report.decayed += 1,
+                MemoryState::Retracted => report.retracted += 1,
+                _ => unreachable!("consolidation only decays or retracts"),
+            }
+            let _ = self.event_sender.send(event.clone());
+            report.mutations.push(MemoryClaimMutation {
+                claim,
+                previous: Some(stored_previous),
+                event,
+            });
+        }
+        Ok(report)
+    }
+
     /// Lists persisted secret-free provider connections.
     ///
     /// # Errors
@@ -4630,6 +5356,470 @@ impl AppRuntime {
     ) -> Result<(), RuntimeError> {
         self.store()?.record_proxy_call(conversation, call)?;
         Ok(())
+    }
+
+    /// Durably claims one content-free physical provider call before network I/O.
+    ///
+    /// # Errors
+    /// Returns validation, identity-conflict, serialization, or storage failures.
+    pub fn begin_provider_dispatch(
+        &self,
+        dispatch: &ProviderDispatchRecord,
+    ) -> Result<ProviderDispatchBegin, RuntimeError> {
+        Ok(self.store()?.begin_provider_dispatch(dispatch)?)
+    }
+
+    /// Marks one claimed physical request as having returned a validated response.
+    ///
+    /// # Errors
+    /// Returns missing-dispatch, response-identity, validation, or storage failures.
+    pub fn complete_provider_dispatch(
+        &self,
+        client_request_id: &str,
+        response_id: &str,
+        completed_at: DateTime<Utc>,
+    ) -> Result<ProviderDispatchRecord, RuntimeError> {
+        Ok(self.store()?.complete_provider_dispatch(
+            client_request_id,
+            response_id,
+            completed_at,
+        )?)
+    }
+
+    /// Marks one claimed physical request as a definite classified failure.
+    ///
+    /// # Errors
+    /// Returns missing-dispatch, classification, validation, or storage failures.
+    pub fn fail_provider_dispatch(
+        &self,
+        client_request_id: &str,
+        failure: ProviderDispatchFailure,
+        failed_at: DateTime<Utc>,
+    ) -> Result<ProviderDispatchRecord, RuntimeError> {
+        Ok(self
+            .store()?
+            .fail_provider_dispatch(client_request_id, failure, failed_at)?)
+    }
+
+    /// Lists content-free physical dispatch evidence for one logical proxy call.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn provider_dispatches_for_call(
+        &self,
+        call_id: ProxyCallId,
+    ) -> Result<Vec<ProviderDispatchRecord>, RuntimeError> {
+        Ok(self.store()?.provider_dispatches_for_call(call_id)?)
+    }
+
+    /// Saves private continuation state for an MCG-managed provider-proxy turn.
+    ///
+    /// # Errors
+    /// Returns validation, stale-progress, context, or storage failures.
+    pub fn save_provider_proxy_turn_checkpoint(
+        &self,
+        checkpoint: &ProviderProxyTurnCheckpoint,
+    ) -> Result<(), RuntimeError> {
+        self.store()?
+            .save_provider_proxy_turn_checkpoint(checkpoint)?;
+        Ok(())
+    }
+
+    /// Loads private continuation state for one managed provider-proxy call.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn provider_proxy_turn_checkpoint(
+        &self,
+        call_id: ProxyCallId,
+    ) -> Result<Option<ProviderProxyTurnCheckpoint>, RuntimeError> {
+        Ok(self.store()?.provider_proxy_turn_checkpoint(call_id)?)
+    }
+
+    /// Saves private, restart-safe member/synthesis state for one ensemble call.
+    ///
+    /// # Errors
+    /// Returns validation, stale-progress, context, or storage failures.
+    pub fn save_provider_proxy_ensemble_checkpoint(
+        &self,
+        checkpoint: &ProviderProxyEnsembleCheckpoint,
+    ) -> Result<(), RuntimeError> {
+        self.store()?
+            .save_provider_proxy_ensemble_checkpoint(checkpoint)?;
+        Ok(())
+    }
+
+    /// Loads private member/synthesis state for one ensemble call.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn provider_proxy_ensemble_checkpoint(
+        &self,
+        call_id: ProxyCallId,
+    ) -> Result<Option<ProviderProxyEnsembleCheckpoint>, RuntimeError> {
+        Ok(self.store()?.provider_proxy_ensemble_checkpoint(call_id)?)
+    }
+
+    /// Loads one completed provider-proxy call by its global caller identity.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn proxy_call(
+        &self,
+        call_id: ProxyCallId,
+    ) -> Result<Option<ProxyCallRecord>, RuntimeError> {
+        Ok(self.store()?.proxy_call(call_id)?)
+    }
+
+    /// Lists immutable content-free provider-proxy calls for evidence-based
+    /// local routing. Prompts and generated output are never present.
+    ///
+    /// # Errors
+    /// Returns decoding or storage failures.
+    pub fn proxy_calls(&self) -> Result<Vec<ProxyCallRecord>, RuntimeError> {
+        Ok(self.store()?.proxy_calls()?)
+    }
+
+    /// Atomically records final proxy usage and removes the exact private
+    /// managed-turn continuation checkpoint.
+    ///
+    /// # Errors
+    /// Returns validation, identity, checkpoint, or storage failures.
+    pub fn complete_provider_proxy_turn(
+        &self,
+        checkpoint: &ProviderProxyTurnCheckpoint,
+        call: &ProxyCallRecord,
+    ) -> Result<(), RuntimeError> {
+        self.store()?
+            .complete_provider_proxy_turn(checkpoint, call)?;
+        Ok(())
+    }
+
+    /// Atomically records final ensemble usage and removes its exact private
+    /// member/synthesis continuation checkpoint.
+    ///
+    /// # Errors
+    /// Returns validation, identity, checkpoint, or storage failures.
+    pub fn complete_provider_proxy_ensemble(
+        &self,
+        checkpoint: &ProviderProxyEnsembleCheckpoint,
+        call: &ProxyCallRecord,
+    ) -> Result<(), RuntimeError> {
+        self.store()?
+            .complete_provider_proxy_ensemble(checkpoint, call)?;
+        Ok(())
+    }
+
+    /// Executes one canonical `host::` provider tool through the same
+    /// project-confined policy, approval, lease, redaction, artifact, and audit
+    /// plane used by native agent turns. The caller-owned proxy call and model
+    /// tool-call identities derive a stable tool request id for approval retry.
+    ///
+    /// # Errors
+    /// Returns missing task/project, malformed or unsupported tool, policy,
+    /// approval, executor, or durable audit failures.
+    #[allow(clippy::too_many_lines)] // Keep the fail-closed decode-to-broker sequence visible in one boundary.
+    pub async fn execute_provider_host_tool(
+        &self,
+        task_id: TaskId,
+        call_id: ProxyCallId,
+        model_tool_call_id: &str,
+        qualified_name: &str,
+        arguments: &str,
+    ) -> Result<ToolOutcome, RuntimeError> {
+        if model_tool_call_id.trim().is_empty()
+            || model_tool_call_id.len() > 256
+            || model_tool_call_id.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidData(
+                "provider model tool-call identity is invalid".into(),
+            )
+            .into());
+        }
+        let name = qualified_name.strip_prefix("host::").ok_or_else(|| {
+            StorageError::InvalidData("provider-managed host tool has no host:: namespace".into())
+        })?;
+        if canonical_host_tool_definition(name).is_none() {
+            return Err(StorageError::InvalidData(format!(
+                "provider-managed host tool {qualified_name} is unsupported"
+            ))
+            .into());
+        }
+        let mut object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            arguments,
+        )
+        .map_err(|error| {
+            StorageError::InvalidData(format!(
+                "invalid provider-managed {qualified_name} arguments: {error}"
+            ))
+        })?;
+        if object.contains_key("tool") {
+            return Err(StorageError::InvalidData(
+                "provider-managed arguments cannot override the typed tool discriminator".into(),
+            )
+            .into());
+        }
+        let canonical_arguments =
+            serde_json::to_string(&object).map_err(StorageError::Serialization)?;
+        object.insert(
+            "tool".into(),
+            serde_json::Value::String(name.replace('.', "_")),
+        );
+        let mut kind: ToolRequestKind = serde_json::from_value(serde_json::Value::Object(object))
+            .map_err(|error| {
+            StorageError::InvalidData(format!(
+                "invalid provider-managed {qualified_name} arguments: {error}"
+            ))
+        })?;
+        if kind.stable_name() != name {
+            return Err(StorageError::InvalidData(
+                "provider-managed tool arguments decoded to a different primitive".into(),
+            )
+            .into());
+        }
+
+        let task = self
+            .task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            StorageError::InvalidData("provider-managed task has no project".into())
+        })?;
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let root = PathBuf::from(project.root)
+            .canonicalize()
+            .map_err(StorageError::Io)?;
+        resolve_project_relative_tool_paths(&mut kind, &root);
+        let artifacts = self.config.data_directory.join("artifacts");
+        fs::create_dir_all(&artifacts)?;
+        let credentials = Arc::new(RejectingCredentialResolver);
+        let filesystem = Arc::new(
+            FilesystemExecutor::open([root.clone()], &artifacts).map_err(runtime_tool_error)?,
+        );
+        let process = Arc::new(
+            ProcessExecutor::new([root.clone()], credentials.clone())
+                .map_err(runtime_tool_error)?,
+        );
+        let http = Arc::new(
+            HttpExecutor::new(credentials, filesystem.clone(), &artifacts)
+                .map_err(runtime_tool_error)?,
+        );
+        let host = HostExecutor {
+            filesystem: filesystem.clone(),
+            process: process.clone(),
+            http: http.clone(),
+            browser: Arc::new(
+                BrowserExecutor::new(self.config.browser_executable.clone(), &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            research: Arc::new(ResearchExecutor::new(http)),
+            system: Arc::new(SystemExecutor),
+            git: Arc::new(
+                GitExecutor::new(process, [root.clone()], &artifacts)
+                    .map_err(runtime_tool_error)?,
+            ),
+            memory: Arc::new(MemoryExecutor::new(InMemoryMemoryRepository::default())),
+            external: Arc::new(RuntimeMcpExecutor {
+                store: self.store.clone(),
+                credentials: self.mcp_credentials.clone(),
+            }),
+        };
+        let control = self.tool_control();
+        let broker = ToolBroker::new(
+            host,
+            control.clone(),
+            control.clone(),
+            BrokerControls {
+                preset: self.user_settings().autonomy,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities: CapabilityPolicy::project(root),
+                leases: Arc::new(control),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let mut request = ToolRequest::new(
+            task_id,
+            format!("Provider-managed {qualified_name} operation"),
+            kind,
+        );
+        request.id = provider_managed_tool_request_id(
+            call_id,
+            model_tool_call_id,
+            qualified_name,
+            &canonical_arguments,
+        );
+        request.namespace = mcg_tools::ToolNamespace::Host;
+        broker.execute(&request).await.map_err(RuntimeError::from)
+    }
+
+    /// Executes one canonical read-only `mcg::` provider tool against the exact
+    /// task/project authority while retaining content-free decision/completion
+    /// audit and a durable execution lease.
+    ///
+    /// # Errors
+    /// Returns missing context, malformed/unsupported arguments, storage,
+    /// lease, audit, serialization, or bounded-output failures.
+    #[allow(clippy::too_many_lines)] // Keeps validation, bounded execution, lease, and audit ordering explicit.
+    pub async fn execute_provider_mcg_tool(
+        &self,
+        task_id: TaskId,
+        call_id: ProxyCallId,
+        model_tool_call_id: &str,
+        qualified_name: &str,
+        arguments: &str,
+    ) -> Result<ToolOutcome, RuntimeError> {
+        if model_tool_call_id.trim().is_empty()
+            || model_tool_call_id.len() > 256
+            || model_tool_call_id.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidData(
+                "provider model tool-call identity is invalid".into(),
+            )
+            .into());
+        }
+        let mut object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            arguments,
+        )
+        .map_err(|error| {
+            StorageError::InvalidData(format!(
+                "invalid provider-managed {qualified_name} arguments: {error}"
+            ))
+        })?;
+        let canonical_arguments =
+            serde_json::to_string(&object).map_err(StorageError::Serialization)?;
+        let task = self
+            .task(task_id)?
+            .ok_or(StorageError::TaskNotFound(task_id))?;
+        let project_id = task.project_id.ok_or_else(|| {
+            StorageError::InvalidData("provider-managed task has no project".into())
+        })?;
+        let output = match qualified_name {
+            "mcg::task.get" => {
+                require_provider_mcg_keys(&object, &[])?;
+                serde_json::to_value(&task).map_err(StorageError::Serialization)?
+            }
+            "mcg::project.context" => {
+                require_provider_mcg_keys(&object, &["relative_target", "token_budget"])?;
+                let relative_target =
+                    take_bounded_optional_string(&mut object, "relative_target", 1_024)?
+                        .map(|value| validate_provider_mcg_relative_target(&value))
+                        .transpose()?;
+                let token_budget =
+                    take_bounded_optional_u64(&mut object, "token_budget", 64, 4_096)?
+                        .unwrap_or(4_096);
+                serde_json::to_value(self.assemble_project_context(
+                    project_id,
+                    Vec::new(),
+                    u32::try_from(token_budget).unwrap_or(4_096),
+                    relative_target.as_deref(),
+                )?)
+                .map_err(StorageError::Serialization)?
+            }
+            "mcg::memory.search" => {
+                require_provider_mcg_keys(&object, &["query", "namespace", "limit"])?;
+                let query = take_bounded_required_string(&mut object, "query", 512)?;
+                let namespace = take_bounded_optional_string(&mut object, "namespace", 128)?;
+                let limit = take_bounded_optional_u64(&mut object, "limit", 1, 20)?.unwrap_or(10);
+                let query = query.to_lowercase();
+                let claims = self
+                    .memory_claims(project_id, namespace.as_deref(), true)?
+                    .into_iter()
+                    .filter(|claim| {
+                        claim.namespace.to_lowercase().contains(&query)
+                            || claim.key.to_lowercase().contains(&query)
+                            || claim.value.to_string().to_lowercase().contains(&query)
+                            || claim.provenance.source.to_lowercase().contains(&query)
+                    })
+                    .take(usize::try_from(limit).unwrap_or(20))
+                    .collect::<Vec<_>>();
+                serde_json::json!({"claims":claims})
+            }
+            _ => {
+                return Err(StorageError::InvalidData(format!(
+                    "provider-managed MCG tool {qualified_name} is unsupported"
+                ))
+                .into());
+            }
+        };
+        let output = serde_json::to_string(&output).map_err(StorageError::Serialization)?;
+        if output.len() > 256 * 1_024 {
+            return Err(StorageError::InvalidData(
+                "provider-managed MCG tool output exceeds 256 KiB".into(),
+            )
+            .into());
+        }
+        let request_id = provider_managed_tool_request_id(
+            call_id,
+            model_tool_call_id,
+            qualified_name,
+            &canonical_arguments,
+        );
+        let execution_id = ToolExecutionId::new();
+        let resource = format!("project:{project_id}");
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                format!("{task_id}\0{call_id}\0{model_tool_call_id}\0{qualified_name}\0{canonical_arguments}")
+                    .as_bytes()
+            )
+        );
+        let control = self.tool_control();
+        control
+            .record(ToolAuditRecord {
+                schema_version: TOOL_SCHEMA_VERSION,
+                execution_id,
+                request_id,
+                task_id,
+                tool: qualified_name.into(),
+                resource: resource.clone(),
+                request_fingerprint: fingerprint.clone(),
+                phase: ToolAuditPhase::Decision,
+                decision: "allow: canonical read-only MCG task/project authority".into(),
+                result: None,
+                artifacts: Vec::new(),
+                verification: Vec::new(),
+                recorded_at: Utc::now(),
+            })
+            .await?;
+        let lease = control
+            .acquire(request_id, execution_id, Duration::seconds(30))
+            .await?;
+        let started_at = Utc::now();
+        let finished_at = Utc::now().max(started_at);
+        let outcome = ToolOutcome {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id,
+            request_id,
+            status: ToolOutcomeStatus::Succeeded,
+            summary: format!("Completed governed {qualified_name} read"),
+            exit_code: None,
+            stdout: Some(output),
+            stderr: None,
+            artifacts: Vec::new(),
+            verification: Vec::new(),
+            started_at,
+            finished_at,
+        };
+        control.finish(lease.id, LeaseState::Completed).await?;
+        control
+            .record(ToolAuditRecord {
+                schema_version: TOOL_SCHEMA_VERSION,
+                execution_id,
+                request_id,
+                task_id,
+                tool: qualified_name.into(),
+                resource,
+                request_fingerprint: fingerprint,
+                phase: ToolAuditPhase::Completion,
+                decision: "completed: canonical read-only MCG operation".into(),
+                result: Some(ToolOutcomeStatus::Succeeded),
+                artifacts: Vec::new(),
+                verification: Vec::new(),
+                recorded_at: finished_at,
+            })
+            .await?;
+        Ok(outcome)
     }
 
     /// Lists privacy-preserving proxy conversation projections.
@@ -5158,6 +6348,96 @@ impl AppRuntime {
         Ok(self.store()?.organization_revision(revision_id)?)
     }
 
+    /// Loads every immutable revision for one organization in revision order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read.
+    pub fn organization_history(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Vec<OrganizationGenome>, RuntimeError> {
+        Ok(self.store()?.organization_history(organization_id)?)
+    }
+
+    /// Exports one immutable organization revision as a bounded, content-addressed,
+    /// identity-independent portable definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found or portable-contract validation errors.
+    pub fn export_organization(
+        &self,
+        revision_id: OrganizationRevisionId,
+    ) -> Result<PortableOrganizationGenome, RuntimeError> {
+        let genome = self
+            .organization_revision(revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(revision_id))?;
+        PortableOrganizationGenome::export(&genome, Utc::now())
+            .map_err(|error| StorageError::InvalidData(error.to_string()).into())
+    }
+
+    /// Imports a portable definition as a fresh root organization. A caller-owned
+    /// import id deterministically binds all local identities, making exact retries
+    /// observational and conflicting retries fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, conflict, or persistence errors.
+    pub fn import_organization(
+        &self,
+        import_id: OrganizationImportId,
+        portable: &PortableOrganizationGenome,
+        name: Option<&str>,
+    ) -> Result<PortableOrganizationImportMutation, RuntimeError> {
+        let candidate = portable
+            .materialize_for_import(import_id, name, Utc::now())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if let Some(existing) = self.organization(candidate.organization_id)? {
+            let mut replay_candidate = candidate;
+            replay_candidate.created_at = existing.created_at;
+            if replay_candidate != existing {
+                return Err(StorageError::Conflict(
+                    "organization import id was already used for different materialized content"
+                        .into(),
+                )
+                .into());
+            }
+            return Ok(PortableOrganizationImportMutation {
+                organization: existing,
+                portable_sha256: portable.content_sha256.clone(),
+                replayed: true,
+                event: None,
+            });
+        }
+        let event = self.record_organization_revision(&candidate)?;
+        Ok(PortableOrganizationImportMutation {
+            organization: candidate,
+            portable_sha256: portable.content_sha256.clone(),
+            replayed: false,
+            event: Some(event),
+        })
+    }
+
+    /// Compares two immutable revisions through their identity-independent
+    /// portable definitions.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found or portable-contract validation errors.
+    pub fn compare_organizations(
+        &self,
+        left: OrganizationRevisionId,
+        right: OrganizationRevisionId,
+    ) -> Result<PortableOrganizationComparison, RuntimeError> {
+        let left = self.export_organization(left)?;
+        let right = self.export_organization(right)?;
+        left.validate()
+            .and_then(|()| right.validate())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        Ok(left.compare(&right))
+    }
+
     /// Loads the full inspectable durable view of one agent run.
     ///
     /// # Errors
@@ -5190,6 +6470,87 @@ impl AppRuntime {
             usage,
             evaluations,
             results,
+        })
+    }
+
+    /// Reconstructs and verifies one run exclusively from durable evidence.
+    ///
+    /// This operation is observation-only: it never dispatches a provider,
+    /// executes a tool, reads mutable project files, or appends runtime state.
+    /// The returned digest is stable across repeated reads and daemon restarts
+    /// while the durable evidence is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for an unknown run and invalid-data when persisted
+    /// identity, ordering, or graph invariants do not form one coherent run.
+    pub fn replay_agent_run(&self, run_id: RunId) -> Result<RunReplayReport, RuntimeError> {
+        let store = self.store()?;
+        let run = store
+            .agent_run(run_id)?
+            .ok_or(StorageError::AgentRunNotFound(run_id))?;
+        let plan = store
+            .work_plan(run_id)?
+            .ok_or_else(|| StorageError::InvalidData("agent run has no work plan".into()))?;
+        let instances = store.agent_instances(run_id)?;
+        let leases = store.agent_leases_for_run(run_id)?;
+        let usage = store.agent_usage(run_id)?;
+        let evaluations = store.evaluations(run_id)?;
+        let results = leases
+            .iter()
+            .map(|lease| store.agent_turn_result(lease.id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let task = store
+            .load_task(run.task_id)?
+            .ok_or(StorageError::TaskNotFound(run.task_id))?;
+        let organization = store
+            .organization_revision(run.organization_revision_id)?
+            .ok_or(StorageError::OrganizationRevisionNotFound(
+                run.organization_revision_id,
+            ))?;
+        let events = store.events_for_task(run.task_id)?;
+        let tool_audit = store.tool_audit_for_task(run.task_id)?;
+        let evidence = RunReplayEvidence {
+            task,
+            organization,
+            view: AgentRunView {
+                run,
+                plan,
+                instances,
+                leases,
+                usage,
+                evaluations,
+                results,
+            },
+            events,
+            tool_audit,
+        };
+        let invariants = validate_run_replay_evidence(&evidence)?;
+        let encoded = serde_json::to_vec(&evidence).map_err(StorageError::from)?;
+        let counts = RunReplayCounts {
+            events: replay_count(evidence.events.len())?,
+            tool_audit_records: replay_count(evidence.tool_audit.len())?,
+            work_items: replay_count(evidence.view.plan.items.len())?,
+            instances: replay_count(evidence.view.instances.len())?,
+            leases: replay_count(evidence.view.leases.len())?,
+            usage_records: replay_count(evidence.view.usage.len())?,
+            evaluations: replay_count(evidence.view.evaluations.len())?,
+            turn_results: replay_count(evidence.view.results.len())?,
+        };
+        Ok(RunReplayReport {
+            schema_version: RUN_REPLAY_SCHEMA_VERSION,
+            run_id,
+            task_id: evidence.task.id,
+            organization_revision_id: evidence.organization.revision_id,
+            terminal: evidence.view.run.state.is_terminal(),
+            side_effect_free: true,
+            evidence_sha256: format!("{:x}", Sha256::digest(encoded)),
+            counts,
+            invariants,
+            evidence,
         })
     }
 
@@ -5909,6 +7270,53 @@ impl AppRuntime {
         .into())
     }
 
+    fn baseline_shadow_service_command(
+        &self,
+        candidate: &AgentRunView,
+        receipt: &ShadowExecutionReceipt,
+        baseline: &EvaluationReport,
+        condition: &SuccessCondition,
+    ) -> Result<Option<String>, RuntimeError> {
+        if candidate.run.task_id != receipt.source_task_id
+            || baseline.task_id != receipt.source_task_id
+            || baseline
+                .conditions
+                .iter()
+                .filter(|result| result.condition == *condition && result.passed)
+                .count()
+                != 1
+        {
+            return Ok(None);
+        }
+        let Some(checkpoint) = self
+            .store()?
+            .consumer_evaluation_checkpoint(receipt.source_task_id)?
+        else {
+            return Ok(None);
+        };
+        if checkpoint.state != ConsumerEvaluationCheckpointState::Completed
+            || checkpoint.run_id != baseline.run_id
+        {
+            return Ok(None);
+        }
+        let Some(task) = self.task(receipt.source_task_id)? else {
+            return Ok(None);
+        };
+        let Some(project_id) = task.project_id else {
+            return Ok(None);
+        };
+        let Some(snapshot) = self
+            .store()?
+            .project_snapshot(checkpoint.project_snapshot_id)?
+        else {
+            return Ok(None);
+        };
+        if snapshot.project_id != project_id {
+            return Ok(None);
+        }
+        Ok(baseline_service_command(&snapshot).map(str::to_owned))
+    }
+
     #[allow(clippy::too_many_lines)] // Keep the complete independent evidence derivation auditable.
     async fn isolated_shadow_evaluation(
         &self,
@@ -6046,6 +7454,23 @@ impl AppRuntime {
                         baseline_urls.as_ref(),
                     )
                     .await?;
+                    conditions.push(result);
+                    evidence.push(verification);
+                    is_supported
+                } else if matches!(
+                    condition,
+                    SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+                ) {
+                    let command = self
+                        .baseline_shadow_service_command(candidate, receipt, baseline, condition)?;
+                    let (result, verification, is_supported) = verify_isolated_service_condition(
+                        self.shadow_command_verifier.as_ref(),
+                        &artifacts,
+                        &workspace_root,
+                        command.as_deref(),
+                        condition,
+                    )
+                    .await;
                     conditions.push(result);
                     evidence.push(verification);
                     is_supported
@@ -7608,7 +9033,13 @@ impl AppRuntime {
                     ))
                     .into());
                 }
-                definitions.push(tool_definition(requested_name)?);
+                definitions.push(canonical_host_tool_definition(requested_name).ok_or_else(
+                    || {
+                        StorageError::InvalidData(format!(
+                            "tool {requested_name} has no runtime schema"
+                        ))
+                    },
+                )?);
             }
         }
         Ok((definitions, bindings))
@@ -7645,8 +9076,12 @@ impl AppRuntime {
         Ok((
             names
                 .into_iter()
-                .map(tool_definition)
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(|name| {
+                    canonical_host_tool_definition(name).ok_or_else(|| {
+                        StorageError::InvalidData(format!("tool {name} has no runtime schema"))
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?,
             Vec::new(),
         ))
     }
@@ -8288,6 +9723,181 @@ impl AppRuntime {
     }
 }
 
+fn replay_count(value: usize) -> Result<u64, StorageError> {
+    u64::try_from(value)
+        .map_err(|_| StorageError::InvalidData("run replay evidence count overflowed".into()))
+}
+
+fn replay_invariant(code: &str, detail: &str) -> RunReplayInvariant {
+    RunReplayInvariant {
+        code: code.into(),
+        passed: true,
+        detail: detail.into(),
+    }
+}
+
+fn replay_invalid(detail: impl Into<String>) -> StorageError {
+    StorageError::InvalidData(format!("run replay invariant failed: {}", detail.into()))
+}
+
+#[allow(clippy::too_many_lines)] // Keeps the complete fail-closed replay contract auditable in one ordered pass.
+fn validate_run_replay_evidence(
+    evidence: &RunReplayEvidence,
+) -> Result<Vec<RunReplayInvariant>, StorageError> {
+    let run = &evidence.view.run;
+    let plan = &evidence.view.plan;
+    if evidence.task.id != run.task_id || plan.task_id != run.task_id || plan.run_id != run.id {
+        return Err(replay_invalid("run, plan, and task identities differ"));
+    }
+    if evidence.organization.revision_id != run.organization_revision_id
+        || plan.organization_revision_id != run.organization_revision_id
+    {
+        return Err(replay_invalid(
+            "run, plan, and organization revision identities differ",
+        ));
+    }
+    plan.validate(&evidence.organization)
+        .map_err(|error| replay_invalid(format!("the persisted work plan is invalid: {error}")))?;
+    let mut invariants = vec![replay_invariant(
+        "identity_coherent",
+        "task, run, plan, and organization revision identities agree",
+    )];
+
+    let role_ids = evidence
+        .organization
+        .roles
+        .iter()
+        .map(|role| role.id)
+        .collect::<BTreeSet<_>>();
+    if role_ids.len() != evidence.organization.roles.len()
+        || plan
+            .selected_roles
+            .iter()
+            .any(|role_id| !role_ids.contains(role_id))
+    {
+        return Err(replay_invalid(
+            "the plan selects an absent or duplicate organization role",
+        ));
+    }
+    let work_item_ids = plan
+        .items
+        .iter()
+        .map(|item| item.id)
+        .collect::<BTreeSet<_>>();
+    if work_item_ids.len() != plan.items.len()
+        || plan.items.iter().any(|item| {
+            !role_ids.contains(&item.assigned_role)
+                || item
+                    .dependencies
+                    .iter()
+                    .any(|dependency| *dependency == item.id || !work_item_ids.contains(dependency))
+        })
+    {
+        return Err(replay_invalid(
+            "the work graph has duplicate, self, unknown dependency, or role references",
+        ));
+    }
+    invariants.push(replay_invariant(
+        "plan_graph_coherent",
+        "selected roles and work-item dependencies resolve inside the pinned organization and plan",
+    ));
+
+    let instance_ids = evidence
+        .view
+        .instances
+        .iter()
+        .map(|instance| instance.id)
+        .collect::<BTreeSet<_>>();
+    if instance_ids.len() != evidence.view.instances.len()
+        || evidence.view.instances.iter().any(|instance| {
+            instance.run_id != run.id
+                || instance.task_id != run.task_id
+                || !role_ids.contains(&instance.role_id)
+        })
+    {
+        return Err(replay_invalid(
+            "an agent instance has a duplicate identity or escapes the run, task, or organization",
+        ));
+    }
+    let lease_ids = evidence
+        .view
+        .leases
+        .iter()
+        .map(|lease| lease.id)
+        .collect::<BTreeSet<_>>();
+    if lease_ids.len() != evidence.view.leases.len()
+        || evidence.view.leases.iter().any(|lease| {
+            !instance_ids.contains(&lease.instance_id)
+                || !work_item_ids.contains(&lease.work_item_id)
+        })
+        || evidence.view.results.len() > evidence.view.leases.len()
+    {
+        return Err(replay_invalid(
+            "a lease or turn result cannot be resolved inside the run graph",
+        ));
+    }
+    invariants.push(replay_invariant(
+        "authority_graph_coherent",
+        "instances, leases, and retained turn results remain inside the pinned run graph",
+    ));
+
+    if evidence.view.usage.iter().any(|usage| {
+        usage.run_id != run.id
+            || usage.task_id != run.task_id
+            || usage
+                .instance_id
+                .is_some_and(|instance_id| !instance_ids.contains(&instance_id))
+    }) {
+        return Err(replay_invalid(
+            "a usage record escapes the run, task, or known instances",
+        ));
+    }
+    if evidence.view.evaluations.iter().any(|evaluation| {
+        evaluation.run_id != run.id
+            || evaluation.task_id != run.task_id
+            || evaluation
+                .evaluator_instance_id
+                .is_some_and(|instance_id| !instance_ids.contains(&instance_id))
+    }) {
+        return Err(replay_invalid(
+            "an evaluation escapes the run, task, or known evaluator instances",
+        ));
+    }
+    invariants.push(replay_invariant(
+        "accounting_coherent",
+        "usage and evaluations are bound to the reconstructed run and task",
+    ));
+
+    let mut previous_sequence = None;
+    for event in &evidence.events {
+        if event.task_id != Some(run.task_id)
+            || event.sequence == 0
+            || previous_sequence.is_some_and(|sequence| event.sequence <= sequence)
+        {
+            return Err(replay_invalid(
+                "task events are unbound, unsequenced, duplicated, or out of order",
+            ));
+        }
+        previous_sequence = Some(event.sequence);
+    }
+    if evidence
+        .tool_audit
+        .iter()
+        .any(|record| record.task_id != run.task_id)
+    {
+        return Err(replay_invalid("tool audit evidence escapes the run task"));
+    }
+    invariants.push(replay_invariant(
+        "history_coherent",
+        "events are strictly ordered and all tool-audit records are task-bound",
+    ));
+    invariants.push(replay_invariant(
+        "observation_only",
+        "replay was reconstructed from durable records without provider or tool execution",
+    ));
+    Ok(invariants)
+}
+
 fn require_browser_authority(
     session: &PlatformSession,
     expected_state: PlatformSessionState,
@@ -8405,25 +10015,65 @@ const fn ssh_kind_label(kind: &SshOperationKind) -> &'static str {
 }
 
 fn ssh_host_definition_hash(request: &SshHostRegistrationRequest) -> Result<String, RuntimeError> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                SSH_SCHEMA_VERSION,
-                request.id,
-                request.display_name.trim(),
-                request.hostname.trim(),
-                request.port,
-                request.username.trim(),
-                request.platform,
-                request.authentication,
-                request.known_hosts_entry.trim(),
-                request.host_key_sha256.trim(),
-                request.state,
-            ))
-            .map_err(StorageError::from)?,
+    let capabilities = normalize_ssh_capabilities(&request.capabilities)?;
+    let encoded = if capabilities.is_empty() {
+        serde_json::to_vec(&(
+            SSH_SCHEMA_VERSION,
+            request.id,
+            request.display_name.trim(),
+            request.hostname.trim(),
+            request.port,
+            request.username.trim(),
+            request.platform,
+            request.authentication,
+            request.known_hosts_entry.trim(),
+            request.host_key_sha256.trim(),
+            request.state,
+        ))
+    } else {
+        serde_json::to_vec(&(
+            SSH_SCHEMA_VERSION,
+            request.id,
+            request.display_name.trim(),
+            request.hostname.trim(),
+            request.port,
+            request.username.trim(),
+            request.platform,
+            request.authentication,
+            request.known_hosts_entry.trim(),
+            request.host_key_sha256.trim(),
+            capabilities,
+            request.state,
+        ))
+    }
+    .map_err(StorageError::from)?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn normalize_ssh_capabilities(values: &[String]) -> Result<Vec<String>, RuntimeError> {
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if normalized.len() > 64
+        || normalized.iter().any(|value| {
+            value.is_empty()
+                || value.chars().count() > 96
+                || !value.chars().all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || matches!(character, ':' | '.' | '_' | '-')
+                })
+        })
+    {
+        return Err(StorageError::InvalidData(
+            "SSH capabilities must be bounded lowercase namespaced atoms".into(),
         )
-    ))
+        .into());
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 fn ssh_operation_request_hash(
@@ -8447,6 +10097,136 @@ fn ssh_operation_request_hash(
             .map_err(StorageError::from)?,
         )
     ))
+}
+
+fn ssh_workflow_definition_hash(
+    request: &SshWorkflowCreateRequest,
+) -> Result<String, RuntimeError> {
+    #[derive(Serialize)]
+    struct LegacyStep<'a> {
+        id: SshWorkflowStepId,
+        name: &'a str,
+        host_id: SshHostId,
+        host_revision: u32,
+        dependencies: &'a [SshWorkflowStepId],
+        operation: &'a SshOperationKind,
+        timeout_seconds: u64,
+    }
+
+    let legacy_steps = request
+        .steps
+        .iter()
+        .map(|step| {
+            let host_id = step.host_id?;
+            let host_revision = step.host_revision?;
+            if !step.required_capabilities.is_empty() {
+                return None;
+            }
+            Some(LegacyStep {
+                id: step.id,
+                name: &step.name,
+                host_id,
+                host_revision,
+                dependencies: &step.dependencies,
+                operation: &step.operation,
+                timeout_seconds: step.timeout_seconds,
+            })
+        })
+        .collect::<Option<Vec<_>>>();
+    if let Some(steps) = legacy_steps {
+        let encoded = serde_json::to_vec(&(
+            SSH_WORKFLOW_SCHEMA_VERSION,
+            request.id,
+            request.display_name.trim(),
+            request.task_id,
+            steps,
+        ))
+        .map_err(StorageError::from)?;
+        return Ok(format!("{:x}", Sha256::digest(encoded)));
+    }
+
+    let mut steps = Vec::with_capacity(request.steps.len());
+    for step in &request.steps {
+        steps.push((
+            step.id,
+            step.name.trim().to_owned(),
+            step.host_id,
+            step.host_revision,
+            normalize_ssh_capabilities(&step.required_capabilities)?,
+            step.dependencies.clone(),
+            step.operation.clone(),
+            step.timeout_seconds,
+        ));
+    }
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                SSH_WORKFLOW_SCHEMA_VERSION,
+                request.id,
+                request.display_name.trim(),
+                request.task_id,
+                steps,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn ssh_workflow_operation_id(
+    workflow_id: SshWorkflowId,
+    step_id: SshWorkflowStepId,
+) -> SshOperationId {
+    let digest = Sha256::digest(format!(
+        "mcg:ssh-workflow-operation:v1:{workflow_id}:{step_id}"
+    ));
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    SshOperationId::from_stable_bytes(bytes)
+}
+
+fn skip_ssh_workflow_dependents(workflow: &mut SshWorkflow, failed: SshWorkflowStepId) {
+    let mut blocked = BTreeSet::from([failed]);
+    loop {
+        let additions = workflow
+            .steps
+            .iter()
+            .filter(|step| {
+                step.state == SshWorkflowStepState::Pending
+                    && step
+                        .dependencies
+                        .iter()
+                        .any(|dependency| blocked.contains(dependency))
+            })
+            .map(|step| step.id)
+            .collect::<Vec<_>>();
+        if additions.is_empty() {
+            break;
+        }
+        for id in additions {
+            blocked.insert(id);
+            if let Some(step) = workflow.steps.iter_mut().find(|step| step.id == id) {
+                step.state = SshWorkflowStepState::Skipped;
+                step.detail = "dependency did not complete successfully".into();
+            }
+        }
+    }
+}
+
+fn ssh_workflow_error_detail(error: &RuntimeError) -> String {
+    match error {
+        RuntimeError::Tool(ToolError::Unavailable(_)) => {
+            "OpenSSH is unavailable on the controller".into()
+        }
+        RuntimeError::Tool(
+            ToolError::Denied(detail) | ToolError::Invalid(detail) | ToolError::Execution(detail),
+        ) => detail.chars().take(1_024).collect(),
+        RuntimeError::Tool(ToolError::TimedOut) => "SSH workflow step timed out".into(),
+        RuntimeError::Tool(ToolError::ApprovalRequired { .. }) => {
+            "owner approval is required".into()
+        }
+        _ => "SSH workflow step could not be completed safely".into(),
+    }
 }
 
 const fn site_environment_label(environment: SiteEnvironment) -> &'static str {
@@ -9668,7 +11448,11 @@ fn role_tool_names(role: RoleKind) -> &'static [&'static str] {
 fn resolve_role_tools(role: RoleKind) -> Result<Vec<ToolDefinition>, StorageError> {
     role_tool_names(role)
         .iter()
-        .map(|name| tool_definition(name))
+        .map(|name| {
+            canonical_host_tool_definition(name).ok_or_else(|| {
+                StorageError::InvalidData(format!("tool {name} has no runtime schema"))
+            })
+        })
         .collect()
 }
 
@@ -9729,8 +11513,12 @@ fn protocol_mode_for_catalog(protocol_version: &str) -> Result<McpProtocolMode, 
     }
 }
 
+/// Returns MCG's canonical model-facing JSON schema for one host tool.
+/// Caller-supplied descriptions and schemas must never replace this authority
+/// for an MCG-owned execution path.
+#[must_use]
 #[allow(clippy::too_many_lines)] // One exhaustive schema registry is easier to audit than scattered schemas.
-fn tool_definition(name: &str) -> Result<ToolDefinition, StorageError> {
+pub fn canonical_host_tool_definition(name: &str) -> Option<ToolDefinition> {
     let properties = |fields: serde_json::Value, required: &[&str]| {
         serde_json::json!({
             "type": "object",
@@ -9829,18 +11617,125 @@ fn tool_definition(name: &str) -> Result<ToolDefinition, StorageError> {
             &["method", "url", "headers", "body", "max_response_bytes"],
         ),
         "system.info" => properties(serde_json::json!({}), &[]),
-        _ => {
-            return Err(StorageError::InvalidData(format!(
-                "tool {name} has no runtime schema"
-            )));
-        }
+        _ => return None,
     };
-    Ok(ToolDefinition {
+    Some(ToolDefinition {
         name: name.to_owned(),
         description: Some(format!("Governed {name} operation")),
         parameters,
         strict: Some(true),
     })
+}
+
+/// Derives the stable governed request identity for one canonical provider tool call.
+#[must_use]
+pub fn provider_managed_tool_request_id(
+    call_id: ProxyCallId,
+    model_tool_call_id: &str,
+    qualified_name: &str,
+    canonical_arguments: &str,
+) -> ToolRequestId {
+    let mut hash = Sha256::new();
+    hash.update(b"mcg-provider-managed-tool-v1");
+    hash.update([0]);
+    hash.update(call_id.to_string().as_bytes());
+    hash.update([0]);
+    hash.update(model_tool_call_id.as_bytes());
+    hash.update([0]);
+    hash.update(qualified_name.as_bytes());
+    hash.update([0]);
+    hash.update(canonical_arguments.as_bytes());
+    let digest = hash.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    ToolRequestId::from_stable_bytes(bytes)
+}
+
+fn require_provider_mcg_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> Result<(), RuntimeError> {
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(StorageError::InvalidData(
+            "provider-managed MCG arguments contain an unknown field".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn take_bounded_required_string(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max_len: usize,
+) -> Result<String, RuntimeError> {
+    take_bounded_optional_string(object, key, max_len)?.ok_or_else(|| {
+        StorageError::InvalidData(format!("provider-managed MCG argument {key} is required")).into()
+    })
+}
+
+fn take_bounded_optional_string(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max_len: usize,
+) -> Result<Option<String>, RuntimeError> {
+    object
+        .remove(key)
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| {
+                    !value.trim().is_empty()
+                        && value.len() <= max_len
+                        && !value.chars().any(char::is_control)
+                })
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    StorageError::InvalidData(format!(
+                        "provider-managed MCG argument {key} is invalid"
+                    ))
+                    .into()
+                })
+        })
+        .transpose()
+}
+
+fn take_bounded_optional_u64(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<Option<u64>, RuntimeError> {
+    object
+        .remove(key)
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| (*value >= minimum) && (*value <= maximum))
+                .ok_or_else(|| {
+                    StorageError::InvalidData(format!(
+                        "provider-managed MCG argument {key} is out of bounds"
+                    ))
+                    .into()
+                })
+        })
+        .transpose()
+}
+
+fn validate_provider_mcg_relative_target(value: &str) -> Result<String, RuntimeError> {
+    let normalized = value.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized.as_bytes().get(1) == Some(&b':')
+        || normalized
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(StorageError::InvalidData(
+            "provider-managed MCG relative target is not normalized and project-relative".into(),
+        )
+        .into());
+    }
+    Ok(normalized)
 }
 
 fn runtime_tool_error(error: ToolError) -> RuntimeError {
@@ -9851,8 +11746,31 @@ fn objective_command(condition: &SuccessCondition) -> Option<&str> {
     match condition {
         SuccessCondition::Build { command }
         | SuccessCondition::Test { command }
-        | SuccessCondition::StaticAnalysis { command } => Some(command),
+        | SuccessCondition::StaticAnalysis { command }
+        | SuccessCondition::ConfigurationValid { command } => Some(command),
         SuccessCondition::Custom { description } => objective_custom_command(description),
+        _ => None,
+    }
+}
+
+fn baseline_service_command(project: &ProjectModel) -> Option<&str> {
+    let starts = project
+        .commands
+        .iter()
+        .filter(|command| command.name == "start")
+        .collect::<Vec<_>>();
+    match starts.as_slice() {
+        [command] if !command.command.trim().is_empty() => return Some(command.command.as_str()),
+        [] => {}
+        _ => return None,
+    }
+    let development = project
+        .commands
+        .iter()
+        .filter(|command| command.name == "dev")
+        .collect::<Vec<_>>();
+    match development.as_slice() {
+        [command] if !command.command.trim().is_empty() => Some(command.command.as_str()),
         _ => None,
     }
 }
@@ -10004,6 +11922,7 @@ fn objective_workflow_origins(
 
 fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
     match condition {
+        SuccessCondition::ConfigurationValid { .. } => "governed_configuration_validation",
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
         SuccessCondition::ServiceHealthy { .. } => "governed_service_health",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
@@ -10397,6 +12316,118 @@ async fn verify_isolated_command_condition(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keep fail-closed service evidence validation auditable in one boundary.
+async fn verify_isolated_service_condition(
+    verifier: &dyn ShadowCommandVerifier,
+    artifacts: &ArtifactStore,
+    workspace_root: &Path,
+    service_command: Option<&str>,
+    condition: &SuccessCondition,
+) -> (ConditionResult, EvaluationEvidence, bool) {
+    if !matches!(
+        condition,
+        SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+    ) {
+        return (
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "The isolated service verifier rejected a non-service condition.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_service_sandbox".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "No service was started because the condition kind was invalid.".into(),
+            },
+            false,
+        );
+    }
+    let Some(service_command) = service_command else {
+        return (
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "No unique immutable baseline start or dev command authorizes this service probe; the condition remains inconclusive.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_service_sandbox".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "The verifier failed closed before launching a process because baseline project authority was missing or ambiguous.".into(),
+            },
+            false,
+        );
+    };
+    match verifier
+        .verify_service(workspace_root, service_command, condition, artifacts)
+        .await
+    {
+        ShadowCommandVerification::Unavailable => (
+            ConditionResult {
+                condition: condition.clone(),
+                passed: false,
+                detail: "No qualified operating-system service sandbox is available; the condition remains inconclusive.".into(),
+            },
+            EvaluationEvidence {
+                method: "isolated_service_sandbox".into(),
+                artifact_sha256: None,
+                event_sequence: None,
+                detail: "The verifier failed closed without starting a host service or probing through host networking.".into(),
+            },
+            false,
+        ),
+        ShadowCommandVerification::Completed { transcript } => {
+            let parsed_transcript = artifacts
+                .read_verified_reference(&transcript, SHADOW_MAX_COMMAND_TRANSCRIPT_BYTES)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<ShadowCommandTranscript>(&bytes).ok())
+                .filter(|record| {
+                    record.schema_version == SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION
+                        && record.condition == *condition
+                        && valid_optional_artifact(artifacts, record.stdout.as_ref())
+                        && valid_optional_artifact(artifacts, record.stderr.as_ref())
+                });
+            let Some(record) = parsed_transcript else {
+                return (
+                    ConditionResult {
+                        condition: condition.clone(),
+                        passed: false,
+                        detail: "The service sandbox returned invalid immutable evidence; the condition remains inconclusive.".into(),
+                    },
+                    EvaluationEvidence {
+                        method: "isolated_service_sandbox".into(),
+                        artifact_sha256: None,
+                        event_sequence: None,
+                        detail: "Malformed service-transcript evidence was rejected.".into(),
+                    },
+                    false,
+                );
+            };
+            let condition_passed = !record.timed_out && record.exit_code == Some(0);
+            (
+                ConditionResult {
+                    condition: condition.clone(),
+                    passed: condition_passed,
+                    detail: if condition_passed {
+                        "The baseline-bound service passed its loopback probe inside one qualified operating-system shadow sandbox."
+                    } else {
+                        "The baseline-bound service failed its loopback probe inside one qualified operating-system shadow sandbox."
+                    }
+                    .into(),
+                },
+                EvaluationEvidence {
+                    method: "isolated_service_sandbox".into(),
+                    artifact_sha256: Some(transcript.sha256),
+                    event_sequence: None,
+                    detail: "Service startup and the bounded loopback HTTP probe shared the same network-isolated sandbox; no host-network fallback was permitted.".into(),
+                },
+                true,
+            )
+        }
+    }
+}
+
 fn valid_optional_artifact(
     artifacts: &ArtifactStore,
     artifact: Option<&mcg_tools::ArtifactReference>,
@@ -10443,6 +12474,11 @@ fn isolated_evaluation_regressions(
                 SuccessCondition::ResearchSources { .. }
             ) {
                 "candidate failed isolated research-source verification".into()
+            } else if matches!(
+                condition.condition,
+                SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+            ) {
+                "candidate failed an isolated service objective".into()
             } else {
                 "candidate failed an isolated file objective".into()
             }
@@ -10604,7 +12640,10 @@ fn objective_process_options(
 
 fn platform_process_executable(executable: &str) -> String {
     #[cfg(target_os = "windows")]
-    if matches!(executable, "npm" | "npx" | "pnpm" | "yarn" | "bun") {
+    if matches!(
+        executable,
+        "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" | "corepack"
+    ) {
         return format!("{executable}.cmd");
     }
     executable.into()
@@ -10883,6 +12922,42 @@ fn restrict_to_owner(_path: &Path, _mode: u32) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn finish_online_snapshot<T>(
+    snapshot: &Path,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    let cleanup = remove_online_snapshot_files(snapshot);
+    match result {
+        Ok(value) => {
+            cleanup?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
+        }
+    }
+}
+
+fn remove_online_snapshot_files(snapshot: &Path) -> Result<(), StorageError> {
+    let mut wal = snapshot.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = snapshot.as_os_str().to_os_string();
+    shm.push("-shm");
+    for path in [
+        snapshot.to_path_buf(),
+        PathBuf::from(wal),
+        PathBuf::from(shm),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -10923,6 +12998,130 @@ mod tests {
     };
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn runtime_online_backup_cleanup_removes_snapshot_wal_and_shm_on_every_outcome() {
+        let directory = tempfile::tempdir().expect("snapshot directory");
+        let snapshot = directory.path().join(".mcgb-runtime.sqlite3");
+        let paths = [
+            snapshot.clone(),
+            PathBuf::from(format!("{}-wal", snapshot.display())),
+            PathBuf::from(format!("{}-shm", snapshot.display())),
+        ];
+        let create_snapshot_files = || {
+            for path in &paths {
+                fs::write(path, b"snapshot fixture").expect("snapshot fixture");
+            }
+        };
+
+        create_snapshot_files();
+        assert_eq!(
+            finish_online_snapshot(&snapshot, Ok::<_, StorageError>(7))
+                .expect("successful cleanup"),
+            7
+        );
+        assert!(paths.iter().all(|path| !path.exists()));
+
+        create_snapshot_files();
+        let error = finish_online_snapshot::<()>(
+            &snapshot,
+            Err(StorageError::InvalidData("fixture failure".into())),
+        )
+        .expect_err("primary failure must survive cleanup");
+        assert!(error.to_string().contains("fixture failure"));
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn automatic_memory_consolidation_is_bounded_restart_safe_and_idempotent() {
+        let data = tempfile::tempdir().expect("runtime data");
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("Cargo.toml"), "[workspace]")
+            .expect("project manifest");
+        let config = AppConfig::default().with_data_directory(data.path());
+        let project_id = ProjectId::new();
+        let baseline = Utc::now();
+        let working_id = {
+            let runtime = AppRuntime::open(config.clone()).expect("runtime");
+            runtime
+                .discover_project(project_root.path(), project_id)
+                .expect("project");
+            let created = runtime
+                .create_memory_claim(
+                    project_id,
+                    "project",
+                    "deployment_target",
+                    serde_json::json!("staging"),
+                    0.9,
+                    ClaimProvenance {
+                        source_kind: ProvenanceKind::User,
+                        source: "owner fixture".into(),
+                        task_id: None,
+                        artifact_sha256: None,
+                    },
+                    Some(baseline + Duration::hours(1)),
+                )
+                .expect("memory");
+            let working = runtime
+                .transition_memory_claim(
+                    project_id,
+                    created.claim.id,
+                    MemoryLifecycleAction::Reinforce,
+                    ClaimProvenance {
+                        source_kind: ProvenanceKind::ToolObservation,
+                        source: "successful deployment".into(),
+                        task_id: None,
+                        artifact_sha256: None,
+                    },
+                )
+                .expect("reinforcement");
+            assert!(
+                runtime
+                    .managed_memory(project_id)
+                    .expect("managed memory")
+                    .contains("staging")
+            );
+
+            let first = runtime
+                .consolidate_memory_at(baseline + Duration::hours(2), 8)
+                .expect("first consolidation");
+            assert_eq!((first.examined, first.decayed, first.retracted), (1, 1, 0));
+            assert_eq!(first.mutations[0].claim.state, MemoryState::Decaying);
+            assert!(
+                !runtime
+                    .managed_memory(project_id)
+                    .expect("managed memory")
+                    .contains("staging")
+            );
+            working.claim.id
+        };
+
+        let reopened = AppRuntime::open(config).expect("reopened runtime");
+        let second = reopened
+            .consolidate_memory_at(baseline + Duration::days(8) + Duration::hours(3), 8)
+            .expect("second consolidation");
+        assert_eq!(
+            (second.examined, second.decayed, second.retracted),
+            (1, 0, 1)
+        );
+        assert_eq!(second.mutations[0].claim.state, MemoryState::Retracted);
+        let replay = reopened
+            .consolidate_memory_at(baseline + Duration::days(9), 8)
+            .expect("idempotent consolidation");
+        assert_eq!(
+            (replay.examined, replay.decayed, replay.retracted),
+            (0, 0, 0)
+        );
+        let history = reopened
+            .memory_claim_history(project_id, "project", "deployment_target")
+            .expect("history");
+        assert_eq!(history.len(), 4);
+        assert!(history.iter().any(|claim| claim.id == working_id));
+        assert_eq!(
+            history.last().map(|claim| claim.state),
+            Some(MemoryState::Retracted)
+        );
+    }
 
     struct RejectingProviderCredentialStore(AtomicUsize);
 
@@ -10986,6 +13185,200 @@ mod tests {
         };
         assert!(AppRuntime::clear_connection_credentials(&store, &authenticated).is_err());
         assert_eq!(store.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn configuration_validation_retains_typed_command_and_evidence_semantics() {
+        let condition = SuccessCondition::ConfigurationValid {
+            command: "npm run check:config".into(),
+        };
+        assert_eq!(objective_command(&condition), Some("npm run check:config"));
+        assert_eq!(
+            objective_evidence_method(&condition),
+            "governed_configuration_validation"
+        );
+    }
+
+    #[test]
+    fn portable_organization_import_is_restart_safe_idempotent_and_comparable() {
+        let directory = tempfile::tempdir().expect("runtime directory");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let source = OrganizationGenome::consumer_default(Utc::now());
+        let import_id = OrganizationImportId::new();
+        let runtime = AppRuntime::open(config.clone()).expect("runtime");
+        runtime
+            .record_organization_revision(&source)
+            .expect("source organization");
+        let portable = runtime
+            .export_organization(source.revision_id)
+            .expect("portable export");
+        let imported = runtime
+            .import_organization(import_id, &portable, None)
+            .expect("portable import");
+        assert!(!imported.replayed);
+        assert!(imported.event.is_some());
+        assert_ne!(
+            imported.organization.organization_id,
+            source.organization_id
+        );
+        assert!(
+            runtime
+                .compare_organizations(source.revision_id, imported.organization.revision_id)
+                .expect("comparison")
+                .equivalent
+        );
+        let event_count = runtime
+            .store()
+            .expect("store")
+            .event_count()
+            .expect("events");
+
+        drop(runtime);
+        let reopened = AppRuntime::open(config).expect("reopened runtime");
+        let replay = reopened
+            .import_organization(import_id, &portable, None)
+            .expect("replayed import");
+        assert!(replay.replayed);
+        assert!(replay.event.is_none());
+        assert_eq!(replay.organization, imported.organization);
+        assert_eq!(
+            reopened
+                .store()
+                .expect("store")
+                .event_count()
+                .expect("events"),
+            event_count
+        );
+
+        let mut changed_source = source;
+        changed_source.name = "Conflicting import".into();
+        let changed = PortableOrganizationGenome::export(&changed_source, Utc::now())
+            .expect("changed portable");
+        assert!(matches!(
+            reopened.import_organization(import_id, &changed, None),
+            Err(RuntimeError::Storage(StorageError::Conflict(_)))
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fixture proves discovery, routing, durable planning, and evaluator context together.
+    async fn evaluator_turn_receives_bounded_readable_project_topology() {
+        let project_root = tempfile::tempdir().expect("project");
+        std::fs::write(
+            project_root.path().join("compose.yaml"),
+            "services:\n  api:\n    image: example/api:1\n    depends_on:\n      - db\n  db:\n    image: postgres:17\n",
+        )
+        .expect("compose");
+        let data = tempfile::tempdir().expect("data");
+        let runtime = AppRuntime::open_in_memory(
+            AppConfig::default().with_data_directory(data.path()),
+            TEST_TOKEN.to_owned(),
+        )
+        .expect("runtime");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+
+        let provider = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "object": "list",
+                    "data": [{
+                        "id": "topology-evaluator",
+                        "object": "model",
+                        "owned_by": "fixture",
+                        "context_window": 8_192,
+                        "supported_parameters": ["tools"]
+                    }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider listener");
+        let address = listener.local_addr().expect("provider address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, provider).await.expect("provider");
+        });
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "topology_fixture".into(),
+                    display_name: "Topology fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: format!("http://{address}/v1"),
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("configure provider");
+
+        let mut task = TaskEnvelope::new("evaluate the service topology");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("task");
+        let now = Utc::now();
+        let genome = OrganizationGenome::consumer_default(now);
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "evaluate declared dependencies",
+                RoleKind::Evaluator,
+                vec![SuccessCondition::Custom {
+                    description: "dependency topology is consistent".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &planning, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        runtime
+            .launch_task_agent_run(task.id, &genome, &run, &plan)
+            .expect("launch");
+        let prepared = runtime
+            .prepare_agent_turn(&AgentDispatchSpec {
+                run_id: run.id,
+                work_item_id: plan.items[0].id,
+                project_id,
+                target_path: None,
+                context_token_budget: 96,
+                requested_tools: Vec::new(),
+                estimated_output_tokens: 128,
+                max_model_calls: 1,
+            })
+            .await
+            .expect("prepare evaluator");
+        assert_eq!(prepared.request.role.kind, RoleKind::Evaluator);
+        assert!(prepared.request.context.estimated_tokens <= 96);
+        assert!(prepared.request.context.items.iter().any(|item| {
+            item.content == "World relationship: api -> uses database -> db (PostgreSQL)"
+                && item.source == "compose.yaml#services.api.depends_on"
+        }));
+        assert!(prepared.request.context.items.iter().all(|item| {
+            !item.content.starts_with("World relationship:")
+                || (!item.content.contains("service:") && !item.content.contains("database:"))
+        }));
+        server.abort();
     }
 
     #[test]
@@ -11169,6 +13562,72 @@ mod tests {
                 .expect("capture fixture transcript");
             ShadowCommandVerification::Completed { transcript }
         }
+
+        async fn verify_service(
+            &self,
+            workspace_root: &Path,
+            service_command: &str,
+            condition: &SuccessCondition,
+            artifacts: &ArtifactStore,
+        ) -> ShadowCommandVerification {
+            assert!(workspace_root.is_dir());
+            assert!(!service_command.trim().is_empty());
+            assert!(matches!(
+                condition,
+                SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+            ));
+            if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
+                return ShadowCommandVerification::Completed {
+                    transcript: mcg_tools::ArtifactReference {
+                        id: mcg_domain::ArtifactId::new(),
+                        sha256: "not-a-digest".into(),
+                        media_type: "application/vnd.mcg.shadow-command+json".into(),
+                        size_bytes: 0,
+                        relative_path: "outside".into(),
+                    },
+                };
+            }
+            let passed = matches!(self.0, FixtureShadowCommandResult::Pass);
+            let transcript_bytes = serde_json::to_vec(&ShadowCommandTranscript {
+                schema_version: SHADOW_COMMAND_TRANSCRIPT_SCHEMA_VERSION,
+                condition: if matches!(self.0, FixtureShadowCommandResult::MismatchedCondition) {
+                    SuccessCondition::ServiceHealthy {
+                        endpoint: "http://127.0.0.1:65535/different".into(),
+                    }
+                } else {
+                    condition.clone()
+                },
+                exit_code: Some(i32::from(!passed)),
+                timed_out: false,
+                stdout: matches!(self.0, FixtureShadowCommandResult::InvalidOutputEvidence).then(
+                    || mcg_tools::ArtifactReference {
+                        id: mcg_domain::ArtifactId::new(),
+                        sha256: "f".repeat(64),
+                        media_type: "text/plain".into(),
+                        size_bytes: 1,
+                        relative_path: format!("ff/{}", "f".repeat(64)),
+                    },
+                ),
+                stderr: None,
+            })
+            .expect("serialize fixture service transcript");
+            let transcript = artifacts
+                .capture(&transcript_bytes, "application/vnd.mcg.shadow-command+json")
+                .expect("capture fixture service transcript");
+            ShadowCommandVerification::Completed { transcript }
+        }
+    }
+
+    #[test]
+    fn default_in_memory_runtime_owns_and_removes_an_isolated_data_directory() {
+        let consumer_data_directory = AppConfig::default().data_directory;
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("in-memory runtime");
+        let isolated = runtime.config().data_directory.clone();
+        assert_ne!(isolated, consumer_data_directory);
+        assert!(isolated.is_dir());
+        drop(runtime);
+        assert!(!isolated.exists());
     }
 
     #[test]
@@ -11986,6 +14445,370 @@ mod tests {
     }
 
     #[test]
+    fn baseline_service_command_prefers_one_start_then_one_dev_and_rejects_ambiguity() {
+        let root = tempfile::tempdir().expect("project");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"start":"node server.js","dev":"node server.js"}}"#,
+        )
+        .expect("package fixture");
+        let mut project =
+            ProjectDiscoverer::discover(root.path(), ProjectId::new()).expect("discover project");
+        assert_eq!(baseline_service_command(&project), Some("npm run start"));
+
+        project.commands.retain(|command| command.name != "start");
+        assert_eq!(baseline_service_command(&project), Some("npm run dev"));
+        let duplicate = project
+            .commands
+            .iter()
+            .find(|command| command.name == "dev")
+            .expect("dev command")
+            .clone();
+        project.commands.push(duplicate);
+        assert_eq!(baseline_service_command(&project), None);
+    }
+
+    #[test]
+    fn durable_run_replay_is_deterministic_restart_safe_and_observation_only() {
+        let directory = tempfile::tempdir().expect("runtime directory");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let now = Utc::now();
+        let task = TaskEnvelope::new("replay one governed run");
+        let organization = OrganizationGenome::consumer_default(now);
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "verify durable replay",
+                RoleKind::Evaluator,
+                vec![SuccessCondition::Custom {
+                    description: "digest remains stable".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&organization, &planning, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: organization.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+
+        let runtime = AppRuntime::open(config.clone()).expect("runtime");
+        runtime.create_task(&task).expect("task");
+        runtime
+            .record_organization_revision(&organization)
+            .expect("organization");
+        runtime.create_agent_run(&run, &plan).expect("run");
+        let first = runtime.replay_agent_run(run.id).expect("first replay");
+        let second = runtime.replay_agent_run(run.id).expect("second replay");
+        assert_eq!(first, second);
+        assert!(first.side_effect_free);
+        assert!(first.invariants.iter().all(|invariant| invariant.passed));
+        assert_eq!(
+            runtime.task_events(task.id).expect("events"),
+            first.evidence.events
+        );
+        assert_eq!(
+            runtime.tool_audit(task.id).expect("audit"),
+            first.evidence.tool_audit
+        );
+
+        let mut tampered = first.evidence.clone();
+        tampered.view.plan.task_id = TaskId::new();
+        assert!(validate_run_replay_evidence(&tampered).is_err());
+
+        drop(runtime);
+        let reopened = AppRuntime::open(config).expect("reopened runtime");
+        let after_restart = reopened.replay_agent_run(run.id).expect("restart replay");
+        assert_eq!(after_restart, first);
+        assert_eq!(
+            reopened.task_events(task.id).expect("events"),
+            first.evidence.events
+        );
+        assert_eq!(
+            reopened.tool_audit(task.id).expect("audit"),
+            first.evidence.tool_audit
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The durable source-run/snapshot binding is the behavior under test.
+    fn shadow_service_command_uses_the_completed_baseline_snapshot_not_latest_discovery() {
+        let root = tempfile::tempdir().expect("project");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"start":"node server.js"}}"#,
+        )
+        .expect("package fixture");
+        let data = tempfile::tempdir().expect("data");
+        let runtime = AppRuntime::open_in_memory(
+            AppConfig::default().with_data_directory(data.path()),
+            TEST_TOKEN.to_owned(),
+        )
+        .expect("runtime");
+        let project_id = ProjectId::new();
+        let baseline_project = runtime
+            .discover_project(root.path(), project_id)
+            .expect("baseline project");
+        assert_eq!(
+            baseline_service_command(&baseline_project.project),
+            Some("npm run start")
+        );
+
+        let mut task = TaskEnvelope::new("qualify the local service");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("task");
+        let now = Utc::now();
+        let genome = OrganizationGenome::consumer_default(now);
+        let condition = SuccessCondition::HttpResponds {
+            url: "http://127.0.0.1:43123/health".into(),
+            status: 204,
+        };
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "qualify service",
+                RoleKind::Coder,
+                vec![condition.clone()],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &planning, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        runtime
+            .launch_task_agent_run(task.id, &genome, &run, &plan)
+            .expect("launch");
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: plan.items[0].assigned_role,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:service-binding-fixture".into(),
+            confidence: ConfidenceEstimate::new(8_000, 0).expect("confidence"),
+            created_at: now,
+            updated_at: now,
+        };
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: Vec::new(),
+            reporting_interval_seconds: 30,
+            max_retries: 0,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: now,
+            expires_at: now + Duration::minutes(5),
+            heartbeat_at: now,
+        };
+        runtime
+            .store()
+            .expect("store")
+            .dispatch_agent_work(&instance, &lease, now)
+            .expect("dispatch");
+        runtime
+            .store()
+            .expect("store")
+            .finish_agent_lease(lease.id, AgentLeaseState::Completed, 0, 0.0, 1, now)
+            .expect("finish lease");
+        let result = ConditionResult {
+            condition: condition.clone(),
+            passed: true,
+            detail: "baseline service passed".into(),
+        };
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: EvaluationId::new(),
+            run_id: run.id,
+            task_id: task.id,
+            evaluator_instance_id: None,
+            conditions: vec![result.clone()],
+            outcome: EvaluationOutcome::Passed,
+            confidence: ConfidenceEstimate::new(9_000, 1).expect("confidence"),
+            regressions: Vec::new(),
+            evidence: vec![EvaluationEvidence {
+                method: "governed_http_status".into(),
+                artifact_sha256: Some("b".repeat(64)),
+                event_sequence: None,
+                detail: "baseline loopback service evidence".into(),
+            }],
+            evaluated_at: now,
+        };
+        let checkpoint = ConsumerEvaluationCheckpoint {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            task_id: task.id,
+            run_id: run.id,
+            project_snapshot_id: baseline_project.project.id,
+            state: ConsumerEvaluationCheckpointState::Running,
+            next_condition_index: 1,
+            attempt: 0,
+            request_id: None,
+            batch_approved: false,
+            results: vec![result],
+            evidence: Vec::new(),
+            regressions: Vec::new(),
+            objective_failures: 0,
+            unsupported: 0,
+            executed: 1,
+            updated_at: now,
+        };
+        runtime
+            .store()
+            .expect("store")
+            .save_consumer_evaluation_checkpoint(&checkpoint)
+            .expect("checkpoint");
+        runtime
+            .store()
+            .expect("store")
+            .settle_consumer_evaluation(&report, &checkpoint)
+            .expect("settle");
+
+        std::fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("new lockfile");
+        let latest = runtime
+            .discover_project(root.path(), project_id)
+            .expect("latest project");
+        assert_eq!(
+            baseline_service_command(&latest.project),
+            Some("pnpm run start")
+        );
+        let candidate = runtime.agent_run_view(run.id).expect("candidate view");
+        let receipt = ShadowExecutionReceipt {
+            schema_version: EXPERIMENT_SCHEMA_VERSION,
+            experiment_id: ExperimentId::new(),
+            source_task_id: task.id,
+            candidate_run_id: run.id,
+            authority: ShadowAuthority::EvaluationOnly,
+            output_artifact_sha256: "a".repeat(64),
+            completed_at: now,
+        };
+        assert_eq!(
+            runtime
+                .baseline_shadow_service_command(&candidate, &receipt, &report, &condition)
+                .expect("baseline binding"),
+            Some("npm run start".into())
+        );
+        let mut failed_baseline = report.clone();
+        failed_baseline.conditions[0].passed = false;
+        assert_eq!(
+            runtime
+                .baseline_shadow_service_command(
+                    &candidate,
+                    &receipt,
+                    &failed_baseline,
+                    &condition,
+                )
+                .expect("failed baseline"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_service_verification_requires_baseline_authority_and_valid_evidence() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let artifacts = ArtifactStore::open(artifact_root.path()).expect("artifact store");
+        let condition = SuccessCondition::HttpResponds {
+            url: "http://127.0.0.1:43123/health".into(),
+            status: 204,
+        };
+
+        let (result, evidence, supported) = verify_isolated_service_condition(
+            &FixtureShadowCommandVerifier(FixtureShadowCommandResult::Pass),
+            &artifacts,
+            workspace.path(),
+            None,
+            &condition,
+        )
+        .await;
+        assert!(!supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+
+        let (result, evidence, supported) = verify_isolated_service_condition(
+            &UnavailableShadowCommandVerifier,
+            &artifacts,
+            workspace.path(),
+            Some("npm run start"),
+            &condition,
+        )
+        .await;
+        assert!(!supported);
+        assert!(!result.passed);
+        assert!(evidence.artifact_sha256.is_none());
+
+        for (fixture, expected_supported, expected_passed, expected_artifact) in [
+            (FixtureShadowCommandResult::Pass, true, true, true),
+            (FixtureShadowCommandResult::Fail, true, false, true),
+            (
+                FixtureShadowCommandResult::MismatchedCondition,
+                false,
+                false,
+                false,
+            ),
+            (
+                FixtureShadowCommandResult::InvalidOutputEvidence,
+                false,
+                false,
+                false,
+            ),
+            (
+                FixtureShadowCommandResult::InvalidEvidence,
+                false,
+                false,
+                false,
+            ),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &condition,
+            )
+            .await;
+            assert_eq!(supported, expected_supported);
+            assert_eq!(result.passed, expected_passed);
+            assert_eq!(evidence.artifact_sha256.is_some(), expected_artifact);
+        }
+    }
+
+    #[test]
     fn committed_task_is_immediately_readable() {
         let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
             .expect("runtime should open");
@@ -12672,6 +15495,207 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ssh_capability_extensions_preserve_legacy_definition_hashes() {
+        #[derive(Serialize)]
+        struct LegacyStep<'a> {
+            id: SshWorkflowStepId,
+            name: &'a str,
+            host_id: SshHostId,
+            host_revision: u32,
+            dependencies: &'a [SshWorkflowStepId],
+            operation: &'a SshOperationKind,
+            timeout_seconds: u64,
+        }
+
+        let host_id = SshHostId::new();
+        let host = SshHostRegistrationRequest {
+            id: host_id,
+            display_name: " Legacy host ".into(),
+            hostname: "legacy.example.test".into(),
+            port: 22,
+            username: "builder".into(),
+            platform: SshHostPlatform::Posix,
+            authentication: SshAuthentication::Agent,
+            known_hosts_entry: "legacy.example.test ssh-ed25519 AAAAC3NzaLegacy".into(),
+            host_key_sha256: "SHA256:legacy".into(),
+            capabilities: Vec::new(),
+            state: SshHostState::Active,
+        };
+        let expected_host_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    SSH_SCHEMA_VERSION,
+                    host.id,
+                    host.display_name.trim(),
+                    host.hostname.trim(),
+                    host.port,
+                    host.username.trim(),
+                    host.platform,
+                    host.authentication,
+                    host.known_hosts_entry.trim(),
+                    host.host_key_sha256.trim(),
+                    host.state,
+                ))
+                .expect("legacy host encoding")
+            )
+        );
+        assert_eq!(
+            ssh_host_definition_hash(&host).expect("host hash"),
+            expected_host_hash
+        );
+
+        let step_id = SshWorkflowStepId::new();
+        let operation = SshOperationKind::Inspect;
+        let workflow = SshWorkflowCreateRequest {
+            id: SshWorkflowId::new(),
+            display_name: " Legacy workflow ".into(),
+            task_id: None,
+            steps: vec![SshWorkflowStepRequest {
+                id: step_id,
+                name: " inspect ".into(),
+                host_id: Some(host_id),
+                host_revision: Some(1),
+                required_capabilities: Vec::new(),
+                dependencies: Vec::new(),
+                operation: operation.clone(),
+                timeout_seconds: 60,
+            }],
+        };
+        let legacy_steps = vec![LegacyStep {
+            id: step_id,
+            name: " inspect ",
+            host_id,
+            host_revision: 1,
+            dependencies: &[],
+            operation: &operation,
+            timeout_seconds: 60,
+        }];
+        let expected_workflow_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    SSH_WORKFLOW_SCHEMA_VERSION,
+                    workflow.id,
+                    workflow.display_name.trim(),
+                    workflow.task_id,
+                    legacy_steps,
+                ))
+                .expect("legacy workflow encoding")
+            )
+        );
+        assert_eq!(
+            ssh_workflow_definition_hash(&workflow).expect("workflow hash"),
+            expected_workflow_hash
+        );
+    }
+
+    #[test]
+    fn ssh_workflow_creation_replay_and_host_pins_fail_closed() {
+        let runtime =
+            AppRuntime::open_in_memory(AppConfig::default(), "a".repeat(32)).expect("runtime");
+        let host_id = SshHostId::new();
+        runtime
+            .register_ssh_host(&SshHostRegistrationRequest {
+                id: host_id,
+                display_name: "Workflow host".into(),
+                hostname: "runtime-workflow.example.test".into(),
+                port: 22,
+                username: "builder".into(),
+                platform: SshHostPlatform::Posix,
+                authentication: SshAuthentication::Agent,
+                known_hosts_entry:
+                    "runtime-workflow.example.test ssh-ed25519 AAAAC3NzaRuntimeWorkflow".into(),
+                host_key_sha256: "SHA256:runtimeWorkflow".into(),
+                capabilities: vec!["arch:x86_64".into(), "os:linux".into()],
+                state: SshHostState::Active,
+            })
+            .expect("host");
+        let request = SshWorkflowCreateRequest {
+            id: SshWorkflowId::new(),
+            display_name: "Runtime workflow".into(),
+            task_id: None,
+            steps: vec![SshWorkflowStepRequest {
+                id: SshWorkflowStepId::new(),
+                name: "inspect".into(),
+                host_id: Some(host_id),
+                host_revision: Some(1),
+                required_capabilities: Vec::new(),
+                dependencies: Vec::new(),
+                operation: SshOperationKind::Inspect,
+                timeout_seconds: 60,
+            }],
+        };
+        let created = runtime.create_ssh_workflow(&request).expect("create");
+        assert!(!created.replayed);
+        let replay = runtime.create_ssh_workflow(&request).expect("replay");
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.workflow.definition_hash,
+            created.workflow.definition_hash
+        );
+
+        let mut conflict = request.clone();
+        conflict.display_name = "Different authority".into();
+        assert!(matches!(
+            runtime.create_ssh_workflow(&conflict),
+            Err(RuntimeError::Storage(StorageError::Conflict(_)))
+        ));
+        let mut stale = request;
+        stale.id = SshWorkflowId::new();
+        stale.steps[0].host_revision = Some(2);
+        assert!(matches!(
+            runtime.create_ssh_workflow(&stale),
+            Err(RuntimeError::Storage(StorageError::Conflict(_)))
+        ));
+        let routed_request = SshWorkflowCreateRequest {
+            id: SshWorkflowId::new(),
+            display_name: "Capability-routed workflow".into(),
+            task_id: None,
+            steps: vec![SshWorkflowStepRequest {
+                id: SshWorkflowStepId::new(),
+                name: "route to Linux builder".into(),
+                host_id: None,
+                host_revision: None,
+                required_capabilities: vec!["os:linux".into(), "arch:x86_64".into()],
+                dependencies: Vec::new(),
+                operation: SshOperationKind::Inspect,
+                timeout_seconds: 60,
+            }],
+        };
+        let routed = runtime
+            .create_ssh_workflow(&routed_request)
+            .expect("capability route");
+        assert_eq!(routed.workflow.steps[0].host_id, host_id);
+        assert_eq!(routed.workflow.steps[0].host_revision, 1);
+        assert!(routed.workflow.steps[0].routed_automatically);
+        assert_eq!(
+            routed.workflow.steps[0].required_capabilities,
+            ["arch:x86_64", "os:linux"]
+        );
+        let mut routed_replay = routed_request.clone();
+        routed_replay.steps[0].required_capabilities =
+            vec!["OS:LINUX".into(), "arch:x86_64".into()];
+        assert!(
+            runtime
+                .create_ssh_workflow(&routed_replay)
+                .expect("normalized route replay")
+                .replayed
+        );
+        let mut unavailable = routed_request;
+        unavailable.id = SshWorkflowId::new();
+        unavailable.steps[0].required_capabilities = vec!["gpu:nvidia".into()];
+        assert!(matches!(
+            runtime.create_ssh_workflow(&unavailable),
+            Err(RuntimeError::Storage(StorageError::Conflict(_)))
+        ));
+        let cancelled = runtime
+            .cancel_ssh_workflow(created.workflow.id)
+            .expect("cancel");
+        assert_eq!(cancelled.workflow.state, SshWorkflowState::Cancelled);
+    }
+
     #[tokio::test]
     async fn live_ssh_inspect_survives_runtime_restart_without_reexecution() {
         if std::env::var("MCG_LIVE_SSH").as_deref() != Ok("1") {
@@ -12702,6 +15726,7 @@ mod tests {
                     authentication: SshAuthentication::Agent,
                     known_hosts_entry,
                     host_key_sha256,
+                    capabilities: vec!["os:linux".into()],
                     state: SshHostState::Active,
                 })
                 .expect("register pinned live host");
@@ -13192,6 +16217,213 @@ mod tests {
             audit.last().and_then(|record| record.result),
             Some(ToolOutcomeStatus::Succeeded)
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One end-to-end safety scenario covers read, approval, retry, and confinement.
+    async fn provider_host_tool_is_project_confined_stable_and_approval_resumable() {
+        let data_directory = tempfile::tempdir().expect("data directory");
+        let config = AppConfig {
+            data_directory: data_directory.path().to_path_buf(),
+            ..AppConfig::default()
+        };
+        let runtime = AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime");
+        let current = runtime.user_settings();
+        runtime
+            .update_user_settings(
+                current.revision,
+                current.advanced_mode,
+                AutonomyPreset::Guided,
+                current.shadow_experiments,
+                "provider host tool test",
+                Utc::now(),
+            )
+            .expect("guided settings");
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("Cargo.toml"), "[workspace]")
+            .expect("project manifest");
+        std::fs::write(project_root.path().join("fixture.txt"), "fixture").expect("fixture file");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("project");
+        let mut task = TaskEnvelope::new("provider host tool boundary");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("task");
+        let call_id = ProxyCallId::new();
+
+        let read = runtime
+            .execute_provider_host_tool(
+                task.id,
+                call_id,
+                "model-call-read",
+                "host::fs.read",
+                r#"{"path":"fixture.txt","max_bytes":1024}"#,
+            )
+            .await
+            .expect("project read");
+        assert_eq!(read.status, ToolOutcomeStatus::Succeeded);
+        assert!(read.stdout.is_some_and(|stdout| stdout.contains("fixture")));
+
+        let write_arguments = r#"{"path":"generated.txt","content":"generated","create_new":true}"#;
+        let approval_id = match runtime
+            .execute_provider_host_tool(
+                task.id,
+                call_id,
+                "model-call-write",
+                "host::fs.write",
+                write_arguments,
+            )
+            .await
+        {
+            Err(RuntimeError::Tool(ToolError::ApprovalRequired { approval_id, .. })) => approval_id,
+            other => panic!("guided provider write should require approval: {other:?}"),
+        };
+        runtime
+            .resolve_approval(&ApprovalResolution {
+                approval_id,
+                state: ApprovalState::Approved,
+                resolved_by: "test_owner".into(),
+                reason: None,
+                resolved_at: Utc::now(),
+            })
+            .expect("approve write");
+        let written = runtime
+            .execute_provider_host_tool(
+                task.id,
+                call_id,
+                "model-call-write",
+                "host::fs.write",
+                write_arguments,
+            )
+            .await
+            .expect("approved write");
+        assert_eq!(written.status, ToolOutcomeStatus::Succeeded);
+        assert_eq!(
+            std::fs::read_to_string(project_root.path().join("generated.txt"))
+                .expect("generated file"),
+            "generated"
+        );
+        assert!(
+            runtime
+                .execute_provider_host_tool(
+                    task.id,
+                    call_id,
+                    "model-call-escape",
+                    "host::fs.read",
+                    r#"{"path":"../outside.txt","max_bytes":1024}"#,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .execute_provider_host_tool(
+                    task.id,
+                    call_id,
+                    "model-call-override",
+                    "host::fs.read",
+                    r#"{"tool":"fs_delete","path":"fixture.txt","max_bytes":1024}"#,
+                )
+                .await
+                .is_err()
+        );
+        let audits = runtime.tool_audit(task.id).expect("tool audit");
+        assert!(audits.iter().any(|record| {
+            record.request_id == written.request_id
+                && record.result == Some(ToolOutcomeStatus::Succeeded)
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_mcg_tools_are_bounded_project_scoped_and_durably_audited() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("Cargo.toml"), "[workspace]")
+            .expect("project manifest");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("project");
+        let mut task = TaskEnvelope::new("inspect durable MCG context");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("task");
+        runtime
+            .create_memory_claim(
+                project_id,
+                "fixture",
+                "package_manager",
+                serde_json::json!("cargo"),
+                1.0,
+                ClaimProvenance {
+                    source_kind: mcg_projects::ProvenanceKind::User,
+                    source: "provider-mcg-test".into(),
+                    task_id: Some(task.id.to_string()),
+                    artifact_sha256: None,
+                },
+                None,
+            )
+            .expect("memory");
+        let call_id = ProxyCallId::new();
+        let task_outcome = runtime
+            .execute_provider_mcg_tool(task.id, call_id, "task-call", "mcg::task.get", "{}")
+            .await
+            .expect("task get");
+        assert_eq!(task_outcome.status, ToolOutcomeStatus::Succeeded);
+        assert!(
+            task_outcome
+                .stdout
+                .as_deref()
+                .is_some_and(|output| output.contains("inspect durable MCG context"))
+        );
+        let memory_outcome = runtime
+            .execute_provider_mcg_tool(
+                task.id,
+                call_id,
+                "memory-call",
+                "mcg::memory.search",
+                r#"{"query":"cargo","limit":5}"#,
+            )
+            .await
+            .expect("memory search");
+        assert!(
+            memory_outcome
+                .stdout
+                .as_deref()
+                .is_some_and(|output| output.contains("package_manager"))
+        );
+        assert!(
+            runtime
+                .execute_provider_mcg_tool(
+                    task.id,
+                    call_id,
+                    "traversal-call",
+                    "mcg::project.context",
+                    r#"{"relative_target":"../outside","token_budget":256}"#,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .execute_provider_mcg_tool(
+                    task.id,
+                    call_id,
+                    "unknown-call",
+                    "mcg::task.get",
+                    r#"{"untrusted":true}"#,
+                )
+                .await
+                .is_err()
+        );
+        let audits = runtime.tool_audit(task.id).expect("MCG audits");
+        assert_eq!(audits.len(), 4);
+        assert!(audits.iter().all(|record| {
+            record.tool.starts_with("mcg::")
+                && !record.request_fingerprint.contains("cargo")
+                && !record.decision.contains("cargo")
+        }));
     }
 
     struct TurnModels {

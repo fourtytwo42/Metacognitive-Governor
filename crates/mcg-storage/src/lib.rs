@@ -4,8 +4,8 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    ApprovalId, LeaseId, MemoryClaimId, ProjectId, TaskEnvelope, TaskId, TaskState,
-    ToolExecutionId, ToolRequestId,
+    ApprovalId, LeaseId, MemoryClaimId, ProjectId, ProjectSnapshotId, TaskEnvelope, TaskId,
+    TaskState, ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{MemoryClaim, MemoryState, ProjectModel};
@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 mod agents;
 mod backup;
+mod backup_secrets;
 mod experiments;
 mod mcp;
 mod platform;
@@ -28,11 +29,19 @@ mod settings;
 mod shadow_workspaces;
 mod sites;
 mod ssh;
+mod ssh_workflows;
 
 pub use backup::{
     BACKUP_BUNDLE_SCHEMA_VERSION, BackupBundleEntry, BackupBundleManifest, BackupBundleSummary,
     DataDirectoryLock, acquire_data_directory_lock, create_backup_bundle,
-    create_backup_bundle_from_snapshot, restore_backup_bundle, verify_backup_bundle,
+    create_backup_bundle_from_snapshot, create_encrypted_backup_bundle_from_snapshot,
+    decrypt_backup_bundle_secrets, restore_backup_bundle, restore_encrypted_backup_bundle,
+    verify_backup_bundle,
+};
+pub use backup_secrets::{
+    BACKUP_SECRET_ENCRYPTION_SCHEMA_VERSION, BACKUP_SECRET_ENTRY, BackupMcpSecret,
+    BackupPassphrase, BackupProviderSecret, BackupSecretEncryptionMetadata, BackupSecretSnapshot,
+    decrypt_backup_secrets, encrypt_backup_secrets,
 };
 
 pub use agents::{
@@ -48,7 +57,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 26;
+pub const STORAGE_SCHEMA_VERSION: i64 = 31;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -999,6 +1008,139 @@ BEFORE DELETE ON plugin_invocation_events BEGIN
 END;
 ";
 
+const MIGRATION_27: &str = r"
+CREATE TABLE IF NOT EXISTS provider_proxy_turn_checkpoints (
+    call_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS provider_proxy_turn_checkpoints_task
+    ON provider_proxy_turn_checkpoints(task_id, updated_at, call_id);
+";
+
+const MIGRATION_28: &str = r"
+CREATE TABLE IF NOT EXISTS provider_proxy_ensemble_checkpoints (
+    call_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    project_id TEXT,
+    task_id TEXT,
+    request_sha256 TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS provider_proxy_ensemble_checkpoints_task
+    ON provider_proxy_ensemble_checkpoints(task_id, updated_at, call_id);
+";
+
+const MIGRATION_29: &str = r"
+CREATE TABLE IF NOT EXISTS provider_proxy_dispatches (
+    client_request_id TEXT PRIMARY KEY,
+    call_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal <= 1024),
+    state TEXT NOT NULL CHECK(state IN ('started', 'completed')),
+    dispatch_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(call_id, purpose, ordinal)
+);
+CREATE INDEX IF NOT EXISTS provider_proxy_dispatches_call
+    ON provider_proxy_dispatches(call_id, ordinal, purpose);
+CREATE TRIGGER IF NOT EXISTS provider_proxy_dispatches_no_delete
+BEFORE DELETE ON provider_proxy_dispatches
+BEGIN
+    SELECT RAISE(ABORT, 'provider dispatch evidence is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS provider_proxy_dispatches_monotonic_update
+BEFORE UPDATE ON provider_proxy_dispatches
+WHEN OLD.state <> 'started'
+  OR NEW.state <> 'completed'
+  OR OLD.client_request_id <> NEW.client_request_id
+  OR OLD.call_id <> NEW.call_id
+  OR OLD.purpose <> NEW.purpose
+  OR OLD.ordinal <> NEW.ordinal
+  OR OLD.started_at <> NEW.started_at
+  OR NEW.completed_at IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'provider dispatch evidence may only advance once');
+END;
+";
+
+const MIGRATION_30: &str = r"
+DROP TRIGGER IF EXISTS provider_proxy_dispatches_no_delete;
+DROP TRIGGER IF EXISTS provider_proxy_dispatches_monotonic_update;
+DROP INDEX IF EXISTS provider_proxy_dispatches_call;
+CREATE TABLE provider_proxy_dispatches_v30 (
+    client_request_id TEXT PRIMARY KEY,
+    call_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal <= 1024),
+    state TEXT NOT NULL CHECK(state IN ('started', 'completed', 'failed')),
+    dispatch_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(call_id, purpose, ordinal)
+);
+INSERT INTO provider_proxy_dispatches_v30(
+    client_request_id, call_id, purpose, ordinal, state,
+    dispatch_json, started_at, completed_at
+)
+SELECT client_request_id, call_id, purpose, ordinal, state,
+       dispatch_json, started_at, completed_at
+FROM provider_proxy_dispatches;
+DROP TABLE provider_proxy_dispatches;
+ALTER TABLE provider_proxy_dispatches_v30 RENAME TO provider_proxy_dispatches;
+CREATE INDEX provider_proxy_dispatches_call
+    ON provider_proxy_dispatches(call_id, ordinal, purpose);
+CREATE TRIGGER provider_proxy_dispatches_no_delete
+BEFORE DELETE ON provider_proxy_dispatches
+BEGIN
+    SELECT RAISE(ABORT, 'provider dispatch evidence is append-only');
+END;
+CREATE TRIGGER provider_proxy_dispatches_monotonic_update
+BEFORE UPDATE ON provider_proxy_dispatches
+WHEN OLD.state <> 'started'
+  OR NEW.state NOT IN ('completed', 'failed')
+  OR OLD.client_request_id <> NEW.client_request_id
+  OR OLD.call_id <> NEW.call_id
+  OR OLD.purpose <> NEW.purpose
+  OR OLD.ordinal <> NEW.ordinal
+  OR OLD.started_at <> NEW.started_at
+  OR NEW.completed_at IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'provider dispatch evidence may only advance once');
+END;
+";
+
+const MIGRATION_31: &str = r"
+CREATE TABLE IF NOT EXISTS ssh_workflows (
+    workflow_id TEXT PRIMARY KEY,
+    task_id TEXT,
+    state TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    workflow_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+CREATE INDEX IF NOT EXISTS ssh_workflows_state_time
+    ON ssh_workflows(state, updated_at, workflow_id);
+CREATE INDEX IF NOT EXISTS ssh_workflows_task_time
+    ON ssh_workflows(task_id, created_at, workflow_id);
+CREATE TRIGGER IF NOT EXISTS ssh_workflows_no_delete
+BEFORE DELETE ON ssh_workflows BEGIN
+    SELECT RAISE(FAIL, 'SSH workflow history cannot be deleted');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1031,6 +1173,8 @@ pub enum StorageError {
     SiteNotFound(mcg_domain::SiteId),
     #[error("SSH host {0} was not found")]
     SshHostNotFound(mcg_domain::SshHostId),
+    #[error("SSH workflow {0} was not found")]
+    SshWorkflowNotFound(mcg_domain::SshWorkflowId),
     #[error("backup {0} was not found")]
     BackupNotFound(Uuid),
     #[error("plugin {0} was not found")]
@@ -1039,6 +1183,8 @@ pub enum StorageError {
     PluginRevisionNotFound(mcg_domain::PluginRevisionId),
     #[error("storage conflict: {0}")]
     Conflict(String),
+    #[error("protected credential store operation failed: {0}")]
+    ProtectedStore(String),
     #[error(transparent)]
     InvalidTransition(#[from] mcg_domain::InvalidTaskTransition),
 }
@@ -1059,6 +1205,9 @@ pub struct StorageDiagnostics {
     pub artifact_count: u64,
     pub plugin_count: u64,
     pub plugin_invocation_count: u64,
+    pub provider_dispatch_started_count: u64,
+    pub provider_dispatch_completed_count: u64,
+    pub provider_dispatch_failed_count: u64,
 }
 
 pub struct SqliteEventStore {
@@ -1145,6 +1294,11 @@ impl SqliteEventStore {
             (24_i64, MIGRATION_24),
             (25_i64, MIGRATION_25),
             (26_i64, MIGRATION_26),
+            (27_i64, MIGRATION_27),
+            (28_i64, MIGRATION_28),
+            (29_i64, MIGRATION_29),
+            (30_i64, MIGRATION_30),
+            (31_i64, MIGRATION_31),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1467,6 +1621,27 @@ impl SqliteEventStore {
             .transpose()
     }
 
+    /// Loads one immutable project snapshot by its durable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn project_snapshot(
+        &self,
+        snapshot_id: ProjectSnapshotId,
+    ) -> Result<Option<ProjectModel>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT snapshot_json FROM project_snapshots WHERE snapshot_id = ?1",
+                [snapshot_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
     /// Lists current project projections in stable root order.
     ///
     /// # Errors
@@ -1724,6 +1899,55 @@ impl SqliteEventStore {
             .filter(|result: &Result<MemoryClaim, StorageError>| {
                 !fresh_only || result.as_ref().is_ok_and(|claim| claim.is_fresh_at(now))
             })
+            .collect()
+    }
+
+    /// Loads a bounded, deterministic batch of claim heads eligible for
+    /// automatic freshness consolidation.
+    ///
+    /// Expired new/working/durable claims enter decay. Claims that have already
+    /// remained decaying through the supplied grace cutoff become retractable.
+    /// `SQLite`'s `datetime` conversion is used so equivalent RFC 3339 offsets do
+    /// not depend on lexical ordering.
+    ///
+    /// # Errors
+    ///
+    /// Invalid bounds, malformed stored JSON, or query failures are returned.
+    pub fn memory_consolidation_candidates(
+        &self,
+        now: DateTime<Utc>,
+        decay_cutoff: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<MemoryClaim>, StorageError> {
+        if limit == 0 || limit > 1_024 {
+            return Err(StorageError::InvalidData(
+                "memory consolidation limit must be between 1 and 1024".into(),
+            ));
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StorageError::InvalidData("memory consolidation limit is too large".into())
+        })?;
+        let mut statement = self.connection.prepare(
+            "SELECT claim_json FROM memory_claims
+             WHERE (
+                 state IN ('new', 'working', 'durable')
+                 AND fresh_until IS NOT NULL
+                 AND datetime(fresh_until) <= datetime(?1)
+             ) OR (
+                 state = 'decaying'
+                 AND datetime(observed_at) <= datetime(?2)
+             )
+             ORDER BY project_id, namespace, claim_key, datetime(observed_at), claim_id
+             LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(
+                params![now.to_rfc3339(), decay_cutoff.to_rfc3339(), limit],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
             .collect()
     }
 
@@ -2309,6 +2533,27 @@ impl SqliteEventStore {
             [],
             |row| row.get(0),
         )?;
+        let provider_dispatch_started_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM provider_proxy_dispatches WHERE state = 'started'",
+            [],
+            |row| row.get(0),
+        )?;
+        let provider_dispatch_started_count = u64::try_from(provider_dispatch_started_count)
+            .map_err(|_| StorageError::InvalidData("negative started dispatch count".into()))?;
+        let provider_dispatch_completed_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM provider_proxy_dispatches WHERE state = 'completed'",
+            [],
+            |row| row.get(0),
+        )?;
+        let provider_dispatch_completed_count = u64::try_from(provider_dispatch_completed_count)
+            .map_err(|_| StorageError::InvalidData("negative completed dispatch count".into()))?;
+        let provider_dispatch_failed_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM provider_proxy_dispatches WHERE state = 'failed'",
+            [],
+            |row| row.get(0),
+        )?;
+        let provider_dispatch_failed_count = u64::try_from(provider_dispatch_failed_count)
+            .map_err(|_| StorageError::InvalidData("negative failed dispatch count".into()))?;
         Ok(StorageDiagnostics {
             integrity,
             schema_version,
@@ -2317,6 +2562,9 @@ impl SqliteEventStore {
             artifact_count: count(&self.connection, "artifacts")?,
             plugin_count: count(&self.connection, "plugin_installations")?,
             plugin_invocation_count: count(&self.connection, "plugin_invocations")?,
+            provider_dispatch_started_count,
+            provider_dispatch_completed_count,
+            provider_dispatch_failed_count,
         })
     }
 }
@@ -2454,11 +2702,89 @@ mod tests {
         assert_eq!(report.event_count, 1);
         assert_eq!(report.task_count, 1);
         assert_eq!(report.artifact_count, 0);
+        assert_eq!(report.provider_dispatch_started_count, 0);
+        assert_eq!(report.provider_dispatch_completed_count, 0);
+        assert_eq!(report.provider_dispatch_failed_count, 0);
         assert_eq!(store.event_count().expect("count after diagnostics"), 1);
         assert!(
             !serde_json::to_string(&report)
                 .expect("diagnostic JSON")
                 .contains("private task content")
+        );
+    }
+
+    #[test]
+    fn migration_30_preserves_started_dispatch_and_allows_definite_failure() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let database = temporary.path().join("migration-29.sqlite3");
+        let connection = Connection::open(&database).expect("legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE mcg_schema (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+            )
+            .expect("schema table");
+        connection
+            .execute_batch(MIGRATION_29)
+            .expect("migration 29 shape");
+        connection
+            .execute("INSERT INTO mcg_schema(version) VALUES (29)", [])
+            .expect("migration version");
+        let call_id = mcg_domain::ProxyCallId::new();
+        let started_at = Utc::now();
+        let client_request_id = "mcg-migration-29-started";
+        let dispatch_json = serde_json::json!({
+            "schema_version": mcg_providers::PROVIDER_DISPATCH_SCHEMA_VERSION,
+            "call_id": call_id,
+            "client_request_id": client_request_id,
+            "target": {"provider_id":"legacy-provider","model_id":"legacy-model"},
+            "purpose":"primary",
+            "ordinal":0,
+            "state":"started",
+            "response_id":null,
+            "started_at":started_at,
+            "completed_at":null
+        });
+        connection
+            .execute(
+                "INSERT INTO provider_proxy_dispatches(
+                    client_request_id, call_id, purpose, ordinal, state,
+                    dispatch_json, started_at, completed_at
+                 ) VALUES (?1, ?2, 'primary', 0, 'started', ?3, ?4, NULL)",
+                params![
+                    client_request_id,
+                    call_id.to_string(),
+                    dispatch_json.to_string(),
+                    started_at.to_rfc3339(),
+                ],
+            )
+            .expect("legacy dispatch");
+        drop(connection);
+
+        let mut store = SqliteEventStore::open(&database).expect("migrated store");
+        assert_eq!(
+            store.diagnostics().expect("diagnostics").schema_version,
+            STORAGE_SCHEMA_VERSION
+        );
+        let started = store
+            .provider_dispatch(client_request_id)
+            .expect("dispatch lookup")
+            .expect("preserved dispatch");
+        assert_eq!(started.state, mcg_providers::ProviderDispatchState::Started);
+        assert_eq!(started.failure, None);
+        let failed = store
+            .fail_provider_dispatch(
+                client_request_id,
+                mcg_providers::ProviderDispatchFailure::Http,
+                Utc::now(),
+            )
+            .expect("definite failure");
+        assert_eq!(failed.state, mcg_providers::ProviderDispatchState::Failed);
+        assert_eq!(
+            failed.failure,
+            Some(mcg_providers::ProviderDispatchFailure::Http)
         );
     }
 
@@ -2628,6 +2954,10 @@ mod tests {
             .record_project_snapshot(&second)
             .expect("record second snapshot");
         assert_eq!(reopened.project(project_id).expect("project"), Some(second));
+        assert_eq!(
+            reopened.project_snapshot(first.id).expect("exact snapshot"),
+            Some(first.clone())
+        );
         assert_eq!(
             reopened
                 .project_history(project_id)

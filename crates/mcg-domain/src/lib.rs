@@ -57,6 +57,7 @@ domain_id!(ManagedProcessId);
 domain_id!(ProjectSnapshotId);
 domain_id!(MemoryClaimId);
 domain_id!(OrganizationId);
+domain_id!(OrganizationImportId);
 domain_id!(OrganizationRevisionId);
 domain_id!(RoleId);
 domain_id!(AgentInstanceId);
@@ -81,6 +82,8 @@ domain_id!(SiteHealthCheckId);
 domain_id!(SshHostId);
 domain_id!(SshHostRevisionId);
 domain_id!(SshOperationId);
+domain_id!(SshWorkflowId);
+domain_id!(SshWorkflowStepId);
 domain_id!(SupervisionObservationId);
 domain_id!(ExperimentId);
 domain_id!(ExperimentBenchmarkId);
@@ -113,6 +116,16 @@ impl TaskId {
     }
 }
 
+impl SshOperationId {
+    /// Creates a stable per-step operation identity for durable workflow retries.
+    #[must_use]
+    pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+}
+
 impl SupervisionObservationId {
     /// Creates a stable automatic-observation identity from a 128-bit digest.
     #[must_use]
@@ -125,6 +138,26 @@ impl SupervisionObservationId {
 
 impl OrganizationRevisionId {
     /// Creates a stable automatic candidate-revision identity from a 128-bit digest.
+    #[must_use]
+    pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+}
+
+impl OrganizationId {
+    /// Creates a stable organization identity for an idempotent portable import.
+    #[must_use]
+    pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+}
+
+impl RoleId {
+    /// Creates a stable role identity within an idempotent portable import.
     #[must_use]
     pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
         bytes[6] = (bytes[6] & 0x0f) | 0x50;
@@ -425,6 +458,7 @@ pub const SCHEDULE_SCHEMA_VERSION: u16 = 1;
 
 pub const SITE_SCHEMA_VERSION: u16 = 1;
 pub const SSH_SCHEMA_VERSION: u16 = 1;
+pub const SSH_WORKFLOW_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -575,6 +609,8 @@ pub struct SshHost {
     pub authentication: SshAuthentication,
     pub known_hosts_entry: String,
     pub host_key_sha256: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub state: SshHostState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -639,6 +675,70 @@ pub struct SshOperation {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub artifact_sha256: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshWorkflowState {
+    Planned,
+    Running,
+    Waiting,
+    Succeeded,
+    Failed,
+    Uncertain,
+    Cancelled,
+}
+
+impl SshWorkflowState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Uncertain | Self::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshWorkflowStepState {
+    Pending,
+    Succeeded,
+    Failed,
+    Uncertain,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshWorkflowStep {
+    pub id: SshWorkflowStepId,
+    pub name: String,
+    pub host_id: SshHostId,
+    pub host_revision: u32,
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
+    #[serde(default)]
+    pub routed_automatically: bool,
+    #[serde(default)]
+    pub dependencies: Vec<SshWorkflowStepId>,
+    pub operation_id: SshOperationId,
+    pub operation: SshOperationKind,
+    pub timeout_seconds: u64,
+    pub state: SshWorkflowStepState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshWorkflow {
+    pub schema_version: u16,
+    pub id: SshWorkflowId,
+    pub definition_hash: String,
+    pub display_name: String,
+    pub task_id: Option<TaskId>,
+    pub state: SshWorkflowState,
+    pub steps: Vec<SshWorkflowStep>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -33,9 +33,23 @@ const client = vi.hoisted(() => ({
   transitionTask: vi.fn(),
   taskEvents: vi.fn(),
   taskAudit: vi.fn(),
+  replayRun: vi.fn(),
   pickProject: vi.fn(),
   discoverProject: vi.fn(),
   listProjects: vi.fn(),
+  listProjectMemory: vi.fn(),
+  createProjectMemory: vi.fn(),
+  correctProjectMemory: vi.fn(),
+  transitionProjectMemory: vi.fn(),
+  loadProjectMemoryHistory: vi.fn(),
+  loadManagedProjectMemory: vi.fn(),
+  listOrganizations: vi.fn(),
+  loadOrganizationHistory: vi.fn(),
+  createOrganization: vi.fn(),
+  inheritOrganization: vi.fn(),
+  exportOrganization: vi.fn(),
+  importOrganization: vi.fn(),
+  compareOrganizations: vi.fn(),
   listSchedules: vi.fn(),
   createSchedule: vi.fn(),
   setScheduleState: vi.fn(),
@@ -70,6 +84,10 @@ const client = vi.hoisted(() => ({
   ,registerSshHost: vi.fn()
   ,loadSshOperations: vi.fn()
   ,runSshOperation: vi.fn()
+  ,listSshWorkflows: vi.fn()
+  ,createSshWorkflow: vi.fn()
+  ,runSshWorkflow: vi.fn()
+  ,cancelSshWorkflow: vi.fn()
   ,listSupervisionObservations: vi.fn()
   ,recordSupervisionObservation: vi.fn()
   ,recordCandidateRevision: vi.fn()
@@ -85,8 +103,12 @@ const client = vi.hoisted(() => ({
   ,settingsHistory: vi.fn()
   ,listBackups: vi.fn()
   ,createBackup: vi.fn()
+  ,createEncryptedBackup: vi.fn()
   ,verifyBackup: vi.fn()
   ,runDiagnostics: vi.fn()
+  ,getUpdateConfiguration: vi.fn()
+  ,checkForUpdate: vi.fn()
+  ,installUpdate: vi.fn()
   ,localServiceStatus: vi.fn()
 }));
 
@@ -122,9 +144,23 @@ vi.mock("./desktop-client", () => ({
   transitionTask: client.transitionTask,
   loadTaskEvents: client.taskEvents,
   loadTaskAudit: client.taskAudit,
+  replayAgentRun: client.replayRun,
   pickProjectDirectory: client.pickProject,
   discoverProject: client.discoverProject,
   listProjects: client.listProjects,
+  listProjectMemory: client.listProjectMemory,
+  createProjectMemory: client.createProjectMemory,
+  correctProjectMemory: client.correctProjectMemory,
+  transitionProjectMemory: client.transitionProjectMemory,
+  loadProjectMemoryHistory: client.loadProjectMemoryHistory,
+  loadManagedProjectMemory: client.loadManagedProjectMemory,
+  listOrganizations: client.listOrganizations,
+  loadOrganizationHistory: client.loadOrganizationHistory,
+  createOrganization: client.createOrganization,
+  inheritOrganization: client.inheritOrganization,
+  exportOrganization: client.exportOrganization,
+  importOrganization: client.importOrganization,
+  compareOrganizations: client.compareOrganizations,
   listSchedules: client.listSchedules,
   createSchedule: client.createSchedule,
   setScheduleState: client.setScheduleState,
@@ -159,6 +195,10 @@ vi.mock("./desktop-client", () => ({
   registerSshHost: client.registerSshHost,
   loadSshOperations: client.loadSshOperations,
   runSshOperation: client.runSshOperation,
+  listSshWorkflows: client.listSshWorkflows,
+  createSshWorkflow: client.createSshWorkflow,
+  runSshWorkflow: client.runSshWorkflow,
+  cancelSshWorkflow: client.cancelSshWorkflow,
   listSupervisionObservations: client.listSupervisionObservations,
   recordSupervisionObservation: client.recordSupervisionObservation,
   recordCandidateRevision: client.recordCandidateRevision,
@@ -174,8 +214,12 @@ vi.mock("./desktop-client", () => ({
   loadUserSettingsHistory: client.settingsHistory,
   listBackups: client.listBackups,
   createBackup: client.createBackup,
+  createEncryptedBackup: client.createEncryptedBackup,
   verifyBackup: client.verifyBackup,
   runDiagnostics: client.runDiagnostics,
+  getUpdateConfiguration: client.getUpdateConfiguration,
+  checkForUpdate: client.checkForUpdate,
+  installUpdate: client.installUpdate,
   getLocalServiceStatus: client.localServiceStatus
 }));
 
@@ -214,9 +258,23 @@ beforeEach(() => {
   client.transitionTask.mockReset();
   client.taskEvents.mockReset();
   client.taskAudit.mockReset();
+  client.replayRun.mockReset();
   client.pickProject.mockReset();
   client.discoverProject.mockReset();
   client.listProjects.mockReset();
+  client.listProjectMemory.mockReset();
+  client.createProjectMemory.mockReset();
+  client.correctProjectMemory.mockReset();
+  client.transitionProjectMemory.mockReset();
+  client.loadProjectMemoryHistory.mockReset();
+  client.loadManagedProjectMemory.mockReset();
+  client.listOrganizations.mockReset();
+  client.loadOrganizationHistory.mockReset();
+  client.createOrganization.mockReset();
+  client.inheritOrganization.mockReset();
+  client.exportOrganization.mockReset();
+  client.importOrganization.mockReset();
+  client.compareOrganizations.mockReset();
   client.listSchedules.mockReset();
   client.createSchedule.mockReset();
   client.setScheduleState.mockReset();
@@ -251,6 +309,10 @@ beforeEach(() => {
   client.registerSshHost.mockReset();
   client.loadSshOperations.mockReset();
   client.runSshOperation.mockReset();
+  client.listSshWorkflows.mockReset();
+  client.createSshWorkflow.mockReset();
+  client.runSshWorkflow.mockReset();
+  client.cancelSshWorkflow.mockReset();
   client.listSupervisionObservations.mockReset();
   client.recordSupervisionObservation.mockReset();
   client.recordCandidateRevision.mockReset();
@@ -266,8 +328,12 @@ beforeEach(() => {
   client.settingsHistory.mockReset();
   client.listBackups.mockReset();
   client.createBackup.mockReset();
+  client.createEncryptedBackup.mockReset();
   client.verifyBackup.mockReset();
   client.runDiagnostics.mockReset();
+  client.getUpdateConfiguration.mockReset();
+  client.checkForUpdate.mockReset();
+  client.installUpdate.mockReset();
   client.open.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
   client.proxyUsage.mockResolvedValue({
@@ -282,6 +348,9 @@ beforeEach(() => {
   client.listPlugins.mockResolvedValue({ plugins: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
+  client.listProjectMemory.mockResolvedValue({ claims: [] });
+  client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n" });
+  client.listOrganizations.mockResolvedValue({ organizations: [] });
   client.listApprovals.mockResolvedValue({ approvals: [] });
   client.listSchedules.mockResolvedValue({ schedules: [] });
   client.listSchedulerNotifications.mockResolvedValue({ notifications: [] });
@@ -300,6 +369,7 @@ beforeEach(() => {
   client.listPlatformSessions.mockResolvedValue({ sessions: [] });
   client.listSites.mockResolvedValue({ sites: [] });
   client.listSshHosts.mockResolvedValue({ hosts: [] });
+  client.listSshWorkflows.mockResolvedValue({ workflows: [] });
   client.listSupervisionObservations.mockResolvedValue({ observations: [] });
   client.listExperiments.mockResolvedValue({ experiments: [] });
   client.loadExperimentEvidence.mockResolvedValue({
@@ -331,10 +401,20 @@ beforeEach(() => {
     overall: "warning",
     checks: [
       { code: "database_integrity", label: "Database integrity", severity: "pass", detail: "SQLite quick-check completed successfully." },
+      { code: "provider_dispatch_recovery", label: "Provider dispatch recovery", severity: "warning", detail: "1 physical provider request(s) are active or indeterminate; 4 validated request(s) completed; 2 definite request(s) failed.", remediation: "Review the affected task and provider billing/logs, then retry with a new owner-authorized call identity; MCG will not resend an indeterminate request automatically." },
       { code: "portable_backups", label: "Portable backups", severity: "warning", detail: "No portable backup has been created yet.", remediation: "Create and retain a portable backup before relying on the installation." }
     ],
-    counts: { events: 4, tasks: 1, artifacts: 0, backups: 0, providers: 0, models: 0, mcp_connections: 0, mcp_tools: 0, schedules: 0, pending_approvals: 0 }
+    counts: { events: 4, tasks: 1, artifacts: 0, backups: 0, providers: 0, models: 0, mcp_connections: 0, mcp_tools: 0, schedules: 0, pending_approvals: 0, provider_dispatch_started: 1, provider_dispatch_completed: 4, provider_dispatch_failed: 2 }
   });
+  client.getUpdateConfiguration.mockResolvedValue({
+    schema_version: 1,
+    configured: false,
+    current_version: "0.1.0",
+    detail: "This build has no trusted update endpoint.",
+    trusted_origin: null,
+    recovery_notice: null
+  });
+  client.installUpdate.mockResolvedValue(undefined);
   client.localServiceStatus.mockResolvedValue({
     ready: true,
     launched: true,
@@ -395,6 +475,48 @@ test("owner settings persist autonomy with optimistic revision control", async (
   expect(within(panel).getByText("Ask before consequential local actions.")).toBeInTheDocument();
 });
 
+test("unsigned development builds fail closed instead of offering an update fallback", async () => {
+  render(<App />);
+  const panel = await screen.findByLabelText("Application updates");
+  expect(within(panel).getByText(/Updates are unavailable in this build/)).toBeInTheDocument();
+  expect(within(panel).getByText(/never accept an unsigned fallback/)).toBeInTheDocument();
+  expect(within(panel).queryByRole("button", { name: "Check for updates" })).not.toBeInTheDocument();
+});
+
+test("owner-signed updates require review and invoke verified backup installation", async () => {
+  client.getUpdateConfiguration.mockResolvedValue({
+    schema_version: 1,
+    configured: true,
+    current_version: "0.1.0",
+    trusted_origin: "https://updates.example.test",
+    detail: "MCG will accept only packages signed by this build's trusted update key.",
+    recovery_notice: "The update did not complete. MCG restarted the previous installation and preserved its data."
+  });
+  client.checkForUpdate.mockResolvedValue({
+    schema_version: 1,
+    configured: true,
+    current_version: "0.1.0",
+    available_version: "0.2.0",
+    notes: "Security and recovery improvements.",
+    published_at: "2026-08-18T12:00:00Z",
+    target: "windows-x86_64-nsis",
+    detail: "A newer owner-signed MCG release is available."
+  });
+  render(<App />);
+  const panel = await screen.findByLabelText("Application updates");
+  expect(within(panel).getByRole("status")).toHaveTextContent(/restarted the previous installation/);
+  fireEvent.click(within(panel).getByRole("button", { name: "Check for updates" }));
+  expect(await within(panel).findByText("MCG 0.2.0")).toBeInTheDocument();
+  expect(within(panel).getByText("Security and recovery improvements.")).toBeInTheDocument();
+  expect(client.installUpdate).not.toHaveBeenCalled();
+
+  fireEvent.click(within(panel).getByRole("button", { name: "Review update" }));
+  const confirmation = within(panel).getByLabelText("Confirm application update");
+  expect(within(confirmation).getByText(/create and verify a credential-free portable backup/)).toBeInTheDocument();
+  fireEvent.click(within(confirmation).getByRole("button", { name: "Back up and install" }));
+  await waitFor(() => expect(client.installUpdate).toHaveBeenCalledWith("0.2.0", expect.any(String)));
+});
+
 test("portable backup creation is explicit secret-free and verifiable", async () => {
   const backup = {
     backup_id: "00000000-0000-4000-8000-000000000401",
@@ -421,6 +543,63 @@ test("portable backup creation is explicit secret-free and verifiable", async ()
   await waitFor(() => expect(client.verifyBackup).toHaveBeenCalledWith(backup.backup_id));
 });
 
+test("encrypted credential backups are opt-in advanced actions with passphrase confirmation", async () => {
+  const backup = {
+    backup_id: "00000000-0000-4000-8000-000000000402",
+    file_name: "00000000-0000-4000-8000-000000000402.mcgb",
+    sha256: "c".repeat(64),
+    size_bytes: 8192,
+    manifest: {
+      schema_version: 2,
+      application_version: "0.1.0",
+      created_at: "2026-08-16T00:00:00Z",
+      secrets_included: true,
+      secret_encryption: {
+        schema_version: 1,
+        entry_path: "secrets/credentials.v1.enc",
+        algorithm: "xchacha20-poly1305",
+        kdf: "argon2id",
+        argon2_version: 19,
+        memory_kib: 65536,
+        iterations: 3,
+        parallelism: 1,
+        salt_base64: "public-salt",
+        nonce_base64: "public-nonce"
+      },
+      entries: [
+        { path: "state/mcg.sqlite3", size_bytes: 2048, sha256: "d".repeat(64) },
+        { path: "secrets/credentials.v1.enc", size_bytes: 1024, sha256: "e".repeat(64) }
+      ]
+    }
+  };
+  client.createEncryptedBackup.mockResolvedValue(backup);
+  render(<App />);
+  expect(screen.queryByLabelText("Encrypted credential backup")).not.toBeInTheDocument();
+
+  await enableAdvancedMode();
+  const form = await screen.findByLabelText("Encrypted credential backup");
+  const passphrase = within(form).getByLabelText("Passphrase");
+  const confirmation = within(form).getByLabelText("Confirm passphrase");
+  fireEvent.change(passphrase, { target: { value: "correct horse battery staple" } });
+  fireEvent.change(confirmation, { target: { value: "different secure passphrase" } });
+  fireEvent.click(within(form).getByRole("button", { name: "Create encrypted backup" }));
+  expect(client.createEncryptedBackup).not.toHaveBeenCalled();
+  expect(await screen.findByText("Encrypted backup passphrases do not match.")).toBeInTheDocument();
+
+  fireEvent.change(confirmation, { target: { value: "correct horse battery staple" } });
+  fireEvent.click(within(form).getByRole("button", { name: "Create encrypted backup" }));
+  await waitFor(() =>
+    expect(client.createEncryptedBackup).toHaveBeenCalledWith(
+      expect.any(String),
+      "correct horse battery staple"
+    )
+  );
+  expect(await screen.findByText(backup.file_name)).toBeInTheDocument();
+  expect(screen.getByText(/credentials encrypted/)).toBeInTheDocument();
+  expect(passphrase).toHaveValue("");
+  expect(confirmation).toHaveValue("");
+});
+
 test("system diagnostics are explicit concise and actionable", async () => {
   render(<App />);
   const panel = await screen.findByLabelText("System diagnostics");
@@ -429,12 +608,136 @@ test("system diagnostics are explicit concise and actionable", async () => {
   await waitFor(() => expect(client.runDiagnostics).toHaveBeenCalledOnce());
   expect(await within(panel).findByText(/Overall: WARNING/)).toBeInTheDocument();
   expect(within(panel).getByText(/Portable backups/)).toBeInTheDocument();
+  expect(within(panel).getByText(/Provider dispatch recovery/)).toBeInTheDocument();
+  expect(within(panel).getByText(/will not resend an indeterminate request automatically/)).toBeInTheDocument();
   expect(within(panel).getByText(/Create and retain a portable backup/)).toBeInTheDocument();
   expect(within(panel).queryByText(/Database integrity/)).not.toBeInTheDocument();
 
   await enableAdvancedMode();
   expect(within(panel).getByText(/Database integrity/)).toBeInTheDocument();
   expect(within(panel).getByText(/4 events/)).toBeInTheDocument();
+  expect(within(panel).getByText(/1 active or indeterminate provider calls/)).toBeInTheDocument();
+});
+
+test("advanced organization inheritance pins a visible base revision", async () => {
+  const base = {
+    schema_version: 2,
+    organization_id: "00000000-0000-4000-8000-000000000281",
+    revision_id: "00000000-0000-4000-8000-000000000282",
+    revision: 1,
+    name: "Consumer Default",
+    roles: [{ id: "role", kind: "coder", name: "Coder", purpose: "Build", tool_capabilities: ["filesystem.project"] }],
+    relationships: [],
+    policy: { prefer_minimal_organization: true, max_parallel_agents: 4, max_total_agents: 8, max_organizational_overhead_ratio: 0.3, default_lease_seconds: 900 },
+    evaluation: { require_independent_evaluation: false, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+    created_at: "2026-08-18T00:00:00Z"
+  };
+  const inherited = {
+    ...base,
+    organization_id: "00000000-0000-4000-8000-000000000283",
+    revision_id: "00000000-0000-4000-8000-000000000284",
+    inherited_from_revision_id: base.revision_id,
+    name: "Website specialists"
+  };
+  client.listOrganizations
+    .mockResolvedValueOnce({ organizations: [base] })
+    .mockResolvedValueOnce({ organizations: [base, inherited] });
+  client.inheritOrganization.mockResolvedValue({ organization: inherited, event: {} });
+  render(<App />);
+  const panel = await screen.findByRole("region", { name: "Measured improvement" });
+  expect((await within(panel).findAllByText("Consumer Default")).length).toBeGreaterThan(0);
+  await enableAdvancedMode();
+  fireEvent.change(within(panel).getByLabelText("New organization name"), { target: { value: "Website specialists" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Create inherited organization" }));
+  await waitFor(() => expect(client.inheritOrganization).toHaveBeenCalledWith(base.organization_id, "Website specialists"));
+  expect((await within(panel).findAllByText("Website specialists")).length).toBeGreaterThan(0);
+  expect(within(panel).getByText("Inherited from a pinned revision")).toBeInTheDocument();
+  expect(within(panel).getByText(`base ${base.revision_id}`)).toBeInTheDocument();
+});
+
+test("organization portability is simple to duplicate and advanced to export import and compare", async () => {
+  const base = {
+    schema_version: 2,
+    organization_id: "00000000-0000-4000-8000-000000000291",
+    revision_id: "00000000-0000-4000-8000-000000000292",
+    revision: 1,
+    name: "Portable team",
+    roles: [{ id: "role", kind: "coder", name: "Coder", purpose: "Build", tool_capabilities: ["filesystem.project"] }],
+    relationships: [],
+    policy: { prefer_minimal_organization: true, max_parallel_agents: 4, max_total_agents: 8, max_organizational_overhead_ratio: 0.3, default_lease_seconds: 900 },
+    evaluation: { require_independent_evaluation: false, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+    created_at: "2026-08-18T00:00:00Z"
+  };
+  const copy = {
+    ...base,
+    organization_id: "00000000-0000-4000-8000-000000000293",
+    revision_id: "00000000-0000-4000-8000-000000000294",
+    name: "Portable team copy"
+  };
+  const portable = {
+    schema_version: 1,
+    source: { organization_id: base.organization_id, revision_id: base.revision_id, revision: 1, exported_at: "2026-08-18T00:00:00Z" },
+    definition: {
+      name: base.name,
+      roles: [{
+        key: "role-000",
+        kind: "coder",
+        name: "Coder",
+        purpose: "Build",
+        prompt_policy: "Stay bounded",
+        model_policy: { capability_class: "coding", preferred_models: [], allow_fallback: true, max_escalation_tier: 2 },
+        tool_capabilities: ["filesystem.project"],
+        memory_namespace: "role/coder"
+      }],
+      relationships: [],
+      policy: base.policy,
+      evaluation: base.evaluation
+    },
+    content_sha256: "a".repeat(64)
+  };
+  client.listOrganizations
+    .mockResolvedValueOnce({ organizations: [base] })
+    .mockResolvedValue({ organizations: [base, copy] });
+  client.exportOrganization.mockResolvedValue(portable);
+  client.loadOrganizationHistory.mockResolvedValue({ revisions: [base] });
+  client.importOrganization
+    .mockRejectedValueOnce(new Error("Connection closed after import"))
+    .mockResolvedValue({ organization: copy, portable_sha256: portable.content_sha256, replayed: false });
+  client.compareOrganizations.mockResolvedValue({
+    equivalent: true,
+    left_sha256: portable.content_sha256,
+    right_sha256: portable.content_sha256,
+    sections_changed: [],
+    roles_added: [],
+    roles_removed: [],
+    roles_changed: [],
+    relationships_added: [],
+    relationships_removed: []
+  });
+  render(<App />);
+  const panel = await screen.findByRole("region", { name: "Measured improvement" });
+  fireEvent.click(await within(panel).findByRole("button", { name: "Duplicate" }));
+  expect(await within(panel).findByRole("alert")).toHaveTextContent("Connection closed after import");
+  const firstDuplicateId = client.importOrganization.mock.calls[0][1];
+  fireEvent.click(within(panel).getByRole("button", { name: "Duplicate" }));
+  await waitFor(() => expect(client.exportOrganization).toHaveBeenCalledWith(base.revision_id));
+  expect(client.importOrganization).toHaveBeenLastCalledWith(
+    portable,
+    firstDuplicateId,
+    "Portable team copy"
+  );
+  expect((await within(panel).findAllByText("Portable team copy")).length).toBeGreaterThan(0);
+
+  await enableAdvancedMode();
+  fireEvent.click(within(panel).getAllByRole("button", { name: "Show portable JSON" })[0]);
+  expect((await within(panel).findByLabelText("Portable organization JSON") as HTMLTextAreaElement).value).toContain(portable.content_sha256);
+  fireEvent.click(within(panel).getAllByRole("button", { name: "Revision history" })[0]);
+  expect(await within(panel).findByRole("list", { name: "Portable team revision history" })).toHaveTextContent("Revision 1");
+  fireEvent.click(within(panel).getByRole("button", { name: "Compare portable definitions" }));
+  expect(await within(panel).findByText("Definitions are equivalent.")).toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Import as new organization" }));
+  await waitFor(() => expect(client.importOrganization).toHaveBeenCalledTimes(3));
+  expect(client.importOrganization.mock.calls[2][1]).not.toBe(firstDuplicateId);
 });
 
 test("measured improvement stays simple by default and exposes controlled transitions in advanced mode", async () => {
@@ -455,6 +758,20 @@ test("measured improvement stays simple by default and exposes controlled transi
     created_at: "2026-08-14T00:00:00Z",
     updated_at: "2026-08-14T00:00:00Z"
   };
+  client.listOrganizations.mockResolvedValue({
+    organizations: [{
+      schema_version: 2,
+      organization_id: experiment.organization_id,
+      revision_id: experiment.baseline_revision_id,
+      revision: 1,
+      name: "Consumer Fixture",
+      roles: [],
+      relationships: [],
+      policy: { prefer_minimal_organization: true, max_parallel_agents: 4, max_total_agents: 8, max_organizational_overhead_ratio: 0.3, default_lease_seconds: 900 },
+      evaluation: { require_independent_evaluation: false, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+      created_at: "2026-08-14T00:00:00Z"
+    }]
+  });
   client.listExperiments.mockResolvedValue({ experiments: [experiment] });
   client.loadExperimentEvidence.mockResolvedValue({
     shadow: { receipts: [{}] },
@@ -465,7 +782,7 @@ test("measured improvement stays simple by default and exposes controlled transi
   render(<App />);
   const panel = await screen.findByRole("region", { name: "Measured improvement" });
   expect(within(panel).getByText("Candidates stay inactive until benchmark evidence supports promotion. Shadow work can evaluate, but cannot change a real task.")).toBeTruthy();
-  fireEvent.change(within(panel).getByLabelText("Organization ID"), { target: { value: experiment.organization_id } });
+  fireEvent.change(within(panel).getByLabelText("Organization for experiments"), { target: { value: experiment.organization_id } });
   fireEvent.click(within(panel).getByRole("button", { name: "Load experiments" }));
   await within(panel).findByText(experiment.hypothesis);
   expect(within(panel).getByText("1 shadow · 1/2 benchmarks · 0 decisions")).toBeTruthy();
@@ -491,6 +808,7 @@ test("simple SSH flow registers a pinned host and performs read-only inspection"
     username: "builder",
     known_hosts_entry: "192.168.50.109 ssh-ed25519 AAAAfixture",
     host_key_sha256: "SHA256:fixture",
+    capabilities: ["os:linux"],
     state: "active" as const,
     created_at: "2026-08-14T00:00:00Z",
     updated_at: "2026-08-14T00:00:00Z"
@@ -514,13 +832,43 @@ test("simple SSH flow registers a pinned host and performs read-only inspection"
   fireEvent.change(within(panel).getByLabelText("Pinned known_hosts line"), { target: { value: sshHost.known_hosts_entry } });
   fireEvent.change(within(panel).getByLabelText("Verified host fingerprint"), { target: { value: sshHost.host_key_sha256 } });
   fireEvent.click(within(panel).getByRole("button", { name: "Register pinned host" }));
-  await screen.findByText("Build VM");
+  await within(panel).findByRole("heading", { name: "Build VM" });
   fireEvent.click(within(panel).getByRole("button", { name: "Inspect host" }));
   await waitFor(() => expect(client.runSshOperation).toHaveBeenCalledWith(
     sshHost.id,
     expect.objectContaining({ operation: { kind: "inspect" }, timeout_seconds: 60 })
   ));
   expect(await within(panel).findByText("OpenSSH operation exited with 255 · exit 255")).toBeInTheDocument();
+});
+
+test("simple SSH workflow pins selected hosts and exposes run state", async () => {
+  const now = "2026-08-18T00:00:00Z";
+  const hosts = [
+    { id: "00000000-0000-4000-8000-000000000201", revision: 3, definition_hash: "a".repeat(64), display_name: "Builder", hostname: "builder.test", port: 22, username: "mcg", known_hosts_entry: "builder.test ssh-ed25519 AAAA", host_key_sha256: "SHA256:a", capabilities: ["os:linux"], state: "active" as const, created_at: now, updated_at: now },
+    { id: "00000000-0000-4000-8000-000000000202", revision: 2, definition_hash: "b".repeat(64), display_name: "Tester", hostname: "tester.test", port: 22, username: "mcg", known_hosts_entry: "tester.test ssh-ed25519 BBBB", host_key_sha256: "SHA256:b", capabilities: ["os:linux"], state: "active" as const, created_at: now, updated_at: now }
+  ];
+  client.listSshHosts.mockResolvedValue({ hosts });
+  client.createSshWorkflow.mockImplementation(async (request) => ({
+    workflow: { schema_version: 1, definition_hash: "c".repeat(64), state: "planned", created_at: now, updated_at: now, ...request, steps: request.steps.map((step: Record<string, unknown>) => ({ ...step, operation_id: crypto.randomUUID(), state: "pending", detail: "" })) },
+    replayed: false
+  }));
+  client.runSshWorkflow.mockImplementation(async (workflowId) => ({
+    workflow: { schema_version: 1, id: workflowId, definition_hash: "c".repeat(64), display_name: "Cross-platform check", state: "succeeded", created_at: now, updated_at: now, steps: [] },
+    replayed: false
+  }));
+  render(<App />);
+  const workflows = await screen.findByRole("region", { name: "SSH workflows" });
+  fireEvent.change(within(workflows).getByLabelText("Workflow name"), { target: { value: "Cross-platform check" } });
+  fireEvent.click(within(workflows).getByRole("checkbox", { name: /Builder/ }));
+  fireEvent.click(within(workflows).getByRole("checkbox", { name: /Tester/ }));
+  fireEvent.click(within(workflows).getByRole("button", { name: "Create durable workflow" }));
+  await within(workflows).findByRole("heading", { name: "Cross-platform check" });
+  const request = client.createSshWorkflow.mock.calls[0][0];
+  expect(request.steps.map((step: { host_revision: number }) => step.host_revision)).toEqual([3, 2]);
+  expect(request.steps[1].dependencies).toEqual([request.steps[0].id]);
+  fireEvent.click(within(workflows).getByRole("button", { name: "Run workflow" }));
+  await waitFor(() => expect(client.runSshWorkflow).toHaveBeenCalledWith(request.id));
+  expect(await within(workflows).findByText("succeeded")).toBeInTheDocument();
 });
 
 test("simple Sites flow registers a selected project and records governed health", async () => {
@@ -915,6 +1263,20 @@ test("advanced mode reveals runtime details", async () => {
   expect(screen.getByRole("heading", { name: "Runtime status" })).toBeInTheDocument();
 });
 
+test("mode persistence restores keyboard focus after the temporarily disabled control returns", async () => {
+  render(<App />);
+
+  const advanced = await screen.findByRole("button", { name: "Advanced mode" });
+  await waitFor(() => expect(advanced).toBeEnabled());
+  advanced.focus();
+  expect(advanced).toHaveFocus();
+  fireEvent.click(advanced);
+
+  const simple = await screen.findByRole("button", { name: "Simple mode" });
+  await waitFor(() => expect(simple).toBeEnabled());
+  await waitFor(() => expect(simple).toHaveFocus());
+});
+
 test("OpenAI subscription browser login is the clear default and confirms connection", async () => {
   client.start.mockResolvedValue({
     session_id: "fixture-session",
@@ -1217,6 +1579,21 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
       recorded_at: pendingTask.created_at
     }]
   });
+  client.replayRun.mockResolvedValue({
+    schema_version: 1,
+    run_id: "00000000-0000-4000-8000-000000000020",
+    task_id: pendingTask.id,
+    organization_revision_id: "00000000-0000-4000-8000-000000000021",
+    terminal: false,
+    side_effect_free: true,
+    evidence_sha256: "b".repeat(64),
+    counts: { events: 3, tool_audit_records: 1, work_items: 1, instances: 1, leases: 1, usage_records: 1, evaluations: 1, turn_results: 1 },
+    invariants: [
+      { code: "identity_coherent", passed: true, detail: "identities agree" },
+      { code: "observation_only", passed: true, detail: "no execution" }
+    ],
+    evidence: {}
+  });
   render(<App />);
 
   await screen.findByRole("option", { name: "sample" });
@@ -1246,6 +1623,11 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   expect(screen.getAllByText("1", { selector: ".evidence-overview strong" })).toHaveLength(2);
   expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
   expect(client.taskAudit).toHaveBeenCalledWith(pendingTask.id);
+  fireEvent.click(screen.getByRole("button", { name: "Verify replay" }));
+  expect(await screen.findByText("Durable replay verified")).toBeInTheDocument();
+  expect(screen.getByText("No provider or tool side effects")).toBeInTheDocument();
+  expect(screen.getByTitle("b".repeat(64))).toBeInTheDocument();
+  expect(client.replayRun).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000020");
 
   await enableAdvancedMode();
   expect(screen.getByText("task transitioned")).toBeInTheDocument();
@@ -1404,6 +1786,89 @@ test("native project selection discovers the folder and associates the new task"
   expect(client.createTask).toHaveBeenCalledWith(expect.objectContaining({
     project_id: project.project_id
   }));
+});
+
+test("desktop project memory is simple to add and advanced lifecycle evidence stays visible", async () => {
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000510",
+    project_id: "00000000-0000-4000-8000-000000000511",
+    root: "C:\\Projects\\remembered",
+    fingerprint: "f".repeat(64),
+    observed_at: "2026-08-18T00:00:00Z",
+    repository: { is_git: true, branch: "main", head: "abc", dirty: false, recent_commits: [] },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    package_managers: ["pnpm"],
+    services: ["web"],
+    ci_systems: [],
+    important_directories: ["src"],
+    commands: [{ name: "test", command: "pnpm test", source: "package.json", confidence_basis: "manifest" }],
+    instructions: { conflicts: [] },
+    world: {
+      nodes: [{ id: "service:web", kind: "service", label: "web", source: "package.json" }],
+      relationships: [{ from: "repository", relation: "provides", to: "service:web", source: "package.json" }]
+    },
+    watched_inputs: {}
+  };
+  const claim = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000512",
+    project_id: project.project_id,
+    namespace: "project",
+    key: "package_manager",
+    value: "pnpm",
+    state: "new",
+    confidence: 0.8,
+    provenance: { source_kind: "user", source: "Desktop owner" },
+    observed_at: "2026-08-18T00:01:00Z",
+    correction_count: 0,
+    usefulness_count: 0
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.listProjectMemory
+    .mockResolvedValueOnce({ claims: [] })
+    .mockResolvedValue({ claims: [claim] });
+  client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n\n- package_manager: pnpm" });
+  client.createProjectMemory.mockResolvedValue({ claim, event: { sequence: 1, kind: "memory_claim_recorded", occurred_at: claim.observed_at } });
+  client.transitionProjectMemory.mockResolvedValue({ claim: { ...claim, state: "working", usefulness_count: 1 }, previous: claim, event: { sequence: 2, kind: "memory_claim_state_changed", occurred_at: claim.observed_at } });
+  client.correctProjectMemory.mockResolvedValue({ claim: { ...claim, id: "00000000-0000-4000-8000-000000000513", value: "pnpm 10", state: "working" }, previous: claim, event: { sequence: 3, kind: "memory_claim_corrected", occurred_at: claim.observed_at } });
+  client.loadProjectMemoryHistory.mockResolvedValue({ claims: [claim] });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  const intelligence = await screen.findByLabelText("Project intelligence and memory");
+  fireEvent.change(within(intelligence).getByLabelText("Memory fact name"), { target: { value: "package_manager" } });
+  fireEvent.change(within(intelligence).getByLabelText("Memory value"), { target: { value: "pnpm" } });
+  fireEvent.click(within(intelligence).getByRole("button", { name: "Remember this" }));
+  await waitFor(() => expect(client.createProjectMemory).toHaveBeenCalledWith(project.project_id, expect.objectContaining({
+    namespace: "project",
+    key: "package_manager",
+    value: "pnpm",
+    confidence: 0.8,
+    provenance: { source_kind: "user", source: "Desktop owner" }
+  })));
+  expect(await within(intelligence).findByText("pnpm")).toBeInTheDocument();
+
+  await enableAdvancedMode();
+  fireEvent.change(within(intelligence).getByLabelText("Memory fact name"), { target: { value: "temporary_endpoint" } });
+  fireEvent.change(within(intelligence).getByLabelText("Memory value"), { target: { value: "http://127.0.0.1:4173" } });
+  fireEvent.change(within(intelligence).getByLabelText("Memory fresh until"), { target: { value: "2026-08-20T12:00" } });
+  fireEvent.click(within(intelligence).getByRole("button", { name: "Remember this" }));
+  await waitFor(() => expect(client.createProjectMemory).toHaveBeenLastCalledWith(project.project_id, expect.objectContaining({
+    key: "temporary_endpoint",
+    fresh_until: new Date("2026-08-20T12:00").toISOString()
+  })));
+  expect(within(intelligence).getByRole("list", { name: "Project world model" })).toHaveTextContent("service web");
+  expect(within(intelligence).getByRole("list", { name: "Project world model" })).toHaveTextContent("repository → provides → web");
+  fireEvent.change(within(intelligence).getByLabelText("Correction for package_manager"), { target: { value: "pnpm 10" } });
+  fireEvent.click(within(intelligence).getByRole("button", { name: "Correct" }));
+  await waitFor(() => expect(client.correctProjectMemory).toHaveBeenCalledWith(project.project_id, claim.id, expect.objectContaining({ value: "pnpm 10" })));
+  fireEvent.click(within(intelligence).getByRole("button", { name: "Reinforce" }));
+  await waitFor(() => expect(client.transitionProjectMemory).toHaveBeenCalledWith(project.project_id, claim.id, "reinforce"));
+  fireEvent.click(within(intelligence).getByRole("button", { name: "History" }));
+  await waitFor(() => expect(intelligence.querySelector(".memory-history")).toHaveTextContent("new"));
 });
 
 test("project discovery errors remain visible on the Projects screen", async () => {

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -32,14 +33,99 @@ test.beforeEach(async ({ page }) => {
         installed_at: "2026-08-15T00:00:00Z"
       }
     };
+    const now = "2026-08-18T00:00:00Z";
+    const sshHosts = [
+      { id: "00000000-0000-4000-8000-000000000221", revision: 4, definition_hash: "d".repeat(64), display_name: "Linux builder", hostname: "builder.test", port: 22, username: "mcg", known_hosts_entry: "builder.test ssh-ed25519 AAAA", host_key_sha256: "SHA256:builder", capabilities: ["os:linux", "tool:cargo"], state: "active", created_at: now, updated_at: now },
+      { id: "00000000-0000-4000-8000-000000000222", revision: 2, definition_hash: "e".repeat(64), display_name: "Linux tester", hostname: "tester.test", port: 22, username: "mcg", known_hosts_entry: "tester.test ssh-ed25519 BBBB", host_key_sha256: "SHA256:tester", capabilities: ["os:linux", "tool:playwright"], state: "active", created_at: now, updated_at: now }
+    ];
+    const project = {
+      schema_version: 1,
+      id: "00000000-0000-4000-8000-000000000241",
+      project_id: "00000000-0000-4000-8000-000000000242",
+      root: "C:\\Projects\\consumer-app",
+      fingerprint: "a".repeat(64),
+      observed_at: now,
+      repository: { is_git: true, branch: "main", head: "abc", dirty: false, recent_commits: [] },
+      languages: ["TypeScript"], build_systems: ["npm"], test_systems: ["vitest"], package_managers: ["pnpm"],
+      services: ["web"], ci_systems: [], important_directories: ["src"],
+      commands: [{ name: "test", command: "pnpm test", source: "package.json", confidence_basis: "manifest" }],
+      instructions: { conflicts: [] },
+      world: {
+        nodes: [{ id: "service:web", kind: "service", label: "web", source: "package.json" }],
+        relationships: [{ from: "repository", relation: "provides", to: "service:web", source: "package.json" }]
+      },
+      watched_inputs: {}
+    };
+    const baseOrganization = {
+      schema_version: 2,
+      organization_id: "00000000-0000-4000-8000-000000000251",
+      revision_id: "00000000-0000-4000-8000-000000000252",
+      revision: 1,
+      name: "Consumer team",
+      roles: [{ id: "00000000-0000-4000-8000-000000000253", kind: "coder", name: "Coder", purpose: "Build", tool_capabilities: ["filesystem.project"] }],
+      relationships: [],
+      policy: { prefer_minimal_organization: true, max_parallel_agents: 4, max_total_agents: 8, max_organizational_overhead_ratio: 0.3, default_lease_seconds: 900 },
+      evaluation: { require_independent_evaluation: false, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+      created_at: now
+    };
+    const portableOrganization = {
+      schema_version: 1,
+      source: { organization_id: baseOrganization.organization_id, revision_id: baseOrganization.revision_id, revision: 1, exported_at: now },
+      definition: {
+        name: baseOrganization.name,
+        roles: [{ key: "role-000", kind: "coder", name: "Coder", purpose: "Build", prompt_policy: "Stay bounded", model_policy: { capability_class: "coding", preferred_models: [], allow_fallback: true, max_escalation_tier: 2 }, tool_capabilities: ["filesystem.project"], memory_namespace: "role/coder" }],
+        relationships: [], policy: baseOrganization.policy, evaluation: baseOrganization.evaluation
+      },
+      content_sha256: "c".repeat(64)
+    };
+    let organizations = [baseOrganization];
+    let memoryClaims: any[] = [];
+    let sshWorkflows: any[] = [];
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
         invoke: async (command: string, args: Record<string, any> = {}) => {
           if (command === "get_user_settings") return settings;
+          if (command === "update_configuration") return { schema_version: 1, configured: false, current_version: "0.1.0", detail: "This build has no trusted update endpoint." };
           if (command === "user_settings_history") return { revisions: [...history] };
           if (command === "list_backups") return { backups: [] };
           if (command === "list_plugins") return { plugins: [plugin] };
+          if (command === "list_ssh_hosts") return { hosts: sshHosts };
+          if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
+          if (command === "list_projects") return { projects: [project] };
+          if (command === "list_organizations") return { organizations };
+          if (command === "organization_history") return { revisions: organizations.filter((item) => item.organization_id === args.organizationId) };
+          if (command === "export_organization") return portableOrganization;
+          if (command === "import_organization") {
+            const copy = { ...baseOrganization, organization_id: "00000000-0000-4000-8000-000000000254", revision_id: "00000000-0000-4000-8000-000000000255", name: args.request.name ?? args.request.portable.definition.name };
+            organizations = [baseOrganization, copy];
+            return { organization: copy, portable_sha256: args.request.portable.content_sha256, replayed: false };
+          }
+          if (command === "compare_organizations") return { equivalent: true, left_sha256: portableOrganization.content_sha256, right_sha256: portableOrganization.content_sha256, sections_changed: [], roles_added: [], roles_removed: [], roles_changed: [], relationships_added: [], relationships_removed: [] };
+          if (command === "list_project_memory") return { claims: memoryClaims };
+          if (command === "managed_project_memory") return { markdown: `# Managed Project Memory\n\n${memoryClaims.map((claim) => `- ${claim.key}: ${claim.value}`).join("\n")}` };
+          if (command === "create_project_memory") {
+            const claim = { schema_version: 1, id: "00000000-0000-4000-8000-000000000243", project_id: project.project_id, state: "new", observed_at: now, correction_count: 0, usefulness_count: 0, ...args.request };
+            memoryClaims = [claim];
+            return { claim, event: { sequence: 1, kind: "memory_claim_recorded", occurred_at: now } };
+          }
+          if (command === "transition_project_memory") {
+            const previous = memoryClaims[0];
+            const claim = { ...previous, id: "00000000-0000-4000-8000-000000000244", state: args.request.action === "reinforce" ? "working" : args.request.action === "decay" ? "decaying" : "retracted", usefulness_count: args.request.action === "reinforce" ? 1 : previous.usefulness_count };
+            memoryClaims = [claim];
+            return { claim, previous, event: { sequence: 2, kind: "memory_claim_state_changed", occurred_at: now } };
+          }
+          if (command === "project_memory_history") return { claims: memoryClaims };
+          if (command === "create_ssh_workflow") {
+            const workflow = { schema_version: 1, definition_hash: "f".repeat(64), state: "planned", created_at: now, updated_at: now, ...args.request, steps: args.request.steps.map((step: any, index: number) => ({ ...step, operation_id: `00000000-0000-4000-8000-${String(230 + index).padStart(12, "0")}`, state: "pending", detail: "" })) };
+            sshWorkflows = [workflow];
+            return { workflow, replayed: false, events: [] };
+          }
+          if (command === "run_ssh_workflow") {
+            const workflow = { ...sshWorkflows[0], state: "succeeded", updated_at: "2026-08-18T00:01:00Z", steps: sshWorkflows[0].steps.map((step: any) => ({ ...step, state: "succeeded", detail: "remote inspection completed" })) };
+            sshWorkflows = [workflow];
+            return { workflow, replayed: false, events: [] };
+          }
           if (command === "set_plugin_grants") {
             plugin.installation.capability_grants = args.request.grants;
             plugin.installation.revision += 1;
@@ -80,6 +166,9 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
 
   await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
   await expect(page.getByText("System details are hidden in simple mode.")).toBeVisible();
+  const updates = page.getByLabel("Application updates");
+  await expect(updates.getByText(/Updates are unavailable in this build/)).toBeVisible();
+  await expect(updates.getByText(/never accept an unsigned fallback/)).toBeVisible();
 
   await page.getByRole("button", { name: "Advanced mode" }).click();
 
@@ -106,6 +195,58 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
 
   await page.getByRole("button", { name: "Simple mode" }).click();
   await expect(scheduler.getByLabel("Repeat")).toHaveValue("3600");
+});
+
+test("simple and advanced interfaces meet the WCAG A and AA accessibility baseline", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
+
+  const simple = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+    .analyze();
+  expect(simple.violations, "simple-mode accessibility violations").toEqual([]);
+
+  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
+
+  const advanced = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+    .analyze();
+  expect(advanced.violations, "advanced-mode accessibility violations").toEqual([]);
+});
+
+test("keyboard-only navigation reaches every workspace and exposes visible focus", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
+
+  const navigation = [
+    "Tasks",
+    "Projects",
+    "Threads",
+    "Scheduler",
+    "Improvement",
+    "Sites",
+    "SSH",
+    "Computer & browser",
+    "Providers",
+    "Tools",
+    "Plugins",
+    "Settings"
+  ];
+  for (const name of navigation) {
+    await page.keyboard.press("Tab");
+    const link = page.getByRole("link", { name, exact: true });
+    await expect(link).toBeFocused();
+    await expectVisibleKeyboardFocus(link);
+  }
+
+  await page.keyboard.press("Tab");
+  const mode = page.getByRole("button", { name: "Advanced mode" });
+  await expect(mode).toBeFocused();
+  await expectVisibleKeyboardFocus(mode);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Simple mode" })).toBeFocused();
 });
 
 test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {
@@ -154,3 +295,92 @@ test("plugin permission review gates enablement and invocation", async ({ page }
   await plugins.getByRole("button", { name: "Run plugin" }).click();
   await expect(plugins.getByText('"forecast": "sunny"')).toBeVisible();
 });
+
+test("consumer composes and runs a revision-pinned multi-host workflow", async ({ page }) => {
+  await page.goto("/");
+  const workflows = page.getByRole("region", { name: "SSH workflows" });
+  await workflows.getByLabel("Workflow name").fill("Build and test remotely");
+  await workflows.getByRole("checkbox", { name: /Linux builder/ }).check();
+  await workflows.getByRole("checkbox", { name: /Linux tester/ }).check();
+  await workflows.getByRole("button", { name: "Create durable workflow" }).click();
+  await expect(workflows.getByRole("heading", { name: "Build and test remotely" })).toBeVisible();
+  await expect(workflows.getByText("2 dependency-ordered steps")).toBeVisible();
+  await workflows.getByRole("button", { name: "Run workflow" }).click();
+  await expect(workflows.getByText("succeeded", { exact: true }).first()).toBeVisible();
+  await expect(workflows.getByText(/remote inspection completed/).first()).toBeVisible();
+});
+
+test("consumer manages provenance-bearing project memory and inspects the world model", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("button", { name: "Use project" }).click();
+  const intelligence = page.getByLabel("Project intelligence and memory");
+  await intelligence.getByLabel("Memory fact name").fill("package_manager");
+  await intelligence.getByLabel("Memory value").fill("pnpm");
+  await intelligence.getByRole("button", { name: "Remember this" }).click();
+  await expect(intelligence.getByText("package_manager")).toBeVisible();
+  await expect(intelligence.getByText("pnpm", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await expect(intelligence.getByLabel("Memory namespace")).toHaveValue("project");
+  await expect(intelligence.getByLabel("Memory fresh until")).toBeVisible();
+  await intelligence.getByText("World model and managed MEMORY.md").click();
+  await expect(intelligence.getByRole("list", { name: "Project world model" })).toContainText("service web");
+  await expect(intelligence.getByRole("list", { name: "Project world model" })).toContainText("repository → provides → web");
+  await intelligence.getByRole("button", { name: "Reinforce" }).click();
+  await expect(intelligence.getByText("working", { exact: true })).toBeVisible();
+  await intelligence.getByRole("button", { name: "History" }).click();
+  await expect(intelligence.locator(".memory-history")).toContainText("working");
+  await expect(intelligence.locator(".managed-memory")).toContainText("package_manager: pnpm");
+});
+
+test("consumer duplicates and inspects a portable organization without exposing local authority", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  const improvement = page.getByRole("region", { name: "Measured improvement" });
+  const organizations = improvement.getByLabel("Agent organizations");
+  await expect(organizations.locator("strong", { hasText: "Consumer team" })).toBeVisible();
+  await organizations.getByRole("button", { name: "Duplicate" }).click();
+  await expect(organizations.locator("strong", { hasText: "Consumer team copy" })).toBeVisible();
+  await expectOrganizationCardsToFit(organizations);
+
+  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await expectOrganizationCardsToFit(organizations);
+  await organizations.getByRole("button", { name: "Show portable JSON" }).first().click();
+  await expect(organizations.getByLabel("Portable organization JSON")).toContainText("cccccccc");
+  await organizations.getByRole("button", { name: "Revision history" }).first().click();
+  await expect(organizations.getByRole("list", { name: "Consumer team revision history" })).toContainText("Revision 1");
+  await organizations.getByRole("button", { name: "Compare portable definitions" }).click();
+  await expect(organizations.getByText("Definitions are equivalent.")).toBeVisible();
+  await expect(organizations.getByText(/Retry identity:/)).toBeVisible();
+});
+
+async function expectOrganizationCardsToFit(organizations: import("@playwright/test").Locator) {
+  const layouts = await organizations.locator(".organization-card").evaluateAll((cards) => cards.map((card) => {
+    const summary = card.querySelector<HTMLElement>(".organization-summary");
+    return {
+      clientWidth: (card as HTMLElement).clientWidth,
+      scrollWidth: (card as HTMLElement).scrollWidth,
+      summaryWidth: summary?.getBoundingClientRect().width ?? 0
+    };
+  }));
+  expect(layouts.length).toBeGreaterThan(0);
+  for (const layout of layouts) {
+    expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+    expect(layout.summaryWidth).toBeGreaterThan(180);
+  }
+}
+
+async function expectVisibleKeyboardFocus(locator: import("@playwright/test").Locator) {
+  const outline = await locator.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      style: style.outlineStyle,
+      width: Number.parseFloat(style.outlineWidth),
+      color: style.outlineColor
+    };
+  });
+  expect(outline.style).not.toBe("none");
+  expect(outline.width).toBeGreaterThanOrEqual(3);
+  expect(outline.color).not.toBe("transparent");
+}

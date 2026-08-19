@@ -473,7 +473,7 @@ fn platform_process_executable(executable: &str) -> String {
             let command = executable.to_ascii_lowercase();
             if matches!(
                 command.as_str(),
-                "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" | "bun" | "bunx" | "corepack"
+                "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" | "corepack"
             ) {
                 return format!("{executable}.cmd");
             }
@@ -930,6 +930,7 @@ mod tests {
             assert_eq!(platform_process_executable("npm"), "npm.cmd");
             assert_eq!(platform_process_executable("NPM"), "NPM.cmd");
             assert_eq!(platform_process_executable("corepack"), "corepack.cmd");
+            assert_eq!(platform_process_executable("bun"), "bun");
             assert_eq!(platform_process_executable("npm.cmd"), "npm.cmd");
             assert_eq!(
                 platform_process_executable(r"C:\\tools\\npm"),

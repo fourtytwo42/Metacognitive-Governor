@@ -32,6 +32,12 @@ token. The daemon generates a 256-bit token on first start, stores it outside th
 repository in the MCG data directory, never logs it, and reuses it across restarts.
 On Unix the token file is created with mode `0600`.
 
+The same bearer boundary protects `POST /api/v1/system/shutdown`. `mcg stop`
+uses it to request graceful HTTP draining and SQLite close, which is required
+before offline restore or upgrade. Unauthenticated local processes cannot stop
+the service. Unix daemons also treat SIGINT and SIGTERM as graceful shutdown;
+force termination remains a crash-recovery test, not a maintenance workflow.
+
 The CLI reads the same token file automatically. `MCG_AUTH_TOKEN` and `--token-file`
 are explicit overrides for controlled tests and alternate local clients.
 
@@ -49,6 +55,7 @@ are explicit overrides for controlled tests and alternate local clients.
 | `POST` | `/api/v1/tasks/{id}/retry` | Explicitly retry bounded incomplete work for a blocked task |
 | `POST` | `/api/v1/tasks/{id}/resume` | Revalidate and continue an owner-approved local-tool turn |
 | `GET` | `/api/v1/tasks/{id}/events` | Read ordered durable task history |
+| `GET` | `/api/v1/runs/{id}/replay` | Deterministically reconstruct and verify retained run evidence without side effects |
 | `GET` | `/api/v1/events/stream` | Receive committed events over SSE |
 
 The SSE endpoint emits sequence IDs and stable event names. A reconnecting client
@@ -101,6 +108,20 @@ checkpoint atomically.
 Checkpoints are private local working data and can contain bounded project/model
 content, but never provider credentials or authorization headers.
 
+Provider-mode managed tools use a separate migration-27 continuation contract
+because an external OpenAI-compatible call is not an agent lease. It binds the
+call to one durable task/project/conversation, request and context hashes, one
+pinned route, ordered provider evidence, and governed outcomes. Storage rejects
+identity changes or progress regression, survives reopen, and atomically swaps
+the final checkpoint for the immutable content-free proxy ledger record. The
+public proxy now consumes this contract end to end: canonical `host::` requests
+use the normal durable broker, canonical read-only `mcg::` requests use a bounded
+task/project executor with immutable audit, approval returns a resumable conflict,
+and terminal buffered or synthesized-streaming output is emitted only after
+atomic settlement. Same-process duplicate call identities are serialized;
+restart resumes the checkpoint, while a terminal duplicate is refused because
+the privacy ledger does not retain response content for replay.
+
 After all planned Coder and independent Evaluator turns complete, command-based
 `Build`, `Test`, and `StaticAnalysis` conditions are executed immediately through
 typed `process.exec` requests. Runtime accepts only commands that still exactly
@@ -115,7 +136,10 @@ requests one approval for the exact supported objective batch against the immuta
 project snapshot. Denial blocks the task and bounded retry creates a fresh approval
 identity; approval delegates only that batch, and resume after daemon restart
 continues from the stored condition index without another provider turn or repeated
-completed check. Conditions without a deterministic evaluator remain visibly
+completed check. Terminal settlement retains that checkpoint in a non-resumable
+`completed` state so later automatic evaluation can recover the exact immutable
+project-snapshot authority; resume paths accept only `waiting_for_approval`.
+Conditions without a deterministic evaluator remain visibly
 awaiting evaluation rather than accepting model self-report as objective proof.
 
 `FILE EXISTS project/relative/path` becomes a typed `FileExists` condition. Runtime
@@ -127,6 +151,10 @@ contents; structured plans may additionally require a minimum size and exact dig
 command must still exactly match current project discovery, including safely named
 manifest scripts, and executes as structured process argv through the same policy,
 lease, approval, and audit path. Other custom prose remains inconclusive.
+`CONFIG VALIDATES exact discovered command` uses the same fail-closed command
+authority while remaining a distinct typed condition and evidence method. It is
+rejected before model work if project discovery no longer contains the exact
+command.
 
 An advanced consumer success-condition line in the exact form `HTTP STATUS URL`
 becomes a typed `HttpResponds` condition. Runtime grants only that parsed origin,
@@ -220,6 +248,9 @@ rejection, and an abrupt daemon-server restart followed by API projection/histor
 comparison. Consumer-launch fixtures additionally prove atomic one-run
 reservation, restart durability, deterministic project-command success
 conditions, missing-provider reporting, and retry idempotency.
+Run-replay fixtures prove byte-stable evidence digests across repeated reads and
+daemon reopen, reject identity tampering, and compare task events and tool audit
+before and after replay so an inspection cannot execute or append work.
 The approval fixture proves that a guided-mode write remains absent while pending,
 executes after approval, advances independent evaluation, and is not repeated by
 a later Start replay.
@@ -228,8 +259,8 @@ build/test/check conditions atomically complete a task, a nonzero test exit
 atomically fails it, evidence is durable, and terminal replay adds neither model
 calls nor tool audit records. A file-backed guided fixture denies and retries the
 batch with distinct identities, approves it, restarts the daemon while waiting,
-then resumes exactly once and verifies the checkpoint is removed only by atomic
-terminal settlement.
+then resumes exactly once and verifies atomic terminal settlement retains a
+non-resumable completed checkpoint with the original run and project snapshot.
 The HTTP fixture proves an expected non-2xx response passes with a captured artifact,
 a status mismatch fails, and an unreachable origin records failed tool audit plus a
 terminal failed report instead of escaping as an API error.

@@ -15,6 +15,47 @@ function Stop-UatProcess([Diagnostics.Process]$Process) {
     }
 }
 
+function Test-ContainsByteSequence([byte[]]$Bytes, [byte[]]$Sequence) {
+    if ($Sequence.Length -eq 0 -or $Bytes.Length -lt $Sequence.Length) { return $false }
+    for ($offset = 0; $offset -le $Bytes.Length - $Sequence.Length; $offset++) {
+        $matches = $true
+        for ($index = 0; $index -lt $Sequence.Length; $index++) {
+            if ($Bytes[$offset + $index] -ne $Sequence[$index]) {
+                $matches = $false
+                break
+            }
+        }
+        if ($matches) { return $true }
+    }
+    return $false
+}
+
+function Stop-UatDaemonGracefully(
+    [Diagnostics.Process]$Process,
+    [string]$Executable,
+    [string]$HostUrl,
+    [string]$TokenFile,
+    [string]$DataRoot,
+    [string]$EvidencePath
+) {
+    $output = & $Executable --host $HostUrl --token-file $TokenFile stop --json 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Installed CLI graceful stop failed: $output" }
+    $response = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($response.accepted -ne $true -or $response.service -ne "mcg-daemon") {
+        throw "Installed CLI graceful stop returned an invalid response."
+    }
+    $response | ConvertTo-Json | Set-Content -LiteralPath $EvidencePath -Encoding UTF8
+    if (-not $Process.WaitForExit(10000)) {
+        throw "Installed daemon did not exit after accepting graceful shutdown."
+    }
+    foreach ($sidecar in @("mcg.sqlite3-wal", "mcg.sqlite3-shm")) {
+        if (Test-Path -LiteralPath (Join-Path $DataRoot $sidecar)) {
+            throw "Installed daemon retained $sidecar after graceful shutdown."
+        }
+    }
+    return $response
+}
+
 function Wait-ForHealth([int]$Port, [string]$OutputPath) {
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         try {
@@ -211,7 +252,7 @@ try {
     }
     $installationRemoved = $false
 
-    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
+    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
     $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File
     foreach ($name in $requiredPayload) {
         if ($installed.Name -notcontains $name) {
@@ -285,7 +326,9 @@ try {
     $servicePort = 17777
     $env:MCG_DATA_DIR = $serviceDataRoot
     $env:MCG_BIND_ADDRESS = "127.0.0.1:$servicePort"
-    $daemon = Start-Process -FilePath (Join-Path $installRoot "mcg-service.exe") -PassThru -WindowStyle Hidden
+    $daemon = Start-Process -FilePath (Join-Path $installRoot "mcg-service.exe") -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $uatRoot "service.stdout.log") `
+        -RedirectStandardError (Join-Path $uatRoot "service.stderr.log")
     $health = Wait-ForHealth $servicePort (Join-Path $uatRoot "health.json")
     $cli = Join-Path $installRoot "mcg.exe"
     $tokenFile = Join-Path $serviceDataRoot "local-auth-token"
@@ -299,8 +342,39 @@ try {
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
-    if ($backup.manifest.schema_version -ne 1 -or $backup.manifest.secrets_included -ne $false -or $backup.size_bytes -le 0) { throw "Installed CLI backup returned invalid or unsafe metadata." }
+    if ($backup.manifest.schema_version -ne 2 -or $backup.manifest.secrets_included -ne $false -or $null -ne $backup.manifest.secret_encryption -or $backup.size_bytes -le 0) { throw "Installed CLI backup returned invalid or unsafe metadata." }
     $backup | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $uatRoot "backup.json") -Encoding UTF8
+    $encryptedBackupId = "00000000-0000-4000-8000-00000000b003"
+    $encryptedPassphrase = "package fixture passphrase 2026 windows encrypted backup"
+    $encryptedBackup = Invoke-RestMethod -Method Post `
+        -Uri "http://127.0.0.1:$servicePort/api/v1/backups/$encryptedBackupId/encrypted" `
+        -Headers @{ Authorization = "Bearer $((Get-Content -LiteralPath $tokenFile -Raw).Trim())" } `
+        -ContentType "application/json" `
+        -Body (@{ passphrase = $encryptedPassphrase } | ConvertTo-Json -Compress)
+    $encryption = $encryptedBackup.manifest.secret_encryption
+    if ($encryptedBackup.manifest.schema_version -ne 2 -or $encryptedBackup.manifest.secrets_included -ne $true `
+        -or $encryption.schema_version -ne 1 -or $encryption.entry_path -ne "secrets/credentials.v1.enc" `
+        -or $encryption.algorithm -ne "xchacha20-poly1305" -or $encryption.kdf -ne "argon2id" `
+        -or $encryption.argon2_version -ne 19 -or $encryption.memory_kib -ne 65536 `
+        -or $encryption.iterations -ne 3 -or $encryption.parallelism -ne 1 `
+        -or $encryptedBackup.manifest.entries[-1].path -ne "secrets/credentials.v1.enc") {
+        throw "Installed encrypted backup returned invalid metadata."
+    }
+    $encryptedBundle = Join-Path $serviceDataRoot "backups\$encryptedBackupId.mcgb"
+    $bundleBytes = [IO.File]::ReadAllBytes($encryptedBundle)
+    if ($bundleBytes.Length -ne $encryptedBackup.size_bytes `
+        -or (Test-ContainsByteSequence $bundleBytes ([Text.Encoding]::UTF8.GetBytes($encryptedPassphrase))) `
+        -or (Test-ContainsByteSequence $bundleBytes ([Text.Encoding]::UTF8.GetBytes((Get-Content -LiteralPath $tokenFile -Raw).Trim())))) {
+        throw "Installed encrypted backup exposed protected plaintext or had the wrong size."
+    }
+    $encryptedBackup | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $uatRoot "encrypted-backup.json") -Encoding UTF8
+    $encryptedVerifyOutput = & $cli backup verify $encryptedBundle --json 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Installed CLI encrypted backup verification failed: $encryptedVerifyOutput" }
+    $encryptedVerify = ($encryptedVerifyOutput -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($encryptedVerify.manifest.secrets_included -ne $true -or $encryptedVerify.sha256 -ne $encryptedBackup.sha256) {
+        throw "Installed CLI encrypted backup verification returned inconsistent metadata."
+    }
+    $encryptedVerify | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $uatRoot "encrypted-backup-verified.json") -Encoding UTF8
     $consumerCli = Test-ConsumerCli $cli "http://127.0.0.1:$servicePort" $tokenFile (Join-Path $uatRoot "consumer-project") $uatRoot
 
     $token = (Get-Content -LiteralPath $tokenFile -Raw).Trim()
@@ -324,14 +398,36 @@ try {
     $toolNames = @($mcpTools.result.tools | ForEach-Object { $_.name })
     if ($toolNames -notcontains "mcg_run_task" -or $toolNames -notcontains "mcg_system_status") { throw "Installed MCP tool catalog is incomplete." }
     @{ supportedVersion = "2026-07-28"; toolCount = $toolNames.Count } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $uatRoot "mcp.json") -Encoding UTF8
-    Stop-UatProcess $daemon
+    $tokenBeforeRestore = [IO.File]::ReadAllBytes($tokenFile)
+    $null = Stop-UatDaemonGracefully $daemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "graceful-stop.json")
     $daemon = $null
 
-    $restartedDaemon = Start-Process -FilePath (Join-Path $installRoot "mcg-service.exe") -PassThru -WindowStyle Hidden
+    $restoreArguments = @("backup", "restore", $encryptedBundle, "--confirm", "--restore-secrets", "--passphrase-stdin")
+    $wrongRestore = Invoke-ConsumerCliProcess $cli $restoreArguments "wrong package fixture passphrase`n" $uatRoot "encrypted-restore-wrong"
+    if ($wrongRestore.ExitCode -eq 0 -or $wrongRestore.Stdout -match "wrong package fixture" -or $wrongRestore.Stderr -match "wrong package fixture") {
+        throw "Installed encrypted restore did not reject or redact the wrong passphrase."
+    }
+    $correctRestore = Invoke-ConsumerCliProcess $cli $restoreArguments "$encryptedPassphrase`n" $uatRoot "encrypted-restore-correct"
+    if ($correctRestore.ExitCode -ne 0 -or $correctRestore.Stdout -notmatch "with encrypted credentials" `
+        -or $correctRestore.Stdout -match [regex]::Escape($encryptedPassphrase) `
+        -or $correctRestore.Stderr -match [regex]::Escape($encryptedPassphrase)) {
+        throw "Installed encrypted restore failed or exposed its passphrase."
+    }
+    if ([Convert]::ToBase64String($tokenBeforeRestore) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($tokenFile))) {
+        throw "Installed encrypted restore changed the local daemon token."
+    }
+    $rollbackDatabases = @(Get-ChildItem -LiteralPath (Join-Path $serviceDataRoot "backups") -Filter "pre-restore-*.sqlite3" -File)
+    if ($rollbackDatabases.Count -lt 1) { throw "Installed encrypted restore retained no rollback database." }
+    @{ WrongPassphraseExit = $wrongRestore.ExitCode; RestoreExit = $correctRestore.ExitCode; RollbackDatabaseCount = $rollbackDatabases.Count; TokenUnchanged = $true } `
+        | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $uatRoot "encrypted-restore.json") -Encoding UTF8
+
+    $restartedDaemon = Start-Process -FilePath (Join-Path $installRoot "mcg-service.exe") -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $uatRoot "restarted-service.stdout.log") `
+        -RedirectStandardError (Join-Path $uatRoot "restarted-service.stderr.log")
     $restartHealth = Wait-ForHealth $servicePort (Join-Path $uatRoot "restarted-health.json")
     $restartStatus = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile status 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI failed after daemon restart: $restartStatus" }
-    Stop-UatProcess $restartedDaemon
+    $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 
     if (-not $SkipDesktop) {
@@ -358,7 +454,8 @@ try {
         $screenshot = Save-DesktopScreenshot $desktopScreenshot
         Stop-UatProcess $desktop
         $desktop = $null
-        Stop-UatProcess $desktopService
+        $guiTokenFile = Join-Path $guiDataRoot "local-auth-token"
+        $null = Stop-UatDaemonGracefully $desktopService $cli "http://127.0.0.1:$guiPort" $guiTokenFile $guiDataRoot (Join-Path $uatRoot "desktop-service-graceful-stop.json")
         $desktopService = $null
     }
 
@@ -396,6 +493,9 @@ try {
         CliStatus = $cliStatus -join " "
         DoctorSchema = $doctor.schema_version
         BackupSchema = $backup.manifest.schema_version
+        EncryptedBackupSchema = $encryptedBackup.manifest.schema_version
+        EncryptedRestoreReport = Join-Path $uatRoot "encrypted-restore.json"
+        GracefulShutdownQualified = $true
         ConsumerCliReport = Join-Path $uatRoot "consumer-cli.json"
         ConsumerCliTaskCount = $consumerCli.task_count
         ConsumerCliProjectCount = $consumerCli.project_count

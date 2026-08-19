@@ -94,8 +94,13 @@ available. Missing metadata remains unknown rather than becoming a false claim.
 The explicit conformance probe requires real assistant output from buffered and
 streaming Responses requests, a harmless required function-call request, and a
 per-request `reasoning.effort=none` control check, then records supported,
-unsupported, or indeterminate evidence. An empty terminal envelope does not count
-as inference. A successful response that ignores the required call remains indeterminate; tool
+unsupported, or indeterminate evidence. The tiny buffered and streaming probe
+also requests `reasoning.effort=none` so a reasoning model cannot consume the
+entire synthetic output allowance before producing user-visible text; an older
+compatible endpoint is retried once without that optional field only when a
+400/422 response explicitly identifies `reasoning` as unsupported. An empty
+terminal envelope still does not count as inference. A successful response that
+ignores the required call remains indeterminate; tool
 authority is not granted from model prose or wishful inference. Tool-using agent
 turns disable internal reasoning only after the exact model has positively proven
 that control, preserving output budget for complete JSON tool arguments. Unknown
@@ -135,11 +140,14 @@ The common probe runs against:
 - configured OpenAI/OpenRouter connections when their credentials are
   deliberately supplied on an owner-controlled machine.
 
-GPU45 currently returns a terminal SSE response even for `stream: false`; the
-adapter accepts this documented exception. On 2026-08-14 its active model passed
-buffered and streaming Responses but ignored the required function-call probe, so
-tool support remained unknown and it was not eligible for tool-using Coder work.
-Live aliases remain dynamically discovered and are never compiled into MCG.
+GPU45 currently returns SSE even for `stream: false`; the adapter accepts this
+documented exception. On 2026-08-18 its dynamically selected model passed
+buffered Responses, streaming, required function calling, and the explicit
+reasoning-control probe. A prior 16-token basic probe was invalid for reasoning
+models because it could end after hidden reasoning with no assistant text; the
+bounded reasoning-disabled probe above fixes the test without treating hidden
+reasoning as output. Live aliases remain dynamically discovered and are never
+compiled into MCG.
 
 On 2026-08-15 an isolated owner-host ChatGPT device-code connection survived daemon
 restart, discovered six visible subscription models with honest unknown prices, and

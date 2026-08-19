@@ -1,0 +1,67 @@
+# Production-Readiness Evidence Matrix
+
+This document is the current completion audit for the full MCG roadmap. It is
+deliberately stricter than a feature inventory: `implemented` means source and
+focused tests exist, while `qualified` additionally requires the milestone's
+cross-interface, restart, security, packaging, and owner-machine exit evidence.
+Passing a narrower test does not close a broader milestone.
+
+Status values:
+
+- **Qualified checkpoint** — the implemented milestone contract has matching
+  automated evidence on its supported owner-controlled platforms.
+- **Implemented, gates open** — substantial end-to-end implementation exists,
+  but one or more named exit gates remain.
+- **Partial** — material roadmap deliverables are absent or deliberately
+  inconclusive.
+- **Not started** — no first-class product implementation was found.
+
+No GitHub-hosted build, test, or paid automation is permitted. GitHub is source
+hosting only.
+
+## Milestone matrix
+
+| Milestone | Current status | Authoritative implementation/evidence | Gates that remain open |
+| --- | --- | --- | --- |
+| M0 — Foundations | Qualified checkpoint | Rust workspace, Tauri/React shell, local `scripts/verify.ps1` and `scripts/verify.sh`, formatting, strict Clippy, Rust, Vitest, Playwright, documentation, and packaging checks. | Repeat the complete verifier on each final signed candidate. |
+| M1 — Runtime spine | Qualified checkpoint | Durable event/projection storage, authenticated loopback API, SSE replay, crash recovery, migrations, daemon/CLI/desktop integration, and restart tests. | Final-candidate migration and installer rerun. |
+| M2 — Provider fabric | Implemented, gates open | Explicit OpenAI subscription OAuth and API-key modes, OpenRouter, GPU45/local/arbitrary compatible endpoints, discovery/probes, capabilities, pricing provenance, routing, streaming, durable dispatch accounting, and exact post-v5 Ubuntu/Win11 provider/ensemble/shadow qualification. | Normal browser OAuth lifecycle on final Ubuntu and macOS packages; never silently fall back from subscription OAuth to API billing. |
+| M3 — Tools and policy | Qualified checkpoint | Typed filesystem/process/Git/HTTP/system/memory tools, project confinement, approvals, leases, redaction, evidence, audit, and adversarial tests on Windows/Linux. | Re-run against the final package candidates. |
+| M4 — Projects and memory | Qualified checkpoint | Project discovery, instruction precedence/conflicts, build/test discovery, snapshots, watches, bounded context, provenance-bearing memory, lifecycle, and restart tests. | Broader real-project UAT and final-package regression. |
+| M5 — Organization and useful work | Implemented, gates open | Versioned organizations, Executive/Coder/Conversation/Evaluator/Tool Worker roles, plans, leases, budgets, model/tool evidence, objective settlement, durable restart, and provider-backed project fixtures. | Complete several representative website/application projects through installed final-candidate packages; retain independent browser/evaluator evidence and bounded-cost results. |
+| M6 — Interface family | Implemented, gates open | Native desktop simple/advanced modes, CLI human/JSON/NDJSON/streaming, daemon REST/SSE, OpenAI Responses/Chat/models adapter, MCP client/server, Tauri commands, and shared durable contracts. | Final installed-package success journey from every interface, accessibility UAT, and broader simple/advanced usability refinement. |
+| M7 — Scheduler and autonomy | Qualified checkpoint | Interval/cron/file/event/heartbeat triggers, durable occurrences, leases, recovery, notifications, policy and budget boundaries, CLI/API/MCP/Tauri/desktop surfaces. | Final-candidate unattended soak and notification UAT. |
+| M8 — Expanded execution | Implemented, gates open | Persistent confined browser sessions, bounded Windows/X11 computer use, Sites, monitoring/deployment, and typed SSH with durable authority, approval, audit, and recovery. | Clipboard/window/process computer capabilities are still explicitly unavailable; Wayland input is unqualified; repeat real installed-package browser/computer/Sites/SSH UAT on final candidates. |
+| M9 — Measured improvement | Partial | Durable supervision, calibration/failure observations, isolated candidate workspaces, shadow models, paired benchmarks, promotion/reversion, and restart-safe experiment evidence exist. Provider ensemble/shadow is exact-qualified on Ubuntu and Win11. Same-sandbox candidate-service/browser verification and the production Bubblewrap/AppArmor `.deb` lane pass exact Ubuntu qualification. | Run the schema-3 candidate-service/browser isolation lane on Win11, including negative escape/network/host-side-effect fixtures, and finish remaining objective-specific benchmark verifiers plus final package UAT. |
+| M10 — Extensibility and advanced operation | Partial | Trusted-native and Wasmtime/WASI plugins, registry signatures, brokered grants, portable/encrypted backups, content-addressed evidence, schema-2 pinned organization inheritance, bounded content-addressed organization export/import/history/comparison, deterministic run replay, and schema-31 dependency-ordered multi-host SSH workflows with deterministic capability routing now span REST/CLI/MCP/Tauri/desktop with fail-closed recovery. Project intelligence now has bounded stable provenance topology for cross-language dependencies/runtimes, named Compose services/databases/edges/endpoints, OpenAPI origins, and deployment targets; readable provenance-bearing topology feeds the shared worker/evaluator context under a strict token bound; native desktop exposes the graph plus the full memory lifecycle; and scheduler-driven freshness consolidation is restart-safe. Exact v12 Ubuntu source and `.deb`/AppImage qualification includes agent-operated native create/duplicate/export/history/compare UAT at 1280x800. | The same current boundary still needs exact Win11 qualification; workflows and desktop memory/world-model/consolidation/context also need representative real-project UAT. Broader manifest ecosystems, topology-driven plan synthesis, organization sharing/marketplace policy, and operational UX remain open. |
+| M11 — Consumer release | Partial | Owner-built Windows NSIS, Linux `.deb`/AppImage, and macOS app/DMG packaging plus clean-machine install/repair/uninstall/backup UAT, diagnostics, and recovery harnesses exist. Exact v27 passes complete canonical verification on Ubuntu and Win11, full Win11 NSIS install/repair/restart/CLI/doctor/backup/MCP/GUI/uninstall/data-retention UAT, and matched two-hour/10,000-task Windows/Ubuntu optimized-daemon soaks with verifier-bound exact identities, forced-crash recovery, database/schema checks, and zero residual candidate processes. The native updater fails closed in unsigned builds and implements explicit signed check/review, version recheck, verified download, verified pre-update backup, graceful shutdown, install, failure recovery, and restart. Exact v27 Linux signed-AppImage UAT passes shutdown-timeout and real ENOSPC rollback with baseline preservation, verified backups, authenticated recovery, zero temporary/zombie residue, and exact disposable-CA teardown. | Finish exact-v27 Windows signed-updater scenario/fault UAT and certificate teardown. Trusted signing identities, Windows/Linux signing policy, macOS Developer ID notarization/stapling, owner-controlled updater publication, malware/reputation checks, final upgrade candidates, and final OAuth/accessibility/privacy UAT remain. |
+| M12 — Long-term roadmap | Not started as a complete milestone | Some foundations overlap: experiments, ensembles, Sites, typed SSH, portable organizations, and project-scoped memory. | Cross-project learning controls, distributed execution beyond typed SSH, fleet management, organization sharing/marketplace, predictive intervention, long-term operational workflows, and an Android capability-profile application require first-class design, implementation, threat models, interfaces, and tests. |
+
+## Immediate dependency order
+
+1. Finish the exact-v27 Win11 signed-updater build and real package fault matrix,
+   including bounded disposable-CA trust and exact teardown evidence.
+2. Close M9's remaining Win11 same-boundary browser benchmark gap, including negative
+   escape/network/host-side-effect fixtures.
+3. Qualify pinned organization inheritance on exact final Windows/Linux packages, then
+   continue M10 in independently releasable vertical slices: deterministic
+   evidence replay, exact qualification for multi-host workflows, and advanced memory/world-model
+   behavior. Every slice must reach desktop, CLI, REST, MCP where applicable,
+   durable recovery, and tests.
+4. Exercise multiple representative projects through installed candidates and
+   refine simple/advanced UX plus accessibility from observed UAT evidence.
+5. Provision the production updater publication path, acquire owner-controlled
+   signing and notarization authority, then run matched package, upgrade, rollback, soak,
+   security, privacy, OAuth, and UAT gates.
+6. Treat M12 as product implementation, not aspirational documentation, if the
+   complete PRD remains the release definition.
+
+## Evidence discipline
+
+- Raw qualification evidence belongs outside disposable `target/debug` output.
+- A platform-specific capability difference must be visible to the consumer and
+  cannot be counted as a pass for that platform.
+- Ignored VM tests count only after execution on the named owner-controlled VM.
+- Unsigned/ad-hoc packages are qualification artifacts, not production releases.
+- A feature is not complete merely because its storage type, API shape, or unit
+  test exists; the milestone exit evidence in `milestones.md` controls.

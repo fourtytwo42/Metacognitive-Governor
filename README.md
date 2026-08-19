@@ -18,9 +18,12 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in active implementation. M0 through M7 have qualified core checkpoints,
-and M8 expanded execution-plane work is active; the full vision remains in scope and is
-delivered through tested, end-to-end milestones.
+MCG is in active implementation. M0 through M8 have substantial qualified
+checkpoints, while M9 and M10 remain partial and the signed/updatable M11 consumer
+release is not complete. M12 remains a long-term implementation milestone. The
+full vision remains in scope and is delivered through tested, end-to-end
+milestones; see the [production-readiness evidence matrix](docs/roadmap/production-readiness.md)
+for the explicit open gates.
 
 Start with the [product requirements](MCG_PRD.md) and the
 [product and engineering baseline](docs/decisions/0001-product-engineering-baseline.md).
@@ -36,13 +39,14 @@ Implementation planning:
 - [M6 MCP boundary](docs/architecture/mcp.md)
 - [M8 platform capabilities and sessions](docs/architecture/platform-sessions.md)
 - [M8 Sites, deployment, and monitoring](docs/architecture/sites.md)
-- [M8 typed SSH remote execution](docs/architecture/typed-ssh.md)
+- [M8/M10 typed SSH remote execution and multi-host workflows](docs/architecture/typed-ssh.md)
 - [Durable owner settings](docs/architecture/settings.md)
 - [Portable backup and restore](docs/architecture/backups.md)
 - [Secret-free system diagnostics](docs/architecture/diagnostics.md)
 - [Interactive, piped, JSON, and streaming consumer CLI](docs/architecture/consumer-cli.md)
 - [Native packaging, startup, upgrade, and removal](docs/architecture/packaging.md)
 - [Dependency-ordered milestones](docs/roadmap/milestones.md)
+- [Production-readiness evidence matrix](docs/roadmap/production-readiness.md)
 - [Automated testing strategy](docs/testing/strategy.md)
 
 ## Repository documents
@@ -61,8 +65,8 @@ Prerequisites: Rust 1.93+ and Node.js 24+.
 ```powershell
 npm install
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 npm run check
 npm run test
 npm run build
@@ -75,6 +79,12 @@ Run the daemon and CLI in separate terminals:
 cargo run -p mcg-daemon
 cargo run -p mcg-cli -- status
 cargo run -p mcg-cli -- doctor
+cargo run -p mcg-cli -- organization inherit BASE_ID --name "Website specialists"
+cargo run -p mcg-cli -- organization history ORGANIZATION_ID
+cargo run -p mcg-cli -- organization export REVISION_ID --output team.mcg-organization.json
+cargo run -p mcg-cli -- organization import team.mcg-organization.json --import-id REQUEST_UUID
+cargo run -p mcg-cli -- organization compare LEFT_REVISION_ID RIGHT_REVISION_ID
+cargo run -p mcg-cli -- stop
 ```
 
 The first-class consumer CLI uses the same durable project/task/run authority as
@@ -101,14 +111,40 @@ immutable reasoned history, and apply to new authority decisions; startup-only
 trust roots such as data paths, loopback binding, and executable locations are
 not mutable through this surface.
 
-Create a portable, secret-free backup from the desktop Settings workspace or
-with `mcg backup create`. `mcg backup list` re-verifies stored bundles and
-`mcg backup verify PATH` validates a transferred bundle offline. Restore is an
-explicit offline recovery operation: stop the daemon and run
-`mcg backup restore PATH --confirm`. Credentials and the installation-local
-bearer token are never included; the destination machine retains its own token
-and credentials must be reconnected. The restore keeps the previous database in
-the data directory's `backups/` folder and never deletes it.
+Owner-signed release builds also expose an explicit update flow in Settings. MCG
+rechecks the reviewed version, verifies the complete package against its embedded
+minisign public key, creates and verifies a credential-free backup, stops the local
+service cleanly, installs, and restarts. Development and unsigned UAT builds show
+updates as unavailable and never fall back to unsigned packages.
+
+The desktop Projects workspace keeps common memory work simple: select a
+project, name a fact, and record its value. Advanced mode reveals confidence,
+provenance, correction/reinforcement/decay/retraction controls, immutable
+history, an optional freshness deadline, the discovered project world graph,
+and managed `MEMORY.md` output. Expired facts automatically enter decay through
+bounded scheduler batches and retract after a seven-day grace period while
+retaining their immutable provenance and history.
+
+Advanced project intelligence also renders a source-backed topology from common
+package/Cargo/Python/Go, Docker Compose, OpenAPI/Swagger, and deployment
+manifests. Named services, databases, dependencies, runtimes, API origins,
+deployment targets, and their declared relationships use stable identities and
+remain bounded; credential-bearing URLs are never admitted to the graph. The
+same readable, provenance-bearing topology is injected into bounded worker and
+evaluator context, with dependency relationships retained ahead of lower-value
+inventory when compression is required.
+
+Create a routine portable, secret-free backup from the desktop Settings workspace
+or with `mcg backup create`. Advanced mode or `mcg backup create
+--include-secrets` can instead include the exact provider/MCP credential catalog
+under passphrase-authenticated encryption; the installation-local bearer token is
+never included. `mcg backup list` re-verifies stored bundles and `mcg backup verify
+PATH` validates a transferred bundle offline. Restore is an explicit offline
+recovery operation: run `mcg stop`, then `mcg backup restore PATH --confirm`; add
+`--restore-secrets` for an encrypted bundle. The restore retains the destination
+token and a pre-restore database in `backups/`. Owner-controlled automation may
+use redirected `--passphrase-stdin`; passphrases are never accepted in arguments
+or environment variables.
 
 Run the explicit read-only health surface from desktop Settings or with
 `mcg doctor`. `mcg doctor --json --strict` is the machine-readable qualification
@@ -125,8 +161,10 @@ one ready work item through configured providers and project-confined governed
 tools; run, work-item, and project UUIDs are explicit positional arguments.
 Use `mcg run evaluate RUN evaluation.json` to submit an immutable objective
 `EvaluationReport`. Independent-review plans require the report to identify the
-run's Evaluator instance, and `mcg run get RUN` replays the stored report with
-the rest of the run evidence.
+run's Evaluator instance. `mcg run get RUN` reads the ordinary durable run view;
+`mcg run replay RUN` verifies the task, pinned organization, plan graph,
+authority, usage, evaluations, results, events, and tool audit without dispatching
+a provider or tool. Add `--json` for the complete digest-bearing evidence report.
 
 Durable unattended work is controlled with `mcg schedule` and the native
 Scheduler dashboard. One-time jobs accept an RFC 3339 timestamp; fixed intervals,
@@ -232,7 +270,10 @@ success-condition lines can use `FILE EXISTS project/relative/path` to stream a
 regular file into bounded content-addressed evidence without exposing its contents
 in task history. `COMMAND SUCCEEDS exact discovered command` runs only when the
 entire command still matches project discovery; arbitrary custom text is never
-executed. Advanced lines can also use
+executed. `CONFIG VALIDATES exact discovered command` is the typed configuration
+counterpart: it is accepted only for an exact currently discovered command and
+retains configuration-validation evidence instead of generic custom-command
+evidence. Advanced lines can also use
 `HTTP STATUS URL` (for example, `HTTP 200 http://127.0.0.1:3000/health`). MCG
 performs one governed, body-bounded GET to that exact credential-free URL, captures
 the response artifact, and compares the observed status exactly, including expected
@@ -331,7 +372,10 @@ OpenRouter, and arbitrary local or remote OpenAI-compatible endpoints. It discov
 the endpoint catalog before saving, labels subscription/usage/endpoint-reported
 billing explicitly, and shows known per-model prices or `Cost unknown`. Connect an OpenAI subscription through the panel or with
 `mcg provider login openai-subscription "OpenAI Subscription"`. Use
-`--method device-code` on a headless machine. Subscription OAuth and API-key
+`--method device-code` on a headless machine. The default desktop and CLI method
+opens normal browser sign-in and returns through MCG's loopback callback; it does
+not require a Codex CLI pairing code. The optional device-code method deliberately
+shows a separate one-time pairing code. Subscription OAuth and API-key
 billing are separate connections; an OAuth failure never switches billing modes.
 For API-key or bearer authentication, select `--auth api-key` or
 `--auth bearer-token` and pipe the credential on standard input; credentials are

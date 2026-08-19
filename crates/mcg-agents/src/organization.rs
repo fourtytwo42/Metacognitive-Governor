@@ -61,6 +61,7 @@ impl OrganizationGenome {
             revision_id: OrganizationRevisionId::new(),
             revision: 1,
             parent_revision_id: None,
+            inherited_from_revision_id: None,
             name: "MCG Consumer Default".into(),
             roles: vec![executive, conversation, coder, evaluator, tool_worker],
             relationships,
@@ -77,6 +78,28 @@ impl OrganizationGenome {
                 minimum_confidence: 0.80,
                 calibration_window: 100,
             },
+            created_at,
+        }
+    }
+
+    /// Creates a new materialized organization whose immutable lineage is pinned
+    /// to one existing revision. Role identities and policies are intentionally
+    /// retained so inherited semantics remain stable even when the source
+    /// organization later advances.
+    #[must_use]
+    pub fn inherit_from(base: &Self, name: impl Into<String>, created_at: DateTime<Utc>) -> Self {
+        Self {
+            schema_version: ORGANIZATION_SCHEMA_VERSION,
+            organization_id: OrganizationId::new(),
+            revision_id: OrganizationRevisionId::new(),
+            revision: 1,
+            parent_revision_id: None,
+            inherited_from_revision_id: Some(base.revision_id),
+            name: name.into(),
+            roles: base.roles.clone(),
+            relationships: base.relationships.clone(),
+            policy: base.policy.clone(),
+            evaluation: base.evaluation.clone(),
             created_at,
         }
     }
@@ -135,5 +158,21 @@ mod tests {
                 RoleKind::ToolWorker,
             ])
         );
+    }
+
+    #[test]
+    fn inherited_organization_is_materialized_and_pinned() {
+        let base = OrganizationGenome::consumer_default(Utc::now());
+        let inherited = OrganizationGenome::inherit_from(&base, "Website specialists", Utc::now());
+        inherited.validate().expect("inherited genome");
+        assert_ne!(inherited.organization_id, base.organization_id);
+        assert_ne!(inherited.revision_id, base.revision_id);
+        assert_eq!(inherited.revision, 1);
+        assert_eq!(inherited.parent_revision_id, None);
+        assert_eq!(inherited.inherited_from_revision_id, Some(base.revision_id));
+        assert_eq!(inherited.roles, base.roles);
+        assert_eq!(inherited.relationships, base.relationships);
+        assert_eq!(inherited.policy, base.policy);
+        assert_eq!(inherited.evaluation, base.evaluation);
     }
 }

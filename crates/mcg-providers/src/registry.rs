@@ -377,6 +377,7 @@ mod tests {
                 ModelRequest {
                     contract_version: CONTRACT_VERSION,
                     model: "ignored-by-registry".into(),
+                    client_request_id: None,
                     instructions: None,
                     messages: Vec::new(),
                     tools: Vec::new(),
@@ -402,6 +403,7 @@ mod tests {
                     ModelRequest {
                         contract_version: CONTRACT_VERSION,
                         model: "not-discovered".into(),
+                        client_request_id: None,
                         instructions: None,
                         messages: Vec::new(),
                         tools: Vec::new(),

@@ -263,6 +263,20 @@ impl OpenAiCompatibleProvider {
         request
     }
 
+    fn identify_model_request(
+        &self,
+        mut request_builder: RequestBuilder,
+        request: &ModelRequest,
+    ) -> RequestBuilder {
+        if self.connection.kind == ProviderKind::OpenAi
+            && !self.is_openai_subscription()
+            && let Some(client_request_id) = &request.client_request_id
+        {
+            request_builder = request_builder.header("X-Client-Request-Id", client_request_id);
+        }
+        request_builder
+    }
+
     async fn send_with_retry<F>(&self, mut make_request: F) -> Result<Response, ProviderError>
     where
         F: FnMut() -> RequestBuilder,
@@ -358,7 +372,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
             self.openrouter_routing.as_ref(),
         );
         let response = self
-            .send_with_retry(|| self.authorize(self.client.post(endpoint.clone()).json(&body)))
+            .send_with_retry(|| {
+                self.identify_model_request(
+                    self.authorize(self.client.post(endpoint.clone()).json(&body)),
+                    &request,
+                )
+            })
             .await?;
         let content_type = response
             .headers()
@@ -396,7 +415,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
             self.openrouter_routing.as_ref(),
         );
         let response = self
-            .send_with_retry(|| self.authorize(self.client.post(endpoint.clone()).json(&body)))
+            .send_with_retry(|| {
+                self.identify_model_request(
+                    self.authorize(self.client.post(endpoint.clone()).json(&body)),
+                    &request,
+                )
+            })
             .await?;
         let stream = response.bytes_stream().eventsource().map(|event| {
             let event = event.map_err(|error| ProviderError::Request {
@@ -418,6 +442,15 @@ fn validate_request(request: &ModelRequest) -> Result<(), ProviderError> {
     }
     if request.model.trim().is_empty() {
         return Err(ProviderError::Configuration("model is required".into()));
+    }
+    if request
+        .client_request_id
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > 512 || !value.is_ascii())
+    {
+        return Err(ProviderError::Configuration(
+            "client request id must contain 1 through 512 ASCII bytes".into(),
+        ));
     }
     if request.messages.is_empty() {
         return Err(ProviderError::Configuration(
@@ -1107,7 +1140,7 @@ fn error_message(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1166,6 +1199,36 @@ mod tests {
         format!("http://{address}/v1")
     }
 
+    async fn client_request_id_server() -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+        async fn response_route(
+            State(seen): State<Arc<Mutex<Vec<Option<String>>>>>,
+            headers: HeaderMap,
+        ) -> Json<Value> {
+            let value = headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            seen.lock()
+                .expect("client request observations")
+                .push(value);
+            Json(json!({
+                "id":"resp_fixture","model":"fixture-model","status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],
+                "usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5}
+            }))
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/responses", post(response_route))
+            .with_state(seen.clone());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind client request fixture");
+        let address = listener.local_addr().expect("client request address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("fixture server") });
+        (format!("http://{address}/v1"), seen)
+    }
+
     async fn unclean_sse_server() -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1217,6 +1280,7 @@ mod tests {
         ModelRequest {
             contract_version: CONTRACT_VERSION,
             model: "fixture-model".into(),
+            client_request_id: None,
             instructions: None,
             messages: vec![Message {
                 role: MessageRole::User,
@@ -1334,6 +1398,42 @@ mod tests {
         assert!(
             matches!(&response.output[0], OutputItem::Message { content, .. } if content[0] == ContentPart::Text { text: "hello".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn first_party_openai_sends_bounded_client_request_id_without_affecting_compatible() {
+        let (base_url, seen) = client_request_id_server().await;
+        let mut openai_connection = connection(base_url.clone());
+        openai_connection.kind = ProviderKind::OpenAi;
+        let openai = OpenAiCompatibleProviderBuilder::new(openai_connection)
+            .build()
+            .expect("OpenAI provider");
+        let mut identified = request();
+        identified.client_request_id = Some("mcg-stable-request-1".into());
+        openai
+            .create_response(identified.clone())
+            .await
+            .expect("identified OpenAI response");
+
+        let compatible = OpenAiCompatibleProviderBuilder::new(connection(base_url))
+            .build()
+            .expect("compatible provider");
+        compatible
+            .create_response(identified)
+            .await
+            .expect("compatible response");
+
+        assert_eq!(
+            seen.lock().expect("client request observations").as_slice(),
+            &[Some("mcg-stable-request-1".into()), None]
+        );
+
+        let mut invalid = request();
+        invalid.client_request_id = Some("é".into());
+        assert!(matches!(
+            openai.create_response(invalid).await,
+            Err(ProviderError::Configuration(message)) if message.contains("ASCII")
+        ));
     }
 
     #[tokio::test]

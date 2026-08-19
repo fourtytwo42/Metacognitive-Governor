@@ -28,6 +28,7 @@ mcg-runtime = { path = "../../crates/mcg-runtime" }
 mcg-storage = { path = "../../crates/mcg-storage" }
 mcg-tools = { path = "../../crates/mcg-tools" }
 reqwest.workspace = true
+rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -40,4 +41,5 @@ zeroize.workspace = true
 workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true

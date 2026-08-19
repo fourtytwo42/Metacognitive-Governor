@@ -9,6 +9,8 @@ use chrono::Utc;
 use mcg_domain::{ProjectId, ProjectSnapshotId};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use url::Url;
+use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::{
     ConflictResolution, EffectiveInstruction, InstructionConflict, InstructionDocument,
@@ -20,6 +22,10 @@ use crate::{
 const MAX_FILES: usize = 20_000;
 const MAX_DEPTH: usize = 12;
 const MAX_INSTRUCTION_BYTES: u64 = 512 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_WORLD_NODES: usize = 2_000;
+const MAX_WORLD_RELATIONSHIPS: usize = 4_000;
+const MAX_MANIFEST_ITEMS: usize = 500;
 
 #[derive(Debug, Error)]
 pub enum ProjectDiscoveryError {
@@ -29,6 +35,12 @@ pub enum ProjectDiscoveryError {
     Io(#[from] std::io::Error),
     #[error("project manifest is invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("project manifest is invalid TOML: {0}")]
+    Toml(#[from] toml::de::Error),
+    #[error("project manifest is invalid YAML: {0}")]
+    Yaml(String),
+    #[error("project manifest exceeds the {MAX_MANIFEST_BYTES}-byte discovery limit: {0}")]
+    ManifestTooLarge(String),
 }
 
 pub struct ProjectDiscoverer;
@@ -194,7 +206,14 @@ impl ProjectDiscoverer {
             .find(|path| relative(&root, path) == "MEMORY.md")
             .map(|_| "MEMORY.md".to_owned());
         let dependencies = discover_dependencies(&root, &files)?;
-        let world = world_model(&commands, &services, &repository, &dependencies);
+        let world = world_model(
+            &root,
+            &files,
+            &commands,
+            &services,
+            &repository,
+            &dependencies,
+        )?;
 
         Ok(ProjectModel {
             schema_version: PROJECT_MODEL_SCHEMA_VERSION,
@@ -359,7 +378,7 @@ fn package_manager_candidates(
             }
         }
     }
-    candidates.sort_by(|left, right| right.1.priority.cmp(&left.1.priority));
+    candidates.sort_by_key(|right| std::cmp::Reverse(right.1.priority));
     candidates
 }
 
@@ -382,7 +401,7 @@ fn discover_commands(
         .iter()
         .find(|path| relative(root, path) == "package.json")
     {
-        let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(package_json)?)?;
+        let value: serde_json::Value = serde_json::from_str(&read_bounded_manifest(package_json)?)?;
         if let Some(scripts) = value.get("scripts").and_then(serde_json::Value::as_object) {
             let runner = preferred_js_runner(files);
             let preferred = ["build", "test", "check", "lint", "dev", "start", "test:e2e"];
@@ -526,7 +545,15 @@ fn is_manifest(path: &str) -> bool {
             | "compose.yml"
             | "compose.yaml"
             | "Makefile"
+            | "vercel.json"
+            | "netlify.toml"
+            | "fly.toml"
+            | "render.yaml"
+            | "render.yml"
+            | "wrangler.toml"
+            | "railway.json"
     ) || path.starts_with(".github/workflows/")
+        || is_openapi_manifest(path)
 }
 
 fn fingerprint(inputs: &BTreeMap<String, String>) -> String {
@@ -592,7 +619,7 @@ fn discover_test_systems(
         .iter()
         .find(|path| relative(root, path) == "package.json")
     {
-        let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(package_json)?)?;
+        let value: serde_json::Value = serde_json::from_str(&read_bounded_manifest(package_json)?)?;
         let all = value.to_string().to_ascii_lowercase();
         for (needle, name) in [
             ("vitest", "Vitest"),
@@ -648,7 +675,7 @@ fn discover_dependencies(
     else {
         return Ok(Vec::new());
     };
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(package_json)?)?;
+    let value: serde_json::Value = serde_json::from_str(&read_bounded_manifest(package_json)?)?;
     let mut dependencies = BTreeSet::new();
     for section in ["dependencies", "devDependencies"] {
         if let Some(values) = value.get(section).and_then(serde_json::Value::as_object) {
@@ -711,71 +738,569 @@ fn discover_important_directories(root: &Path) -> Vec<String> {
 }
 
 fn world_model(
+    root: &Path,
+    files: &[PathBuf],
     commands: &[ProjectCommand],
     services: &[String],
     repository: &RepositoryModel,
     dependencies: &[(String, String)],
-) -> ProjectWorldModel {
-    let mut nodes = Vec::new();
-    let mut relationships = Vec::new();
-    if repository.is_git {
-        nodes.push(WorldNode {
-            id: "repository".into(),
-            kind: WorldNodeKind::Repository,
-            label: "Git repository".into(),
-            source: ".git".into(),
-        });
-    }
-    nodes.extend(commands.iter().map(|command| WorldNode {
-        id: format!("command:{}", command.name),
-        kind: WorldNodeKind::Command,
-        label: command.command.clone(),
-        source: command.source.clone(),
-    }));
-    if repository.is_git {
-        relationships.extend(commands.iter().map(|command| WorldRelationship {
-            from: "repository".into(),
-            relation: "provides".into(),
-            to: format!("command:{}", command.name),
-            source: command.source.clone(),
-        }));
-    }
-    nodes.extend(
-        services
-            .iter()
-            .enumerate()
-            .map(|(index, service)| WorldNode {
-                id: format!("service:{index}"),
-                kind: WorldNodeKind::Service,
-                label: service.clone(),
-                source: "project manifest".into(),
-            }),
+) -> Result<ProjectWorldModel, ProjectDiscoveryError> {
+    let mut graph = WorldGraph::default();
+    graph.add_fixed_node(
+        "repository",
+        WorldNodeKind::Repository,
+        if repository.is_git {
+            "Git repository"
+        } else {
+            "Project workspace"
+        },
+        if repository.is_git {
+            ".git"
+        } else {
+            "project root"
+        },
     );
-    nodes.extend(
-        dependencies
-            .iter()
-            .enumerate()
-            .map(|(index, (name, source))| WorldNode {
-                id: format!("dependency:{index}"),
-                kind: WorldNodeKind::Dependency,
-                label: name.clone(),
-                source: source.clone(),
-            }),
-    );
-    if repository.is_git {
-        relationships.extend(dependencies.iter().enumerate().map(|(index, (_, source))| {
-            WorldRelationship {
-                from: "repository".into(),
-                relation: "depends_on".into(),
-                to: format!("dependency:{index}"),
-                source: source.clone(),
+    for command in commands {
+        let id = graph.add_node(WorldNodeKind::Command, &command.command, &command.source);
+        graph.add_relationship("repository", "provides", &id, &command.source);
+    }
+    for service in services {
+        if service == "Docker Compose" {
+            continue;
+        }
+        let id = graph.add_node(WorldNodeKind::Service, service, "project manifest");
+        graph.add_relationship("repository", "contains", &id, "project manifest");
+    }
+    for (name, source) in dependencies {
+        add_dependency(&mut graph, name, source);
+    }
+    add_runtime_and_package_facts(root, files, &mut graph)?;
+    add_manifest_dependencies(root, files, &mut graph)?;
+    add_compose_facts(root, files, &mut graph)?;
+    add_openapi_facts(root, files, &mut graph)?;
+    add_deployment_facts(root, files, &mut graph);
+    Ok(graph.finish())
+}
+
+#[derive(Default)]
+struct WorldGraph {
+    nodes: BTreeMap<String, WorldNode>,
+    relationships: BTreeSet<(String, String, String, String)>,
+}
+
+impl WorldGraph {
+    fn add_fixed_node(
+        &mut self,
+        id: &str,
+        kind: WorldNodeKind,
+        label: &str,
+        source: &str,
+    ) -> String {
+        if self.nodes.len() < MAX_WORLD_NODES || self.nodes.contains_key(id) {
+            self.nodes
+                .entry(id.to_owned())
+                .or_insert_with(|| WorldNode {
+                    id: id.to_owned(),
+                    kind,
+                    label: label.to_owned(),
+                    source: source.to_owned(),
+                });
+        }
+        id.to_owned()
+    }
+
+    fn add_node(&mut self, kind: WorldNodeKind, label: &str, source: &str) -> String {
+        let material = format!("{}\0{label}\0{source}", world_kind_name(kind));
+        let digest = sha256(material.as_bytes());
+        let id = format!("{}:{}", world_kind_name(kind), &digest[..16]);
+        self.add_fixed_node(&id, kind, label, source)
+    }
+
+    fn add_relationship(&mut self, from: &str, relation: &str, to: &str, source: &str) {
+        if self.relationships.len() >= MAX_WORLD_RELATIONSHIPS
+            || !self.nodes.contains_key(from)
+            || !self.nodes.contains_key(to)
+        {
+            return;
+        }
+        self.relationships.insert((
+            from.to_owned(),
+            relation.to_owned(),
+            to.to_owned(),
+            source.to_owned(),
+        ));
+    }
+
+    fn finish(self) -> ProjectWorldModel {
+        ProjectWorldModel {
+            nodes: self.nodes.into_values().collect(),
+            relationships: self
+                .relationships
+                .into_iter()
+                .map(|(from, relation, to, source)| WorldRelationship {
+                    from,
+                    relation,
+                    to,
+                    source,
+                })
+                .collect(),
+        }
+    }
+}
+
+const fn world_kind_name(kind: WorldNodeKind) -> &'static str {
+    match kind {
+        WorldNodeKind::Service => "service",
+        WorldNodeKind::Database => "database",
+        WorldNodeKind::Domain => "domain",
+        WorldNodeKind::Api => "api",
+        WorldNodeKind::Deployment => "deployment",
+        WorldNodeKind::Dependency => "dependency",
+        WorldNodeKind::Repository => "repository",
+        WorldNodeKind::Runtime => "runtime",
+        WorldNodeKind::Command => "command",
+    }
+}
+
+fn add_dependency(graph: &mut WorldGraph, name: &str, source: &str) {
+    if name.trim().is_empty() || name.len() > 512 {
+        return;
+    }
+    let id = graph.add_node(WorldNodeKind::Dependency, name, source);
+    graph.add_relationship("repository", "depends_on", &id, source);
+}
+
+fn add_runtime_and_package_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    let runtime_manifests = [
+        ("Cargo.toml", "Rust"),
+        ("pyproject.toml", "Python"),
+        ("requirements.txt", "Python"),
+        ("go.mod", "Go"),
+        ("pom.xml", "Java"),
+        ("build.gradle", "Java/JVM"),
+        ("build.gradle.kts", "Kotlin/JVM"),
+    ];
+    for (manifest, label) in runtime_manifests {
+        if files.iter().any(|path| relative(root, path) == manifest) {
+            let id = graph.add_node(WorldNodeKind::Runtime, label, manifest);
+            graph.add_relationship("repository", "uses_runtime", &id, manifest);
+        }
+    }
+    let Some(package_json) = files
+        .iter()
+        .find(|path| relative(root, path) == "package.json")
+    else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(&read_bounded_manifest(package_json)?)?;
+    let node_label = value
+        .pointer("/engines/node")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || "Node.js".to_owned(),
+            |version| format!("Node.js {version}"),
+        );
+    let runtime_id = graph.add_node(WorldNodeKind::Runtime, &node_label, "package.json#engines");
+    graph.add_relationship("repository", "uses_runtime", &runtime_id, "package.json");
+    let scripts = value.get("scripts").and_then(serde_json::Value::as_object);
+    if scripts.is_some_and(|scripts| scripts.contains_key("start") || scripts.contains_key("dev")) {
+        let label = value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.trim().is_empty() && name.len() <= 256)
+            .unwrap_or("Node application");
+        let service_id = graph.add_node(WorldNodeKind::Service, label, "package.json#scripts");
+        graph.add_relationship("repository", "provides", &service_id, "package.json");
+        graph.add_relationship(&service_id, "runs_on", &runtime_id, "package.json#scripts");
+        if let Some(homepage) = value
+            .get("homepage")
+            .and_then(serde_json::Value::as_str)
+            .and_then(credential_free_origin)
+        {
+            let domain_id =
+                graph.add_node(WorldNodeKind::Domain, &homepage, "package.json#homepage");
+            graph.add_relationship(
+                &service_id,
+                "exposed_at",
+                &domain_id,
+                "package.json#homepage",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_manifest_dependencies(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    if let Some(path) = files
+        .iter()
+        .find(|path| relative(root, path) == "Cargo.toml")
+    {
+        let value: toml::Value = toml::from_str(&read_bounded_manifest(path)?)?;
+        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            if let Some(table) = value.get(section).and_then(toml::Value::as_table) {
+                for name in table.keys().take(MAX_MANIFEST_ITEMS) {
+                    add_dependency(graph, name, &format!("Cargo.toml#{section}"));
+                }
             }
-        }));
+        }
+        if let Some(table) = value
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(toml::Value::as_table)
+        {
+            for name in table.keys().take(MAX_MANIFEST_ITEMS) {
+                add_dependency(graph, name, "Cargo.toml#workspace.dependencies");
+            }
+        }
     }
-    ProjectWorldModel {
-        nodes,
-        relationships,
+    if let Some(path) = files
+        .iter()
+        .find(|path| relative(root, path) == "requirements.txt")
+    {
+        for line in read_bounded_manifest(path)?
+            .lines()
+            .take(MAX_MANIFEST_ITEMS)
+        {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with('-')
+                || line.contains('@')
+            {
+                continue;
+            }
+            let name = line
+                .split(['=', '<', '>', '!', '~', '[', ';'])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            add_dependency(graph, name, "requirements.txt");
+        }
     }
+    if let Some(path) = files.iter().find(|path| relative(root, path) == "go.mod") {
+        let mut in_require = false;
+        for line in read_bounded_manifest(path)?
+            .lines()
+            .take(MAX_MANIFEST_ITEMS * 2)
+        {
+            let line = line.trim();
+            if line == "require (" {
+                in_require = true;
+                continue;
+            }
+            if in_require && line == ")" {
+                in_require = false;
+                continue;
+            }
+            let candidate = if in_require {
+                line.split_whitespace().next()
+            } else {
+                line.strip_prefix("require ")
+                    .and_then(|value| value.split_whitespace().next())
+            };
+            if let Some(name) = candidate.filter(|name| !name.is_empty() && !name.starts_with("//"))
+            {
+                add_dependency(graph, name, "go.mod#require");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn add_compose_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    for path in files.iter().filter(|path| {
+        matches!(
+            relative(root, path).as_str(),
+            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+        )
+    }) {
+        let source = relative(root, path);
+        let documents = YamlLoader::load_from_str(&read_bounded_manifest(path)?)
+            .map_err(|error| ProjectDiscoveryError::Yaml(error.to_string()))?;
+        for document in documents.iter().take(4) {
+            let Some(services) = yaml_field(document, "services").and_then(Yaml::as_hash) else {
+                continue;
+            };
+            let container_runtime =
+                graph.add_node(WorldNodeKind::Runtime, "OCI container", source.as_str());
+            graph.add_relationship("repository", "uses_runtime", &container_runtime, &source);
+            let mut service_ids = BTreeMap::new();
+            let mut database_ids = BTreeMap::new();
+            for (name, definition) in services.iter().take(256) {
+                let Some(name) = name.as_str().filter(|name| valid_world_label(name)) else {
+                    continue;
+                };
+                let fact_source = format!("{source}#services.{name}");
+                let service_id = graph.add_node(WorldNodeKind::Service, name, &fact_source);
+                graph.add_relationship("repository", "provides", &service_id, &fact_source);
+                graph.add_relationship(&service_id, "runs_on", &container_runtime, &fact_source);
+                service_ids.insert(name.to_owned(), service_id.clone());
+                if let Some(image) = yaml_field(definition, "image")
+                    .and_then(Yaml::as_str)
+                    .filter(|image| valid_world_label(image))
+                {
+                    let image_id = graph.add_node(
+                        WorldNodeKind::Dependency,
+                        image,
+                        &format!("{fact_source}.image"),
+                    );
+                    graph.add_relationship(&service_id, "uses_image", &image_id, &fact_source);
+                    if let Some(database) = database_kind(image) {
+                        let database_id = graph.add_node(
+                            WorldNodeKind::Database,
+                            &format!("{name} ({database})"),
+                            &format!("{fact_source}.image"),
+                        );
+                        graph.add_relationship(&service_id, "provides", &database_id, &fact_source);
+                        database_ids.insert(name.to_owned(), database_id);
+                    }
+                }
+                if let Some(ports) = yaml_field(definition, "ports").and_then(Yaml::as_vec) {
+                    for port in ports.iter().take(64).filter_map(compose_published_port) {
+                        let endpoint = format!("localhost:{port}");
+                        let domain_id = graph.add_node(
+                            WorldNodeKind::Domain,
+                            &endpoint,
+                            &format!("{fact_source}.ports"),
+                        );
+                        graph.add_relationship(&service_id, "exposes", &domain_id, &fact_source);
+                    }
+                }
+            }
+            for (name, definition) in services.iter().take(256) {
+                let Some(name) = name.as_str() else { continue };
+                let Some(from) = service_ids.get(name) else {
+                    continue;
+                };
+                for dependency in compose_dependencies(definition).into_iter().take(256) {
+                    if let Some(to) = service_ids.get(&dependency) {
+                        graph.add_relationship(
+                            from,
+                            "depends_on",
+                            to,
+                            &format!("{source}#services.{name}.depends_on"),
+                        );
+                    }
+                    if let Some(database) = database_ids.get(&dependency) {
+                        graph.add_relationship(
+                            from,
+                            "uses_database",
+                            database,
+                            &format!("{source}#services.{name}.depends_on"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn yaml_field<'a>(value: &'a Yaml, field: &str) -> Option<&'a Yaml> {
+    value
+        .as_hash()?
+        .iter()
+        .find_map(|(key, value)| (key.as_str() == Some(field)).then_some(value))
+}
+
+fn compose_dependencies(definition: &Yaml) -> Vec<String> {
+    let Some(value) = yaml_field(definition, "depends_on") else {
+        return Vec::new();
+    };
+    let mut dependencies = if let Some(values) = value.as_vec() {
+        values
+            .iter()
+            .filter_map(Yaml::as_str)
+            .filter(|name| valid_world_label(name))
+            .map(str::to_owned)
+            .collect()
+    } else if let Some(values) = value.as_hash() {
+        values
+            .keys()
+            .filter_map(Yaml::as_str)
+            .filter(|name| valid_world_label(name))
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+fn compose_published_port(value: &Yaml) -> Option<u16> {
+    if let Some(published) = yaml_field(value, "published") {
+        return published
+            .as_i64()
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|port| *port > 0)
+            .or_else(|| {
+                published
+                    .as_str()
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .filter(|port| *port > 0)
+            });
+    }
+    let rendered = value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_i64().map(|value| value.to_string()))?;
+    let rendered = rendered.split('/').next()?;
+    let parts = rendered.split(':').collect::<Vec<_>>();
+    let published = if parts.len() >= 2 {
+        parts[parts.len() - 2]
+    } else {
+        parts[0]
+    };
+    published.parse::<u16>().ok().filter(|port| *port > 0)
+}
+
+fn database_kind(image: &str) -> Option<&'static str> {
+    let image = image.to_ascii_lowercase();
+    [
+        ("postgres", "PostgreSQL"),
+        ("mariadb", "MariaDB"),
+        ("mysql", "MySQL"),
+        ("mongodb", "MongoDB"),
+        ("mongo", "MongoDB"),
+        ("redis", "Redis"),
+        ("cockroach", "CockroachDB"),
+        ("mssql", "SQL Server"),
+        ("cassandra", "Cassandra"),
+        ("neo4j", "Neo4j"),
+    ]
+    .into_iter()
+    .find_map(|(needle, label)| image.contains(needle).then_some(label))
+}
+
+fn add_openapi_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    for path in files
+        .iter()
+        .filter(|path| is_openapi_manifest(&relative(root, path)))
+    {
+        let source = relative(root, path);
+        let text = read_bounded_manifest(path)?;
+        let (title, servers) = if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            let value: serde_json::Value = serde_json::from_str(&text)?;
+            let title = value
+                .pointer("/info/title")
+                .and_then(serde_json::Value::as_str)
+                .filter(|title| valid_world_label(title))
+                .unwrap_or(source.as_str())
+                .to_owned();
+            let servers: Vec<String> = value
+                .get("servers")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .take(32)
+                .filter_map(|server| server.get("url").and_then(serde_json::Value::as_str))
+                .filter_map(credential_free_origin)
+                .collect();
+            (title, servers)
+        } else {
+            let documents = YamlLoader::load_from_str(&text)
+                .map_err(|error| ProjectDiscoveryError::Yaml(error.to_string()))?;
+            let Some(document) = documents.first() else {
+                continue;
+            };
+            let title = yaml_field(document, "info")
+                .and_then(|info| yaml_field(info, "title"))
+                .and_then(Yaml::as_str)
+                .filter(|title| valid_world_label(title))
+                .unwrap_or(source.as_str())
+                .to_owned();
+            let servers: Vec<String> = yaml_field(document, "servers")
+                .and_then(Yaml::as_vec)
+                .into_iter()
+                .flatten()
+                .take(32)
+                .filter_map(|server| yaml_field(server, "url").and_then(Yaml::as_str))
+                .filter_map(credential_free_origin)
+                .collect();
+            (title, servers)
+        };
+        let api_id = graph.add_node(WorldNodeKind::Api, &title, &source);
+        graph.add_relationship("repository", "describes", &api_id, &source);
+        for origin in servers {
+            let domain_id = graph.add_node(WorldNodeKind::Domain, &origin, &source);
+            graph.add_relationship(&api_id, "served_at", &domain_id, &source);
+        }
+    }
+    Ok(())
+}
+
+fn is_openapi_manifest(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "openapi.json"
+            | "openapi.yaml"
+            | "openapi.yml"
+            | "swagger.json"
+            | "swagger.yaml"
+            | "swagger.yml"
+    )
+}
+
+fn credential_free_origin(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+    {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
+}
+
+fn add_deployment_facts(root: &Path, files: &[PathBuf], graph: &mut WorldGraph) {
+    let manifests = [
+        ("vercel.json", "Vercel"),
+        ("netlify.toml", "Netlify"),
+        ("fly.toml", "Fly.io"),
+        ("render.yaml", "Render"),
+        ("render.yml", "Render"),
+        ("wrangler.toml", "Cloudflare Workers"),
+        ("railway.json", "Railway"),
+        ("Dockerfile", "Docker image"),
+    ];
+    for (manifest, label) in manifests {
+        if files.iter().any(|path| relative(root, path) == manifest) {
+            let id = graph.add_node(WorldNodeKind::Deployment, label, manifest);
+            graph.add_relationship("repository", "deploys_to", &id, manifest);
+        }
+    }
+}
+
+fn valid_world_label(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 512
+        && !value.chars().any(char::is_control)
+        && !value.to_ascii_lowercase().contains("password")
+        && !value.to_ascii_lowercase().contains("token=")
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -783,6 +1308,15 @@ fn relative(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+fn read_bounded_manifest(path: &Path) -> Result<String, ProjectDiscoveryError> {
+    if path.metadata()?.len() > MAX_MANIFEST_BYTES {
+        return Err(ProjectDiscoveryError::ManifestTooLarge(
+            path.display().to_string(),
+        ));
+    }
+    Ok(fs::read_to_string(path)?)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -869,6 +1403,156 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One topology fixture keeps node and edge provenance assertions together.
+    fn manifest_world_model_is_typed_stable_provenance_bearing_and_secret_safe() {
+        let root = tempdir().expect("root");
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"orders-web","homepage":"https://orders.example.test/app","scripts":{"start":"node server.js"},"dependencies":{"fastify":"5"}}"#,
+        )
+        .expect("package manifest");
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"orders-worker\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
+        )
+        .expect("cargo manifest");
+        fs::write(
+            root.path().join("requirements.txt"),
+            "requests==2.32\nprivate @ https://owner:secret@example.test/private.whl\n",
+        )
+        .expect("Python dependencies");
+        fs::write(
+            root.path().join("go.mod"),
+            "module example.test/orders\n\nrequire example.test/observability v1.2.3\n",
+        )
+        .expect("Go dependencies");
+        fs::write(
+            root.path().join("compose.yaml"),
+            r#"services:
+  web:
+    image: ghcr.io/example/orders-web:1
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+      - target: 443
+        published: 8443
+  db:
+    image: postgres:17
+"#,
+        )
+        .expect("compose manifest");
+        fs::write(
+            root.path().join("openapi.yaml"),
+            r"openapi: 3.1.0
+info:
+  title: Orders API
+servers:
+  - url: https://api.example.test/v1
+  - url: https://owner:secret@private.example.test/v1
+",
+        )
+        .expect("OpenAPI manifest");
+        fs::write(root.path().join("vercel.json"), "{}").expect("deployment manifest");
+
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
+        let second = ProjectDiscoverer::discover(root.path(), project_id).expect("rediscover");
+        assert_eq!(first.world, second.world);
+        for (kind, label) in [
+            (WorldNodeKind::Service, "orders-web"),
+            (WorldNodeKind::Service, "web"),
+            (WorldNodeKind::Database, "db (PostgreSQL)"),
+            (WorldNodeKind::Api, "Orders API"),
+            (WorldNodeKind::Domain, "https://api.example.test"),
+            (WorldNodeKind::Domain, "localhost:8080"),
+            (WorldNodeKind::Domain, "localhost:8443"),
+            (WorldNodeKind::Deployment, "Vercel"),
+            (WorldNodeKind::Runtime, "Rust"),
+            (WorldNodeKind::Runtime, "Node.js"),
+            (WorldNodeKind::Runtime, "Python"),
+            (WorldNodeKind::Runtime, "Go"),
+            (WorldNodeKind::Runtime, "OCI container"),
+            (WorldNodeKind::Dependency, "serde"),
+            (WorldNodeKind::Dependency, "fastify"),
+            (WorldNodeKind::Dependency, "requests"),
+            (WorldNodeKind::Dependency, "example.test/observability"),
+        ] {
+            assert!(
+                first
+                    .world
+                    .nodes
+                    .iter()
+                    .any(|node| node.kind == kind && node.label == label),
+                "missing {kind:?} {label}"
+            );
+        }
+        assert!(!first.world.nodes.iter().any(|node| {
+            node.label.contains("secret") || node.label.contains("private.example.test")
+        }));
+        let node_id = |kind, label: &str| {
+            first
+                .world
+                .nodes
+                .iter()
+                .find(|node| node.kind == kind && node.label == label)
+                .map(|node| node.id.clone())
+                .expect("world node")
+        };
+        let web = node_id(WorldNodeKind::Service, "web");
+        let database = node_id(WorldNodeKind::Database, "db (PostgreSQL)");
+        let api = node_id(WorldNodeKind::Api, "Orders API");
+        let api_domain = node_id(WorldNodeKind::Domain, "https://api.example.test");
+        let deployment = node_id(WorldNodeKind::Deployment, "Vercel");
+        let repository_id = "repository".to_owned();
+        for (from, relation, to) in [
+            (&web, "uses_database", &database),
+            (&api, "served_at", &api_domain),
+            (&repository_id, "deploys_to", &deployment),
+        ] {
+            assert!(
+                first.world.relationships.iter().any(|edge| {
+                    edge.from == *from && edge.relation == relation && edge.to == *to
+                })
+            );
+        }
+        assert!(first.world.nodes.iter().all(|node| !node.source.is_empty()));
+        assert!(
+            first
+                .world
+                .relationships
+                .iter()
+                .all(|edge| !edge.source.is_empty())
+        );
+    }
+
+    #[test]
+    fn oversized_or_malformed_topology_manifests_fail_before_unbounded_parsing() {
+        let oversized = tempdir().expect("oversized root");
+        fs::write(
+            oversized.path().join("package.json"),
+            vec![b' '; usize::try_from(MAX_MANIFEST_BYTES).expect("limit") + 1],
+        )
+        .expect("oversized manifest");
+        assert!(matches!(
+            ProjectDiscoverer::discover(oversized.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::ManifestTooLarge(_))
+        ));
+
+        let malformed = tempdir().expect("malformed root");
+        fs::write(
+            malformed.path().join("compose.yaml"),
+            "services:\n  web: [unterminated",
+        )
+        .expect("malformed manifest");
+        assert!(matches!(
+            ProjectDiscoverer::discover(malformed.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Yaml(_))
+        ));
+    }
+
+    #[test]
     fn nested_repository_request_resolves_to_git_root_and_ignores_symlinks() {
         let root = tempdir().expect("root");
         fs::create_dir_all(root.path().join(".git")).expect("git");
@@ -901,5 +1585,22 @@ mod tests {
         assert!(invalidation.invalidate_commands);
         assert!(!invalidation.invalidate_instructions);
         assert!(model.commands.iter().any(|command| command.name == "test"));
+
+        fs::write(
+            root.path().join("openapi.json"),
+            r#"{"openapi":"3.1.0","info":{"title":"Fixture API"}}"#,
+        )
+        .expect("OpenAPI update");
+        let (model, invalidation) = watcher.poll().expect("topology poll").expect("change");
+        assert_eq!(invalidation.changed_inputs, vec!["openapi.json"]);
+        assert!(invalidation.invalidate_world_model);
+        assert!(!invalidation.invalidate_commands);
+        assert!(
+            model
+                .world
+                .nodes
+                .iter()
+                .any(|node| node.kind == WorldNodeKind::Api && node.label == "Fixture API")
+        );
     }
 }

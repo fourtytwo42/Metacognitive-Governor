@@ -55,6 +55,8 @@ pub enum EventKind {
     ExperimentDecisionRecorded,
     ShadowWorkspacePrepared,
     ShadowWorkspaceStateChanged,
+    SshWorkflowCreated,
+    SshWorkflowStateChanged,
 }
 
 impl EventKind {
@@ -105,6 +107,8 @@ impl EventKind {
             Self::ExperimentDecisionRecorded => "experiment_decision_recorded",
             Self::ShadowWorkspacePrepared => "shadow_workspace_prepared",
             Self::ShadowWorkspaceStateChanged => "shadow_workspace_state_changed",
+            Self::SshWorkflowCreated => "ssh_workflow_created",
+            Self::SshWorkflowStateChanged => "ssh_workflow_state_changed",
         }
     }
 
@@ -190,6 +194,10 @@ impl EventKind {
             }
             "shadow_workspace_state_changed" | "ShadowWorkspaceStateChanged" => {
                 Ok(Self::ShadowWorkspaceStateChanged)
+            }
+            "ssh_workflow_created" | "SshWorkflowCreated" => Ok(Self::SshWorkflowCreated),
+            "ssh_workflow_state_changed" | "SshWorkflowStateChanged" => {
+                Ok(Self::SshWorkflowStateChanged)
             }
             other => Err(other.to_owned()),
         }

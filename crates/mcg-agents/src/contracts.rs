@@ -8,8 +8,10 @@ use mcg_domain::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const ORGANIZATION_SCHEMA_VERSION: u16 = 1;
+pub const ORGANIZATION_SCHEMA_VERSION: u16 = 2;
+const LEGACY_ORGANIZATION_SCHEMA_VERSION: u16 = 1;
 pub const AGENT_RUN_SCHEMA_VERSION: u16 = 1;
+pub const PROVIDER_PROXY_TURN_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrganizationGenome {
@@ -18,6 +20,8 @@ pub struct OrganizationGenome {
     pub revision_id: OrganizationRevisionId,
     pub revision: u64,
     pub parent_revision_id: Option<OrganizationRevisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from_revision_id: Option<OrganizationRevisionId>,
     pub name: String,
     pub roles: Vec<RoleDefinition>,
     pub relationships: Vec<RoleRelationship>,
@@ -33,8 +37,19 @@ impl OrganizationGenome {
     ///
     /// Returns a precise invariant violation for malformed imported genomes.
     pub fn validate(&self) -> Result<(), OrganizationError> {
-        if self.schema_version != ORGANIZATION_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            LEGACY_ORGANIZATION_SCHEMA_VERSION | ORGANIZATION_SCHEMA_VERSION
+        ) {
             return Err(OrganizationError::UnsupportedSchema(self.schema_version));
+        }
+        if (self.schema_version == LEGACY_ORGANIZATION_SCHEMA_VERSION
+            && self.inherited_from_revision_id.is_some())
+            || self.inherited_from_revision_id == Some(self.revision_id)
+            || (self.inherited_from_revision_id.is_some()
+                && self.inherited_from_revision_id == self.parent_revision_id)
+        {
+            return Err(OrganizationError::InvalidInheritance);
         }
         if self.name.trim().is_empty() || self.roles.is_empty() {
             return Err(OrganizationError::EmptyOrganization);
@@ -374,6 +389,9 @@ pub enum SuccessCondition {
     StaticAnalysis {
         command: String,
     },
+    ConfigurationValid {
+        command: String,
+    },
     FileExists {
         path: String,
         min_bytes: u64,
@@ -539,6 +557,8 @@ pub enum OrganizationError {
     InvalidAgentLimit,
     #[error("organization policy values are inconsistent or out of bounds")]
     InvalidPolicy,
+    #[error("organization inheritance identity is inconsistent")]
+    InvalidInheritance,
     #[error("confidence must be between 0 and 10000 basis points")]
     InvalidConfidence,
 }
@@ -617,6 +637,7 @@ mod tests {
             revision_id: OrganizationRevisionId::new(),
             revision: 1,
             parent_revision_id: None,
+            inherited_from_revision_id: None,
             name: "fixture".into(),
             roles: vec![executive.clone(), coder.clone()],
             relationships: vec![RoleRelationship {
@@ -645,6 +666,15 @@ mod tests {
             serde_json::from_str::<OrganizationGenome>(&json).expect("deserialize"),
             genome
         );
+        let mut legacy = serde_json::to_value(&genome).expect("legacy JSON");
+        legacy["schema_version"] = serde_json::json!(LEGACY_ORGANIZATION_SCHEMA_VERSION);
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("inherited_from_revision_id");
+        let legacy: OrganizationGenome = serde_json::from_value(legacy).expect("legacy genome");
+        assert_eq!(legacy.inherited_from_revision_id, None);
+        legacy.validate().expect("legacy schema remains readable");
         genome.relationships.push(RoleRelationship {
             from: coder.id,
             to: executive.id,

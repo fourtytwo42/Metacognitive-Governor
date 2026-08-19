@@ -1,31 +1,36 @@
 use mcg_agents::{
     ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, OrganizationGenome,
-    ShadowExecutionReceipt, SupervisionObservation,
+    PortableOrganizationComparison, PortableOrganizationGenome, ShadowExecutionReceipt,
+    SupervisionObservation,
 };
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
     BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
-    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DeploySiteRequest,
-    DiscoverProjectRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
-    ExperimentListResponse, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, McpListResponse,
-    NavigateBrowserSessionRequest, PlatformSessionHistoryResponse, PlatformSessionListResponse,
+    CorrectMemoryClaimRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
+    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
+    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
+    DeploySiteRequest, DiscoverProjectRequest, ExperimentBenchmarkListResponse,
+    ExperimentDecisionListResponse, ExperimentListResponse, ImportOrganizationRequest,
+    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
+    OrganizationMutationResponse, PlatformSessionHistoryResponse, PlatformSessionListResponse,
     PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse, ProviderListResponse,
     ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
     SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
     SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
     SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, StartOpenAiOAuthRequest,
-    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransitionExperimentRequest, TransitionTaskRequest, UpdateSiteRequest,
-    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
-    WakeScheduleRequest,
+    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
+    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
+    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionExperimentRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
+    UpdateUserSettingsRequest, UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
     PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ScheduleDefinition,
-    SchedulerNotification, Site, SiteMonitor, SshHost, TaskEnvelope,
+    SchedulerNotification, Site, SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -34,10 +39,11 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     CandidateRevisionMutation, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
-    OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PluginInvocationMutation, ProjectMutation, ProviderMutation,
-    ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
-    SiteMutation, SshHostMutation, SshOperationMutation, SupervisionMutation,
+    MemoryClaimMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
+    ProjectMutation, ProviderMutation, RunReplayReport, ScheduleWakeMutation,
+    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
+    SshOperationMutation, SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -46,6 +52,7 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 mod service_bootstrap;
+mod updater;
 
 use service_bootstrap::LocalServiceStatus;
 
@@ -164,11 +171,33 @@ fn validate_local_daemon(endpoint: &str) -> Result<(), String> {
 
 async fn response_error(response: reqwest::Response, action: &str) -> String {
     let status = response.status();
-    let detail = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "No error details were returned".into());
-    format!("{action} failed ({status}): {detail}")
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if body.len().saturating_add(chunk.len()) > 16 * 1024 {
+            body.clear();
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    bounded_api_error_code(&body).map_or_else(
+        || format!("{action} failed ({status})."),
+        |code| format!("{action} failed ({status}; code {code})."),
+    )
+}
+
+fn bounded_api_error_code(body: &[u8]) -> Option<String> {
+    let document: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = document.get("error")?.as_str()?;
+    if code.is_empty()
+        || code.len() > 64
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some(code.to_owned())
 }
 
 #[tauri::command]
@@ -489,6 +518,32 @@ async fn create_backup(backup_id: String) -> Result<BackupSummaryResponse, Strin
 }
 
 #[tauri::command]
+async fn create_encrypted_backup(
+    backup_id: String,
+    passphrase: String,
+) -> Result<BackupSummaryResponse, String> {
+    let backup_id = uuid::Uuid::parse_str(&backup_id)
+        .map_err(|_| "Backup identity must be a UUID".to_owned())?;
+    let request = CreateEncryptedBackupRequest { passphrase };
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{LOCAL_DAEMON}/api/v1/backups/{backup_id}/encrypted"
+        ))
+        .bearer_auth(daemon_token()?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("Encrypted backup could not be created: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Encrypted backup creation").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Encrypted backup response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn verify_backup(backup_id: String) -> Result<BackupSummaryResponse, String> {
     let backup_id = uuid::Uuid::parse_str(&backup_id)
         .map_err(|_| "Backup identity must be a UUID".to_owned())?;
@@ -649,6 +704,103 @@ async fn list_tasks() -> Result<TaskListResponse, String> {
         .json()
         .await
         .map_err(|error| format!("Task list response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_organizations() -> Result<OrganizationListResponse, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/organizations")),
+        None::<&()>,
+        "Organization listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn organization_history(
+    organization_id: String,
+) -> Result<OrganizationHistoryResponse, String> {
+    let organization_id = canonical_uuid(&organization_id, "Organization identity")?;
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/organizations/{organization_id}/history"
+        )),
+        None::<&()>,
+        "Organization history",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_organization(
+    request: CreateOrganizationRequest,
+) -> Result<OrganizationMutationResponse, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/organizations")),
+        Some(&request),
+        "Organization creation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn inherit_organization(
+    organization_id: String,
+    request: InheritOrganizationRequest,
+) -> Result<OrganizationMutationResponse, String> {
+    let organization_id = canonical_uuid(&organization_id, "Organization identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/organizations/{organization_id}/inherit"
+        )),
+        Some(&request),
+        "Organization inheritance",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn export_organization(revision_id: String) -> Result<PortableOrganizationGenome, String> {
+    let revision_id = canonical_uuid(&revision_id, "Organization revision identity")?;
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/organization-revisions/{revision_id}/export"
+        )),
+        None::<&()>,
+        "Organization export",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn import_organization(
+    request: ImportOrganizationRequest,
+) -> Result<PortableOrganizationImportMutation, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/organizations/import")),
+        Some(&request),
+        "Organization import",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn compare_organizations(
+    left_revision_id: String,
+    right_revision_id: String,
+) -> Result<PortableOrganizationComparison, String> {
+    let left_revision_id =
+        canonical_uuid(&left_revision_id, "Left organization revision identity")?;
+    let right_revision_id =
+        canonical_uuid(&right_revision_id, "Right organization revision identity")?;
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/organization-revisions/{left_revision_id}/compare/{right_revision_id}"
+        )),
+        None::<&()>,
+        "Organization comparison",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1027,6 +1179,79 @@ async fn run_ssh_operation(
     request: RunSshOperationRequest,
 ) -> Result<SshOperationMutation, String> {
     ssh_post(&format!("/{host_id}/operations"), &request, "SSH operation").await
+}
+
+#[tauri::command]
+async fn list_ssh_workflows() -> Result<SshWorkflowListResponse, String> {
+    ssh_workflow_get("", "SSH workflow listing").await
+}
+
+#[tauri::command]
+async fn get_ssh_workflow(workflow_id: String) -> Result<SshWorkflow, String> {
+    ssh_workflow_get(&format!("/{workflow_id}"), "SSH workflow loading").await
+}
+
+#[tauri::command]
+async fn create_ssh_workflow(
+    request: SshWorkflowCreateRequest,
+) -> Result<SshWorkflowMutation, String> {
+    ssh_workflow_post("", Some(&request), "SSH workflow creation").await
+}
+
+#[tauri::command]
+async fn run_ssh_workflow(workflow_id: String) -> Result<SshWorkflowMutation, String> {
+    ssh_workflow_post::<SshWorkflowMutation, ()>(
+        &format!("/{workflow_id}/run"),
+        None,
+        "SSH workflow execution",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_ssh_workflow(workflow_id: String) -> Result<SshWorkflowMutation, String> {
+    ssh_workflow_post::<SshWorkflowMutation, ()>(
+        &format!("/{workflow_id}/cancel"),
+        None,
+        "SSH workflow cancellation",
+    )
+    .await
+}
+
+async fn ssh_workflow_get<T>(suffix: &str, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/ssh/workflows{suffix}")),
+        None::<&()>,
+        label,
+    )
+    .await
+}
+
+async fn ssh_workflow_post<T, B>(suffix: &str, body: Option<&B>, label: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let request = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}/api/v1/ssh/workflows{suffix}"))
+        .bearer_auth(daemon_token()?);
+    let response = match body {
+        Some(body) => request.json(body),
+        None => request,
+    }
+    .send()
+    .await
+    .map_err(|error| format!("{label} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, label).await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{label} response was invalid: {error}"))
 }
 
 async fn ssh_get<T>(suffix: &str, label: &str) -> Result<T, String>
@@ -1670,6 +1895,23 @@ async fn task_tool_audit(task_id: String) -> Result<ToolAuditResponse, String> {
 }
 
 #[tauri::command]
+async fn replay_agent_run(run_id: String) -> Result<RunReplayReport, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{LOCAL_DAEMON}/api/v1/runs/{run_id}/replay"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Run evidence could not be replayed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Run evidence replay").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Run replay response was invalid: {error}"))
+}
+
+#[tauri::command]
 async fn pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
     app.dialog()
         .file()
@@ -1718,6 +1960,105 @@ async fn list_projects() -> Result<ProjectListResponse, String> {
         .map_err(|error| format!("Project list response was invalid: {error}"))
 }
 
+fn canonical_uuid(value: &str, label: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(value).map_err(|_| format!("{label} must be a UUID"))
+}
+
+#[tauri::command]
+async fn list_project_memory(project_id: String) -> Result<MemoryClaimListResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/memory"),
+        "Project memory",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_project_memory(
+    project_id: String,
+    request: CreateMemoryClaimRequest,
+) -> Result<MemoryClaimMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/memory"),
+        &request,
+        "Project memory creation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn correct_project_memory(
+    project_id: String,
+    claim_id: String,
+    request: CorrectMemoryClaimRequest,
+) -> Result<MemoryClaimMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let claim_id = canonical_uuid(&claim_id, "Memory claim identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/memory/{claim_id}/correct"),
+        &request,
+        "Project memory correction",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn transition_project_memory(
+    project_id: String,
+    claim_id: String,
+    request: TransitionMemoryClaimRequest,
+) -> Result<MemoryClaimMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let claim_id = canonical_uuid(&claim_id, "Memory claim identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/memory/{claim_id}/transition"),
+        &request,
+        "Project memory transition",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn project_memory_history(
+    project_id: String,
+    namespace: String,
+    key: String,
+) -> Result<MemoryClaimHistoryResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let mut url = reqwest::Url::parse(&format!(
+        "{LOCAL_DAEMON}/api/v1/projects/{project_id}/memory/history"
+    ))
+    .map_err(|error| format!("Project memory history URL was invalid: {error}"))?;
+    url.query_pairs_mut()
+        .append_pair("namespace", &namespace)
+        .append_pair("key", &key);
+    let response = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Project memory history could not be loaded: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Project memory history").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Project memory history response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn managed_project_memory(project_id: String) -> Result<ManagedMemoryResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/memory/managed"),
+        "Managed project memory",
+    )
+    .await
+}
+
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
 fn open_external_url(url: String) -> Result<(), String> {
@@ -1748,10 +2089,14 @@ pub fn run() {
     let _ = LOCAL_SERVICE_STATUS.set(service_status);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             runtime_label,
             local_service_status,
             run_diagnostics,
+            updater::update_configuration,
+            updater::check_for_update,
+            updater::install_update,
             start_openai_oauth,
             complete_openai_oauth,
             cancel_openai_oauth,
@@ -1763,6 +2108,7 @@ pub fn run() {
             user_settings_history,
             list_backups,
             create_backup,
+            create_encrypted_backup,
             verify_backup,
             list_plugins,
             install_local_plugin,
@@ -1810,6 +2156,11 @@ pub fn run() {
             ssh_host_revisions,
             ssh_operation_history,
             run_ssh_operation,
+            list_ssh_workflows,
+            get_ssh_workflow,
+            create_ssh_workflow,
+            run_ssh_workflow,
+            cancel_ssh_workflow,
             platform_capabilities,
             list_platform_sessions,
             request_platform_session,
@@ -1831,6 +2182,13 @@ pub fn run() {
             list_scheduler_notifications,
             acknowledge_scheduler_notification,
             list_tasks,
+            list_organizations,
+            organization_history,
+            create_organization,
+            inherit_organization,
+            export_organization,
+            import_organization,
+            compare_organizations,
             create_task,
             launch_task,
             retry_task,
@@ -1840,9 +2198,16 @@ pub fn run() {
             transition_task,
             task_events,
             task_tool_audit,
+            replay_agent_run,
             pick_project_directory,
             discover_project,
             list_projects,
+            list_project_memory,
+            create_project_memory,
+            correct_project_memory,
+            transition_project_memory,
+            project_memory_history,
+            managed_project_memory,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -1851,7 +2216,20 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_external_url, validate_local_daemon};
+    use super::{
+        bounded_api_error_code, canonical_uuid, validate_external_url, validate_local_daemon,
+    };
+
+    #[test]
+    fn daemon_error_details_expose_only_a_bounded_code() {
+        let body = br#"{"error":"runtime_error","message":"unable to open C:\\Users\\owner\\private.sqlite3?token=secret"}"#;
+        assert_eq!(
+            bounded_api_error_code(body).as_deref(),
+            Some("runtime_error")
+        );
+        assert!(bounded_api_error_code(br#"{"error":"bad code","message":"secret"}"#).is_none());
+        assert!(bounded_api_error_code(&vec![b'a'; 20_000]).is_none());
+    }
 
     #[test]
     fn external_launcher_allows_only_official_openai_https() {
@@ -1869,5 +2247,12 @@ mod tests {
         assert!(validate_local_daemon("http://example.com:7777").is_err());
         assert!(validate_local_daemon("http://127.0.0.1:7777/api").is_err());
         assert!(validate_local_daemon("http://user:secret@127.0.0.1:7777").is_err());
+    }
+
+    #[test]
+    fn organization_route_identities_reject_path_shaping() {
+        assert!(canonical_uuid("00000000-0000-4000-8000-000000000001", "id").is_ok());
+        assert!(canonical_uuid("../providers", "id").is_err());
+        assert!(canonical_uuid("id?revision=other", "id").is_err());
     }
 }
