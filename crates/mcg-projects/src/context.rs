@@ -222,7 +222,12 @@ impl SnapshotInvalidation {
             matches!(
                 path.as_str(),
                 "Cargo.toml" | "package.json" | "Makefile" | "pyproject.toml" | "go.mod"
-            )
+            ) || matches!(
+                path.rsplit('/').next().unwrap_or(path),
+                "global.json" | "Directory.Build.props" | "Directory.Build.targets"
+            ) || [".sln", ".slnx", ".csproj", ".fsproj", ".vbproj"]
+                .iter()
+                .any(|suffix| path.to_ascii_lowercase().ends_with(suffix))
         });
         let invalidate_world_model = invalidate_commands
             || changed_inputs.iter().any(|path| {
@@ -245,6 +250,9 @@ impl SnapshotInvalidation {
                             | "railway.json"
                             | "requirements.txt"
                     )
+                    || [".csproj", ".fsproj", ".vbproj"]
+                        .iter()
+                        .any(|suffix| path.to_ascii_lowercase().ends_with(suffix))
                     || path.starts_with(".github/workflows/")
             });
         Self {

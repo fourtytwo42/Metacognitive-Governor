@@ -52,6 +52,17 @@ grammars; variable, output, provider configuration, resource property, module
 source, version-constraint, and unknown dependency values are never retained.
 This discovery is read-only and does not run Terraform or turn topology into
 deployment authority.
+.NET solution and project manifests (`.sln`, `.slnx`, `.csproj`, `.fsproj`,
+and `.vbproj`) in the root or conventional `src/`, `apps/`, `packages/`,
+`tests/`, and `services/` trees contribute deterministic `dotnet build`/`test`
+commands, the .NET runtime and NuGet package manager, named projects, bounded
+`PackageReference`/`FrameworkReference` dependencies, and exact admitted
+`ProjectReference` ordering. Generated `bin/` and `obj/` trees and unrelated
+vendor trees are excluded. The XML reader rejects document types and malformed
+documents and retains only strictly bounded `Include` identities: target
+frameworks, versions, properties, repository URLs, credentials, and arbitrary
+XML values never enter the world model. Project discovery never runs `dotnet`
+or restores packages.
 Package `homepage` contributes only a credential-free HTTP(S) origin. Every node
 and relationship retains its manifest source and uses a content-stable identity;
 the desktop resolves those identities back to consumer-readable labels.

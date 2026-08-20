@@ -7,6 +7,7 @@ use std::{
 
 use chrono::Utc;
 use mcg_domain::{ProjectId, ProjectSnapshotId};
+use quick_xml::{Reader, XmlVersion, events::Event};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -39,6 +40,8 @@ pub enum ProjectDiscoveryError {
     Toml(#[from] toml::de::Error),
     #[error("project manifest is invalid YAML: {0}")]
     Yaml(String),
+    #[error("project manifest is invalid XML: {0}")]
+    Xml(String),
     #[error("project manifest exceeds the {MAX_MANIFEST_BYTES}-byte discovery limit: {0}")]
     ManifestTooLarge(String),
 }
@@ -197,7 +200,7 @@ impl ProjectDiscoverer {
         let languages = discover_languages(&files);
         let build_systems = discover_build_systems(&root, &files);
         let test_systems = discover_test_systems(&root, &files)?;
-        let package_managers = discover_package_managers(&files);
+        let package_managers = discover_package_managers(&root, &files);
         let services = discover_services(&root, &files);
         let ci_systems = discover_ci(&files);
         let important_directories = discover_important_directories(&root);
@@ -431,6 +434,18 @@ fn discover_commands(
         commands.push(command("build", "make", "Makefile"));
         commands.push(command("test", "make test", "Makefile"));
     }
+    if let Some(target) = dotnet_command_target(root, files) {
+        commands.push(command(
+            "build",
+            &format!("dotnet build \"{target}\""),
+            &target,
+        ));
+        commands.push(command(
+            "test",
+            &format!("dotnet test \"{target}\""),
+            &target,
+        ));
+    }
     commands.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -469,6 +484,32 @@ fn preferred_js_runner(files: &[PathBuf]) -> &'static str {
     } else {
         "npm"
     }
+}
+
+fn dotnet_command_target(root: &Path, files: &[PathBuf]) -> Option<String> {
+    let mut candidates = files
+        .iter()
+        .map(|path| relative(root, path))
+        .filter(|path| is_dotnet_solution(path) || is_dotnet_project(path))
+        .filter(|path| safe_command_manifest_path(path))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| {
+        (
+            !is_dotnet_solution(path),
+            path.matches('/').count(),
+            path.clone(),
+        )
+    });
+    candidates.into_iter().next()
+}
+
+fn safe_command_manifest_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 512
+        && path.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'.' | b'_' | b'-' | b' ' | b'(' | b')')
+        })
 }
 
 fn discover_repository(root: &Path) -> RepositoryModel {
@@ -553,11 +594,54 @@ fn is_manifest(path: &str) -> bool {
             | "wrangler.toml"
             | "railway.json"
     ) || path.starts_with(".github/workflows/")
+        || is_dotnet_manifest(path)
         || is_openapi_manifest(path)
         || is_kubernetes_manifest(path)
         || is_helm_chart(path)
         || is_cloudformation_manifest(path)
         || is_terraform_json_manifest(path)
+}
+
+fn is_dotnet_manifest(path: &str) -> bool {
+    is_dotnet_solution(path)
+        || is_dotnet_project(path)
+        || matches!(
+            path,
+            "global.json"
+                | "Directory.Build.props"
+                | "Directory.Build.targets"
+                | "Directory.Packages.props"
+        )
+}
+
+fn is_dotnet_solution(path: &str) -> bool {
+    is_conventional_dotnet_path(path, &[".sln", ".slnx"])
+}
+
+fn is_dotnet_project(path: &str) -> bool {
+    is_conventional_dotnet_path(path, &[".csproj", ".fsproj", ".vbproj"])
+}
+
+fn is_conventional_dotnet_path(path: &str, suffixes: &[&str]) -> bool {
+    let normalized = path.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    if !suffixes.iter().any(|suffix| lower.ends_with(suffix)) {
+        return false;
+    }
+    let components = normalized.split('/').collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| matches!(component.to_ascii_lowercase().as_str(), "bin" | "obj"))
+    {
+        return false;
+    }
+    components.len() == 1
+        || components.first().is_some_and(|component| {
+            matches!(
+                component.to_ascii_lowercase().as_str(),
+                "src" | "apps" | "packages" | "tests" | "services"
+            )
+        })
 }
 
 fn fingerprint(inputs: &BTreeMap<String, String>) -> String {
@@ -614,6 +698,14 @@ fn discover_build_systems(root: &Path, files: &[PathBuf]) -> Vec<String> {
         systems.sort();
         systems.dedup();
     }
+    if files
+        .iter()
+        .any(|path| is_dotnet_manifest(&relative(root, path)))
+    {
+        systems.push(".NET SDK".into());
+        systems.sort();
+        systems.dedup();
+    }
     systems
 }
 
@@ -648,11 +740,17 @@ fn discover_test_systems(
     if files.iter().any(|path| path.ends_with("pytest.ini")) {
         systems.insert("pytest".to_owned());
     }
+    if files
+        .iter()
+        .any(|path| is_dotnet_manifest(&relative(root, path)))
+    {
+        systems.insert("dotnet test".to_owned());
+    }
     Ok(systems.into_iter().collect())
 }
 
-fn discover_package_managers(files: &[PathBuf]) -> Vec<String> {
-    named_presence(
+fn discover_package_managers(root: &Path, files: &[PathBuf]) -> Vec<String> {
+    let mut managers = named_presence(
         files,
         &[
             ("Cargo.lock", "Cargo"),
@@ -662,7 +760,16 @@ fn discover_package_managers(files: &[PathBuf]) -> Vec<String> {
             ("bun.lock", "Bun"),
             ("go.sum", "Go modules"),
         ],
-    )
+    );
+    if files
+        .iter()
+        .any(|path| is_dotnet_project(&relative(root, path)))
+    {
+        managers.push("NuGet".into());
+        managers.sort();
+        managers.dedup();
+    }
+    managers
 }
 
 fn discover_services(root: &Path, files: &[PathBuf]) -> Vec<String> {
@@ -806,6 +913,7 @@ fn world_model(
     }
     add_runtime_and_package_facts(root, files, &mut graph)?;
     add_manifest_dependencies(root, files, &mut graph)?;
+    add_dotnet_facts(root, files, &mut graph)?;
     add_compose_facts(root, files, &mut graph)?;
     add_kubernetes_facts(root, files, &mut graph)?;
     add_helm_facts(root, files, &mut graph)?;
@@ -923,6 +1031,15 @@ fn add_runtime_and_package_facts(
             let id = graph.add_node(WorldNodeKind::Runtime, label, manifest);
             graph.add_relationship("repository", "uses_runtime", &id, manifest);
         }
+    }
+    if let Some(source) = files
+        .iter()
+        .map(|path| relative(root, path))
+        .filter(|path| is_dotnet_project(path))
+        .min()
+    {
+        let id = graph.add_node(WorldNodeKind::Runtime, ".NET", &source);
+        graph.add_relationship("repository", "uses_runtime", &id, &source);
     }
     let Some(package_json) = files
         .iter()
@@ -1047,6 +1164,189 @@ fn add_manifest_dependencies(
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct DotnetProjectFacts {
+    packages: BTreeSet<String>,
+    frameworks: BTreeSet<String>,
+    projects: BTreeSet<String>,
+}
+
+fn add_dotnet_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    let projects = files
+        .iter()
+        .filter_map(|path| {
+            let source = relative(root, path);
+            is_dotnet_project(&source).then_some((source, path))
+        })
+        .take(MAX_MANIFEST_ITEMS)
+        .collect::<Vec<_>>();
+    let mut nodes = BTreeMap::new();
+    let mut facts = BTreeMap::new();
+    for (source, path) in &projects {
+        let label = Path::new(source)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| valid_dotnet_identifier(value))
+            .unwrap_or(".NET project");
+        let id = graph.add_node(WorldNodeKind::Service, label, source);
+        graph.add_relationship("repository", "contains", &id, source);
+        nodes.insert(source.clone(), id);
+        facts.insert(source.clone(), parse_dotnet_project(path, source)?);
+    }
+    for (source, project_facts) in facts {
+        let Some(project_id) = nodes.get(&source) else {
+            continue;
+        };
+        for package in project_facts.packages {
+            let dependency_id = graph.add_node(
+                WorldNodeKind::Dependency,
+                &package,
+                &format!("{source}#PackageReference"),
+            );
+            graph.add_relationship(
+                project_id,
+                "depends_on",
+                &dependency_id,
+                &format!("{source}#PackageReference"),
+            );
+        }
+        for framework in project_facts.frameworks {
+            let dependency_id = graph.add_node(
+                WorldNodeKind::Dependency,
+                &framework,
+                &format!("{source}#FrameworkReference"),
+            );
+            graph.add_relationship(
+                project_id,
+                "depends_on",
+                &dependency_id,
+                &format!("{source}#FrameworkReference"),
+            );
+        }
+        for reference in project_facts.projects {
+            if let Some(target_id) = resolve_dotnet_project_reference(&source, &reference)
+                .and_then(|target| nodes.get(&target))
+            {
+                graph.add_relationship(
+                    project_id,
+                    "depends_on",
+                    target_id,
+                    &format!("{source}#ProjectReference"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_dotnet_project(
+    path: &Path,
+    source: &str,
+) -> Result<DotnetProjectFacts, ProjectDiscoveryError> {
+    let content = read_bounded_manifest(path)?;
+    let mut reader = Reader::from_str(&content);
+    reader.config_mut().trim_text(true);
+    let mut facts = DotnetProjectFacts::default();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let local_name = element.local_name();
+                let name = local_name.as_ref();
+                let destination = if name.eq_ignore_ascii_case(b"PackageReference") {
+                    Some(&mut facts.packages)
+                } else if name.eq_ignore_ascii_case(b"FrameworkReference") {
+                    Some(&mut facts.frameworks)
+                } else if name.eq_ignore_ascii_case(b"ProjectReference") {
+                    Some(&mut facts.projects)
+                } else {
+                    None
+                };
+                if let Some(destination) = destination {
+                    for attribute in element.attributes().with_checks(true) {
+                        let attribute = attribute.map_err(|error| {
+                            ProjectDiscoveryError::Xml(format!("{source}: {error}"))
+                        })?;
+                        if !attribute
+                            .key
+                            .local_name()
+                            .as_ref()
+                            .eq_ignore_ascii_case(b"Include")
+                        {
+                            continue;
+                        }
+                        let value = attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .map_err(|error| {
+                                ProjectDiscoveryError::Xml(format!("{source}: {error}"))
+                            })?;
+                        let value = value.trim();
+                        let valid = if name.eq_ignore_ascii_case(b"ProjectReference") {
+                            valid_dotnet_reference(value)
+                        } else {
+                            valid_dotnet_identifier(value)
+                        };
+                        if valid {
+                            destination.insert(value.to_owned());
+                        }
+                        break;
+                    }
+                }
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(ProjectDiscoveryError::Xml(format!(
+                    "{source}: document types are not admitted"
+                )));
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(ProjectDiscoveryError::Xml(format!("{source}: {error}")));
+            }
+        }
+    }
+    Ok(facts)
+}
+
+fn valid_dotnet_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+}
+
+fn valid_dotnet_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'\\' | b'.' | b'_' | b'-' | b' ' | b'(' | b')')
+        })
+}
+
+fn resolve_dotnet_project_reference(source: &str, reference: &str) -> Option<String> {
+    let mut components = source
+        .rsplit_once('/')
+        .map_or_else(Vec::new, |(parent, _)| {
+            parent.split('/').map(str::to_owned).collect()
+        });
+    for component in reference.replace('\\', "/").split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value => components.push(value.to_owned()),
+        }
+    }
+    let normalized = components.join("/");
+    is_dotnet_project(&normalized).then_some(normalized)
 }
 
 fn add_compose_facts(
@@ -2899,6 +3199,188 @@ Resources:
         ] {
             assert!(!retained.contains(forbidden), "retained {forbidden}");
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture proves the complete bounded .NET manifest contract.
+    fn dotnet_topology_is_project_aware_dependency_ordered_and_secret_safe() {
+        let root = tempdir().expect("root");
+        fs::create_dir_all(root.path().join("apps/Store.Api/obj")).expect("API directory");
+        fs::create_dir_all(root.path().join("packages/Store.Core")).expect("core directory");
+        fs::create_dir_all(root.path().join("vendor/Unsafe")).expect("vendor directory");
+        fs::write(
+            root.path().join("Store.sln"),
+            "Microsoft Visual Studio Solution File",
+        )
+        .expect("solution");
+        fs::write(
+            root.path().join("apps/Store.Api/Store.Api.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Password>never-retain-this</Password>
+    <RepositoryUrl>https://owner:secret@example.test/private</RepositoryUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.66" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\..\packages\Store.Core\Store.Core.csproj" />
+    <ProjectReference Include="..\..\..\outside\Escape.csproj" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .expect("API project");
+        fs::write(
+            root.path().join("packages/Store.Core/Store.Core.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="9.0.4" PrivateAssets="all" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .expect("core project");
+        fs::write(
+            root.path().join("apps/Store.Api/obj/Generated.csproj"),
+            r#"<Project><ItemGroup><PackageReference Include="must-not-appear" /></ItemGroup></Project>"#,
+        )
+        .expect("generated project");
+        fs::write(
+            root.path().join("vendor/Unsafe/Unsafe.csproj"),
+            r#"<Project><ItemGroup><PackageReference Include="vendor-secret" /></ItemGroup></Project>"#,
+        )
+        .expect("unrelated project");
+
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
+        let second = ProjectDiscoverer::discover(root.path(), project_id).expect("rediscover");
+        assert_eq!(first.world, second.world);
+        assert!(first.build_systems.contains(&".NET SDK".to_owned()));
+        assert!(first.test_systems.contains(&"dotnet test".to_owned()));
+        assert!(first.package_managers.contains(&"NuGet".to_owned()));
+        assert!(first.commands.iter().any(|command| {
+            command.name == "build"
+                && command.command == "dotnet build \"Store.sln\""
+                && command.source == "Store.sln"
+        }));
+        assert!(first.commands.iter().any(|command| {
+            command.name == "test" && command.command == "dotnet test \"Store.sln\""
+        }));
+        for watched in [
+            "Store.sln",
+            "apps/Store.Api/Store.Api.csproj",
+            "packages/Store.Core/Store.Core.csproj",
+        ] {
+            assert!(
+                first.watched_inputs.contains_key(watched),
+                "missing {watched}"
+            );
+        }
+        assert!(
+            !first
+                .watched_inputs
+                .contains_key("vendor/Unsafe/Unsafe.csproj")
+        );
+        assert!(
+            !first
+                .watched_inputs
+                .contains_key("apps/Store.Api/obj/Generated.csproj")
+        );
+        for (kind, label) in [
+            (WorldNodeKind::Runtime, ".NET"),
+            (WorldNodeKind::Service, "Store.Api"),
+            (WorldNodeKind::Service, "Store.Core"),
+            (WorldNodeKind::Dependency, "Dapper"),
+            (WorldNodeKind::Dependency, "Microsoft.AspNetCore.App"),
+            (WorldNodeKind::Dependency, "Npgsql"),
+        ] {
+            assert!(
+                first
+                    .world
+                    .nodes
+                    .iter()
+                    .any(|node| node.kind == kind && node.label == label),
+                "missing {kind:?} {label}"
+            );
+        }
+        let retained = serde_json::to_string(&first.world).expect("serialize world model");
+        for forbidden in [
+            "never-retain-this",
+            "owner:secret",
+            "2.1.66",
+            "9.0.4",
+            "must-not-appear",
+            "vendor-secret",
+            "outside",
+        ] {
+            assert!(!retained.contains(forbidden), "retained {forbidden}");
+        }
+        let node_id = |kind, label: &str| {
+            first
+                .world
+                .nodes
+                .iter()
+                .find(|node| node.kind == kind && node.label == label)
+                .map(|node| node.id.clone())
+                .expect("world node")
+        };
+        let api = node_id(WorldNodeKind::Service, "Store.Api");
+        let core = node_id(WorldNodeKind::Service, "Store.Core");
+        assert!(
+            first.world.relationships.iter().any(|edge| {
+                edge.from == api && edge.relation == "depends_on" && edge.to == core
+            })
+        );
+        let plan = first.topology_plan();
+        assert_eq!(plan.status, TopologyPlanStatus::Ready);
+        let stage_of = |label: &str| {
+            plan.stages
+                .iter()
+                .find(|stage| stage.nodes.iter().any(|node| node.label == label))
+                .map(|stage| stage.index)
+                .expect("planned node")
+        };
+        assert!(stage_of("Npgsql") < stage_of("Store.Core"));
+        assert!(stage_of("Store.Core") < stage_of("Store.Api"));
+
+        let mut watcher = ProjectWatcher::start(root.path(), project_id).expect("watch");
+        fs::write(
+            root.path().join("packages/Store.Core/Store.Core.csproj"),
+            r#"<Project><ItemGroup><PackageReference Include="Polly" /></ItemGroup></Project>"#,
+        )
+        .expect("updated core project");
+        let (updated, invalidation) = watcher.poll().expect("poll").expect("change");
+        assert_eq!(
+            invalidation.changed_inputs,
+            vec!["packages/Store.Core/Store.Core.csproj"]
+        );
+        assert!(invalidation.invalidate_commands);
+        assert!(invalidation.invalidate_world_model);
+        assert!(updated.world.nodes.iter().any(|node| node.label == "Polly"));
+    }
+
+    #[test]
+    fn dotnet_xml_rejects_document_types_and_malformed_projects() {
+        let document_type = tempdir().expect("DOCTYPE root");
+        fs::write(
+            document_type.path().join("Unsafe.csproj"),
+            r#"<!DOCTYPE Project [<!ENTITY secret SYSTEM "file:///secret">]><Project><ItemGroup><PackageReference Include="&secret;" /></ItemGroup></Project>"#,
+        )
+        .expect("DOCTYPE project");
+        assert!(matches!(
+            ProjectDiscoverer::discover(document_type.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Xml(_))
+        ));
+
+        let malformed = tempdir().expect("malformed root");
+        fs::write(
+            malformed.path().join("Broken.csproj"),
+            r#"<Project><ItemGroup><PackageReference Include="Dapper"></Project>"#,
+        )
+        .expect("malformed project");
+        assert!(matches!(
+            ProjectDiscoverer::discover(malformed.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Xml(_))
+        ));
     }
 
     #[test]
