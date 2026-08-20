@@ -8,9 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chromiumoxide::{Browser, BrowserConfig};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_SCHEMA_VERSION: u16 = 3;
+const REQUEST_SCHEMA_VERSION: u16 = 4;
 const SETUP_FAILURE_EXIT_CODE: i32 = 125;
 const COMMAND_FAILURE_EXIT_CODE: i32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
@@ -22,7 +24,11 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
+const MAX_RENDERED_DOM_BYTES: usize = 4 * 1024 * 1024;
 const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(20);
+const BROWSER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
 const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -34,6 +40,7 @@ struct RunnerRequest {
     executable: String,
     argv: Vec<String>,
     toolchain_root: Option<String>,
+    browser_executable: Option<String>,
     probe: Option<RunnerProbe>,
 }
 
@@ -47,6 +54,18 @@ enum RunnerProbe {
     TcpConnect {
         endpoint: String,
     },
+    PageRender {
+        url: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderState {
+    ready_state: String,
+    body_present: bool,
+    width: u64,
+    height: u64,
 }
 
 fn main() {
@@ -125,6 +144,10 @@ fn execute_service_probe(
             expected_status: Option<u16>,
         },
         Tcp(LoopbackTcpTarget),
+        PageRender {
+            target: LoopbackHttpTarget,
+            browser: String,
+        },
     }
     let active = match probe {
         RunnerProbe::HttpStatus {
@@ -137,10 +160,19 @@ fn execute_service_probe(
         RunnerProbe::TcpConnect { endpoint } => {
             ActiveProbe::Tcp(LoopbackTcpTarget::parse(endpoint)?)
         }
+        RunnerProbe::PageRender { url } => ActiveProbe::PageRender {
+            target: LoopbackHttpTarget::parse(url)?,
+            browser: request
+                .browser_executable
+                .clone()
+                .ok_or("page render probe requires a browser")?,
+        },
     };
     let (service_host, port) = match &active {
-        ActiveProbe::Http { target, .. } => (target.service_host(), target.port()),
         ActiveProbe::Tcp(target) => (target.service_host(), target.port()),
+        ActiveProbe::Http { target, .. } | ActiveProbe::PageRender { target, .. } => {
+            (target.service_host(), target.port())
+        }
     };
     let mut command = prepared_command(request, workspace)?;
     command
@@ -160,6 +192,10 @@ fn execute_service_probe(
                 )
             }),
             ActiveProbe::Tcp(target) => target.is_listening().then_some(true),
+            ActiveProbe::PageRender { target, browser } => target
+                .request_status()
+                .filter(|status| (200..300).contains(status))
+                .map(|_| render_page(browser, workspace, target)),
         };
         if let Some(passed) = passed {
             break if passed { 0 } else { COMMAND_FAILURE_EXIT_CODE };
@@ -203,6 +239,11 @@ fn validate_request(
             return Err("toolchain root escaped the sandbox contract");
         }
     }
+    match request.browser_executable.as_deref() {
+        Some(browser) if browser_is_exact(browser, enforce_sandbox_paths) => {}
+        Some(_) => return Err("browser executable escaped the sandbox contract"),
+        None => {}
+    }
     if let Some(probe) = &request.probe {
         match probe {
             RunnerProbe::HttpStatus {
@@ -217,7 +258,15 @@ fn validate_request(
             RunnerProbe::TcpConnect { endpoint } => {
                 LoopbackTcpTarget::parse(endpoint)?;
             }
+            RunnerProbe::PageRender { url } => {
+                LoopbackHttpTarget::parse(url)?;
+                if request.browser_executable.is_none() {
+                    return Err("page render probe requires a browser");
+                }
+            }
         }
+    } else if request.browser_executable.is_some() {
+        return Err("browser executable requires a page render probe");
     }
     let command_bytes = request
         .argv
@@ -270,6 +319,115 @@ fn toolchain_root_is_exact(toolchain_root: &str) -> bool {
     {
         toolchain_root == "/mcg-toolchain"
     }
+}
+
+fn browser_is_exact(browser: &str, enforce_sandbox_paths: bool) -> bool {
+    let path = Path::new(browser);
+    if browser.contains('\0')
+        || !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return false;
+    }
+    if !enforce_sandbox_paths {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        path.parent().is_some_and(|parent| {
+            parent
+                .to_string_lossy()
+                .eq_ignore_ascii_case(r"C:\mcg-browser")
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        path.parent() == Some(Path::new("/mcg-browser"))
+    }
+}
+
+fn render_page(browser: &str, workspace: &Path, target: &LoopbackHttpTarget) -> bool {
+    let profile = workspace.join(".mcg-browser-profile");
+    if fs::create_dir(&profile).is_err() {
+        return false;
+    }
+    let rendered = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .is_ok_and(|runtime| runtime.block_on(render_page_with_browser(browser, &profile, target)));
+    let _ = fs::remove_dir_all(&profile);
+    rendered
+}
+
+async fn render_page_with_browser(
+    executable: &str,
+    profile: &Path,
+    target: &LoopbackHttpTarget,
+) -> bool {
+    let config = BrowserConfig::builder()
+        .chrome_executable(executable)
+        .user_data_dir(profile)
+        .window_size(1_280, 800)
+        .no_sandbox()
+        .launch_timeout(BROWSER_LAUNCH_TIMEOUT)
+        .request_timeout(BROWSER_RENDER_TIMEOUT)
+        .build();
+    let Ok(config) = config else {
+        return false;
+    };
+    let Ok((mut browser, mut handler)) = Browser::launch(config).await else {
+        return false;
+    };
+    let handler_task = tokio::spawn(async move {
+        while let Some(event) = handler.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+    let url = format!("http://{}{}", target.authority, target.request_target);
+    let rendered = tokio::time::timeout(BROWSER_RENDER_TIMEOUT, async {
+        let page = browser.new_page("about:blank").await.ok()?;
+        page.goto(&url).await.ok()?;
+        let final_url = page.url().await.ok().flatten()?;
+        let final_target = LoopbackHttpTarget::parse(&final_url).ok()?;
+        if final_target.authority != target.authority {
+            return None;
+        }
+        let state: RenderState = page
+            .evaluate(
+                "({readyState: document.readyState, bodyPresent: !!document.body, width: Math.max(document.documentElement?.scrollWidth || 0, document.body?.scrollWidth || 0), height: Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0)})",
+            )
+            .await
+            .ok()?
+            .into_value()
+            .ok()?;
+        let bytes = page.content_bytes().await.ok()?;
+        (matches!(state.ready_state.as_str(), "interactive" | "complete")
+            && state.body_present
+            && state.width > 0
+            && state.height > 0
+            && bytes.len() <= MAX_RENDERED_DOM_BYTES
+            && rendered_dom_is_valid(&bytes))
+        .then_some(())
+    })
+    .await
+    .is_ok_and(|result| result.is_some());
+    let _ = tokio::time::timeout(BROWSER_SHUTDOWN_TIMEOUT, browser.close()).await;
+    let _ = tokio::time::timeout(BROWSER_SHUTDOWN_TIMEOUT, browser.wait()).await;
+    handler_task.abort();
+    rendered
+}
+
+fn rendered_dom_is_valid(bytes: &[u8]) -> bool {
+    bytes
+        .windows(5)
+        .any(|window| window.eq_ignore_ascii_case(b"<body"))
+        && bytes
+            .windows(6)
+            .any(|window| window.eq_ignore_ascii_case(b"</body"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,7 +763,9 @@ mod tests {
                 let mut request = [0_u8; 1024];
                 let mut read = 0;
                 while read < request.len()
-                    && !request[..read].windows(2).any(|window| window == b"\r\n")
+                    && !request[..read]
+                        .windows(4)
+                        .any(|window| window == b"\r\n\r\n")
                 {
                     match stream.read(&mut request[read..]) {
                         Ok(0) | Err(_) => break,
@@ -613,6 +773,7 @@ mod tests {
                     }
                 }
                 stream.write_all(response).expect("response");
+                stream.flush().expect("flush response");
                 if request[..read].starts_with(request_line) {
                     break;
                 }
@@ -661,6 +822,7 @@ mod tests {
             executable,
             argv,
             toolchain_root: None,
+            browser_executable: None,
             probe: None,
         };
         assert_eq!(
@@ -686,6 +848,7 @@ mod tests {
             executable,
             argv,
             toolchain_root: None,
+            browser_executable: None,
             probe: None,
         };
         assert_eq!(execute_request(&request, false), Ok(0));
@@ -729,6 +892,7 @@ mod tests {
             executable: "tool.exe".into(),
             argv: Vec::new(),
             toolchain_root: None,
+            browser_executable: None,
             probe: None,
         };
         assert!(validate_request(&request, true).is_err());
@@ -798,7 +962,14 @@ mod tests {
         );
         let target =
             LoopbackHttpTarget::parse(&format!("http://127.0.0.1:{port}/health")).expect("target");
-        assert_eq!(target.request_status(), Some(204));
+        let observed = (0..10).find_map(|_| {
+            let status = target.request_status();
+            if status.is_none() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            status
+        });
+        assert_eq!(observed, Some(204));
         server.join().expect("server");
     }
 
@@ -830,6 +1001,7 @@ mod tests {
                 executable,
                 argv,
                 toolchain_root: None,
+                browser_executable: None,
                 probe: Some(RunnerProbe::HttpStatus {
                     url: format!("http://127.0.0.1:{port}/ready"),
                     expected_status: Some(expected_status),
@@ -842,5 +1014,108 @@ mod tests {
 
         assert_eq!(exercise(201), 0);
         assert_eq!(exercise(204), COMMAND_FAILURE_EXIT_CODE);
+    }
+
+    #[test]
+    fn page_render_contract_requires_exact_browser_and_hydrated_body() {
+        assert!(rendered_dom_is_valid(
+            b"<!doctype html><html><body><main>ready</main></body></html>"
+        ));
+        assert!(!rendered_dom_is_valid(b"<html><head></head></html>"));
+
+        let mut request = RunnerRequest {
+            schema_version: REQUEST_SCHEMA_VERSION,
+            source_root: if cfg!(windows) {
+                r"C:\mcg-source".into()
+            } else {
+                "/mcg-source".into()
+            },
+            workspace_root: if cfg!(windows) {
+                r"C:\mcg-workspace".into()
+            } else {
+                "/tmp/mcg-workspace".into()
+            },
+            executable: "service".into(),
+            argv: Vec::new(),
+            toolchain_root: None,
+            browser_executable: None,
+            probe: Some(RunnerProbe::PageRender {
+                url: "http://127.0.0.1:8080/".into(),
+            }),
+        };
+        assert!(validate_request(&request, true).is_err());
+        request.browser_executable = Some(if cfg!(windows) {
+            r"C:\mcg-browser\chrome.exe".into()
+        } else {
+            "/mcg-browser/chrome".into()
+        });
+        assert!(validate_request(&request, true).is_ok());
+        request.browser_executable = Some(if cfg!(windows) {
+            r"C:\outside\chrome.exe".into()
+        } else {
+            "/outside/chrome".into()
+        });
+        assert!(validate_request(&request, true).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires MCG_BROWSER_EXECUTABLE and a real local Chromium runtime"]
+    fn real_browser_renders_page_beside_service() {
+        let browser = std::env::var_os("MCG_BROWSER_EXECUTABLE")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_file())
+            .expect("MCG_BROWSER_EXECUTABLE");
+        let reservation =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve loopback port");
+        let port = reservation.local_addr().expect("reserved address").port();
+        drop(reservation);
+        let source = tempfile::tempdir().expect("source");
+        fs::write(
+            source.path().join("server.ps1"),
+            format!(
+                r#"$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, {port})
+$listener.Start()
+while ($true) {{
+  $client = $listener.AcceptTcpClient()
+  $stream = $client.GetStream()
+  $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+  while (($line = $reader.ReadLine()) -ne '') {{ if ($null -eq $line) {{ break }} }}
+  $body = '<!doctype html><html><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>'
+  $bytes = [Text.Encoding]::UTF8.GetBytes($body)
+  $header = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n")
+  $stream.Write($header, 0, $header.Length)
+  $stream.Write($bytes, 0, $bytes.Length)
+  $stream.Flush()
+  $client.Dispose()
+}}
+"#
+            ),
+        )
+        .expect("service fixture");
+        let destination_parent = tempfile::tempdir().expect("destination parent");
+        let request = RunnerRequest {
+            schema_version: REQUEST_SCHEMA_VERSION,
+            source_root: source.path().to_string_lossy().into_owned(),
+            workspace_root: destination_parent
+                .path()
+                .join("workspace")
+                .to_string_lossy()
+                .into_owned(),
+            executable: "powershell.exe".into(),
+            argv: vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "server.ps1".into(),
+            ],
+            toolchain_root: None,
+            browser_executable: Some(browser.to_string_lossy().into_owned()),
+            probe: Some(RunnerProbe::PageRender {
+                url: format!("http://127.0.0.1:{port}/"),
+            }),
+        };
+        assert_eq!(execute_request(&request, false), Ok(0));
     }
 }

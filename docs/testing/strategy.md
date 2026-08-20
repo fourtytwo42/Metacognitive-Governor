@@ -370,8 +370,8 @@ Windows tests prove the generated
 Windows Sandbox profile disables network/device/redirection surfaces, enables
 Protected Client, XML-escapes host paths, exposes exactly two mandatory read-only
 host mappings plus exactly one optional bounded Node toolchain mapping, runs the
-package-local helper as `System`, preserves the schema-3 JSON argument and typed
-loopback-probe
+package-local helper as `System`, preserves the schema-4 JSON argument and typed
+loopback/browser-probe
 boundary behind the CLI's single compile-time command value, rejects canonical
 path-prefix confusion, and produces no evidence or workspace effect when the CLI
 is absent.
@@ -384,7 +384,9 @@ links the runner's C runtime and rejects Visual C++ redistributable DLL imports.
 Live Win11 qualification on the current Store-delivered Sandbox CLI proves
 official-package discovery, serialized start/exec/probe/stop compatibility,
 real nested runner execution, ephemeral command writes, and no persistence
-through the read-only host mapping. Windows Sandbox may satisfy a mapped-folder
+through the read-only host mapping. An optional browser distribution is
+independently bounded and read-only, and the schema-4 runner retains the static
+C-runtime contract while embedding the DevTools client. Windows Sandbox may satisfy a mapped-folder
 write through its disposable view, so the gate measures host non-persistence
 rather than assuming the child must fail. The same owner-controlled gate proves
 no default route or non-loopback IPv4 address, a two-second command timeout with
@@ -406,8 +408,12 @@ a Node HTTP service and probes it inside the same explicitly user- and
 network-unshared bubblewrap namespace while an identically addressed host
 listener remains unreachable; it
 requires exact-status success, wrong-status failure, zero host hits, and service
-cleanup. The corresponding real Win11 lane uses runner schema 3 and must prove
-the same pass/fail behavior with no Sandbox session left behind.
+cleanup. The Ubuntu lane additionally loads a hydrated page through Chromium's
+DevTools protocol using the package-adjacent schema-4 runner in that same
+namespace, proves the colliding host listener still receives zero requests, and
+leaves zero candidate/browser processes. The corresponding real Win11 lane uses
+runner schema 4 and must prove the same HTTP/TCP/browser behavior with no Sandbox
+session left behind.
 The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision promotes only the
 independently verified candidate while retaining one evaluation, benchmark, and

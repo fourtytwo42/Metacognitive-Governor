@@ -42,6 +42,8 @@ const BWRAP_TMPFS_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 #[cfg(any(target_os = "linux", test))]
 const BWRAP_ADDRESS_SPACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 #[cfg(any(target_os = "linux", test))]
+const BWRAP_BROWSER_ADDRESS_SPACE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+#[cfg(any(target_os = "linux", test))]
 const BWRAP_MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(any(target_os = "linux", test))]
 const BWRAP_MAX_PROCESSES: u32 = 256;
@@ -57,6 +59,12 @@ const NODE_TOOLCHAIN_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const NODE_TOOLCHAIN_MAX_FILES: u64 = 100_000;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 const NODE_TOOLCHAIN_MAX_DEPTH: usize = 24;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const BROWSER_RUNTIME_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const BROWSER_RUNTIME_MAX_FILES: u64 = 100_000;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const BROWSER_RUNTIME_MAX_DEPTH: usize = 16;
 #[cfg(any(target_os = "windows", test))]
 const WSB_START_TIMEOUT_SECONDS: u64 = 180;
 #[cfg(any(target_os = "windows", test))]
@@ -105,6 +113,13 @@ struct NodeToolchain {
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserRuntime {
+    host_root: PathBuf,
+    executable_name: String,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ShadowServiceProbe {
     Http {
         url: String,
@@ -113,14 +128,17 @@ enum ShadowServiceProbe {
     Tcp {
         endpoint: String,
     },
+    PageRender {
+        url: String,
+    },
 }
 
 #[cfg(any(target_os = "linux", test))]
 impl ShadowServiceProbe {
     fn endpoint(&self) -> &str {
         match self {
-            Self::Http { url, .. } => url,
             Self::Tcp { endpoint } => endpoint,
+            Self::Http { url, .. } | Self::PageRender { url } => url,
         }
     }
 
@@ -129,7 +147,7 @@ impl ShadowServiceProbe {
             Self::Http {
                 expected_status, ..
             } => *expected_status,
-            Self::Tcp { .. } => None,
+            Self::Tcp { .. } | Self::PageRender { .. } => None,
         }
     }
 
@@ -137,6 +155,7 @@ impl ShadowServiceProbe {
         match self {
             Self::Http { .. } => "http",
             Self::Tcp { .. } => "tcp",
+            Self::PageRender { .. } => "page_render",
         }
     }
 }
@@ -172,7 +191,10 @@ pub(crate) trait ShadowCommandVerifier: Send + Sync {
 pub(crate) fn default_shadow_command_verifier() -> Arc<dyn ShadowCommandVerifier> {
     #[cfg(target_os = "linux")]
     if let Some(executable) = trusted_bubblewrap_executable() {
-        return Arc::new(LinuxBubblewrapVerifier { executable });
+        return Arc::new(LinuxBubblewrapVerifier {
+            executable,
+            runner: trusted_linux_shadow_runner(),
+        });
     }
     #[cfg(target_os = "windows")]
     if let Some((executable, runner)) = trusted_windows_sandbox_components() {
@@ -206,6 +228,7 @@ impl ShadowCommandVerifier for UnavailableShadowCommandVerifier {
 #[derive(Debug)]
 struct LinuxBubblewrapVerifier {
     executable: PathBuf,
+    runner: Option<PathBuf>,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -319,11 +342,23 @@ impl LinuxBubblewrapVerifier {
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
         let probe = shadow_service_probe(condition)?;
+        let browser = matches!(probe, ShadowServiceProbe::PageRender { .. })
+            .then(discover_browser_runtime)
+            .transpose()?
+            .flatten();
+        if matches!(probe, ShadowServiceProbe::PageRender { .. }) && browser.is_none() {
+            return Err(ToolError::Unavailable(
+                "same-sandbox page rendering requires a configured browser runtime".into(),
+            ));
+        }
         let probe_program_available = match probe {
-            ShadowServiceProbe::Http { .. } => Path::new("/usr/bin/curl").is_file(),
             ShadowServiceProbe::Tcp { .. } => Path::new("/bin/bash").is_file(),
+            ShadowServiceProbe::Http { .. } => Path::new("/usr/bin/curl").is_file(),
+            ShadowServiceProbe::PageRender { .. } => true,
         };
-        if !probe_program_available || !Path::new("/usr/bin/sleep").is_file() {
+        let sleep_available = matches!(probe, ShadowServiceProbe::PageRender { .. })
+            || Path::new("/usr/bin/sleep").is_file();
+        if !probe_program_available || !sleep_available {
             return Err(ToolError::Unavailable(
                 "Linux shadow service verification requires its trusted probe utility and sleep"
                     .into(),
@@ -332,6 +367,23 @@ impl LinuxBubblewrapVerifier {
         let (executable, command_arguments) = split_command(service_command)?;
         let toolchain = discover_node_toolchain(executable)?;
         let proof = EphemeralProof::create(&workspace_root)?;
+        let runner_request = if matches!(probe, ShadowServiceProbe::PageRender { .. }) {
+            self.runner.as_deref().ok_or_else(|| {
+                ToolError::Unavailable(
+                    "same-sandbox page rendering requires the packaged shadow runner".into(),
+                )
+            })?;
+            Some(LinuxRunnerRequestFile::create(
+                &workspace_root,
+                executable,
+                &command_arguments,
+                toolchain.as_ref(),
+                browser.as_ref().expect("browser checked above"),
+                &probe,
+            )?)
+        } else {
+            None
+        };
         let argv = bubblewrap_service_arguments(
             &workspace_root,
             &proof.path,
@@ -339,6 +391,11 @@ impl LinuxBubblewrapVerifier {
             &command_arguments,
             &probe,
             toolchain.as_ref(),
+            browser.as_ref(),
+            self.runner.as_deref(),
+            runner_request
+                .as_ref()
+                .map(|request| request.path.as_path()),
         )?;
         let process = ProcessExecutor::new(
             [workspace_root.clone()],
@@ -481,9 +538,14 @@ impl WindowsSandboxVerifier {
             &command_arguments,
             toolchain.as_ref(),
             None,
+            None,
         )?;
-        let configuration =
-            windows_sandbox_configuration(&workspace_root, &harness.path, toolchain.as_ref())?;
+        let configuration = windows_sandbox_configuration(
+            &workspace_root,
+            &harness.path,
+            toolchain.as_ref(),
+            None,
+        )?;
         let process = ProcessExecutor::new(
             [harness.path.clone()],
             Arc::new(RejectingCredentialResolver),
@@ -507,6 +569,15 @@ impl WindowsSandboxVerifier {
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
         let probe = shadow_service_probe(condition)?;
+        let browser = matches!(probe, ShadowServiceProbe::PageRender { .. })
+            .then(discover_browser_runtime)
+            .transpose()?
+            .flatten();
+        if matches!(probe, ShadowServiceProbe::PageRender { .. }) && browser.is_none() {
+            return Err(ToolError::Unavailable(
+                "same-sandbox page rendering requires a configured browser runtime".into(),
+            ));
+        }
         let (executable, command_arguments) = split_command(service_command)?;
         let toolchain = discover_node_toolchain(executable)?;
         let executable = windows_command_name(executable);
@@ -516,10 +587,15 @@ impl WindowsSandboxVerifier {
             &executable,
             &command_arguments,
             toolchain.as_ref(),
+            browser.as_ref(),
             Some(&probe),
         )?;
-        let configuration =
-            windows_sandbox_configuration(&workspace_root, &harness.path, toolchain.as_ref())?;
+        let configuration = windows_sandbox_configuration(
+            &workspace_root,
+            &harness.path,
+            toolchain.as_ref(),
+            browser.as_ref(),
+        )?;
         let process = ProcessExecutor::new(
             [harness.path.clone()],
             Arc::new(RejectingCredentialResolver),
@@ -665,6 +741,7 @@ struct WindowsRunnerRequest<'a> {
     executable: &'a str,
     argv: &'a [String],
     toolchain_root: Option<&'a str>,
+    browser_executable: Option<String>,
     probe: Option<WindowsRunnerProbe<'a>>,
 }
 
@@ -678,6 +755,9 @@ enum WindowsRunnerProbe<'a> {
     },
     TcpConnect {
         endpoint: &'a str,
+    },
+    PageRender {
+        url: &'a str,
     },
 }
 
@@ -694,6 +774,7 @@ impl WindowsSandboxHarness {
         executable: &str,
         argv: &[String],
         toolchain: Option<&NodeToolchain>,
+        browser: Option<&BrowserRuntime>,
         probe: Option<&ShadowServiceProbe>,
     ) -> Result<Self, ToolError> {
         let parent = workspace_root
@@ -707,12 +788,14 @@ impl WindowsSandboxHarness {
                 ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
             })?;
             let request = WindowsRunnerRequest {
-                schema_version: 3,
+                schema_version: 4,
                 source_root: r"C:\mcg-source",
                 workspace_root: r"C:\mcg-workspace",
                 executable,
                 argv,
                 toolchain_root: toolchain.map(|_| r"C:\mcg-toolchain"),
+                browser_executable: browser
+                    .map(|browser| format!(r"C:\mcg-browser\{}", browser.executable_name)),
                 probe: probe.map(|probe| match probe {
                     ShadowServiceProbe::Http {
                         url,
@@ -723,6 +806,9 @@ impl WindowsSandboxHarness {
                     },
                     ShadowServiceProbe::Tcp { endpoint } => {
                         WindowsRunnerProbe::TcpConnect { endpoint }
+                    }
+                    ShadowServiceProbe::PageRender { url } => {
+                        WindowsRunnerProbe::PageRender { url }
                     }
                 }),
             };
@@ -763,6 +849,7 @@ fn windows_sandbox_configuration(
     source: &Path,
     harness: &Path,
     toolchain: Option<&NodeToolchain>,
+    browser: Option<&BrowserRuntime>,
 ) -> Result<String, ToolError> {
     let source = xml_escape_path(source)?;
     let harness = xml_escape_path(harness)?;
@@ -776,8 +863,18 @@ fn windows_sandbox_configuration(
             })
         },
     )?;
+    let browser_mapping = browser.map_or_else(
+        || Ok(String::new()),
+        |browser| {
+            xml_escape_path(&browser.host_root).map(|root| {
+                format!(
+                    "<MappedFolder><HostFolder>{root}</HostFolder><SandboxFolder>C:\\mcg-browser</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>"
+                )
+            })
+        },
+    )?;
     Ok(format!(
-        "<Configuration><vGPU>Disable</vGPU><Networking>Disable</Networking><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><ClipboardRedirection>Disable</ClipboardRedirection><ProtectedClient>Enable</ProtectedClient><MemoryInMB>8192</MemoryInMB><MappedFolders><MappedFolder><HostFolder>{source}</HostFolder><SandboxFolder>C:\\mcg-source</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder><MappedFolder><HostFolder>{harness}</HostFolder><SandboxFolder>C:\\mcg-harness</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>{toolchain_mapping}</MappedFolders></Configuration>"
+        "<Configuration><vGPU>Disable</vGPU><Networking>Disable</Networking><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><ClipboardRedirection>Disable</ClipboardRedirection><ProtectedClient>Enable</ProtectedClient><MemoryInMB>8192</MemoryInMB><MappedFolders><MappedFolder><HostFolder>{source}</HostFolder><SandboxFolder>C:\\mcg-source</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder><MappedFolder><HostFolder>{harness}</HostFolder><SandboxFolder>C:\\mcg-harness</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>{toolchain_mapping}{browser_mapping}</MappedFolders></Configuration>"
     ))
 }
 
@@ -1010,10 +1107,10 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
         SuccessCondition::HttpResponds { url, status } => (url, Some(*status), "http"),
         SuccessCondition::ServiceHealthy { endpoint } => (endpoint, None, "http"),
         SuccessCondition::PortListening { endpoint } => (endpoint, None, "tcp"),
+        SuccessCondition::PageRenders { url } => (url, None, "http"),
         _ => {
             return Err(ToolError::Invalid(
-                "shadow service verifier requires an HTTP, service-health, or TCP-port condition"
-                    .into(),
+                "shadow service verifier requires an HTTP, service-health, TCP-port, or page-render condition".into(),
             ));
         }
     };
@@ -1046,7 +1143,9 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
                 .into(),
         ));
     }
-    if scheme == "tcp" {
+    if matches!(condition, SuccessCondition::PageRenders { .. }) {
+        Ok(ShadowServiceProbe::PageRender { url: value.clone() })
+    } else if scheme == "tcp" {
         Ok(ShadowServiceProbe::Tcp {
             endpoint: value.clone(),
         })
@@ -1136,6 +1235,109 @@ fn node_toolchain_from_candidate(candidate: &Path) -> Result<NodeToolchain, Tool
     }
     verify_node_toolchain_bounds(&root)?;
     Ok(NodeToolchain { host_root: root })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn discover_browser_runtime() -> Result<Option<BrowserRuntime>, ToolError> {
+    let Some(candidate) = std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let candidate = candidate
+        .canonicalize()
+        .map_err(|error| ToolError::Unavailable(format!("resolve browser runtime: {error}")))?;
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| ToolError::Unavailable(format!("inspect browser runtime: {error}")))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(ToolError::Denied(
+            "browser runtime must be one regular executable".into(),
+        ));
+    }
+    let host_root = candidate
+        .parent()
+        .ok_or_else(|| ToolError::Unavailable("browser executable has no parent".into()))?
+        .canonicalize()
+        .map_err(|error| ToolError::Unavailable(format!("resolve browser root: {error}")))?;
+    if !candidate.starts_with(&host_root) {
+        return Err(ToolError::Denied(
+            "browser executable escaped its distribution root".into(),
+        ));
+    }
+    let executable_name = candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\', '\0']))
+        .ok_or_else(|| ToolError::Unavailable("browser executable name is invalid".into()))?
+        .to_owned();
+    verify_browser_runtime_bounds(&host_root)?;
+    Ok(Some(BrowserRuntime {
+        host_root,
+        executable_name,
+    }))
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn verify_browser_runtime_bounds(root: &Path) -> Result<(), ToolError> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| ToolError::Unavailable(format!("inspect browser root: {error}")))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(ToolError::Denied(
+            "browser runtime root must be a real directory".into(),
+        ));
+    }
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > BROWSER_RUNTIME_MAX_DEPTH {
+            return Err(ToolError::Unavailable(
+                "browser runtime exceeds the depth limit".into(),
+            ));
+        }
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| ToolError::Unavailable(format!("read browser runtime: {error}")))?
+        {
+            let entry = entry.map_err(|error| ToolError::Unavailable(error.to_string()))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| ToolError::Unavailable(error.to_string()))?;
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path)
+                    .map_err(|error| ToolError::Unavailable(error.to_string()))?;
+                if target.is_absolute()
+                    || path
+                        .canonicalize()
+                        .ok()
+                        .is_none_or(|resolved| !resolved.starts_with(root))
+                {
+                    return Err(ToolError::Denied(
+                        "browser runtime contains an escaping symbolic link".into(),
+                    ));
+                }
+                files = files.saturating_add(1);
+            } else if metadata_is_link_or_reparse(&metadata) {
+                return Err(ToolError::Denied(
+                    "browser runtime contains a reparse point".into(),
+                ));
+            } else if metadata.is_dir() {
+                pending.push((path, depth.saturating_add(1)));
+            } else if metadata.is_file() {
+                files = files.saturating_add(1);
+                bytes = bytes.checked_add(metadata.len()).ok_or_else(|| {
+                    ToolError::Unavailable("browser runtime size overflow".into())
+                })?;
+            } else {
+                return Err(ToolError::Denied(
+                    "browser runtime contains a non-regular entry".into(),
+                ));
+            }
+            if files > BROWSER_RUNTIME_MAX_FILES || bytes > BROWSER_RUNTIME_MAX_BYTES {
+                return Err(ToolError::Unavailable(
+                    "browser runtime exceeds its file or byte limit".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -1354,7 +1556,11 @@ fn bubblewrap_arguments(
 }
 
 #[cfg(any(target_os = "linux", test))]
-#[allow(clippy::too_many_lines)] // Keep the complete same-sandbox service and probe profile auditable.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "keep the complete same-sandbox service and probe profile auditable"
+)]
 fn bubblewrap_service_arguments(
     workspace_root: &Path,
     proof_path: &Path,
@@ -1362,6 +1568,9 @@ fn bubblewrap_service_arguments(
     command_arguments: &[String],
     probe: &ShadowServiceProbe,
     toolchain: Option<&NodeToolchain>,
+    browser: Option<&BrowserRuntime>,
+    runner: Option<&Path>,
+    runner_request: Option<&Path>,
 ) -> Result<Vec<String>, ToolError> {
     let workspace = workspace_root
         .to_str()
@@ -1373,6 +1582,18 @@ fn bubblewrap_service_arguments(
         "/mcg-toolchain/bin:/usr/bin:/bin"
     } else {
         "/usr/bin:/bin"
+    };
+    let use_runner = matches!(probe, ShadowServiceProbe::PageRender { .. });
+    if use_runner != (runner.is_some() && runner_request.is_some()) {
+        return Err(ToolError::Invalid(
+            "page-render sandbox runner mappings are incomplete".into(),
+        ));
+    }
+    let sandbox_source = if use_runner { "/mcg-source" } else { "/source" };
+    let address_space_bytes = if matches!(probe, ShadowServiceProbe::PageRender { .. }) {
+        BWRAP_BROWSER_ADDRESS_SPACE_BYTES
+    } else {
+        BWRAP_ADDRESS_SPACE_BYTES
     };
     let mut argv = vec![
         "--unshare-all".into(),
@@ -1429,7 +1650,7 @@ fn bubblewrap_service_arguments(
         "/run".into(),
         "--ro-bind".into(),
         workspace.into(),
-        "/source".into(),
+        sandbox_source.into(),
         "--size".into(),
         BWRAP_TMPFS_BYTES.to_string(),
         "--tmpfs".into(),
@@ -1446,6 +1667,46 @@ fn bubblewrap_service_arguments(
             "/mcg-toolchain".into(),
         ]);
     }
+    if let Some(browser) = browser {
+        let host_root = browser
+            .host_root
+            .to_str()
+            .ok_or_else(|| ToolError::Invalid("browser runtime path is not Unicode".into()))?;
+        argv.extend(["--ro-bind".into(), host_root.into(), "/mcg-browser".into()]);
+    }
+    if use_runner {
+        let runner = runner
+            .and_then(Path::to_str)
+            .ok_or_else(|| ToolError::Invalid("shadow runner path is not Unicode".into()))?;
+        let runner_request = runner_request.and_then(Path::to_str).ok_or_else(|| {
+            ToolError::Invalid("shadow runner request path is not Unicode".into())
+        })?;
+        argv.extend([
+            "--ro-bind".into(),
+            runner.into(),
+            "/mcg-shadow-runner".into(),
+            "--ro-bind".into(),
+            runner_request.into(),
+            "/mcg-request.json".into(),
+            "--bind".into(),
+            proof.into(),
+            "/mcg-proof".into(),
+            "--chdir".into(),
+            "/tmp".into(),
+            "--".into(),
+            "/usr/bin/prlimit".into(),
+            format!("--cpu={BWRAP_TIMEOUT_SECONDS}"),
+            format!("--as={address_space_bytes}"),
+            format!("--fsize={BWRAP_MAX_FILE_BYTES}"),
+            format!("--nproc={BWRAP_MAX_PROCESSES}"),
+            format!("--nofile={BWRAP_MAX_OPEN_FILES}"),
+            "--".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'mcg-shadow-bwrap-v1\\n' > /mcg-proof || exit 125; exec /mcg-shadow-runner /mcg-request.json".into(),
+        ]);
+        return Ok(argv);
+    }
     argv.extend([
         "--bind".into(),
         proof.into(),
@@ -1455,7 +1716,7 @@ fn bubblewrap_service_arguments(
         "--".into(),
         "/usr/bin/prlimit".into(),
         format!("--cpu={BWRAP_TIMEOUT_SECONDS}"),
-        format!("--as={BWRAP_ADDRESS_SPACE_BYTES}"),
+        format!("--as={address_space_bytes}"),
         format!("--fsize={BWRAP_MAX_FILE_BYTES}"),
         format!("--nproc={BWRAP_MAX_PROCESSES}"),
         format!("--nofile={BWRAP_MAX_OPEN_FILES}"),
@@ -1609,6 +1870,90 @@ struct EphemeralProof {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[derive(Serialize)]
+struct LinuxRunnerRequest<'a> {
+    schema_version: u16,
+    source_root: &'static str,
+    workspace_root: &'static str,
+    executable: &'a str,
+    argv: &'a [String],
+    toolchain_root: Option<&'static str>,
+    browser_executable: String,
+    probe: LinuxRunnerProbe<'a>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum LinuxRunnerProbe<'a> {
+    PageRender { url: &'a str },
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct LinuxRunnerRequestFile {
+    path: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl LinuxRunnerRequestFile {
+    fn create(
+        workspace_root: &Path,
+        executable: &str,
+        argv: &[String],
+        toolchain: Option<&NodeToolchain>,
+        browser: &BrowserRuntime,
+        probe: &ShadowServiceProbe,
+    ) -> Result<Self, ToolError> {
+        let ShadowServiceProbe::PageRender { url } = probe else {
+            return Err(ToolError::Invalid(
+                "Linux runner request requires a page-render probe".into(),
+            ));
+        };
+        let parent = workspace_root
+            .parent()
+            .ok_or_else(|| ToolError::Invalid("shadow workspace has no parent".into()))?;
+        let path = parent.join(format!(".mcg-shadow-request-{}.json", Uuid::new_v4()));
+        let request = LinuxRunnerRequest {
+            schema_version: 4,
+            source_root: "/mcg-source",
+            workspace_root: "/tmp/mcg-workspace",
+            executable,
+            argv,
+            toolchain_root: toolchain.map(|_| "/mcg-toolchain"),
+            browser_executable: format!("/mcg-browser/{}", browser.executable_name),
+            probe: LinuxRunnerProbe::PageRender { url },
+        };
+        let bytes = serde_json::to_vec(&request).map_err(|error| {
+            ToolError::Execution(format!("serialize Linux shadow-runner request: {error}"))
+        })?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| {
+            ToolError::Execution(format!("create Linux shadow-runner request: {error}"))
+        })?;
+        std::io::Write::write_all(&mut file, &bytes).map_err(|error| {
+            ToolError::Execution(format!("write Linux shadow-runner request: {error}"))
+        })?;
+        file.sync_all().map_err(|error| {
+            ToolError::Execution(format!("sync Linux shadow-runner request: {error}"))
+        })?;
+        Ok(Self { path })
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Drop for LinuxRunnerRequestFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
 impl EphemeralProof {
     fn create(workspace_root: &Path) -> Result<Self, ToolError> {
         let parent = workspace_root
@@ -1659,6 +2004,25 @@ fn trusted_bubblewrap_executable() -> Option<PathBuf> {
             && Path::new("/bin/cp").is_file()
             && installed_bubblewrap_version_is_supported(path)
     })
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_linux_shadow_runner() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let expected = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("mcg-shadow-runner");
+    let metadata = fs::symlink_metadata(&expected).ok()?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o111 == 0
+    {
+        return None;
+    }
+    expected.canonicalize().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -1887,6 +2251,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One auditable profile covers URL, namespace, toolchain, and browser boundaries.
     fn service_probe_and_bubblewrap_profile_are_loopback_only_and_argument_safe() {
         let accepted = [
             "http://127.0.0.1:43123/health",
@@ -1914,6 +2279,13 @@ mod tests {
                 ShadowServiceProbe::Tcp { .. }
             ));
         }
+        assert!(matches!(
+            shadow_service_probe(&SuccessCondition::PageRenders {
+                url: "http://127.0.0.1:43123/app".into(),
+            })
+            .expect("exact loopback page URL"),
+            ShadowServiceProbe::PageRender { .. }
+        ));
         for url in [
             "https://127.0.0.1:43123/health",
             "http://127.0.0.1/health",
@@ -1947,6 +2319,9 @@ mod tests {
             Some(&NodeToolchain {
                 host_root: workspace.path().to_path_buf(),
             }),
+            None,
+            None,
+            None,
         )
         .expect("service profile");
         assert_eq!(
@@ -1988,6 +2363,59 @@ mod tests {
                 "server.js;touch",
                 "literal argument",
             ]
+        );
+
+        let browser_root = tempfile::tempdir().expect("browser root");
+        let browser = BrowserRuntime {
+            host_root: browser_root.path().to_path_buf(),
+            executable_name: "chrome".into(),
+        };
+        let page_probe = ShadowServiceProbe::PageRender {
+            url: "http://127.0.0.1:43123/app".into(),
+        };
+        let runner = workspace.path().join("mcg-shadow-runner");
+        let request = workspace.path().join("request.json");
+        fs::write(&runner, b"runner").expect("runner fixture");
+        fs::write(&request, b"{}").expect("request fixture");
+        let page_argv = bubblewrap_service_arguments(
+            workspace.path(),
+            &proof.path,
+            "node",
+            &["server.js".into()],
+            &page_probe,
+            None,
+            Some(&browser),
+            Some(&runner),
+            Some(&request),
+        )
+        .expect("page-render profile");
+        assert!(page_argv.windows(3).any(|items| items
+            == [
+                "--ro-bind",
+                browser_root.path().to_str().expect("browser root"),
+                "/mcg-browser"
+            ]));
+        assert!(page_argv.windows(3).any(|items| items
+            == [
+                "--ro-bind",
+                runner.to_str().expect("runner path"),
+                "/mcg-shadow-runner"
+            ]));
+        assert!(page_argv.windows(3).any(|items| items
+            == [
+                "--ro-bind",
+                request.to_str().expect("request path"),
+                "/mcg-request.json"
+            ]));
+        assert!(
+            page_argv
+                .last()
+                .is_some_and(|script| script.contains("exec /mcg-shadow-runner /mcg-request.json"))
+        );
+        assert!(
+            !page_argv
+                .iter()
+                .any(|argument| argument.contains("--dump-dom"))
         );
     }
 
@@ -2131,6 +2559,7 @@ mod tests {
         let artifact_root = tempfile::tempdir().expect("artifacts");
         let verifier = LinuxBubblewrapVerifier {
             executable: workspace.path().join("missing-bwrap"),
+            runner: None,
         };
         let result = verifier
             .verify(
@@ -2179,8 +2608,8 @@ mod tests {
     fn windows_sandbox_profile_is_locked_down_read_only_and_xml_safe() {
         let source = Path::new(r"C:\source & fixtures");
         let harness = Path::new(r"C:\harness <private>");
-        let configuration =
-            windows_sandbox_configuration(source, harness, None).expect("Windows Sandbox profile");
+        let configuration = windows_sandbox_configuration(source, harness, None, None)
+            .expect("Windows Sandbox profile");
         for setting in [
             "<vGPU>Disable</vGPU>",
             "<Networking>Disable</Networking>",
@@ -2204,7 +2633,7 @@ mod tests {
         let toolchain = NodeToolchain {
             host_root: PathBuf::from(r"C:\node & tools"),
         };
-        let configuration = windows_sandbox_configuration(source, harness, Some(&toolchain))
+        let configuration = windows_sandbox_configuration(source, harness, Some(&toolchain), None)
             .expect("Windows Sandbox Node profile");
         assert_eq!(configuration.matches("<MappedFolder>").count(), 3);
         assert_eq!(
@@ -2213,6 +2642,20 @@ mod tests {
         );
         assert!(configuration.contains(r"C:\node &amp; tools"));
         assert!(configuration.contains(r"C:\mcg-toolchain"));
+
+        let browser = BrowserRuntime {
+            host_root: PathBuf::from(r"C:\browser & runtime"),
+            executable_name: "chrome.exe".into(),
+        };
+        let configuration = windows_sandbox_configuration(source, harness, None, Some(&browser))
+            .expect("Windows Sandbox browser profile");
+        assert_eq!(configuration.matches("<MappedFolder>").count(), 3);
+        assert_eq!(
+            configuration.matches("<ReadOnly>true</ReadOnly>").count(),
+            3
+        );
+        assert!(configuration.contains(r"C:\browser &amp; runtime"));
+        assert!(configuration.contains(r"C:\mcg-browser"));
     }
 
     #[test]
@@ -2232,18 +2675,20 @@ mod tests {
             "npm.cmd",
             &["run".into(), "start".into()],
             None,
+            None,
             Some(&probe),
         )
         .expect("service harness");
         let request: serde_json::Value =
             serde_json::from_slice(&fs::read(harness.path.join("request.json")).expect("request"))
                 .expect("request JSON");
-        assert_eq!(request["schema_version"], 3);
+        assert_eq!(request["schema_version"], 4);
         assert_eq!(request["source_root"], r"C:\mcg-source");
         assert_eq!(request["workspace_root"], r"C:\mcg-workspace");
         assert_eq!(request["executable"], "npm.cmd");
         assert_eq!(request["argv"], serde_json::json!(["run", "start"]));
         assert_eq!(request["toolchain_root"], serde_json::Value::Null);
+        assert_eq!(request["browser_executable"], serde_json::Value::Null);
         assert_eq!(request["probe"]["kind"], "http_status");
         assert_eq!(request["probe"]["url"], probe.endpoint());
         assert_eq!(request["probe"]["expected_status"], 204);
@@ -2257,6 +2702,7 @@ mod tests {
             "npm.cmd",
             &["run".into(), "start".into()],
             None,
+            None,
             Some(&tcp_probe),
         )
         .expect("TCP service harness");
@@ -2266,6 +2712,36 @@ mod tests {
         .expect("TCP request JSON");
         assert_eq!(tcp_request["probe"]["kind"], "tcp_connect");
         assert_eq!(tcp_request["probe"]["endpoint"], tcp_probe.endpoint());
+
+        let browser_root = parent.path().join("browser");
+        fs::create_dir(&browser_root).expect("browser root");
+        let browser = BrowserRuntime {
+            host_root: browser_root,
+            executable_name: "chrome.exe".into(),
+        };
+        let page_probe = ShadowServiceProbe::PageRender {
+            url: "http://127.0.0.1:43123/app".into(),
+        };
+        let page_harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&browser),
+            Some(&page_probe),
+        )
+        .expect("page-render harness");
+        let page_request: serde_json::Value = serde_json::from_slice(
+            &fs::read(page_harness.path.join("request.json")).expect("page request"),
+        )
+        .expect("page request JSON");
+        assert_eq!(page_request["probe"]["kind"], "page_render");
+        assert_eq!(page_request["probe"]["url"], page_probe.endpoint());
+        assert_eq!(
+            page_request["browser_executable"],
+            r"C:\mcg-browser\chrome.exe"
+        );
     }
 
     #[test]
@@ -2289,9 +2765,13 @@ mod tests {
 
     #[test]
     fn windows_sandbox_cli_uses_system_context_and_never_writable_shares() {
-        let configuration =
-            windows_sandbox_configuration(Path::new(r"C:\source"), Path::new(r"C:\harness"), None)
-                .expect("profile");
+        let configuration = windows_sandbox_configuration(
+            Path::new(r"C:\source"),
+            Path::new(r"C:\harness"),
+            None,
+            None,
+        )
+        .expect("profile");
         let start = windows_sandbox_start_arguments("session", &configuration);
         assert_eq!(
             &start[..5],
@@ -2437,6 +2917,7 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    #[allow(clippy::too_many_lines)] // One live fixture proves HTTP, TCP, browser, and host-network isolation together.
     async fn assert_windows_node_service_isolated(
         verifier: &WindowsSandboxVerifier,
         workspace: &Path,
@@ -2447,13 +2928,21 @@ mod tests {
 
         fs::write(
             workspace.join("server.js"),
-            r"const http = require('http');
+            r#"const http = require('http');
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT);
 http.createServer((request, response) => {
-  response.writeHead(request.url === '/health' ? 204 : 404);
-  response.end();
-}).listen(port, host);",
+  if (request.url === '/health') {
+    response.writeHead(204);
+    response.end();
+  } else if (request.url === '/app') {
+    response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+    response.end('<!doctype html><html><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+  } else {
+    response.writeHead(404);
+    response.end();
+  }
+}).listen(port, host);"#,
         )
         .expect("service fixture");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2511,11 +3000,33 @@ http.createServer((request, response) => {
         assert_eq!(record.exit_code, Some(0));
         assert!(!record.timed_out);
         assert_no_windows_sandbox_sessions(verifier, workspace).await;
+        if discover_browser_runtime()
+            .expect("inspect browser runtime")
+            .is_some()
+        {
+            let page_condition = SuccessCondition::PageRenders {
+                url: format!("http://{address}/app"),
+            };
+            let ShadowCommandVerification::Completed { transcript } = verifier
+                .verify_service(workspace, "node server.js", &page_condition, artifacts)
+                .await
+            else {
+                panic!("same-sandbox Windows browser probe must produce measured evidence");
+            };
+            let bytes = artifacts
+                .read_verified_reference(&transcript, 1024 * 1024)
+                .expect("browser service transcript");
+            let record: ShadowCommandTranscript =
+                serde_json::from_slice(&bytes).expect("browser service record");
+            assert_eq!(record.exit_code, Some(0));
+            assert!(!record.timed_out);
+            assert_no_windows_sandbox_sessions(verifier, workspace).await;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(service_hits.load(Ordering::SeqCst), 0);
         host_service.abort();
         eprintln!(
-            "qualified same-sandbox Windows Node HTTP/TCP service pass/fail with zero host-network hits"
+            "qualified same-sandbox Windows Node HTTP/TCP/browser service pass/fail with zero host-network hits"
         );
     }
 
@@ -2652,6 +3163,7 @@ http.createServer((request, response) => {
             &arguments,
             None,
             None,
+            None,
         )
         .expect("setup-failure harness");
         fs::write(
@@ -2659,8 +3171,9 @@ http.createServer((request, response) => {
             br#"{"schema_version":999}"#,
         )
         .expect("corrupt request");
-        let configuration = windows_sandbox_configuration(workspace.path(), &harness.path, None)
-            .expect("setup-failure profile");
+        let configuration =
+            windows_sandbox_configuration(workspace.path(), &harness.path, None, None)
+                .expect("setup-failure profile");
         let process = ProcessExecutor::new(
             [harness.path.clone()],
             Arc::new(RejectingCredentialResolver),
@@ -2692,7 +3205,16 @@ http.createServer((request, response) => {
         fs::write(workspace.path().join("input.txt"), b"input").expect("input");
         let artifact_root = tempfile::tempdir().expect("artifacts");
         let artifacts = ArtifactStore::open(artifact_root.path()).expect("artifacts");
-        let verifier = LinuxBubblewrapVerifier { executable };
+        let runner = trusted_linux_shadow_runner().or_else(|| {
+            std::env::current_exe()
+                .ok()?
+                .parent()?
+                .parent()?
+                .join("mcg-shadow-runner")
+                .canonicalize()
+                .ok()
+        });
+        let verifier = LinuxBubblewrapVerifier { executable, runner };
 
         let condition = SuccessCondition::Test {
             command: "touch sandbox-only.txt".into(),
@@ -2757,13 +3279,21 @@ http.createServer((request, response) => {
             if Path::new("/usr/bin/curl").is_file() && Path::new("/usr/bin/sleep").is_file() {
                 fs::write(
                     workspace.path().join("server.js"),
-                    r"const http = require('http');
+                    r#"const http = require('http');
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT);
 http.createServer((request, response) => {
-  response.writeHead(request.url === '/health' ? 204 : 404);
-  response.end();
-}).listen(port, host);",
+  if (request.url === '/health') {
+    response.writeHead(204);
+    response.end();
+  } else if (request.url === '/app') {
+    response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+    response.end('<!doctype html><html><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+  } else {
+    response.writeHead(404);
+    response.end();
+  }
+}).listen(port, host);"#,
                 )
                 .expect("service fixture");
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2800,6 +3330,34 @@ http.createServer((request, response) => {
                     serde_json::from_slice(&bytes).expect("service record");
                 assert_eq!(record.exit_code, Some(0));
                 assert!(!record.timed_out);
+
+                if verifier.runner.is_some()
+                    && discover_browser_runtime()
+                        .expect("inspect browser runtime")
+                        .is_some()
+                {
+                    let page_condition = SuccessCondition::PageRenders {
+                        url: format!("http://{address}/app"),
+                    };
+                    let ShadowCommandVerification::Completed { transcript } = verifier
+                        .verify_service(
+                            workspace.path(),
+                            "node server.js",
+                            &page_condition,
+                            &artifacts,
+                        )
+                        .await
+                    else {
+                        panic!("same-sandbox browser probe must produce measured evidence");
+                    };
+                    let bytes = artifacts
+                        .read_verified_reference(&transcript, 1024 * 1024)
+                        .expect("browser service transcript");
+                    let record: ShadowCommandTranscript =
+                        serde_json::from_slice(&bytes).expect("browser service record");
+                    assert_eq!(record.exit_code, Some(0));
+                    assert!(!record.timed_out);
+                }
 
                 let tcp_condition = SuccessCondition::PortListening {
                     endpoint: format!("tcp://{address}"),
@@ -2849,7 +3407,7 @@ http.createServer((request, response) => {
                 assert_eq!(service_hits.load(Ordering::SeqCst), 0);
                 host_service.abort();
                 eprintln!(
-                    "qualified same-sandbox Node HTTP/TCP service pass/fail with zero host-network hits"
+                    "qualified same-sandbox Node HTTP/TCP/browser service pass/fail with zero host-network hits"
                 );
             }
         }

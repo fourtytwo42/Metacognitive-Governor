@@ -3835,9 +3835,12 @@ dependencies = [
 name = "mcg-shadow-runner"
 version = "0.1.0"
 dependencies = [
+ "chromiumoxide",
+ "futures-util",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

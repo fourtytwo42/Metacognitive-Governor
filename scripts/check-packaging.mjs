@@ -173,10 +173,10 @@ for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [li
 for (const invariant of ["target-feature=+crt-static", "VCRUNTIME", "MSVCP", "ReadAllBytes", '"rustc", "-p", "mcg-shadow-runner"']) {
   requireText(windowsPrepare, invariant, "Windows self-contained Sandbox runner build");
 }
-for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 3', 'toolchain_root', 'C:\\mcg-toolchain']) {
+for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 4', 'toolchain_root', 'C:\\mcg-toolchain', 'browser_executable', 'C:\\mcg-browser', 'Browser::launch', 'BROWSER_RENDER_TIMEOUT']) {
   requireText(shadowRunner, invariant, "Windows Sandbox runner contract");
 }
-for (const invariant of ["NODE_TOOLCHAIN_MAX_BYTES", "NODE_TOOLCHAIN_MAX_FILES", "NODE_TOOLCHAIN_MAX_DEPTH", '"--ro-bind"', 'r"C:\\mcg-toolchain"']) {
+for (const invariant of ["NODE_TOOLCHAIN_MAX_BYTES", "NODE_TOOLCHAIN_MAX_FILES", "NODE_TOOLCHAIN_MAX_DEPTH", "BROWSER_RUNTIME_MAX_BYTES", "BROWSER_RUNTIME_MAX_FILES", "BROWSER_RUNTIME_MAX_DEPTH", '"--ro-bind"', 'r"C:\\mcg-toolchain"', 'r"C:\\mcg-browser"', '"/mcg-shadow-runner"']) {
   requireText(shadowVerification, invariant, "bounded read-only shadow toolchain contract");
 }
 for (const invariant of ["REQUEST_SCHEMA: u32 = 3", "stage_verified_windows_installer", "windows_installer_product_version", "expected_version", "installer_product_version", "canonical_regular_child", "installer_sha256", "supervisor_sha256", "validate_running_staged_supervisor", "cleanup_staged_windows_supervisor", "wait_for_desktop_exit", 'args(["/P", "/R", "/UPDATE", "/ARGS"])', "MCG_UPDATE_RECOVERY_NOTICE", "The update did not complete"]) {

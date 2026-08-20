@@ -7460,6 +7460,7 @@ impl AppRuntime {
                     SuccessCondition::HttpResponds { .. }
                         | SuccessCondition::ServiceHealthy { .. }
                         | SuccessCondition::PortListening { .. }
+                        | SuccessCondition::PageRenders { .. }
                 ) {
                     let command = self
                         .baseline_shadow_service_command(candidate, receipt, baseline, condition)?;
@@ -12369,6 +12370,7 @@ async fn verify_isolated_service_condition(
         SuccessCondition::HttpResponds { .. }
             | SuccessCondition::ServiceHealthy { .. }
             | SuccessCondition::PortListening { .. }
+            | SuccessCondition::PageRenders { .. }
     ) {
         return (
             ConditionResult {
@@ -12452,9 +12454,9 @@ async fn verify_isolated_service_condition(
                     condition: condition.clone(),
                     passed: condition_passed,
                     detail: if condition_passed {
-                        "The baseline-bound service passed its loopback HTTP/TCP probe inside one qualified operating-system shadow sandbox."
+                        "The baseline-bound service passed its loopback HTTP/TCP/browser probe inside one qualified operating-system shadow sandbox."
                     } else {
-                        "The baseline-bound service failed its loopback HTTP/TCP probe inside one qualified operating-system shadow sandbox."
+                        "The baseline-bound service failed its loopback HTTP/TCP/browser probe inside one qualified operating-system shadow sandbox."
                     }
                     .into(),
                 },
@@ -12462,7 +12464,7 @@ async fn verify_isolated_service_condition(
                     method: "isolated_service_sandbox".into(),
                     artifact_sha256: Some(transcript.sha256),
                     event_sequence: None,
-                    detail: "Service startup and the bounded loopback HTTP/TCP probe shared the same network-isolated sandbox; no host-network fallback was permitted.".into(),
+                    detail: "Service startup and the bounded loopback HTTP/TCP/browser probe shared the same network-isolated sandbox; no host-network fallback was permitted.".into(),
                 },
                 true,
             )
@@ -12521,6 +12523,7 @@ fn isolated_evaluation_regressions(
                 SuccessCondition::HttpResponds { .. }
                     | SuccessCondition::ServiceHealthy { .. }
                     | SuccessCondition::PortListening { .. }
+                    | SuccessCondition::PageRenders { .. }
             ) {
                 "candidate failed an isolated service objective".into()
             } else {
@@ -13635,6 +13638,7 @@ mod tests {
                 SuccessCondition::HttpResponds { .. }
                     | SuccessCondition::ServiceHealthy { .. }
                     | SuccessCondition::PortListening { .. }
+                    | SuccessCondition::PageRenders { .. }
             ));
             if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
                 return ShadowCommandVerification::Completed {
@@ -14799,6 +14803,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One table-driven test covers every service verifier disposition and condition kind.
     async fn isolated_service_verification_requires_baseline_authority_and_valid_evidence() {
         let workspace = tempfile::tempdir().expect("workspace");
         let artifact_root = tempfile::tempdir().expect("artifacts");
@@ -14886,6 +14891,27 @@ mod tests {
             assert_eq!(result.passed, expected_passed);
             assert!(evidence.artifact_sha256.is_some());
             assert!(result.detail.contains("HTTP/TCP"));
+        }
+
+        let page_condition = SuccessCondition::PageRenders {
+            url: "http://127.0.0.1:43123/app".into(),
+        };
+        for (fixture, expected_passed) in [
+            (FixtureShadowCommandResult::Pass, true),
+            (FixtureShadowCommandResult::Fail, false),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &page_condition,
+            )
+            .await;
+            assert!(supported);
+            assert_eq!(result.passed, expected_passed);
+            assert!(evidence.artifact_sha256.is_some());
+            assert!(result.detail.contains("browser"));
         }
     }
 
