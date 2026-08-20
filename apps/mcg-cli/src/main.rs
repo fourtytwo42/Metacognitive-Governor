@@ -30,21 +30,22 @@ use mcg_api::{
     MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
     OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
-    PluginListResponse, ProjectHistoryResponse, ProjectListResponse, ProviderListResponse,
-    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
+    ProjectMemoryTransferListResponse, ProviderListResponse, ResolveApprovalRequest,
+    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
     SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
     SetScheduleStateRequest, ShadowExecutionListResponse, ShutdownResponse,
     SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
     SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
     SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
     TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransitionAgentRunRequest, TransitionExperimentRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest,
+    TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
+    UpdateUserSettingsRequest, UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
-    ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId,
+    ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId, MemoryTransferId,
     NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
     PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
     PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
@@ -71,8 +72,9 @@ use mcg_runtime::{
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
-    ProjectMutation, ProviderMutation, RunReplayReport, RuntimeStatus, SiteDeploymentMutation,
-    SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
+    ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    RunReplayReport, RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation,
+    SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
     SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
 };
 use mcg_storage::{
@@ -1223,6 +1225,24 @@ enum MemoryCommand {
     },
     /// Read every version of one claim key.
     History { namespace: String, key: String },
+    /// Review the exact transferable source claim and canonical digest.
+    TransferPreview { claim_id: String },
+    /// Copy one reviewed durable claim into another project.
+    Transfer {
+        claim_id: String,
+        target_project_id: String,
+        /// Canonical digest returned by `transfer-preview`.
+        #[arg(long)]
+        source_sha256: String,
+        /// Printable owner review explaining why this claim belongs in the target.
+        #[arg(long)]
+        reason: String,
+        /// Stable UUID for safe retry after a lost response.
+        #[arg(long)]
+        transfer_id: Option<String>,
+    },
+    /// List immutable inbound and outbound transfer evidence.
+    Transfers,
     /// Render current working/durable memory as Markdown.
     Managed,
 }
@@ -5224,6 +5244,58 @@ async fn run_memory(
                 .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        MemoryCommand::TransferPreview { claim_id } => {
+            let claim_id = MemoryClaimId::from_str(&claim_id)?;
+            let response: ProjectMemoryTransferPreview = client
+                .get(format!("{base}/{claim_id}/transfer-preview"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        MemoryCommand::Transfer {
+            claim_id,
+            target_project_id,
+            source_sha256,
+            reason,
+            transfer_id,
+        } => {
+            let transfer_id = transfer_id
+                .as_deref()
+                .map(MemoryTransferId::from_str)
+                .transpose()?
+                .unwrap_or_else(MemoryTransferId::new);
+            let mutation: ProjectMemoryTransferMutation = client
+                .post(format!("{base}/transfers"))
+                .bearer_auth(token)
+                .json(&TransferProjectMemoryRequest {
+                    transfer_id,
+                    source_claim_id: MemoryClaimId::from_str(&claim_id)?,
+                    source_claim_sha256: source_sha256,
+                    target_project_id: ProjectId::from_str(&target_project_id)?,
+                    reason,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&mutation)?);
+        }
+        MemoryCommand::Transfers => {
+            let response: ProjectMemoryTransferListResponse = client
+                .get(format!("{base}/transfers"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
         MemoryCommand::Managed => {
             let response: ManagedMemoryResponse = client
                 .get(format!("{base}/managed"))
@@ -5566,6 +5638,60 @@ mod tests {
                 "value",
                 "--fresh-until",
                 "tomorrow",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn project_memory_transfer_requires_review_evidence_and_supports_stable_retry_identity() {
+        let cli = Cli::try_parse_from([
+            "mcg",
+            "project",
+            "memory",
+            "00000000-0000-0000-0000-000000000001",
+            "transfer",
+            "00000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000003",
+            "--source-sha256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--reason",
+            "Both projects share the reviewed convention",
+            "--transfer-id",
+            "00000000-0000-0000-0000-000000000004",
+        ])
+        .expect("memory transfer command");
+        assert!(matches!(
+            cli.command.expect("command"),
+            Command::Project {
+                command: ProjectCommand::Memory {
+                    project_id,
+                    command: MemoryCommand::Transfer {
+                        claim_id,
+                        target_project_id,
+                        source_sha256,
+                        reason,
+                        transfer_id: Some(transfer_id),
+                    },
+                }
+            } if project_id == "00000000-0000-0000-0000-000000000001"
+                && claim_id == "00000000-0000-0000-0000-000000000002"
+                && target_project_id == "00000000-0000-0000-0000-000000000003"
+                && source_sha256.len() == 64
+                && reason == "Both projects share the reviewed convention"
+                && transfer_id == "00000000-0000-0000-0000-000000000004"
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "mcg",
+                "project",
+                "memory",
+                "00000000-0000-0000-0000-000000000001",
+                "transfer",
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000003",
+                "--reason",
+                "missing digest",
             ])
             .is_err()
         );

@@ -604,6 +604,28 @@ export interface MemoryClaimMutation {
 
 export interface MemoryClaimListResponse { claims: MemoryClaim[]; }
 export interface MemoryClaimHistoryResponse { claims: MemoryClaim[]; }
+export interface ProjectMemoryTransfer {
+  schema_version: number;
+  id: string;
+  source_project_id: string;
+  source_claim_id: string;
+  source_claim_sha256: string;
+  target_project_id: string;
+  target_claim_id: string;
+  reason: string;
+  created_at: string;
+}
+export interface ProjectMemoryTransferPreview {
+  claim: MemoryClaim;
+  source_claim_sha256: string;
+}
+export interface ProjectMemoryTransferMutation {
+  transfer: ProjectMemoryTransfer;
+  claim: MemoryClaim;
+  replayed: boolean;
+  events: Array<{ sequence: number; kind: string; occurred_at: string }>;
+}
+export interface ProjectMemoryTransferListResponse { transfers: ProjectMemoryTransfer[]; }
 export interface ManagedMemoryResponse { markdown: string; }
 
 export interface TaskListResponse {
@@ -1355,6 +1377,32 @@ export function transitionProjectMemory(
       provenance: { source_kind: "user", source: "Desktop owner" }
     }
   });
+}
+
+export function reviewProjectMemoryTransfer(
+  projectId: string,
+  claimId: string
+): Promise<ProjectMemoryTransferPreview> {
+  return invoke("review_project_memory_transfer", { projectId, claimId });
+}
+
+export function transferProjectMemory(
+  projectId: string,
+  request: {
+    transfer_id: string;
+    source_claim_id: string;
+    source_claim_sha256: string;
+    target_project_id: string;
+    reason: string;
+  }
+): Promise<ProjectMemoryTransferMutation> {
+  return invoke("transfer_project_memory", { projectId, request });
+}
+
+export function listProjectMemoryTransfers(
+  projectId: string
+): Promise<ProjectMemoryTransferListResponse> {
+  return invoke("list_project_memory_transfers", { projectId });
 }
 
 export function loadProjectMemoryHistory(

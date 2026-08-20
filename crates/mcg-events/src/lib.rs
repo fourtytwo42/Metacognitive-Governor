@@ -32,6 +32,7 @@ pub enum EventKind {
     MemoryClaimRecorded,
     MemoryClaimCorrected,
     MemoryClaimStateChanged,
+    MemoryClaimTransferred,
     OrganizationRevisionRecorded,
     AgentRunPlanned,
     AgentRunStateChanged,
@@ -84,6 +85,7 @@ impl EventKind {
             Self::MemoryClaimRecorded => "memory_claim_recorded",
             Self::MemoryClaimCorrected => "memory_claim_corrected",
             Self::MemoryClaimStateChanged => "memory_claim_state_changed",
+            Self::MemoryClaimTransferred => "memory_claim_transferred",
             Self::OrganizationRevisionRecorded => "organization_revision_recorded",
             Self::AgentRunPlanned => "agent_run_planned",
             Self::AgentRunStateChanged => "agent_run_state_changed",
@@ -149,6 +151,9 @@ impl EventKind {
             "memory_claim_corrected" | "MemoryClaimCorrected" => Ok(Self::MemoryClaimCorrected),
             "memory_claim_state_changed" | "MemoryClaimStateChanged" => {
                 Ok(Self::MemoryClaimStateChanged)
+            }
+            "memory_claim_transferred" | "MemoryClaimTransferred" => {
+                Ok(Self::MemoryClaimTransferred)
             }
             "organization_revision_recorded" | "OrganizationRevisionRecorded" => {
                 Ok(Self::OrganizationRevisionRecorded)

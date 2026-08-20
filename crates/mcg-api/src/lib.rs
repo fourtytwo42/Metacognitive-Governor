@@ -32,7 +32,7 @@ use mcg_agents::{
 use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, ExperimentId,
-    MemoryClaimId, NotificationSeverity, OrganizationId, OrganizationImportId,
+    MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
     OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent,
     PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallation,
     PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId, RiskLevel, RunId,
@@ -49,7 +49,8 @@ use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
 use mcg_plugin_trust::PluginSignatureProof;
 pub use mcg_projects::ProjectTopologyPlan;
 use mcg_projects::{
-    ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
+    ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction,
+    ProjectMemoryTransfer, ProjectModel,
 };
 use mcg_providers::{
     ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderCredential,
@@ -62,8 +63,9 @@ use mcg_runtime::{
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation,
-    PortableOrganizationImportMutation, ProjectMutation, ProviderMutation, RunReplayReport,
-    RuntimeError, RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
+    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
+    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation, RunReplayReport, RuntimeError,
+    RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
     SiteMonitorMutation, SiteMonitorRequest, SiteMutation, SiteRegistrationRequest,
     SiteUpdateRequest, SshHostMutation, SshHostRegistrationRequest, SshHostUpdateRequest,
     SshOperationMutation, SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
@@ -316,6 +318,20 @@ pub struct MemoryClaimListResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryClaimHistoryResponse {
     pub claims: Vec<MemoryClaim>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferProjectMemoryRequest {
+    pub transfer_id: MemoryTransferId,
+    pub source_claim_id: MemoryClaimId,
+    pub source_claim_sha256: String,
+    pub target_project_id: ProjectId,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMemoryTransferListResponse {
+    pub transfers: Vec<ProjectMemoryTransfer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1302,6 +1318,14 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/projects/{project_id}/memory/managed",
             get(managed_memory),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory/transfers",
+            get(list_project_memory_transfers).post(transfer_project_memory),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/memory/{claim_id}/transfer-preview",
+            get(project_memory_transfer_preview),
         )
         .route(
             "/api/v1/projects/{project_id}/memory/{claim_id}/correct",
@@ -4564,6 +4588,57 @@ async fn transition_memory_claim(
         .map_err(map_runtime_error)
 }
 
+async fn transfer_project_memory(
+    State(state): State<ApiState>,
+    Path(source_project_id): Path<String>,
+    Json(request): Json<TransferProjectMemoryRequest>,
+) -> Result<(StatusCode, Json<ProjectMemoryTransferMutation>), ApiError> {
+    let source_project_id = parse_project_id(&source_project_id)?;
+    let mutation = state
+        .runtime
+        .transfer_project_memory(
+            request.transfer_id,
+            source_project_id,
+            request.source_claim_id,
+            &request.source_claim_sha256,
+            request.target_project_id,
+            &request.reason,
+        )
+        .map_err(map_runtime_error)?;
+    let status = if mutation.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(mutation)))
+}
+
+async fn project_memory_transfer_preview(
+    State(state): State<ApiState>,
+    Path((project_id, claim_id)): Path<(String, String)>,
+) -> Result<Json<ProjectMemoryTransferPreview>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let claim_id = parse_memory_claim_id(&claim_id)?;
+    state
+        .runtime
+        .project_memory_transfer_preview(project_id, claim_id)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn list_project_memory_transfers(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectMemoryTransferListResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    Ok(Json(ProjectMemoryTransferListResponse {
+        transfers: state
+            .runtime
+            .project_memory_transfers(project_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
 async fn list_memory_claims(
     State(state): State<ApiState>,
     Path(project_id): Path<String>,
@@ -7560,6 +7635,9 @@ form.addEventListener('submit', (event) => {
             names,
             vec![
                 "mcg_memory_search",
+                "mcg_project_memory_transfer_preview",
+                "mcg_project_memory_transfers",
+                "mcg_project_memory_transfer",
                 "mcg_project_context",
                 "mcg_project_topology_plan",
                 "mcg_query_project",
@@ -13497,6 +13575,290 @@ form.addEventListener('submit', (event) => {
         assert_eq!(history.claims.len(), 3);
         assert_eq!(history.claims[2].value, serde_json::json!("pnpm"));
         assert_eq!(history.claims[2].usefulness_count, 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One cross-interface fixture proves review, auth, mutation, replay, and history.
+    async fn cross_project_memory_transfer_is_authenticated_explicit_and_idempotent() {
+        let roots = tempfile::tempdir().expect("project roots");
+        let source_root = roots.path().join("source");
+        let target_root = roots.path().join("target");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        std::fs::create_dir_all(&target_root).expect("target root");
+        std::fs::write(source_root.join("package.json"), "{}").expect("source manifest");
+        std::fs::write(target_root.join("Cargo.toml"), "[workspace]").expect("target manifest");
+        let source_project_id = ProjectId::new();
+        let target_project_id = ProjectId::new();
+        let runtime = test_runtime();
+        runtime
+            .discover_project(&source_root, source_project_id)
+            .expect("source project");
+        runtime
+            .discover_project(&target_root, target_project_id)
+            .expect("target project");
+        let created = runtime
+            .create_memory_claim(
+                source_project_id,
+                "project",
+                "package_manager",
+                serde_json::json!("pnpm"),
+                0.9,
+                ClaimProvenance {
+                    source_kind: mcg_projects::ProvenanceKind::User,
+                    source: "owner-confirmed source".into(),
+                    task_id: None,
+                    artifact_sha256: None,
+                },
+                Some(Utc::now() + chrono::Duration::days(7)),
+            )
+            .expect("source claim");
+        let working = runtime
+            .transition_memory_claim(
+                source_project_id,
+                created.claim.id,
+                MemoryLifecycleAction::Reinforce,
+                created.claim.provenance.clone(),
+            )
+            .expect("first reinforcement");
+        let durable = runtime
+            .transition_memory_claim(
+                source_project_id,
+                working.claim.id,
+                MemoryLifecycleAction::Reinforce,
+                working.claim.provenance.clone(),
+            )
+            .expect("second reinforcement");
+        let app = router(runtime.clone());
+        let preview_path = format!(
+            "/api/v1/projects/{source_project_id}/memory/{}/transfer-preview",
+            durable.claim.id
+        );
+        let unauthorized_preview = app
+            .clone()
+            .oneshot(
+                Request::get(&preview_path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized preview");
+        assert_eq!(unauthorized_preview.status(), StatusCode::UNAUTHORIZED);
+        let preview = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(&preview_path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("transfer preview");
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview: ProjectMemoryTransferPreview =
+            serde_json::from_value(response_json(preview).await).expect("transfer preview");
+        assert_eq!(preview.claim, durable.claim);
+        let mcp_preview = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(100),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_project_memory_transfer_preview"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "source_project_id": source_project_id,
+                            "source_claim_id": durable.claim.id
+                        }),
+                    ),
+                ]),
+                Some("mcg_project_memory_transfer_preview"),
+            ))
+            .await
+            .expect("MCP transfer preview");
+        let mcp_preview = response_json(mcp_preview).await;
+        assert_eq!(
+            mcp_preview.pointer("/result/structuredContent/source_claim_sha256"),
+            Some(&serde_json::json!(preview.source_claim_sha256))
+        );
+        let transfer_id = MemoryTransferId::new();
+        let request = TransferProjectMemoryRequest {
+            transfer_id,
+            source_claim_id: durable.claim.id,
+            source_claim_sha256: preview.source_claim_sha256,
+            target_project_id,
+            reason: "Owner reviewed the package-manager convention".into(),
+        };
+        let path = format!("/api/v1/projects/{source_project_id}/memory/transfers");
+
+        let empty_target = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/projects/{target_project_id}/memory"
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("target memory before transfer");
+        let empty_target: MemoryClaimListResponse =
+            serde_json::from_value(response_json(empty_target).await).expect("target memory");
+        assert!(empty_target.claims.is_empty());
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post(&path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized transfer");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let transfer = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("transfer");
+        assert_eq!(transfer.status(), StatusCode::CREATED);
+        let transfer: ProjectMemoryTransferMutation =
+            serde_json::from_value(response_json(transfer).await).expect("transfer response");
+        assert!(!transfer.replayed);
+        assert_eq!(transfer.transfer.id, transfer_id);
+        assert_eq!(transfer.claim.project_id, target_project_id);
+        assert_eq!(transfer.claim.value, serde_json::json!("pnpm"));
+        assert_eq!(transfer.events.len(), 1);
+
+        let mcp_replay = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(101),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_project_memory_transfer"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "transfer_id": transfer_id,
+                            "source_project_id": source_project_id,
+                            "source_claim_id": durable.claim.id,
+                            "source_claim_sha256": request.source_claim_sha256,
+                            "target_project_id": target_project_id,
+                            "reason": request.reason
+                        }),
+                    ),
+                ]),
+                Some("mcg_project_memory_transfer"),
+            ))
+            .await
+            .expect("MCP transfer replay");
+        let mcp_replay = response_json(mcp_replay).await;
+        assert_eq!(
+            mcp_replay.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            mcp_replay.pointer("/result/structuredContent/claim/id"),
+            Some(&serde_json::json!(transfer.claim.id))
+        );
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: ProjectMemoryTransferMutation =
+            serde_json::from_value(response_json(replay).await).expect("replay response");
+        assert!(replay.replayed);
+        assert_eq!(replay.claim.id, transfer.claim.id);
+        assert!(replay.events.is_empty());
+
+        let target_memory = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/projects/{target_project_id}/memory"
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("target memory");
+        let target_memory: MemoryClaimListResponse =
+            serde_json::from_value(response_json(target_memory).await).expect("target memory");
+        assert_eq!(target_memory.claims, vec![transfer.claim.clone()]);
+
+        let transfers = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/projects/{target_project_id}/memory/transfers"
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("transfer history");
+        let transfers: ProjectMemoryTransferListResponse =
+            serde_json::from_value(response_json(transfers).await).expect("transfer history");
+        assert_eq!(transfers.transfers, vec![transfer.transfer.clone()]);
+
+        let mcp_transfers = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(102),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_project_memory_transfers"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({"project_id": target_project_id}),
+                    ),
+                ]),
+                Some("mcg_project_memory_transfers"),
+            ))
+            .await
+            .expect("MCP transfer history");
+        let mcp_transfers = response_json(mcp_transfers).await;
+        assert_eq!(
+            mcp_transfers.pointer("/result/structuredContent/transfers/0/id"),
+            Some(&serde_json::json!(transfer_id))
+        );
+
+        let mut changed = request.clone();
+        changed.reason = "Changed review reason".into();
+        let conflict = app
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&changed).expect("body")))
+                    .expect("request"),
+            )
+            .await
+            .expect("changed replay");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

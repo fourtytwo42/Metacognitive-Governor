@@ -1,12 +1,17 @@
 use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
-use mcg_domain::{MemoryClaimId, ProjectId};
+use mcg_domain::{MemoryClaimId, MemoryTransferId, ProjectId};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ClaimProvenance, MEMORY_CLAIM_SCHEMA_VERSION, MemoryClaim, MemoryState, ProvenanceKind,
+    ClaimProvenance, MEMORY_CLAIM_SCHEMA_VERSION, MEMORY_TRANSFER_SCHEMA_VERSION, MemoryClaim,
+    MemoryState, ProjectMemoryTransfer, ProvenanceKind,
 };
+
+const MAX_TRANSFER_CLAIM_BYTES: usize = 64 * 1024;
+const MAX_TRANSFER_REASON_BYTES: usize = 512;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum MemoryError {
@@ -16,8 +21,140 @@ pub enum MemoryError {
     InvalidConfidence,
     #[error("memory key cannot be empty")]
     EmptyKey,
+    #[error("cross-project memory transfer is invalid: {0}")]
+    InvalidTransfer(String),
     #[error("claim {0} cannot transition from {1:?} to {2:?}")]
     InvalidTransition(MemoryClaimId, MemoryState, MemoryState),
+}
+
+/// Returns the lowercase SHA-256 of the exact versioned claim JSON reviewed for transfer.
+///
+/// # Errors
+///
+/// Returns an invalid-transfer error if the claim cannot be encoded.
+pub fn memory_claim_sha256(claim: &MemoryClaim) -> Result<String, MemoryError> {
+    let bytes = serde_json::to_vec(claim)
+        .map_err(|error| MemoryError::InvalidTransfer(format!("claim encoding failed: {error}")))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Returns the digest of a claim only when it is currently eligible for an
+/// explicit cross-project transfer review.
+///
+/// # Errors
+///
+/// Rejects stale, non-durable, or oversized source claims.
+pub fn transferable_memory_claim_sha256(claim: &MemoryClaim) -> Result<String, MemoryError> {
+    transferable_memory_claim_sha256_at(claim, Utc::now())
+}
+
+fn transferable_memory_claim_sha256_at(
+    claim: &MemoryClaim,
+    now: DateTime<Utc>,
+) -> Result<String, MemoryError> {
+    if claim.state != MemoryState::Durable || !claim.is_fresh_at(now) {
+        return Err(MemoryError::InvalidTransfer(
+            "source claim must be fresh and durable".into(),
+        ));
+    }
+    let source_bytes = serde_json::to_vec(claim)
+        .map_err(|error| MemoryError::InvalidTransfer(format!("claim encoding failed: {error}")))?;
+    if source_bytes.len() > MAX_TRANSFER_CLAIM_BYTES {
+        return Err(MemoryError::InvalidTransfer(
+            "source claim exceeds the 64 KiB transfer limit".into(),
+        ));
+    }
+    Ok(format!("{:x}", Sha256::digest(source_bytes)))
+}
+
+/// Prepares one explicit, digest-bound cross-project memory transfer.
+///
+/// The source must be a fresh durable claim. The copied claim starts as `new`,
+/// preserves confidence and freshness, and carries only transfer provenance.
+/// No ambient cross-project lookup or automatic learning is granted.
+///
+/// # Errors
+///
+/// Rejects same-project, stale, non-durable, oversized, changed-digest, or
+/// insufficiently reviewed transfers.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_project_memory_transfer(
+    transfer_id: MemoryTransferId,
+    source: &MemoryClaim,
+    expected_source_sha256: &str,
+    target_project_id: ProjectId,
+    reason: &str,
+) -> Result<(ProjectMemoryTransfer, MemoryClaim), MemoryError> {
+    prepare_project_memory_transfer_at(
+        transfer_id,
+        source,
+        expected_source_sha256,
+        target_project_id,
+        reason,
+        Utc::now(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_project_memory_transfer_at(
+    transfer_id: MemoryTransferId,
+    source: &MemoryClaim,
+    expected_source_sha256: &str,
+    target_project_id: ProjectId,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(ProjectMemoryTransfer, MemoryClaim), MemoryError> {
+    if source.project_id == target_project_id {
+        return Err(MemoryError::InvalidTransfer(
+            "source and target projects must differ".into(),
+        ));
+    }
+    let reason = reason.trim();
+    if reason.is_empty()
+        || reason.len() > MAX_TRANSFER_REASON_BYTES
+        || reason.chars().any(char::is_control)
+    {
+        return Err(MemoryError::InvalidTransfer(
+            "owner review reason must contain 1 to 512 printable bytes".into(),
+        ));
+    }
+    let actual_sha256 = transferable_memory_claim_sha256_at(source, now)?;
+    if expected_source_sha256.len() != 64
+        || !expected_source_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || expected_source_sha256 != actual_sha256
+    {
+        return Err(MemoryError::InvalidTransfer(
+            "source claim digest is malformed or no longer matches".into(),
+        ));
+    }
+    let target_claim = MemoryLifecycle::create(
+        target_project_id,
+        source.namespace.clone(),
+        source.key.clone(),
+        source.value.clone(),
+        source.confidence,
+        ClaimProvenance {
+            source_kind: ProvenanceKind::Imported,
+            source: format!("cross-project-transfer:{transfer_id}"),
+            task_id: None,
+            artifact_sha256: Some(actual_sha256.clone()),
+        },
+        source.fresh_until,
+    )?;
+    let transfer = ProjectMemoryTransfer {
+        schema_version: MEMORY_TRANSFER_SCHEMA_VERSION,
+        id: transfer_id,
+        source_project_id: source.project_id,
+        source_claim_id: source.id,
+        source_claim_sha256: actual_sha256,
+        target_project_id,
+        target_claim_id: target_claim.id,
+        reason: reason.to_owned(),
+        created_at: now,
+    };
+    Ok((transfer, target_claim))
 }
 
 pub struct MemoryLifecycle;
@@ -447,6 +584,108 @@ mod tests {
             None,
         );
         assert_eq!(disguised, Err(MemoryError::SecretNamespace));
+    }
+
+    #[test]
+    fn cross_project_transfer_is_explicit_digest_bound_and_provenance_preserving() {
+        let now = Utc::now();
+        let source_project_id = ProjectId::new();
+        let target_project_id = ProjectId::new();
+        let mut source = MemoryLifecycle::create(
+            source_project_id,
+            "project",
+            "package_manager",
+            serde_json::json!("pnpm"),
+            0.9,
+            user_provenance("owner-confirmed source"),
+            Some(now + chrono::Duration::days(7)),
+        )
+        .expect("source claim");
+        source.state = MemoryState::Durable;
+        source.usefulness_count = 2;
+        let digest = memory_claim_sha256(&source).expect("claim digest");
+        let transfer_id = MemoryTransferId::new();
+        let (transfer, target) = prepare_project_memory_transfer_at(
+            transfer_id,
+            &source,
+            &digest,
+            target_project_id,
+            "The owner reviewed this project convention for reuse",
+            now,
+        )
+        .expect("transfer");
+
+        assert_eq!(transfer.source_project_id, source_project_id);
+        assert_eq!(transfer.source_claim_id, source.id);
+        assert_eq!(transfer.source_claim_sha256, digest);
+        assert_eq!(transfer.target_project_id, target_project_id);
+        assert_eq!(transfer.target_claim_id, target.id);
+        assert_eq!(target.project_id, target_project_id);
+        assert_eq!(target.namespace, source.namespace);
+        assert_eq!(target.key, source.key);
+        assert_eq!(target.value, source.value);
+        assert_eq!(target.confidence.to_bits(), source.confidence.to_bits());
+        assert_eq!(target.fresh_until, source.fresh_until);
+        assert_eq!(target.state, MemoryState::New);
+        assert_eq!(target.provenance.source_kind, ProvenanceKind::Imported);
+        assert_eq!(
+            target.provenance.source,
+            format!("cross-project-transfer:{transfer_id}")
+        );
+        assert_eq!(
+            target.provenance.artifact_sha256.as_deref(),
+            Some(transfer.source_claim_sha256.as_str())
+        );
+    }
+
+    #[test]
+    fn cross_project_transfer_rejects_ambient_or_changed_authority() {
+        let now = Utc::now();
+        let source_project_id = ProjectId::new();
+        let target_project_id = ProjectId::new();
+        let mut source = MemoryLifecycle::create(
+            source_project_id,
+            "project",
+            "test_command",
+            serde_json::json!("cargo test"),
+            1.0,
+            user_provenance("fixture"),
+            Some(now + chrono::Duration::hours(1)),
+        )
+        .expect("source");
+        let digest = memory_claim_sha256(&source).expect("digest");
+        for (target, expected_digest, reason) in [
+            (target_project_id, digest.as_str(), "reviewed"),
+            (source_project_id, digest.as_str(), "reviewed"),
+            (target_project_id, "0", "reviewed"),
+            (target_project_id, digest.as_str(), ""),
+        ] {
+            assert!(
+                prepare_project_memory_transfer_at(
+                    MemoryTransferId::new(),
+                    &source,
+                    expected_digest,
+                    target,
+                    reason,
+                    now,
+                )
+                .is_err()
+            );
+        }
+        source.state = MemoryState::Durable;
+        source.fresh_until = Some(now - chrono::Duration::seconds(1));
+        let digest = memory_claim_sha256(&source).expect("expired digest");
+        assert!(
+            prepare_project_memory_transfer_at(
+                MemoryTransferId::new(),
+                &source,
+                &digest,
+                target_project_id,
+                "reviewed",
+                now,
+            )
+            .is_err()
+        );
     }
 
     #[test]

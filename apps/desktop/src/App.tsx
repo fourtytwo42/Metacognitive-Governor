@@ -47,6 +47,7 @@ import {
   listSchedulerNotifications,
   listProjects,
   listProjectMemory,
+  listProjectMemoryTransfers,
   projectTopologyPlan,
   listPlatformSessions,
   listSites,
@@ -109,6 +110,8 @@ import {
   type MemoryClaim,
   type MemoryClaimHistoryResponse,
   type MemoryLifecycleAction,
+  type ProjectMemoryTransfer,
+  type ProjectMemoryTransferPreview,
   type RiskLevel,
   type RunReplayReport,
   type ScheduleDefinition,
@@ -163,6 +166,8 @@ import {
   type UserSettingsRevision,
   transitionTask,
   transitionProjectMemory,
+  reviewProjectMemoryTransfer,
+  transferProjectMemory,
   transitionExperiment,
   correctProjectMemory,
   updateSite,
@@ -451,6 +456,12 @@ export function App() {
   const [memoryFreshUntil, setMemoryFreshUntil] = useState("");
   const [memoryCorrections, setMemoryCorrections] = useState<Record<string, string>>({});
   const [memoryHistory, setMemoryHistory] = useState<Record<string, MemoryClaimHistoryResponse | undefined>>({});
+  const [memoryTransfers, setMemoryTransfers] = useState<ProjectMemoryTransfer[]>([]);
+  const [memoryTransferSource, setMemoryTransferSource] = useState<MemoryClaim | null>(null);
+  const [memoryTransferPreview, setMemoryTransferPreview] = useState<ProjectMemoryTransferPreview | null>(null);
+  const [memoryTransferTarget, setMemoryTransferTarget] = useState("");
+  const [memoryTransferReason, setMemoryTransferReason] = useState("");
+  const [memoryTransferId, setMemoryTransferId] = useState(() => crypto.randomUUID());
   const [managedMemory, setManagedMemory] = useState("");
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
@@ -715,8 +726,14 @@ export function App() {
     setMemoryError(null);
     setTopologyPlanError(null);
     setMemoryHistory({});
+    setMemoryTransferSource(null);
+    setMemoryTransferPreview(null);
+    setMemoryTransferTarget("");
+    setMemoryTransferReason("");
+    setMemoryTransferId(crypto.randomUUID());
     if (!selectedProject) {
       setMemoryClaims([]);
+      setMemoryTransfers([]);
       setManagedMemory("");
       setTopologyPlan(null);
       return () => { active = false; };
@@ -724,12 +741,14 @@ export function App() {
     setTopologyPlan(null);
     Promise.all([
       listProjectMemory(selectedProject.project_id),
-      loadManagedProjectMemory(selectedProject.project_id)
+      loadManagedProjectMemory(selectedProject.project_id),
+      listProjectMemoryTransfers(selectedProject.project_id)
     ])
-      .then(([claims, managed]) => {
+      .then(([claims, managed, transfers]) => {
         if (active) {
           setMemoryClaims(claims.claims);
           setManagedMemory(managed.markdown);
+          setMemoryTransfers(transfers.transfers);
         }
       })
       .catch((error) => {
@@ -1436,12 +1455,14 @@ export function App() {
   }
 
   async function refreshProjectMemory(project: ProjectModel) {
-    const [claims, managed] = await Promise.all([
+    const [claims, managed, transfers] = await Promise.all([
       listProjectMemory(project.project_id),
-      loadManagedProjectMemory(project.project_id)
+      loadManagedProjectMemory(project.project_id),
+      listProjectMemoryTransfers(project.project_id)
     ]);
     setMemoryClaims(claims.claims);
     setManagedMemory(managed.markdown);
+    setMemoryTransfers(transfers.transfers);
   }
 
   async function addProjectMemory() {
@@ -1524,6 +1545,57 @@ export function App() {
         claim.key
       );
       setMemoryHistory((current) => ({ ...current, [claim.id]: history }));
+    } catch (error) {
+      setMemoryError(errorMessage(error));
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function beginMemoryTransfer(claim: MemoryClaim) {
+    if (!selectedProject) return;
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      const preview = await reviewProjectMemoryTransfer(selectedProject.project_id, claim.id);
+      setMemoryTransferSource(claim);
+      setMemoryTransferPreview(preview);
+      setMemoryTransferTarget("");
+      setMemoryTransferReason("");
+      setMemoryTransferId(crypto.randomUUID());
+    } catch (error) {
+      setMemoryError(errorMessage(error));
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function confirmMemoryTransfer() {
+    if (!selectedProject || !memoryTransferSource || !memoryTransferPreview) return;
+    if (!memoryTransferTarget) {
+      setMemoryError("Choose a different project for this fact.");
+      return;
+    }
+    if (!memoryTransferReason.trim()) {
+      setMemoryError("Explain why this fact should also apply to the target project.");
+      return;
+    }
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      await transferProjectMemory(selectedProject.project_id, {
+        transfer_id: memoryTransferId,
+        source_claim_id: memoryTransferSource.id,
+        source_claim_sha256: memoryTransferPreview.source_claim_sha256,
+        target_project_id: memoryTransferTarget,
+        reason: memoryTransferReason.trim()
+      });
+      setMemoryTransferSource(null);
+      setMemoryTransferPreview(null);
+      setMemoryTransferTarget("");
+      setMemoryTransferReason("");
+      setMemoryTransferId(crypto.randomUUID());
+      await refreshProjectMemory(selectedProject);
     } catch (error) {
       setMemoryError(errorMessage(error));
     } finally {
@@ -2605,19 +2677,40 @@ export function App() {
                     <p>{memoryText(claim.value)}</p>
                     <small>{claim.namespace} · confidence {Math.round(claim.confidence * 100)}% · {claim.provenance.source}</small>
                   </div>
-                  {advanced && <div className="memory-actions">
-                    <textarea aria-label={`Correction for ${claim.key}`} value={memoryCorrections[claim.id] ?? ""} onChange={(event) => setMemoryCorrections((current) => ({ ...current, [claim.id]: event.target.value }))} placeholder={memoryText(claim.value)} />
-                    <button className="secondary" type="button" disabled={memoryBusy || !(memoryCorrections[claim.id] ?? "").trim()} onClick={() => correctMemory(claim)}>Correct</button>
-                    {!(["superseded", "retracted"] as string[]).includes(claim.state) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "reinforce")}>Reinforce</button>}
-                    {(["new", "working"] as string[]).includes(claim.state) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "decay")}>Mark stale</button>}
-                    {!(["superseded", "retracted"] as string[]).includes(claim.state) && <button className="link-button" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "retract")}>Retract</button>}
-                    <button className="secondary" type="button" disabled={memoryBusy} onClick={() => inspectMemoryHistory(claim)}>History</button>
-                  </div>}
+                  <div className="memory-actions">
+                    {advanced && <textarea aria-label={`Correction for ${claim.key}`} value={memoryCorrections[claim.id] ?? ""} onChange={(event) => setMemoryCorrections((current) => ({ ...current, [claim.id]: event.target.value }))} placeholder={memoryText(claim.value)} />}
+                    {advanced && <button className="secondary" type="button" disabled={memoryBusy || !(memoryCorrections[claim.id] ?? "").trim()} onClick={() => correctMemory(claim)}>Correct</button>}
+                    {advanced && !(["superseded", "retracted"] as string[]).includes(claim.state) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "reinforce")}>Reinforce</button>}
+                    {advanced && (["new", "working"] as string[]).includes(claim.state) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "decay")}>Mark stale</button>}
+                    {advanced && !(["superseded", "retracted"] as string[]).includes(claim.state) && <button className="link-button" type="button" disabled={memoryBusy} onClick={() => transitionMemory(claim, "retract")}>Retract</button>}
+                    {claim.state === "durable" && (!claim.fresh_until || Date.parse(claim.fresh_until) > Date.now()) && projects.some((project) => project.project_id !== claim.project_id) && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => beginMemoryTransfer(claim)}>Share with another project</button>}
+                    {advanced && <button className="secondary" type="button" disabled={memoryBusy} onClick={() => inspectMemoryHistory(claim)}>History</button>}
+                  </div>
                   {advanced && memoryHistory[claim.id] && <ol className="memory-history">
                     {memoryHistory[claim.id]!.claims.map((version) => <li key={version.id}><strong>{version.state}</strong> · {new Date(version.observed_at).toLocaleString()} · {memoryText(version.value)}</li>)}
                   </ol>}
                 </article>)}
               </div>}
+              {memoryTransferSource && memoryTransferPreview && <div className="memory-composer" aria-label="Review project memory transfer">
+                <strong>Share “{memoryTransferSource.key}” with another project</strong>
+                <p className="muted">MCG will copy this exact fact once. Later changes stay separate in each project.</p>
+                <label>Target project<select aria-label="Memory transfer target project" value={memoryTransferTarget} onChange={(event) => setMemoryTransferTarget(event.target.value)}>
+                  <option value="">Choose a project</option>
+                  {projects.filter((project) => project.project_id !== selectedProject.project_id).map((project) => <option value={project.project_id} key={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                </select></label>
+                <label>Why does this fact apply there?<textarea aria-label="Memory transfer reason" value={memoryTransferReason} onChange={(event) => setMemoryTransferReason(event.target.value)} maxLength={512} placeholder="Both projects use the same deployment convention." /></label>
+                {advanced && <><small>Source SHA-256 <code>{memoryTransferPreview.source_claim_sha256}</code></small><small>Retry identity <code>{memoryTransferId}</code></small></>}
+                <div className="composer-actions">
+                  <button className="secondary" type="button" disabled={memoryBusy} onClick={() => { setMemoryTransferSource(null); setMemoryTransferPreview(null); }}>Cancel</button>
+                  <button className="primary" type="button" disabled={memoryBusy || !memoryTransferTarget || !memoryTransferReason.trim()} onClick={confirmMemoryTransfer}>Copy reviewed fact</button>
+                </div>
+              </div>}
+              {advanced && memoryTransfers.length > 0 && <details className="advanced-details">
+                <summary>Cross-project transfer history ({memoryTransfers.length})</summary>
+                <ol className="memory-history">
+                  {memoryTransfers.map((transfer) => <li key={transfer.id}><strong>{transfer.source_project_id === selectedProject.project_id ? "Sent" : "Received"}</strong> · {new Date(transfer.created_at).toLocaleString()} · {transfer.reason}<small><code>{transfer.id}</code> · SHA-256 {transfer.source_claim_sha256}</small></li>)}
+                </ol>
+              </details>}
               {advanced && <details className="advanced-details">
                 <summary>World model and managed MEMORY.md</summary>
                 <p>{selectedProject.world?.nodes.length ?? 0} nodes · {selectedProject.world?.relationships.length ?? 0} relationships · {selectedProject.commands?.length ?? 0} discovered commands</p>

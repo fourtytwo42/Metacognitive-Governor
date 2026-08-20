@@ -37,23 +37,24 @@ use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ApprovalId, ComputerActionBatch, ComputerActionBatchId,
     ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, EvaluationId,
     ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, LeaseId, MemoryClaimId,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
-    PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
-    PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
-    PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant, PluginCapabilityScope,
-    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginInvocationState,
-    PluginRevision, ProjectId, ProxyCallId, ProxyConversationId, RiskLevel, RunId,
-    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment,
-    SiteDeploymentCommand, SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck,
-    SiteHealthCheckId, SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId,
-    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
-    SshHostRevisionId, SshHostState, SshOperation, SshOperationId, SshOperationKind,
-    SshOperationState, SshWorkflow, SshWorkflowId, SshWorkflowState, SshWorkflowStep,
-    SshWorkflowStepId, SshWorkflowStepState, SupervisionObservationId, TaskBudget, TaskEnvelope,
-    TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
+    MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
+    PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
+    PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
+    PluginCapabilityScope, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
+    PluginInvocationState, PluginRevision, ProjectId, ProxyCallId, ProxyConversationId, RiskLevel,
+    RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION,
+    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
+    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
+    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
+    SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
+    SshOperationId, SshOperationKind, SshOperationState, SshWorkflow, SshWorkflowId,
+    SshWorkflowState, SshWorkflowStep, SshWorkflowStepId, SshWorkflowStepState,
+    SupervisionObservationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
+    ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -77,8 +78,8 @@ use mcg_policy::{CapabilityPolicy, OwnerConstitution};
 use mcg_projects::{
     ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
     MemoryError, MemoryLifecycle, MemoryLifecycleAction, MemoryState, ProjectDiscoverer,
-    ProjectDiscoveryError, ProjectModel, ProvenanceKind, SnapshotInvalidation,
-    render_managed_memory,
+    ProjectDiscoveryError, ProjectMemoryTransfer, ProjectModel, ProvenanceKind,
+    SnapshotInvalidation, prepare_project_memory_transfer, render_managed_memory,
 };
 use mcg_providers::{
     BrowserAuthorizationConfig, DeviceAuthorizationConfig, MemoryProviderCredentialStore,
@@ -470,6 +471,7 @@ impl RuntimeError {
                     MemoryError::SecretNamespace
                         | MemoryError::InvalidConfidence
                         | MemoryError::EmptyKey
+                        | MemoryError::InvalidTransfer(_)
                 )
                 | Self::AgentTurn(AgentTurnError::Invalid(_))
                 | Self::Tool(ToolError::Invalid(_))
@@ -539,6 +541,20 @@ pub struct MemoryClaimMutation {
     pub claim: MemoryClaim,
     pub previous: Option<MemoryClaim>,
     pub event: EventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMemoryTransferMutation {
+    pub transfer: ProjectMemoryTransfer,
+    pub claim: MemoryClaim,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMemoryTransferPreview {
+    pub claim: MemoryClaim,
+    pub source_claim_sha256: String,
 }
 
 pub const MEMORY_CONSOLIDATION_BATCH_LIMIT: usize = 64;
@@ -5030,6 +5046,97 @@ impl AppRuntime {
             previous: None,
             event,
         })
+    }
+
+    /// Transfers one exact reviewed durable claim into another project.
+    ///
+    /// The caller owns the transfer identity and exact source digest. Replay is
+    /// observation-only; changed identity reuse, stale evidence, target key
+    /// collisions, and implicit/same-project transfer fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, invalid-request, conflict, or storage failures without
+    /// creating partial target memory.
+    pub fn transfer_project_memory(
+        &self,
+        transfer_id: MemoryTransferId,
+        source_project_id: ProjectId,
+        source_claim_id: MemoryClaimId,
+        source_claim_sha256: &str,
+        target_project_id: ProjectId,
+        reason: &str,
+    ) -> Result<ProjectMemoryTransferMutation, RuntimeError> {
+        let (transfer, claim, event, replayed) = {
+            let mut store = self.store()?;
+            let source = store
+                .memory_claim(source_claim_id)?
+                .ok_or(StorageError::MemoryClaimNotFound(source_claim_id))?;
+            if source.project_id != source_project_id {
+                return Err(StorageError::MemoryClaimNotFound(source_claim_id).into());
+            }
+            let (requested, target_claim) = prepare_project_memory_transfer(
+                transfer_id,
+                &source,
+                source_claim_sha256,
+                target_project_id,
+                reason,
+            )?;
+            store.create_project_memory_transfer(&requested, &target_claim)?
+        };
+        let mut events = Vec::new();
+        if let Some(event) = event {
+            let _ = self.event_sender.send(event.clone());
+            events.push(event);
+        }
+        Ok(ProjectMemoryTransferMutation {
+            transfer,
+            claim,
+            replayed,
+            events,
+        })
+    }
+
+    /// Loads one exact source claim and returns its canonical transfer digest.
+    ///
+    /// This read-only review step admits only a fresh durable source. The
+    /// returned digest must be supplied unchanged to the later mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for a claim outside the source project and rejects a
+    /// source that is stale, non-durable, or oversized.
+    pub fn project_memory_transfer_preview(
+        &self,
+        source_project_id: ProjectId,
+        source_claim_id: MemoryClaimId,
+    ) -> Result<ProjectMemoryTransferPreview, RuntimeError> {
+        let claim = self
+            .store()?
+            .memory_claim(source_claim_id)?
+            .filter(|claim| claim.project_id == source_project_id)
+            .ok_or(StorageError::MemoryClaimNotFound(source_claim_id))?;
+        let source_claim_sha256 = mcg_projects::transferable_memory_claim_sha256(&claim)?;
+        Ok(ProjectMemoryTransferPreview {
+            claim,
+            source_claim_sha256,
+        })
+    }
+
+    /// Lists immutable inbound and outbound transfer evidence for one project.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for an unknown project or a storage read failure.
+    pub fn project_memory_transfers(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ProjectMemoryTransfer>, RuntimeError> {
+        let store = self.store()?;
+        if store.project(project_id)?.is_none() {
+            return Err(StorageError::ProjectNotFound(project_id).into());
+        }
+        Ok(store.project_memory_transfers(project_id)?)
     }
 
     /// Corrects the current claim version under one storage lock and records the

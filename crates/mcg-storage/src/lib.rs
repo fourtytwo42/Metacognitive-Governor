@@ -4,11 +4,14 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    ApprovalId, LeaseId, MemoryClaimId, ProjectId, ProjectSnapshotId, TaskEnvelope, TaskId,
-    TaskState, ToolExecutionId, ToolRequestId,
+    ApprovalId, LeaseId, MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId,
+    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
-use mcg_projects::{MemoryClaim, MemoryState, ProjectModel};
+use mcg_projects::{
+    MEMORY_TRANSFER_SCHEMA_VERSION, MemoryClaim, MemoryState, ProjectMemoryTransfer, ProjectModel,
+    ProvenanceKind, memory_claim_sha256,
+};
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease, LeaseState, ToolAuditRecord,
 };
@@ -57,7 +60,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 31;
+pub const STORAGE_SCHEMA_VERSION: i64 = 32;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1141,6 +1144,35 @@ BEFORE DELETE ON ssh_workflows BEGIN
 END;
 ";
 
+const MIGRATION_32: &str = r"
+CREATE TABLE IF NOT EXISTS project_memory_transfers (
+    transfer_id TEXT PRIMARY KEY,
+    source_project_id TEXT NOT NULL,
+    source_claim_id TEXT NOT NULL,
+    source_claim_sha256 TEXT NOT NULL,
+    target_project_id TEXT NOT NULL,
+    target_claim_id TEXT NOT NULL UNIQUE,
+    transfer_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(source_project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(source_claim_id) REFERENCES memory_claims(claim_id),
+    FOREIGN KEY(target_project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(target_claim_id) REFERENCES memory_claims(claim_id)
+);
+CREATE INDEX IF NOT EXISTS project_memory_transfers_source
+    ON project_memory_transfers(source_project_id, created_at, transfer_id);
+CREATE INDEX IF NOT EXISTS project_memory_transfers_target
+    ON project_memory_transfers(target_project_id, created_at, transfer_id);
+CREATE TRIGGER IF NOT EXISTS project_memory_transfers_no_update
+BEFORE UPDATE ON project_memory_transfers BEGIN
+    SELECT RAISE(FAIL, 'project memory transfer evidence is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS project_memory_transfers_no_delete
+BEFORE DELETE ON project_memory_transfers BEGIN
+    SELECT RAISE(FAIL, 'project memory transfer evidence is immutable');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1299,6 +1331,7 @@ impl SqliteEventStore {
             (29_i64, MIGRATION_29),
             (30_i64, MIGRATION_30),
             (31_i64, MIGRATION_31),
+            (32_i64, MIGRATION_32),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1707,6 +1740,193 @@ impl SqliteEventStore {
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// Atomically copies one reviewed durable claim into another project and
+    /// retains immutable, idempotent transfer evidence.
+    ///
+    /// # Errors
+    ///
+    /// Missing projects/source claims, stale or changed source evidence, target
+    /// key collisions, changed transfer-id reuse, and forged copies fail closed.
+    #[allow(clippy::too_many_lines)] // Keep every atomic transfer invariant adjacent and auditable.
+    pub fn create_project_memory_transfer(
+        &mut self,
+        requested: &ProjectMemoryTransfer,
+        target_claim: &MemoryClaim,
+    ) -> Result<
+        (
+            ProjectMemoryTransfer,
+            MemoryClaim,
+            Option<EventEnvelope>,
+            bool,
+        ),
+        StorageError,
+    > {
+        if let Some(existing) = self.project_memory_transfer(requested.id)? {
+            if !same_transfer_intent(&existing, requested) {
+                return Err(StorageError::Conflict(
+                    "cross-project memory transfer id was reused with changed input".into(),
+                ));
+            }
+            let claim = self
+                .memory_claim(existing.target_claim_id)?
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "stored memory transfer target claim is missing".into(),
+                    )
+                })?;
+            return Ok((existing, claim, None, true));
+        }
+        if requested.schema_version != MEMORY_TRANSFER_SCHEMA_VERSION
+            || requested.source_project_id == requested.target_project_id
+            || requested.target_claim_id != target_claim.id
+            || requested.reason.trim().is_empty()
+            || requested.reason.len() > 512
+            || requested.reason.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidData(
+                "cross-project memory transfer contract is invalid".into(),
+            ));
+        }
+        if requested.source_claim_sha256.len() != 64
+            || !requested
+                .source_claim_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(StorageError::InvalidData(
+                "cross-project memory transfer digest is malformed".into(),
+            ));
+        }
+        if self.project(requested.source_project_id)?.is_none() {
+            return Err(StorageError::ProjectNotFound(requested.source_project_id));
+        }
+        if self.project(requested.target_project_id)?.is_none() {
+            return Err(StorageError::ProjectNotFound(requested.target_project_id));
+        }
+        let source = self
+            .memory_claim(requested.source_claim_id)?
+            .ok_or(StorageError::MemoryClaimNotFound(requested.source_claim_id))?;
+        let source_sha256 = memory_claim_sha256(&source)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if source.project_id != requested.source_project_id
+            || source.state != MemoryState::Durable
+            || !source.is_fresh_at(Utc::now())
+            || source_sha256 != requested.source_claim_sha256
+        {
+            return Err(StorageError::Conflict(
+                "reviewed source claim is stale, non-durable, or changed".into(),
+            ));
+        }
+        let expected_source = format!("cross-project-transfer:{}", requested.id);
+        if target_claim.project_id != requested.target_project_id
+            || target_claim.state != MemoryState::New
+            || target_claim.supersedes.is_some()
+            || target_claim.namespace != source.namespace
+            || target_claim.key != source.key
+            || target_claim.value != source.value
+            || target_claim.confidence.to_bits() != source.confidence.to_bits()
+            || target_claim.fresh_until != source.fresh_until
+            || target_claim.correction_count != 0
+            || target_claim.usefulness_count != 0
+            || target_claim.provenance.source_kind != ProvenanceKind::Imported
+            || target_claim.provenance.source != expected_source
+            || target_claim.provenance.task_id.is_some()
+            || target_claim.provenance.artifact_sha256.as_deref()
+                != Some(requested.source_claim_sha256.as_str())
+        {
+            return Err(StorageError::InvalidData(
+                "target memory claim does not match the reviewed source".into(),
+            ));
+        }
+        let collision = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM memory_claims
+                WHERE project_id = ?1 AND namespace = ?2 AND claim_key = ?3
+                  AND state IN ('new', 'working', 'durable', 'decaying')
+             )",
+            params![
+                requested.target_project_id.to_string(),
+                target_claim.namespace,
+                target_claim.key
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if collision {
+            return Err(StorageError::Conflict(
+                "target project already has an active claim for this namespace and key".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::MemoryClaimTransferred,
+            None,
+            serde_json::json!({"transfer": requested, "claim": target_claim}),
+        );
+        let transaction = self.connection.transaction()?;
+        Self::insert_memory_claim(&transaction, target_claim)?;
+        transaction.execute(
+            "INSERT INTO project_memory_transfers(
+                transfer_id, source_project_id, source_claim_id, source_claim_sha256,
+                target_project_id, target_claim_id, transfer_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                requested.id.to_string(),
+                requested.source_project_id.to_string(),
+                requested.source_claim_id.to_string(),
+                requested.source_claim_sha256,
+                requested.target_project_id.to_string(),
+                requested.target_claim_id.to_string(),
+                serde_json::to_string(requested)?,
+                requested.created_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((requested.clone(), target_claim.clone(), Some(event), false))
+    }
+
+    /// Loads immutable transfer evidence by caller-owned identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed stored JSON or a failed query.
+    pub fn project_memory_transfer(
+        &self,
+        transfer_id: MemoryTransferId,
+    ) -> Result<Option<ProjectMemoryTransfer>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT transfer_json FROM project_memory_transfers WHERE transfer_id = ?1",
+                [transfer_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    /// Lists inbound and outbound immutable transfer evidence for one project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed stored JSON or a failed query.
+    pub fn project_memory_transfers(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ProjectMemoryTransfer>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT transfer_json FROM project_memory_transfers
+             WHERE source_project_id = ?1 OR target_project_id = ?1
+             ORDER BY created_at, transfer_id",
+        )?;
+        let rows = statement
+            .query_map([project_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
     }
 
     /// Atomically supersedes one active claim with a validated corrected version.
@@ -2596,6 +2816,19 @@ const fn tool_audit_phase_name(phase: mcg_tools::ToolAuditPhase) -> &'static str
     }
 }
 
+fn same_transfer_intent(
+    existing: &ProjectMemoryTransfer,
+    requested: &ProjectMemoryTransfer,
+) -> bool {
+    existing.schema_version == requested.schema_version
+        && existing.id == requested.id
+        && existing.source_project_id == requested.source_project_id
+        && existing.source_claim_id == requested.source_claim_id
+        && existing.source_claim_sha256 == requested.source_claim_sha256
+        && existing.target_project_id == requested.target_project_id
+        && existing.reason == requested.reason
+}
+
 const fn memory_state_name(state: MemoryState) -> &'static str {
     match state {
         MemoryState::New => "new",
@@ -2610,8 +2843,11 @@ const fn memory_state_name(state: MemoryState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcg_domain::{ApprovalId, ArtifactId};
-    use mcg_projects::{MemoryLifecycle, ProjectDiscoverer, user_provenance};
+    use mcg_domain::{ApprovalId, ArtifactId, MemoryTransferId};
+    use mcg_projects::{
+        MemoryLifecycle, ProjectDiscoverer, memory_claim_sha256, prepare_project_memory_transfer,
+        user_provenance,
+    };
     use mcg_tools::{
         ArtifactReference, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolOutcomeStatus,
         VerificationEvidence,
@@ -3032,5 +3268,168 @@ mod tests {
                 .execute("DELETE FROM memory_claims", [])
                 .is_err()
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle fixture proves rollback, reopen, replay, and collisions.
+    fn cross_project_memory_transfer_is_atomic_idempotent_and_restart_durable() {
+        let roots = tempfile::tempdir().expect("project roots");
+        let source_root = roots.path().join("source");
+        let target_root = roots.path().join("target");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        std::fs::create_dir_all(&target_root).expect("target root");
+        std::fs::write(source_root.join("package.json"), "{}").expect("source manifest");
+        std::fs::write(target_root.join("Cargo.toml"), "[workspace]").expect("target manifest");
+        let source_project_id = ProjectId::new();
+        let target_project_id = ProjectId::new();
+        let source_project =
+            ProjectDiscoverer::discover(&source_root, source_project_id).expect("source project");
+        let target_project =
+            ProjectDiscoverer::discover(&target_root, target_project_id).expect("target project");
+        let database = tempfile::tempdir().expect("database");
+        let path = database.path().join("mcg.db");
+        let mut source = MemoryLifecycle::create(
+            source_project_id,
+            "project",
+            "package_manager",
+            serde_json::json!("pnpm"),
+            0.9,
+            user_provenance("owner-confirmed source"),
+            Some(Utc::now() + chrono::Duration::days(7)),
+        )
+        .expect("source claim");
+        {
+            let mut store = SqliteEventStore::open(&path).expect("store");
+            store
+                .record_project_snapshot(&source_project)
+                .expect("source project");
+            store
+                .record_project_snapshot(&target_project)
+                .expect("target project");
+            store.create_memory_claim(&source).expect("source claim");
+            let first = MemoryLifecycle::reinforced(&mut source, user_provenance("use one"))
+                .expect("first reinforcement");
+            store
+                .revise_memory_claim(&first)
+                .expect("first reinforcement storage");
+            source = first;
+            let second = MemoryLifecycle::reinforced(&mut source, user_provenance("use two"))
+                .expect("second reinforcement");
+            store
+                .revise_memory_claim(&second)
+                .expect("second reinforcement storage");
+            source = second;
+        }
+        assert_eq!(source.state, MemoryState::Durable);
+        let digest = memory_claim_sha256(&source).expect("digest");
+        let transfer_id = MemoryTransferId::new();
+        let (transfer, target_claim) = prepare_project_memory_transfer(
+            transfer_id,
+            &source,
+            &digest,
+            target_project_id,
+            "Owner reviewed the package-manager convention",
+        )
+        .expect("prepare transfer");
+
+        let mut reopened = SqliteEventStore::open(&path).expect("reopen");
+        reopened
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_memory_transfer
+                 BEFORE INSERT ON project_memory_transfers BEGIN
+                    SELECT RAISE(FAIL, 'injected transfer failure');
+                 END;",
+            )
+            .expect("failure trigger");
+        let events_before = reopened.event_count().expect("event count");
+        assert!(
+            reopened
+                .create_project_memory_transfer(&transfer, &target_claim)
+                .is_err()
+        );
+        assert!(
+            reopened
+                .memory_claim(target_claim.id)
+                .expect("target query")
+                .is_none()
+        );
+        assert!(
+            reopened
+                .project_memory_transfer(transfer_id)
+                .expect("transfer query")
+                .is_none()
+        );
+        assert_eq!(reopened.event_count().expect("event count"), events_before);
+        reopened
+            .connection
+            .execute_batch("DROP TRIGGER reject_memory_transfer;")
+            .expect("drop failure trigger");
+
+        let (stored, stored_claim, event, replayed) = reopened
+            .create_project_memory_transfer(&transfer, &target_claim)
+            .expect("transfer");
+        assert!(!replayed);
+        assert_eq!(stored, transfer);
+        assert_eq!(stored_claim, target_claim);
+        assert_eq!(
+            event.expect("transfer event").kind,
+            EventKind::MemoryClaimTransferred
+        );
+        let events_after = reopened.event_count().expect("event count");
+        drop(reopened);
+
+        let mut restarted = SqliteEventStore::open(&path).expect("restart");
+        let (replayed_transfer, replayed_claim, event, replayed) = restarted
+            .create_project_memory_transfer(&transfer, &target_claim)
+            .expect("idempotent replay");
+        assert!(replayed);
+        assert_eq!(replayed_transfer, transfer);
+        assert_eq!(replayed_claim, target_claim);
+        assert!(event.is_none());
+        assert_eq!(restarted.event_count().expect("event count"), events_after);
+        assert_eq!(
+            restarted
+                .project_memory_transfers(source_project_id)
+                .expect("source transfers"),
+            vec![transfer.clone()]
+        );
+        assert_eq!(
+            restarted
+                .project_memory_transfers(target_project_id)
+                .expect("target transfers"),
+            vec![transfer.clone()]
+        );
+        assert!(
+            restarted
+                .connection
+                .execute("DELETE FROM project_memory_transfers", [])
+                .is_err()
+        );
+
+        let (changed, changed_claim) = prepare_project_memory_transfer(
+            transfer_id,
+            &source,
+            &digest,
+            target_project_id,
+            "A changed review reason",
+        )
+        .expect("changed request");
+        assert!(matches!(
+            restarted.create_project_memory_transfer(&changed, &changed_claim),
+            Err(StorageError::Conflict(_))
+        ));
+        let (collision, collision_claim) = prepare_project_memory_transfer(
+            MemoryTransferId::new(),
+            &source,
+            &digest,
+            target_project_id,
+            "Another transfer into the occupied target key",
+        )
+        .expect("collision request");
+        assert!(matches!(
+            restarted.create_project_memory_transfer(&collision, &collision_claim),
+            Err(StorageError::Conflict(_))
+        ));
     }
 }

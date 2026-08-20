@@ -16,14 +16,15 @@ use mcg_api::{
     McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
     OrganizationMutationResponse, PlatformSessionHistoryResponse, PlatformSessionListResponse,
-    PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse, ProjectTopologyPlan,
-    ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
-    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse,
+    ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
+    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
+    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
+    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
+    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransferProjectMemoryRequest,
     TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
     UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
     UserSettingsHistoryResponse, WakeScheduleRequest,
@@ -42,9 +43,10 @@ use mcg_runtime::{
     CandidateRevisionMutation, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
     MemoryClaimMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
-    ProjectMutation, ProviderMutation, RunReplayReport, ScheduleWakeMutation,
-    SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation, SshHostMutation,
-    SshOperationMutation, SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
+    ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    RunReplayReport, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
+    SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
+    SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -2032,6 +2034,46 @@ async fn transition_project_memory(
 }
 
 #[tauri::command]
+async fn review_project_memory_transfer(
+    project_id: String,
+    claim_id: String,
+) -> Result<ProjectMemoryTransferPreview, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let claim_id = canonical_uuid(&claim_id, "Memory claim identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/memory/{claim_id}/transfer-preview"),
+        "Project memory transfer review",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn transfer_project_memory(
+    project_id: String,
+    request: TransferProjectMemoryRequest,
+) -> Result<ProjectMemoryTransferMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/memory/transfers"),
+        &request,
+        "Project memory transfer",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_project_memory_transfers(
+    project_id: String,
+) -> Result<ProjectMemoryTransferListResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/memory/transfers"),
+        "Project memory transfers",
+    )
+    .await
+}
+
+#[tauri::command]
 async fn project_memory_history(
     project_id: String,
     namespace: String,
@@ -2218,6 +2260,9 @@ pub fn run() {
             create_project_memory,
             correct_project_memory,
             transition_project_memory,
+            review_project_memory_transfer,
+            transfer_project_memory,
+            list_project_memory_transfers,
             project_memory_history,
             managed_project_memory,
             open_external_url

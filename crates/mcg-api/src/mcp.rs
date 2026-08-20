@@ -19,12 +19,12 @@ use mcg_agents::{
     SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
-    ExperimentId, OrganizationId, OrganizationImportId, OrganizationRevisionId, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInvocationId, ProjectId, RiskLevel, RunId,
-    ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
-    SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, SshWorkflowId, TaskBudget,
-    TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ExperimentId, MemoryClaimId, MemoryTransferId, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInvocationId, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState,
+    SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId, SshOperationKind,
+    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
@@ -687,6 +687,59 @@ fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             },
             "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_project_memory_transfer_preview",
+            "title": "Review MCG Project Memory Transfer",
+            "description": "Load one exact fresh durable source claim and its canonical SHA-256 before an explicit cross-project transfer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_project_id": {"type": "string", "format": "uuid"},
+                    "source_claim_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["source_project_id", "source_claim_id"],
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_project_memory_transfers",
+            "title": "List MCG Project Memory Transfers",
+            "description": "List immutable inbound and outbound cross-project memory transfer evidence for one project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["project_id"],
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_project_memory_transfer",
+            "title": "Transfer MCG Project Memory",
+            "description": "Copy one explicitly reviewed, digest-bound fresh durable claim into a different project. The caller owns transfer_id for safe retry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "transfer_id": {"type": "string", "format": "uuid"},
+                    "source_project_id": {"type": "string", "format": "uuid"},
+                    "source_claim_id": {"type": "string", "format": "uuid"},
+                    "source_claim_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "target_project_id": {"type": "string", "format": "uuid"},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+                },
+                "required": ["transfer_id", "source_project_id", "source_claim_id", "source_claim_sha256", "target_project_id", "reason"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
         }),
         json!({
             "name": "mcg_project_context",
@@ -1558,6 +1611,9 @@ async fn call_tool(
         "mcg_project_context" => project_context(state, &arguments),
         "mcg_project_topology_plan" => project_topology_plan(state, &arguments),
         "mcg_memory_search" => memory_search(state, &arguments),
+        "mcg_project_memory_transfer_preview" => memory_transfer_preview(state, &arguments),
+        "mcg_project_memory_transfers" => memory_transfers(state, &arguments),
+        "mcg_project_memory_transfer" => memory_transfer(state, &arguments),
         "mcg_scheduler_list" => scheduler_list(state, &arguments),
         "mcg_scheduler_create" => scheduler_create(state, &arguments),
         "mcg_scheduler_remove" => scheduler_remove(state, &arguments),
@@ -4503,14 +4559,122 @@ fn memory_search(
     tool_success(Ok(json!({"claims": matches})))
 }
 
+fn memory_transfer_preview(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &["source_project_id", "source_claim_id"])?;
+    let source_project_id = required_project_id(arguments, "source_project_id")?;
+    let source_claim_id = required_memory_claim_id(arguments, "source_claim_id")?;
+    match state
+        .runtime
+        .project_memory_transfer_preview(source_project_id, source_claim_id)
+    {
+        Ok(preview) => tool_success(serde_json::to_value(preview)),
+        Err(_) => Ok(tool_error(
+            "transfer_source_refused",
+            "The source claim was not found in that project or is not currently fresh and durable",
+        )),
+    }
+}
+
+fn memory_transfers(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &["project_id"])?;
+    let project_id = project_id(arguments)?;
+    match state.runtime.project_memory_transfers(project_id) {
+        Ok(transfers) => tool_success(Ok(json!({"transfers": transfers}))),
+        Err(_) => Ok(tool_error(
+            "project_not_found",
+            "The requested project is not known to MCG",
+        )),
+    }
+}
+
+fn memory_transfer(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(
+        arguments,
+        &[
+            "transfer_id",
+            "source_project_id",
+            "source_claim_id",
+            "source_claim_sha256",
+            "target_project_id",
+            "reason",
+        ],
+    )?;
+    let transfer_id = required_memory_transfer_id(arguments, "transfer_id")?;
+    let source_project_id = required_project_id(arguments, "source_project_id")?;
+    let source_claim_id = required_memory_claim_id(arguments, "source_claim_id")?;
+    let source_claim_sha256 = required_string(arguments, "source_claim_sha256")?;
+    let target_project_id = required_project_id(arguments, "target_project_id")?;
+    let reason = required_string(arguments, "reason")?;
+    match state.runtime.transfer_project_memory(
+        transfer_id,
+        source_project_id,
+        source_claim_id,
+        source_claim_sha256,
+        target_project_id,
+        reason,
+    ) {
+        Ok(mutation) => tool_success(serde_json::to_value(mutation)),
+        Err(_) => Ok(tool_error(
+            "memory_transfer_refused",
+            "The reviewed transfer was refused because its evidence, identity, target, or current project memory no longer matches",
+        )),
+    }
+}
+
 fn project_id(arguments: &serde_json::Map<String, Value>) -> Result<ProjectId, RpcFailure> {
-    let value = required_string(arguments, "project_id")?;
+    required_project_id(arguments, "project_id")
+}
+
+fn required_project_id(
+    arguments: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<ProjectId, RpcFailure> {
+    let value = required_string(arguments, name)?;
     ProjectId::from_str(value).map_err(|_| {
         RpcFailure::new(
             StatusCode::OK,
             None,
             INVALID_PARAMS,
-            "project_id must be a UUID",
+            format!("{name} must be a UUID"),
+        )
+    })
+}
+
+fn required_memory_claim_id(
+    arguments: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<MemoryClaimId, RpcFailure> {
+    let value = required_string(arguments, name)?;
+    MemoryClaimId::from_str(value).map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            format!("{name} must be a UUID"),
+        )
+    })
+}
+
+fn required_memory_transfer_id(
+    arguments: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<MemoryTransferId, RpcFailure> {
+    let value = required_string(arguments, name)?;
+    MemoryTransferId::from_str(value).map_err(|_| {
+        RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INVALID_PARAMS,
+            format!("{name} must be a UUID"),
         )
     })
 }

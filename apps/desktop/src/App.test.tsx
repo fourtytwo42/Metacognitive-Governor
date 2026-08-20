@@ -42,6 +42,9 @@ const client = vi.hoisted(() => ({
   createProjectMemory: vi.fn(),
   correctProjectMemory: vi.fn(),
   transitionProjectMemory: vi.fn(),
+  reviewProjectMemoryTransfer: vi.fn(),
+  transferProjectMemory: vi.fn(),
+  listProjectMemoryTransfers: vi.fn(),
   loadProjectMemoryHistory: vi.fn(),
   loadManagedProjectMemory: vi.fn(),
   listOrganizations: vi.fn(),
@@ -154,6 +157,9 @@ vi.mock("./desktop-client", () => ({
   createProjectMemory: client.createProjectMemory,
   correctProjectMemory: client.correctProjectMemory,
   transitionProjectMemory: client.transitionProjectMemory,
+  reviewProjectMemoryTransfer: client.reviewProjectMemoryTransfer,
+  transferProjectMemory: client.transferProjectMemory,
+  listProjectMemoryTransfers: client.listProjectMemoryTransfers,
   loadProjectMemoryHistory: client.loadProjectMemoryHistory,
   loadManagedProjectMemory: client.loadManagedProjectMemory,
   listOrganizations: client.listOrganizations,
@@ -269,6 +275,9 @@ beforeEach(() => {
   client.createProjectMemory.mockReset();
   client.correctProjectMemory.mockReset();
   client.transitionProjectMemory.mockReset();
+  client.reviewProjectMemoryTransfer.mockReset();
+  client.transferProjectMemory.mockReset();
+  client.listProjectMemoryTransfers.mockReset();
   client.loadProjectMemoryHistory.mockReset();
   client.loadManagedProjectMemory.mockReset();
   client.listOrganizations.mockReset();
@@ -360,6 +369,7 @@ beforeEach(() => {
     unresolved_nodes: []
   });
   client.listProjectMemory.mockResolvedValue({ claims: [] });
+  client.listProjectMemoryTransfers.mockResolvedValue({ transfers: [] });
   client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n" });
   client.listOrganizations.mockResolvedValue({ organizations: [] });
   client.listApprovals.mockResolvedValue({ approvals: [] });
@@ -1894,6 +1904,73 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   await waitFor(() => expect(client.transitionProjectMemory).toHaveBeenCalledWith(project.project_id, claim.id, "reinforce"));
   fireEvent.click(within(intelligence).getByRole("button", { name: "History" }));
   await waitFor(() => expect(intelligence.querySelector(".memory-history")).toHaveTextContent("new"));
+});
+
+test("simple mode reviews and transfers one durable fact to an explicitly chosen project", async () => {
+  const source = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000520",
+    project_id: "00000000-0000-4000-8000-000000000521",
+    root: "C:\\Projects\\source",
+    fingerprint: "a".repeat(64),
+    observed_at: "2026-08-20T12:00:00Z",
+    repository: { is_git: true, branch: "main", head: "abc", dirty: false, recent_commits: [] },
+    languages: ["TypeScript"], build_systems: ["npm"], test_systems: ["vitest"],
+    package_managers: ["pnpm"], services: [], ci_systems: [], important_directories: ["src"],
+    commands: [], instructions: { conflicts: [] }, world: { nodes: [], relationships: [] }, watched_inputs: {}
+  };
+  const target = { ...source, id: "00000000-0000-4000-8000-000000000522", project_id: "00000000-0000-4000-8000-000000000523", root: "C:\\Projects\\target", fingerprint: "b".repeat(64) };
+  const claim = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000524",
+    project_id: source.project_id,
+    namespace: "project",
+    key: "package_manager",
+    value: "pnpm",
+    state: "durable",
+    confidence: 0.95,
+    provenance: { source_kind: "user", source: "Desktop owner" },
+    observed_at: "2026-08-20T12:01:00Z",
+    fresh_until: "2026-08-27T12:01:00Z",
+    correction_count: 0,
+    usefulness_count: 2
+  };
+  const digest = "d".repeat(64);
+  client.listProjects.mockResolvedValue({ projects: [source, target] });
+  client.listProjectMemory.mockResolvedValue({ claims: [claim] });
+  client.reviewProjectMemoryTransfer.mockResolvedValue({ claim, source_claim_sha256: digest });
+  client.transferProjectMemory.mockResolvedValue({
+    transfer: {
+      schema_version: 1,
+      id: "00000000-0000-4000-8000-000000000525",
+      source_project_id: source.project_id,
+      source_claim_id: claim.id,
+      source_claim_sha256: digest,
+      target_project_id: target.project_id,
+      target_claim_id: "00000000-0000-4000-8000-000000000526",
+      reason: "Both projects use the same package manager",
+      created_at: "2026-08-20T12:02:00Z"
+    },
+    claim: { ...claim, id: "00000000-0000-4000-8000-000000000526", project_id: target.project_id, state: "new" },
+    replayed: false,
+    events: [{ sequence: 1, kind: "memory_claim_transferred", occurred_at: "2026-08-20T12:02:00Z" }]
+  });
+
+  render(<App />);
+  fireEvent.click((await screen.findAllByRole("button", { name: "Use project" }))[0]!);
+  const intelligence = await screen.findByLabelText("Project intelligence and memory");
+  fireEvent.click(await within(intelligence).findByRole("button", { name: "Share with another project" }));
+  await waitFor(() => expect(client.reviewProjectMemoryTransfer).toHaveBeenCalledWith(source.project_id, claim.id));
+  fireEvent.change(within(intelligence).getByLabelText("Memory transfer target project"), { target: { value: target.project_id } });
+  fireEvent.change(within(intelligence).getByLabelText("Memory transfer reason"), { target: { value: "Both projects use the same package manager" } });
+  fireEvent.click(within(intelligence).getByRole("button", { name: "Copy reviewed fact" }));
+  await waitFor(() => expect(client.transferProjectMemory).toHaveBeenCalledWith(source.project_id, {
+    transfer_id: expect.any(String),
+    source_claim_id: claim.id,
+    source_claim_sha256: digest,
+    target_project_id: target.project_id,
+    reason: "Both projects use the same package manager"
+  }));
 });
 
 test("project discovery errors remain visible on the Projects screen", async () => {

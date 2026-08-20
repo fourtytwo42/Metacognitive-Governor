@@ -56,6 +56,7 @@ domain_id!(ArtifactId);
 domain_id!(ManagedProcessId);
 domain_id!(ProjectSnapshotId);
 domain_id!(MemoryClaimId);
+domain_id!(MemoryTransferId);
 domain_id!(OrganizationId);
 domain_id!(OrganizationImportId);
 domain_id!(OrganizationRevisionId);

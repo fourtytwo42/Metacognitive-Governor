@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use mcg_domain::{MemoryClaimId, ProjectId, ProjectSnapshotId};
+use mcg_domain::{MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId};
 use serde::{Deserialize, Serialize};
 
 pub const PROJECT_MODEL_SCHEMA_VERSION: u16 = 1;
 pub const MEMORY_CLAIM_SCHEMA_VERSION: u16 = 1;
+pub const MEMORY_TRANSFER_SCHEMA_VERSION: u16 = 1;
 pub const TOPOLOGY_PLAN_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +193,19 @@ pub struct MemoryClaim {
     pub supersedes: Option<MemoryClaimId>,
     pub correction_count: u32,
     pub usefulness_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMemoryTransfer {
+    pub schema_version: u16,
+    pub id: MemoryTransferId,
+    pub source_project_id: ProjectId,
+    pub source_claim_id: MemoryClaimId,
+    pub source_claim_sha256: String,
+    pub target_project_id: ProjectId,
+    pub target_claim_id: MemoryClaimId,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
 }
 
 impl MemoryClaim {

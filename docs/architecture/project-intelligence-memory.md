@@ -161,6 +161,26 @@ Working and durable heads can be rendered as stable human-readable Markdown.
 JSON API/CLI history is the lossless export surface because it retains lifecycle
 and provenance fields that Markdown intentionally summarizes.
 
+### Explicit cross-project transfer
+
+Cross-project learning is never ambient. A caller first performs a read-only
+review of one exact source claim. Only a fresh `durable` head of at most 64 KiB
+is reviewable, and the response includes the canonical SHA-256 of its versioned
+JSON. A later mutation must pin that digest, a caller-owned transfer UUID, a
+different target project, and a printable owner reason of at most 512 bytes.
+Changed or stale evidence, same-project requests, an occupied target
+namespace/key, and changed UUID reuse fail closed.
+
+The target receives a new claim with the same namespace, key, value,
+confidence, and freshness, but begins its own lifecycle in `new` state. Its
+provenance is `imported`, identifies only the immutable transfer UUID, and pins
+the source digest. Later changes in either project do not propagate. The target
+claim, immutable transfer record, and `memory_claim_transferred` event commit in
+one SQLite transaction; a failed write leaves none of them behind. Exact retry
+after restart returns the original target claim without another event. Transfer
+records cannot be updated or deleted and are included in ordinary consistent
+SQLite backup/restore snapshots.
+
 ## Interfaces
 
 The authenticated loopback API and CLI support:
@@ -170,6 +190,8 @@ The authenticated loopback API and CLI support:
 - target-aware bounded context assembly;
 - memory add/list/correct/history;
 - reinforcement, decay, and retraction;
+- explicit source review, one-claim cross-project transfer, and immutable
+  inbound/outbound transfer history;
 - managed-memory Markdown rendering.
 
 The CLI and desktop accept ordinary consumer strings as memory values and also
@@ -177,8 +199,10 @@ preserve objects, arrays, numbers, booleans, and null when valid JSON is
 supplied. The desktop simple mode provides a small fact-name/value composer. Its
 advanced mode exposes namespace, confidence, correction, reinforcement, decay,
 retraction, immutable history, the discovered world graph, and managed-memory
-Markdown. Tauri commands remain thin authenticated adapters over the same REST
-contracts rather than a second memory implementation.
+Markdown. Fresh durable facts expose a simple reviewed “Share with another
+project” flow; advanced mode additionally shows the exact digest, stable retry
+identity, and transfer history. REST, CLI, MCP, and Tauri use the same review and
+mutation contracts rather than implementing separate transfer logic.
 
 ## Qualification
 
@@ -215,6 +239,12 @@ Runtime and scheduler integration fixtures use explicit clocks to prove bounded
 expiration, durable-to-decaying behavior, seven-day retraction, daemon reopen,
 repeat-tick idempotency, ordinary state-change events, and the absence of any
 schedule requirement. CLI parsing rejects malformed freshness timestamps.
+
+Cross-project fixtures prove source-project scoping, digest binding, freshness
+and durability gates, target collision refusal, atomic rollback under an
+injected SQLite failure, immutable evidence, exact retry after daemon reopen,
+changed-identity conflict, authenticated REST, MCP replay/list parity, CLI
+argument binding, and the simple desktop review/target/reason journey.
 
 Complete owner-machine verification uses:
 
