@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -182,6 +182,47 @@ impl HttpExecutor {
         })
     }
 
+    async fn tcp_connect(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+        endpoint: &str,
+    ) -> Result<ToolOutcome, ToolError> {
+        let started_at = Utc::now();
+        let parsed = parse_tcp_endpoint(endpoint)?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| ToolError::Invalid("TCP endpoint requires a host".into()))?;
+        let port = parsed
+            .port()
+            .ok_or_else(|| ToolError::Invalid("TCP endpoint requires an explicit port".into()))?;
+        tokio::time::timeout(
+            Duration::from_secs(request.timeout_seconds),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await
+        .map_err(|_| ToolError::Execution("TCP connection timed out".into()))?
+        .map_err(|error| ToolError::Execution(format!("TCP connection failed: {error}")))?;
+        Ok(ToolOutcome {
+            schema_version: TOOL_SCHEMA_VERSION,
+            execution_id,
+            request_id: request.id,
+            status: ToolOutcomeStatus::Succeeded,
+            summary: format!("TCP connection succeeded to {}", safe_tcp_endpoint(&parsed)),
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            artifacts: Vec::new(),
+            verification: vec![VerificationEvidence {
+                method: "tcp.connect".into(),
+                passed: true,
+                detail: safe_tcp_endpoint(&parsed),
+            }],
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
     async fn resolve_headers(
         &self,
         headers: &[RequestHeader],
@@ -355,11 +396,37 @@ impl ToolExecutor for HttpExecutor {
                 )
                 .await
             }
+            ToolRequestKind::TcpConnect { endpoint } => {
+                self.tcp_connect(execution_id, request, endpoint).await
+            }
             _ => Err(ToolError::Invalid(
                 "HTTP executor received an unsupported tool".into(),
             )),
         }
     }
+}
+
+fn parse_tcp_endpoint(endpoint: &str) -> Result<Url, ToolError> {
+    let parsed = Url::parse(endpoint)
+        .map_err(|error| ToolError::Invalid(format!("invalid TCP endpoint: {error}")))?;
+    if parsed.scheme() != "tcp"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_none()
+        || parsed.path() != ""
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ToolError::Invalid(
+            "TCP endpoint must be tcp://host:port without credentials, path, query, or fragment"
+                .into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn safe_tcp_endpoint(endpoint: &Url) -> String {
+    endpoint.to_string()
 }
 
 struct RequestParameters<'a> {
@@ -508,6 +575,77 @@ mod tests {
         assert!(outcome.summary.contains("truncated"));
         assert_eq!(outcome.artifacts.len(), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn tcp_connect_is_bounded_typed_and_credential_free() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let project = tempdir().expect("project");
+        let artifacts = tempdir().expect("artifacts");
+        let mut request = ToolRequest::new(
+            mcg_domain::TaskId::new(),
+            "probe TCP listener",
+            ToolRequestKind::TcpConnect {
+                endpoint: endpoint.clone(),
+            },
+        );
+        request.timeout_seconds = 1;
+        let outcome = executor(
+            project.path(),
+            artifacts.path(),
+            Arc::new(RejectingCredentialResolver),
+        )
+        .execute(ToolExecutionId::new(), &request)
+        .await
+        .expect("TCP probe");
+        assert_eq!(outcome.status, ToolOutcomeStatus::Succeeded);
+        assert!(outcome.artifacts.is_empty());
+        assert_eq!(outcome.stdout, None);
+        assert_eq!(outcome.stderr, None);
+        assert_eq!(
+            outcome.verification,
+            vec![VerificationEvidence {
+                method: "tcp.connect".into(),
+                passed: true,
+                detail: endpoint,
+            }]
+        );
+        for invalid in [
+            "http://127.0.0.1:80",
+            "tcp://user@127.0.0.1:80",
+            "tcp://127.0.0.1",
+            "tcp://127.0.0.1:80/path",
+            "tcp://127.0.0.1:80?secret=value",
+        ] {
+            assert!(parse_tcp_endpoint(invalid).is_err(), "accepted {invalid}");
+        }
+
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("closed-port reservation");
+        let closed_endpoint = format!("tcp://{}", closed.local_addr().expect("closed address"));
+        drop(closed);
+        let mut refused = ToolRequest::new(
+            mcg_domain::TaskId::new(),
+            "reject closed TCP port",
+            ToolRequestKind::TcpConnect {
+                endpoint: closed_endpoint,
+            },
+        );
+        refused.timeout_seconds = 1;
+        assert!(matches!(
+            executor(
+                project.path(),
+                artifacts.path(),
+                Arc::new(RejectingCredentialResolver),
+            )
+            .execute(ToolExecutionId::new(), &refused)
+            .await,
+            Err(ToolError::Execution(_))
+        ));
     }
 
     #[tokio::test]

@@ -105,9 +105,40 @@ struct NodeToolchain {
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ShadowServiceProbe {
-    url: String,
-    expected_status: Option<u16>,
+enum ShadowServiceProbe {
+    Http {
+        url: String,
+        expected_status: Option<u16>,
+    },
+    Tcp {
+        endpoint: String,
+    },
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ShadowServiceProbe {
+    fn endpoint(&self) -> &str {
+        match self {
+            Self::Http { url, .. } => url,
+            Self::Tcp { endpoint } => endpoint,
+        }
+    }
+
+    const fn expected_status(&self) -> Option<u16> {
+        match self {
+            Self::Http {
+                expected_status, ..
+            } => *expected_status,
+            Self::Tcp { .. } => None,
+        }
+    }
+
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::Http { .. } => "http",
+            Self::Tcp { .. } => "tcp",
+        }
+    }
 }
 
 /// Capability boundary for build, test, and static-analysis verification in a
@@ -288,9 +319,14 @@ impl LinuxBubblewrapVerifier {
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
         let probe = shadow_service_probe(condition)?;
-        if !Path::new("/usr/bin/curl").is_file() || !Path::new("/usr/bin/sleep").is_file() {
+        let probe_program_available = match probe {
+            ShadowServiceProbe::Http { .. } => Path::new("/usr/bin/curl").is_file(),
+            ShadowServiceProbe::Tcp { .. } => Path::new("/bin/bash").is_file(),
+        };
+        if !probe_program_available || !Path::new("/usr/bin/sleep").is_file() {
             return Err(ToolError::Unavailable(
-                "Linux shadow service verification requires trusted system curl and sleep".into(),
+                "Linux shadow service verification requires its trusted probe utility and sleep"
+                    .into(),
             ));
         }
         let (executable, command_arguments) = split_command(service_command)?;
@@ -640,6 +676,9 @@ enum WindowsRunnerProbe<'a> {
         url: &'a str,
         expected_status: Option<u16>,
     },
+    TcpConnect {
+        endpoint: &'a str,
+    },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -674,9 +713,17 @@ impl WindowsSandboxHarness {
                 executable,
                 argv,
                 toolchain_root: toolchain.map(|_| r"C:\mcg-toolchain"),
-                probe: probe.map(|probe| WindowsRunnerProbe::HttpStatus {
-                    url: &probe.url,
-                    expected_status: probe.expected_status,
+                probe: probe.map(|probe| match probe {
+                    ShadowServiceProbe::Http {
+                        url,
+                        expected_status,
+                    } => WindowsRunnerProbe::HttpStatus {
+                        url,
+                        expected_status: *expected_status,
+                    },
+                    ShadowServiceProbe::Tcp { endpoint } => {
+                        WindowsRunnerProbe::TcpConnect { endpoint }
+                    }
                 }),
             };
             let bytes = serde_json::to_vec(&request).map_err(|error| {
@@ -959,12 +1006,14 @@ fn split_command(command: &str) -> Result<(&str, Vec<String>), ToolError> {
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServiceProbe, ToolError> {
-    let (value, expected_status) = match condition {
-        SuccessCondition::HttpResponds { url, status } => (url, Some(*status)),
-        SuccessCondition::ServiceHealthy { endpoint } => (endpoint, None),
+    let (value, expected_status, scheme) = match condition {
+        SuccessCondition::HttpResponds { url, status } => (url, Some(*status), "http"),
+        SuccessCondition::ServiceHealthy { endpoint } => (endpoint, None, "http"),
+        SuccessCondition::PortListening { endpoint } => (endpoint, None, "tcp"),
         _ => {
             return Err(ToolError::Invalid(
-                "shadow service verifier requires an HTTP or service-health condition".into(),
+                "shadow service verifier requires an HTTP, service-health, or TCP-port condition"
+                    .into(),
             ));
         }
     };
@@ -976,28 +1025,37 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
     let url = Url::parse(value)
         .map_err(|error| ToolError::Invalid(format!("invalid shadow service URL: {error}")))?;
     let loopback = match url.host() {
-        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+        }
         Some(Host::Ipv4(host)) => host == std::net::Ipv4Addr::LOCALHOST,
         Some(Host::Ipv6(host)) => host == std::net::Ipv6Addr::LOCALHOST,
         None => false,
     };
-    if url.scheme() != "http"
+    if url.scheme() != scheme
         || !loopback
         || url.port().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
+        || (scheme == "tcp" && (!url.path().is_empty() || url.query().is_some()))
         || expected_status.is_some_and(|status| !(100..=599).contains(&status))
     {
         return Err(ToolError::Denied(
-            "shadow service probes require credential-free loopback HTTP with an explicit port"
+            "shadow service probes require credential-free loopback HTTP or TCP with an explicit port"
                 .into(),
         ));
     }
-    Ok(ShadowServiceProbe {
-        url: value.clone(),
-        expected_status,
-    })
+    if scheme == "tcp" {
+        Ok(ShadowServiceProbe::Tcp {
+            endpoint: value.clone(),
+        })
+    } else {
+        Ok(ShadowServiceProbe::Http {
+            url: value.clone(),
+            expected_status,
+        })
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -1404,14 +1462,15 @@ fn bubblewrap_service_arguments(
         "--".into(),
         "/bin/sh".into(),
         "-c".into(),
-        "umask 077; /bin/cp -R /source/. /workspace/ || exit 125; printf 'mcg-shadow-bwrap-v1\\n' > /mcg-proof || exit 125; cd /workspace || exit 125; probe_url=$1; expected=$2; host=$3; port=$4; shift 4; HOST=\"$host\" PORT=\"$port\" \"$@\" >/dev/null 2>/dev/null & service_pid=$!; cleanup_service() { kill -TERM \"$service_pid\" 2>/dev/null || true; wait \"$service_pid\" 2>/dev/null || true; }; trap cleanup_service EXIT INT TERM; attempt=0; while [ \"$attempt\" -lt 300 ]; do status=$(/usr/bin/curl --silent --output /dev/null --write-out '%{http_code}' --max-time 1 --max-filesize 1048576 -- \"$probe_url\") || status=''; if [ -n \"$status\" ]; then if [ \"$expected\" = 2xx ]; then case \"$status\" in 2??) exit 0;; *) exit 1;; esac; elif [ \"$status\" = \"$expected\" ]; then exit 0; else exit 1; fi; fi; kill -0 \"$service_pid\" 2>/dev/null || exit 1; attempt=$((attempt + 1)); /usr/bin/sleep 0.1; done; exit 1".into(),
+        "umask 077; /bin/cp -R /source/. /workspace/ || exit 125; printf 'mcg-shadow-bwrap-v1\\n' > /mcg-proof || exit 125; cd /workspace || exit 125; probe_kind=$1; probe_value=$2; expected=$3; host=$4; port=$5; shift 5; HOST=\"$host\" PORT=\"$port\" \"$@\" >/dev/null 2>/dev/null & service_pid=$!; cleanup_service() { kill -TERM \"$service_pid\" 2>/dev/null || true; wait \"$service_pid\" 2>/dev/null || true; }; trap cleanup_service EXIT INT TERM; attempt=0; while [ \"$attempt\" -lt 300 ]; do if [ \"$probe_kind\" = tcp ]; then /bin/bash -c 'exec 3<>/dev/tcp/$1/$2' mcg-tcp \"$host\" \"$port\" 2>/dev/null && exit 0; else status=$(/usr/bin/curl --silent --output /dev/null --write-out '%{http_code}' --max-time 1 --max-filesize 1048576 -- \"$probe_value\") || status=''; if [ -n \"$status\" ]; then if [ \"$expected\" = 2xx ]; then case \"$status\" in 2??) exit 0;; *) exit 1;; esac; elif [ \"$status\" = \"$expected\" ]; then exit 0; else exit 1; fi; fi; fi; kill -0 \"$service_pid\" 2>/dev/null || exit 1; attempt=$((attempt + 1)); /usr/bin/sleep 0.1; done; exit 1".into(),
         "mcg-shadow-service".into(),
-        probe.url.clone(),
+        probe.kind().into(),
+        probe.endpoint().into(),
         probe
-            .expected_status
+            .expected_status()
             .map_or_else(|| "2xx".into(), |status| status.to_string()),
-        probe_host(&probe.url)?.into(),
-        probe_port(&probe.url)?.to_string(),
+        probe_host(probe.endpoint())?.into(),
+        probe_port(probe.endpoint())?.to_string(),
         executable.into(),
     ]);
     argv.extend(command_arguments.iter().cloned());
@@ -1432,7 +1491,12 @@ fn probe_host(value: &str) -> Result<&'static str, ToolError> {
         .map_err(|error| ToolError::Invalid(format!("invalid shadow service URL: {error}")))?;
     match url.host() {
         Some(Host::Ipv6(host)) if host == std::net::Ipv6Addr::LOCALHOST => Ok("::1"),
-        Some(Host::Domain(host)) if host.eq_ignore_ascii_case("localhost") => Ok("127.0.0.1"),
+        Some(Host::Domain(host))
+            if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" =>
+        {
+            Ok("127.0.0.1")
+        }
+        Some(Host::Domain("::1")) => Ok("::1"),
         Some(Host::Ipv4(host)) if host == std::net::Ipv4Addr::LOCALHOST => Ok("127.0.0.1"),
         _ => Err(ToolError::Denied(
             "shadow service probe host is not exact loopback".into(),
@@ -1835,7 +1899,20 @@ mod tests {
                 status: 204,
             })
             .expect("exact loopback URL");
-            assert_eq!(probe.expected_status, Some(204));
+            assert_eq!(probe.expected_status(), Some(204));
+        }
+        for endpoint in [
+            "tcp://127.0.0.1:43123",
+            "tcp://localhost:43123",
+            "tcp://[::1]:43123",
+        ] {
+            assert!(matches!(
+                shadow_service_probe(&SuccessCondition::PortListening {
+                    endpoint: endpoint.into(),
+                })
+                .unwrap_or_else(|error| panic!("exact loopback TCP endpoint {endpoint}: {error}")),
+                ShadowServiceProbe::Tcp { .. }
+            ));
         }
         for url in [
             "https://127.0.0.1:43123/health",
@@ -1857,7 +1934,7 @@ mod tests {
 
         let workspace = tempfile::tempdir().expect("workspace");
         let proof = EphemeralProof::create(workspace.path()).expect("proof");
-        let probe = ShadowServiceProbe {
+        let probe = ShadowServiceProbe::Http {
             url: "http://127.0.0.1:43123/health?value=literal;touch".into(),
             expected_status: Some(204),
         };
@@ -1898,17 +1975,18 @@ mod tests {
             .iter()
             .position(|argument| argument == "mcg-shadow-service")
             .expect("shell argument boundary");
-        assert!(!argv[shell_index - 1].contains(&probe.url));
+        assert!(!argv[shell_index - 1].contains(probe.endpoint()));
         assert_eq!(
             &argv[shell_index + 1..],
             [
-                probe.url,
-                "204".into(),
-                "127.0.0.1".into(),
-                "43123".into(),
-                "node".into(),
-                "server.js;touch".into(),
-                "literal argument".into(),
+                "http",
+                probe.endpoint(),
+                "204",
+                "127.0.0.1",
+                "43123",
+                "node",
+                "server.js;touch",
+                "literal argument",
             ]
         );
     }
@@ -2144,7 +2222,7 @@ mod tests {
         fs::create_dir(&workspace).expect("workspace");
         let runner = parent.path().join("mcg-shadow-runner.exe");
         fs::write(&runner, b"runner fixture").expect("runner");
-        let probe = ShadowServiceProbe {
+        let probe = ShadowServiceProbe::Http {
             url: "http://127.0.0.1:43123/health".into(),
             expected_status: Some(204),
         };
@@ -2167,8 +2245,27 @@ mod tests {
         assert_eq!(request["argv"], serde_json::json!(["run", "start"]));
         assert_eq!(request["toolchain_root"], serde_json::Value::Null);
         assert_eq!(request["probe"]["kind"], "http_status");
-        assert_eq!(request["probe"]["url"], probe.url);
+        assert_eq!(request["probe"]["url"], probe.endpoint());
         assert_eq!(request["probe"]["expected_status"], 204);
+
+        let tcp_probe = ShadowServiceProbe::Tcp {
+            endpoint: "tcp://127.0.0.1:43123".into(),
+        };
+        let tcp_harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&tcp_probe),
+        )
+        .expect("TCP service harness");
+        let tcp_request: serde_json::Value = serde_json::from_slice(
+            &fs::read(tcp_harness.path.join("request.json")).expect("TCP request"),
+        )
+        .expect("TCP request JSON");
+        assert_eq!(tcp_request["probe"]["kind"], "tcp_connect");
+        assert_eq!(tcp_request["probe"]["endpoint"], tcp_probe.endpoint());
     }
 
     #[test]
@@ -2397,6 +2494,23 @@ http.createServer((request, response) => {
             assert!(!record.timed_out);
             assert_no_windows_sandbox_sessions(verifier, workspace).await;
         }
+        let tcp_condition = SuccessCondition::PortListening {
+            endpoint: format!("tcp://{address}"),
+        };
+        let ShadowCommandVerification::Completed { transcript } = verifier
+            .verify_service(workspace, "node server.js", &tcp_condition, artifacts)
+            .await
+        else {
+            panic!("same-sandbox Windows TCP probe must produce measured evidence");
+        };
+        let bytes = artifacts
+            .read_verified_reference(&transcript, 1024 * 1024)
+            .expect("TCP service transcript");
+        let record: ShadowCommandTranscript =
+            serde_json::from_slice(&bytes).expect("TCP service record");
+        assert_eq!(record.exit_code, Some(0));
+        assert!(!record.timed_out);
+        assert_no_windows_sandbox_sessions(verifier, workspace).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(service_hits.load(Ordering::SeqCst), 0);
         host_service.abort();
@@ -2684,6 +2798,28 @@ http.createServer((request, response) => {
                     .expect("service transcript");
                 let record: ShadowCommandTranscript =
                     serde_json::from_slice(&bytes).expect("service record");
+                assert_eq!(record.exit_code, Some(0));
+                assert!(!record.timed_out);
+
+                let tcp_condition = SuccessCondition::PortListening {
+                    endpoint: format!("tcp://{address}"),
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(
+                        workspace.path(),
+                        "node server.js",
+                        &tcp_condition,
+                        &artifacts,
+                    )
+                    .await
+                else {
+                    panic!("same-sandbox TCP probe must produce measured evidence");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("TCP service transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("TCP service record");
                 assert_eq!(record.exit_code, Some(0));
                 assert!(!record.timed_out);
 

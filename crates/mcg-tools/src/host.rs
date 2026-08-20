@@ -41,9 +41,9 @@ impl ToolExecutor for HostExecutor {
             | ToolRequestKind::ProcessStdin { .. }
             | ToolRequestKind::ProcessKill { .. }
             | ToolRequestKind::ShellExec { .. } => &self.process,
-            ToolRequestKind::HttpRequest { .. } | ToolRequestKind::HttpDownload { .. } => {
-                &self.http
-            }
+            ToolRequestKind::HttpRequest { .. }
+            | ToolRequestKind::HttpDownload { .. }
+            | ToolRequestKind::TcpConnect { .. } => &self.http,
             ToolRequestKind::BrowserRender { .. }
             | ToolRequestKind::BrowserElementExists { .. }
             | ToolRequestKind::BrowserAccessibility { .. }

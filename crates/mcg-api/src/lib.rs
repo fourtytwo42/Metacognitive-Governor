@@ -3712,6 +3712,7 @@ fn is_automatable_consumer_condition(condition: &SuccessCondition) -> bool {
             | SuccessCondition::ConfigurationValid { .. }
             | SuccessCondition::HttpResponds { .. }
             | SuccessCondition::ServiceHealthy { .. }
+            | SuccessCondition::PortListening { .. }
             | SuccessCondition::PageRenders { .. }
             | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
@@ -3835,12 +3836,11 @@ fn parse_consumer_success_condition(description: &str) -> SuccessCondition {
     if let Some(condition) = parse_consumer_command_condition(trimmed) {
         return condition;
     }
-    if let Some(endpoint) = consumer_directive_value(trimmed, "SERVICE HEALTHY")
-        && consumer_credential_free_http_url(endpoint)
-    {
-        return SuccessCondition::ServiceHealthy {
-            endpoint: endpoint.to_owned(),
-        };
+    if let Some(condition) = parse_consumer_service_condition(trimmed) {
+        return condition;
+    }
+    if let Some(condition) = parse_consumer_port_condition(trimmed) {
+        return condition;
     }
     if let Some(url) = consumer_directive_value(trimmed, "ACCESSIBILITY CHECK")
         && consumer_credential_free_http_url(url)
@@ -3924,6 +3924,34 @@ fn consumer_credential_free_http_url(value: &str) -> bool {
                 && value.password().is_none()
                 && value.host_str().is_some()
         })
+}
+
+fn parse_consumer_service_condition(description: &str) -> Option<SuccessCondition> {
+    let endpoint = consumer_directive_value(description, "SERVICE HEALTHY")?;
+    consumer_credential_free_http_url(endpoint).then(|| SuccessCondition::ServiceHealthy {
+        endpoint: endpoint.to_owned(),
+    })
+}
+
+fn consumer_tcp_endpoint(value: &str) -> bool {
+    !value.chars().any(char::is_whitespace)
+        && url::Url::parse(value).is_ok_and(|value| {
+            value.scheme() == "tcp"
+                && value.username().is_empty()
+                && value.password().is_none()
+                && value.host_str().is_some()
+                && value.port().is_some()
+                && value.path().is_empty()
+                && value.query().is_none()
+                && value.fragment().is_none()
+        })
+}
+
+fn parse_consumer_port_condition(description: &str) -> Option<SuccessCondition> {
+    let endpoint = consumer_directive_value(description, "PORT LISTENING")?;
+    consumer_tcp_endpoint(endpoint).then(|| SuccessCondition::PortListening {
+        endpoint: endpoint.to_owned(),
+    })
 }
 
 fn consumer_directive_value<'a>(value: &'a str, directive: &str) -> Option<&'a str> {
@@ -5135,6 +5163,23 @@ mod tests {
                 endpoint: "https://example.test/health?full=1".into(),
             }
         );
+        assert_eq!(
+            parse_consumer_success_condition("PORT LISTENING tcp://127.0.0.1:5432"),
+            SuccessCondition::PortListening {
+                endpoint: "tcp://127.0.0.1:5432".into(),
+            }
+        );
+        for unsafe_endpoint in [
+            "PORT LISTENING http://127.0.0.1:5432",
+            "PORT LISTENING tcp://user@127.0.0.1:5432",
+            "PORT LISTENING tcp://127.0.0.1",
+            "PORT LISTENING tcp://127.0.0.1:5432/path",
+        ] {
+            assert!(matches!(
+                parse_consumer_success_condition(unsafe_endpoint),
+                SuccessCondition::Custom { .. }
+            ));
+        }
         assert_eq!(
             parse_consumer_success_condition("ACCESSIBILITY CHECK https://example.test/app"),
             SuccessCondition::Accessibility {
@@ -11299,6 +11344,117 @@ form.addEventListener('submit', (event) => {
                 .is_none()
         );
         assert_eq!(model_calls.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // The initial launch and replay must share one live listener and provider fixture.
+    async fn consumer_tcp_port_objective_is_governed_and_replay_safe() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("README.md"), "# TCP fixture\n").expect("readme");
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(
+                AppConfig::default().with_data_directory(directory.path().join("data")),
+                TEST_TOKEN.to_owned(),
+            )
+            .expect("runtime should open"),
+        );
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let model_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .configure_provider(
+                ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "tcp_objective_fixture".into(),
+                    display_name: "TCP Objective Fixture".into(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: objective_model_fixture(model_calls.clone()).await,
+                    auth_mode: ProviderAuthMode::None,
+                    organization: None,
+                    project: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("provider");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let mut task = TaskEnvelope::new("Verify the TCP service is listening");
+        task.project_id = Some(project.project_id);
+        task.success_conditions = vec![format!("PORT LISTENING {endpoint}")];
+        runtime.create_task(&task).expect("task");
+        let body = serde_json::to_vec(&LaunchTaskRequest {
+            target_path: None,
+            context_token_budget: 2_048,
+            requested_tools: Vec::new(),
+            estimated_output_tokens: 512,
+            max_model_calls: 4,
+        })
+        .expect("launch body");
+        let app = router(runtime);
+        let path = format!("/api/v1/tasks/{}/launch", task.id);
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: LaunchTaskResponse = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("response body");
+        assert_eq!(response.task.state, TaskState::Completed);
+        let report = response.run.evaluations.first().expect("report");
+        assert_eq!(report.outcome, EvaluationOutcome::Passed);
+        assert_eq!(
+            report.conditions[0].condition,
+            SuccessCondition::PortListening {
+                endpoint: endpoint.clone(),
+            }
+        );
+        assert!(report.conditions[0].passed);
+        assert!(report.conditions[0].detail.contains("tcp_connect=true"));
+        assert_eq!(report.evidence[0].method, "governed_tcp_port");
+        assert!(report.evidence[0].artifact_sha256.is_none());
+
+        let replay = app
+            .oneshot(
+                authorized(Request::post(&path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: LaunchTaskResponse = serde_json::from_slice(
+            &replay
+                .into_body()
+                .collect()
+                .await
+                .expect("replay body")
+                .to_bytes(),
+        )
+        .expect("replay response");
+        assert!(replay.replayed);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

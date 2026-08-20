@@ -426,6 +426,9 @@ pub enum SuccessCondition {
     ServiceHealthy {
         endpoint: String,
     },
+    PortListening {
+        endpoint: String,
+    },
     ResearchSources {
         evidence_path: String,
         minimum: u16,

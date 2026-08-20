@@ -425,6 +425,12 @@ fn capability_requests(request: &ToolRequest) -> Result<Vec<CapabilityRequest>, 
             ),
             write_path(destination),
         ],
+        ToolRequestKind::TcpConnect { endpoint } => vec![make(
+            ActionClass::ProjectRead,
+            CapabilityEffect::Read,
+            ResourceKind::NetworkOrigin,
+            tcp_origin(endpoint)?,
+        )],
         ToolRequestKind::BrowserRender { url, .. }
         | ToolRequestKind::BrowserElementExists { url, .. }
         | ToolRequestKind::BrowserAccessibility { url, .. } => vec![make(
@@ -699,6 +705,25 @@ fn network_origin(value: &str) -> Result<String, ToolError> {
     Ok(url.origin().ascii_serialization())
 }
 
+fn tcp_origin(value: &str) -> Result<String, ToolError> {
+    let url = Url::parse(value)
+        .map_err(|error| ToolError::Invalid(format!("invalid TCP endpoint: {error}")))?;
+    if url.scheme() != "tcp"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_none()
+        || url.path() != ""
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ToolError::Invalid(
+            "TCP endpoints require tcp://host:port without credentials, path, query, or fragment"
+                .into(),
+        ));
+    }
+    Ok(url.to_string())
+}
+
 fn executable_name(value: &str) -> String {
     let path = Path::new(value);
     if path.components().count() == 1 {
@@ -728,6 +753,7 @@ fn primary_resource(request: &ToolRequest) -> String {
         | ToolRequestKind::BrowserRender { url, .. }
         | ToolRequestKind::BrowserElementExists { url, .. }
         | ToolRequestKind::BrowserAccessibility { url, .. } => sanitized_url_resource(url),
+        ToolRequestKind::TcpConnect { endpoint } => sanitized_url_resource(endpoint),
         ToolRequestKind::BrowserScreenshotMatches {
             url, baseline_path, ..
         } => format!("{} against {baseline_path}", sanitized_url_resource(url)),
@@ -975,6 +1001,52 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
         assert_eq!(audit.records().len(), 1);
         assert_eq!(audit.records()[0].result, Some(ToolOutcomeStatus::Denied));
+    }
+
+    #[tokio::test]
+    async fn tcp_probe_requires_the_exact_endpoint_capability() {
+        let root = tempdir().expect("tempdir");
+        let count = Arc::new(AtomicUsize::new(0));
+        let audit = InMemoryAuditSink::default();
+        let mut capabilities = CapabilityPolicy::project(root.path());
+        capabilities
+            .allowed_network_origins
+            .push("tcp://127.0.0.1:5432".into());
+        let broker = ToolBroker::new(
+            CountingExecutor(count.clone()),
+            InMemoryApprovalRepository::default(),
+            audit.clone(),
+            BrokerControls {
+                preset: AutonomyPreset::Autonomous,
+                constitution: OwnerConstitution::secure_defaults(),
+                capabilities,
+                leases: Arc::new(LeaseRegistry::default()),
+                redactor: OutputRedactor::default(),
+            },
+        );
+        let allowed = request(
+            TaskId::new(),
+            ToolRequestKind::TcpConnect {
+                endpoint: "tcp://127.0.0.1:5432".into(),
+            },
+        );
+        broker.execute(&allowed).await.expect("exact endpoint");
+        let denied = request(
+            TaskId::new(),
+            ToolRequestKind::TcpConnect {
+                endpoint: "tcp://127.0.0.1:5433".into(),
+            },
+        );
+        assert!(matches!(
+            broker.execute(&denied).await,
+            Err(ToolError::Denied(_))
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(audit.records().len(), 3);
+        assert_eq!(
+            audit.records().last().and_then(|record| record.result),
+            Some(ToolOutcomeStatus::Denied)
+        );
     }
 
     #[tokio::test]

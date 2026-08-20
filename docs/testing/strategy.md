@@ -128,6 +128,10 @@ browser assertions, accessibility checks, and screenshots when visual comparison
 adds information. Model self-report is never sufficient.
 HTTP objective fixtures cover exact expected 2xx and non-2xx statuses, mismatches,
 unreachable origins, response artifact capture, capability confinement, and audit.
+TCP-listener fixtures cover exact typed endpoint parsing, credential/path/query
+rejection, capability confinement, successful and refused bounded handshakes,
+artifact-free evidence, terminal replay, and same-sandbox loopback-only benchmark
+profiles on Linux and Windows.
 Rendered-page success uses a real Chromium fixture; an HTTP body is not a render
 substitute. The fixture requires JavaScript-mutated DOM/title evidence, HTML and PNG
 artifacts, exact-origin GET/HEAD confinement, and blocked cross-origin/mutating

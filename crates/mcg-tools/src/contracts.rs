@@ -298,6 +298,9 @@ pub enum ToolRequestKind {
         max_bytes: u64,
         expected_sha256: Option<String>,
     },
+    TcpConnect {
+        endpoint: String,
+    },
     BrowserRender {
         url: String,
         viewport_width: u32,
@@ -447,6 +450,7 @@ impl ToolRequestKind {
             Self::ShellExec { .. } => "shell.exec".into(),
             Self::HttpRequest { .. } => "http.request".into(),
             Self::HttpDownload { .. } => "http.download".into(),
+            Self::TcpConnect { .. } => "tcp.connect".into(),
             Self::BrowserRender { .. } => "browser.render".into(),
             Self::BrowserElementExists { .. } => "browser.element_exists".into(),
             Self::BrowserAccessibility { .. } => "browser.accessibility".into(),

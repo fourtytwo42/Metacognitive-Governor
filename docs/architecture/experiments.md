@@ -156,20 +156,22 @@ interpreted exit/timeout disposition. Because the Store CLI accepts one
 POSIX `--` argument tail, MCG selects only two compile-time runner command lines
 (probe or request); the untrusted objective executable and argument array remain
 inside the bounded JSON request and never enter that CLI string.
-`HttpResponds` and `ServiceHealthy` automatic assessment additionally require
+`HttpResponds`, `ServiceHealthy`, and `PortListening` automatic assessment additionally require
 the source evaluation to contain exactly one passing identical condition and a
 retained completed consumer-evaluation checkpoint whose run matches that source
 evaluation. The checkpoint selects the exact immutable project snapshot; MCG
 uses its single `start` command, or its single `dev` command only when no `start`
 exists. Missing, stale, empty, or ambiguous authority stays inconclusive and
-launches nothing. Probes accept only credential-free plaintext HTTP on exact
-loopback with an explicit nonzero port and no fragment. Service startup and the
-bounded GET probe run in the same network-isolated OS sandbox: Linux uses fixed
-system curl inside the bubblewrap namespace, while Windows runner schema 3
-performs the loopback request inside the disposable Sandbox VM. Expected status
-is exact for `HttpResponds` and 200-299 for `ServiceHealthy`; startup timeout,
-early process exit, status mismatch, malformed evidence, or sandbox loss fails
-closed. There is no host HTTP or host-process fallback. Browser-render,
+launches nothing. Probes accept only credential-free plaintext HTTP or TCP on
+exact loopback with an explicit nonzero port; TCP additionally rejects paths,
+queries, and fragments. Service startup and its bounded probe run in the same
+network-isolated OS sandbox: Linux uses fixed system curl for HTTP or Bash's
+connect-only TCP facility inside the bubblewrap namespace, while Windows runner
+schema 3 performs the loopback HTTP request or TCP handshake inside the disposable
+Sandbox VM. Expected status is exact for `HttpResponds`, 200-299 for
+`ServiceHealthy`, and a completed no-payload handshake for `PortListening`;
+startup timeout, early process exit, mismatch/refusal, malformed evidence, or
+sandbox loss fails closed. There is no host-network or host-process fallback. Browser-render,
 accessibility, workflow, element, and screenshot conditions remain
 inconclusive until the corresponding browser runtime is placed inside this same
 boundary.

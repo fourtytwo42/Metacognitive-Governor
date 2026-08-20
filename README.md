@@ -287,6 +287,11 @@ installed Chrome/Chromium discovered locally; it never downloads a browser at ta
 execution time. Linux packages install the managed browser at
 `/opt/metacognitive-governor/browser/chrome` with a path-specific AppArmor profile;
 MCG never disables Chromium's sandbox or Ubuntu's global user-namespace restriction.
+For non-HTTP services, use `PORT LISTENING tcp://host:port`. MCG performs only a
+bounded TCP handshake through the normal capability, lease, approval, and audit
+broker; it sends no application bytes, accepts no credentials/path/query/fragment,
+and records artifact-free `governed_tcp_port` evidence. This does not substitute
+for a protocol-specific health check when one exists.
 Use `ELEMENT EXISTS URL selector` to require at least one rendered match after
 JavaScript hydration. Use `BROWSER WORKFLOW project/relative/workflow.json` for a
 bounded multi-step interaction. The version-1 JSON document declares a name,

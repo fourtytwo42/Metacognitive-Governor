@@ -175,6 +175,15 @@ artifact. The report uses distinct `governed_service_health` evidence and record
 the observed status. Terminal launch replay performs neither another provider call
 nor another health request.
 
+`PORT LISTENING tcp://host:port` becomes a typed `PortListening` condition for
+non-HTTP services. The server validates a credential-free TCP endpoint with an
+explicit nonzero port and no path, query, or fragment, grants only that exact
+network resource, and attempts one timeout-bounded connection through the normal
+policy, lease, approval, and audit broker. It sends no application bytes and
+captures no response artifact. A completed handshake records
+`governed_tcp_port`; connection refusal, timeout, or invalid authority fails
+closed. This proves listener availability, not protocol health.
+
 `PAGE RENDERS URL` becomes a typed `PageRenders` condition backed by an actual
 ephemeral Chromium CDP session, not an HTTP-body heuristic. The browser uses a fresh
 profile, bounded viewport/time, no automatic download, and pre-send interception.

@@ -7457,7 +7457,9 @@ impl AppRuntime {
                     is_supported
                 } else if matches!(
                     condition,
-                    SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+                    SuccessCondition::HttpResponds { .. }
+                        | SuccessCondition::ServiceHealthy { .. }
+                        | SuccessCondition::PortListening { .. }
                 ) {
                     let command = self
                         .baseline_shadow_service_command(candidate, receipt, baseline, condition)?;
@@ -8083,6 +8085,16 @@ impl AppRuntime {
                     capabilities.allowed_network_origins.push(origin);
                 }
             }
+            if let SuccessCondition::PortListening { endpoint } = condition {
+                let origin = objective_tcp_origin(endpoint)?;
+                if !capabilities
+                    .allowed_network_origins
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&origin))
+                {
+                    capabilities.allowed_network_origins.push(origin);
+                }
+            }
         }
         let control = self.tool_control();
         let broker_preset = if autonomy == AutonomyPreset::Guided && checkpoint.batch_approved {
@@ -8137,6 +8149,10 @@ impl AppRuntime {
                     headers: Vec::new(),
                     body: None,
                     max_response_bytes: 1_048_576,
+                }
+            } else if let SuccessCondition::PortListening { endpoint } = condition {
+                ToolRequestKind::TcpConnect {
+                    endpoint: endpoint.clone(),
                 }
             } else if let SuccessCondition::PageRenders { url } = condition {
                 ToolRequestKind::BrowserRender {
@@ -11330,6 +11346,7 @@ fn resolve_project_relative_tool_paths(kind: &mut ToolRequestKind, root: &Path) 
         | ToolRequestKind::ProcessStdin { .. }
         | ToolRequestKind::ProcessKill { .. }
         | ToolRequestKind::HttpRequest { .. }
+        | ToolRequestKind::TcpConnect { .. }
         | ToolRequestKind::BrowserRender { .. }
         | ToolRequestKind::BrowserElementExists { .. }
         | ToolRequestKind::BrowserAccessibility { .. }
@@ -11786,6 +11803,8 @@ fn objective_condition_label(condition: &SuccessCondition) -> Option<String> {
             Some(format!("HTTP GET {url} returns {status}"))
         } else if let SuccessCondition::ServiceHealthy { endpoint } = condition {
             Some(format!("Service is healthy at {endpoint}"))
+        } else if let SuccessCondition::PortListening { endpoint } = condition {
+            Some(format!("TCP port accepts connections at {endpoint}"))
         } else if let SuccessCondition::PageRenders { url } = condition {
             Some(format!("Page renders at {url}"))
         } else if let SuccessCondition::Accessibility { url } = condition {
@@ -11896,6 +11915,28 @@ fn objective_network_origin(value: &str) -> Result<String, RuntimeError> {
     Ok(url.origin().ascii_serialization())
 }
 
+fn objective_tcp_origin(value: &str) -> Result<String, RuntimeError> {
+    let url = url::Url::parse(value).map_err(|error| {
+        StorageError::InvalidData(format!("invalid objective TCP endpoint: {error}"))
+    })?;
+    if url.scheme() != "tcp"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+        || url.port().is_none()
+        || !url.path().is_empty()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(StorageError::InvalidData(
+            "objective port checks require tcp://host:port without credentials, path, query, or fragment"
+                .into(),
+        )
+        .into());
+    }
+    Ok(url.to_string())
+}
+
 fn objective_workflow_origins(
     document: &BrowserWorkflowDocument,
 ) -> Result<BTreeSet<String>, ToolError> {
@@ -11923,6 +11964,7 @@ fn objective_evidence_method(condition: &SuccessCondition) -> &'static str {
         SuccessCondition::ConfigurationValid { .. } => "governed_configuration_validation",
         SuccessCondition::HttpResponds { .. } => "governed_http_status",
         SuccessCondition::ServiceHealthy { .. } => "governed_service_health",
+        SuccessCondition::PortListening { .. } => "governed_tcp_port",
         SuccessCondition::PageRenders { .. } => "governed_browser_render",
         SuccessCondition::Accessibility { .. } => "governed_browser_accessibility",
         SuccessCondition::ElementExists { .. } => "governed_browser_element",
@@ -12474,7 +12516,9 @@ fn isolated_evaluation_regressions(
                 "candidate failed isolated research-source verification".into()
             } else if matches!(
                 condition.condition,
-                SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+                SuccessCondition::HttpResponds { .. }
+                    | SuccessCondition::ServiceHealthy { .. }
+                    | SuccessCondition::PortListening { .. }
             ) {
                 "candidate failed an isolated service objective".into()
             } else {
@@ -12490,6 +12534,13 @@ fn objective_outcome_passed(condition: &SuccessCondition, outcome: &ToolOutcome)
     }
     if matches!(condition, SuccessCondition::ServiceHealthy { .. }) {
         return observed_http_status(outcome).is_some_and(|status| (200..300).contains(&status));
+    }
+    if matches!(condition, SuccessCondition::PortListening { .. }) {
+        return outcome.status == ToolOutcomeStatus::Succeeded
+            && outcome
+                .verification
+                .iter()
+                .any(|evidence| evidence.method == "tcp.connect" && evidence.passed);
     }
     if let SuccessCondition::FileExists {
         min_bytes,
@@ -12571,6 +12622,13 @@ fn objective_condition_outcome_detail(
             observed_http_status(outcome)
                 .map_or_else(|| "unknown".into(), |value| value.to_string())
         );
+    }
+    if matches!(condition, SuccessCondition::PortListening { .. }) {
+        let observed = outcome
+            .verification
+            .iter()
+            .any(|evidence| evidence.method == "tcp.connect" && evidence.passed);
+        return format!("{}; tcp_connect={observed}", outcome.summary);
     }
     if matches!(
         condition,

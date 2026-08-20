@@ -44,6 +44,9 @@ enum RunnerProbe {
         url: String,
         expected_status: Option<u16>,
     },
+    TcpConnect {
+        endpoint: String,
+    },
 }
 
 fn main() {
@@ -116,23 +119,49 @@ fn execute_service_probe(
     workspace: &Path,
     probe: &RunnerProbe,
 ) -> Result<i32, &'static str> {
-    let RunnerProbe::HttpStatus {
-        url,
-        expected_status,
-    } = probe;
-    let target = LoopbackHttpTarget::parse(url)?;
+    enum ActiveProbe {
+        Http {
+            target: LoopbackHttpTarget,
+            expected_status: Option<u16>,
+        },
+        Tcp(LoopbackTcpTarget),
+    }
+    let active = match probe {
+        RunnerProbe::HttpStatus {
+            url,
+            expected_status,
+        } => ActiveProbe::Http {
+            target: LoopbackHttpTarget::parse(url)?,
+            expected_status: *expected_status,
+        },
+        RunnerProbe::TcpConnect { endpoint } => {
+            ActiveProbe::Tcp(LoopbackTcpTarget::parse(endpoint)?)
+        }
+    };
+    let (service_host, port) = match &active {
+        ActiveProbe::Http { target, .. } => (target.service_host(), target.port()),
+        ActiveProbe::Tcp(target) => (target.service_host(), target.port()),
+    };
     let mut command = prepared_command(request, workspace)?;
     command
-        .env("HOST", target.service_host())
-        .env("PORT", target.port().to_string());
+        .env("HOST", service_host)
+        .env("PORT", port.to_string());
     let mut child = command.spawn().map_err(|_| "spawn service command")?;
     let deadline = Instant::now() + SERVICE_STARTUP_TIMEOUT;
     let disposition = loop {
-        if let Some(status) = target.request_status() {
-            let passed = expected_status.map_or_else(
-                || (200..300).contains(&status),
-                |expected| status == expected,
-            );
+        let passed = match &active {
+            ActiveProbe::Http {
+                target,
+                expected_status,
+            } => target.request_status().map(|status| {
+                expected_status.map_or_else(
+                    || (200..300).contains(&status),
+                    |expected| status == expected,
+                )
+            }),
+            ActiveProbe::Tcp(target) => target.is_listening().then_some(true),
+        };
+        if let Some(passed) = passed {
             break if passed { 0 } else { COMMAND_FAILURE_EXIT_CODE };
         }
         if child
@@ -174,14 +203,20 @@ fn validate_request(
             return Err("toolchain root escaped the sandbox contract");
         }
     }
-    if let Some(RunnerProbe::HttpStatus {
-        url,
-        expected_status,
-    }) = &request.probe
-    {
-        LoopbackHttpTarget::parse(url)?;
-        if expected_status.is_some_and(|status| !(100..=599).contains(&status)) {
-            return Err("expected HTTP status is invalid");
+    if let Some(probe) = &request.probe {
+        match probe {
+            RunnerProbe::HttpStatus {
+                url,
+                expected_status,
+            } => {
+                LoopbackHttpTarget::parse(url)?;
+                if expected_status.is_some_and(|status| !(100..=599).contains(&status)) {
+                    return Err("expected HTTP status is invalid");
+                }
+            }
+            RunnerProbe::TcpConnect { endpoint } => {
+                LoopbackTcpTarget::parse(endpoint)?;
+            }
         }
     }
     let command_bytes = request
@@ -352,6 +387,80 @@ impl LoopbackHttpTarget {
             return None;
         }
         Some(status)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoopbackTcpTarget {
+    addresses: Vec<SocketAddr>,
+    service_host: &'static str,
+    port: u16,
+}
+
+impl LoopbackTcpTarget {
+    fn parse(endpoint: &str) -> Result<Self, &'static str> {
+        if endpoint.is_empty()
+            || endpoint.len() > MAX_PROBE_URL_BYTES
+            || endpoint
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b' ')
+        {
+            return Err("TCP probe endpoint is invalid");
+        }
+        let authority = endpoint
+            .strip_prefix("tcp://")
+            .ok_or("TCP probe must use the tcp scheme")?;
+        if authority.is_empty() || authority.contains(['@', '/', '?', '#']) {
+            return Err("TCP probe authority is invalid");
+        }
+        let (host, port) = if let Some(port) = authority.strip_prefix("[::1]:") {
+            ("::1", parse_port(port)?)
+        } else {
+            let (host, port) = authority
+                .split_once(':')
+                .ok_or("TCP probe requires an explicit port")?;
+            if port.contains(':') {
+                return Err("TCP probe authority is ambiguous");
+            }
+            (host, parse_port(port)?)
+        };
+        let (addresses, service_host) = match host.to_ascii_lowercase().as_str() {
+            "127.0.0.1" => (
+                vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
+                "127.0.0.1",
+            ),
+            "::1" => (
+                vec![SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)],
+                "::1",
+            ),
+            "localhost" => (
+                vec![
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+                ],
+                "127.0.0.1",
+            ),
+            _ => return Err("TCP probe must target loopback"),
+        };
+        Ok(Self {
+            addresses,
+            service_host,
+            port,
+        })
+    }
+
+    const fn service_host(&self) -> &'static str {
+        self.service_host
+    }
+
+    const fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn is_listening(&self) -> bool {
+        self.addresses
+            .iter()
+            .any(|address| TcpStream::connect_timeout(address, HTTP_ATTEMPT_TIMEOUT).is_ok())
     }
 }
 
@@ -646,6 +755,28 @@ mod tests {
         assert!(validate_request(&request, true).is_ok());
         request.toolchain_root = Some(r"C:\mcg-toolchain\..\escape".into());
         assert!(validate_request(&request, false).is_err());
+    }
+
+    #[test]
+    fn loopback_tcp_probe_accepts_only_exact_listeners() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let target = LoopbackTcpTarget::parse(&endpoint).expect("target");
+        assert!(target.is_listening());
+        assert_eq!(target.service_host(), "127.0.0.1");
+        for rejected in [
+            "http://127.0.0.1:80",
+            "tcp://127.0.0.1",
+            "tcp://127.0.0.2:80",
+            "tcp://user@127.0.0.1:80",
+            "tcp://127.0.0.1:80/path",
+            "tcp://127.0.0.1:80?query=1",
+        ] {
+            assert!(
+                LoopbackTcpTarget::parse(rejected).is_err(),
+                "accepted unsafe endpoint {rejected}"
+            );
+        }
     }
 
     #[test]
