@@ -7461,6 +7461,7 @@ impl AppRuntime {
                         | SuccessCondition::ServiceHealthy { .. }
                         | SuccessCondition::PortListening { .. }
                         | SuccessCondition::PageRenders { .. }
+                        | SuccessCondition::ElementExists { .. }
                 ) {
                     let command = self
                         .baseline_shadow_service_command(candidate, receipt, baseline, condition)?;
@@ -12371,6 +12372,7 @@ async fn verify_isolated_service_condition(
             | SuccessCondition::ServiceHealthy { .. }
             | SuccessCondition::PortListening { .. }
             | SuccessCondition::PageRenders { .. }
+            | SuccessCondition::ElementExists { .. }
     ) {
         return (
             ConditionResult {
@@ -12524,6 +12526,7 @@ fn isolated_evaluation_regressions(
                     | SuccessCondition::ServiceHealthy { .. }
                     | SuccessCondition::PortListening { .. }
                     | SuccessCondition::PageRenders { .. }
+                    | SuccessCondition::ElementExists { .. }
             ) {
                 "candidate failed an isolated service objective".into()
             } else {
@@ -13639,6 +13642,7 @@ mod tests {
                     | SuccessCondition::ServiceHealthy { .. }
                     | SuccessCondition::PortListening { .. }
                     | SuccessCondition::PageRenders { .. }
+                    | SuccessCondition::ElementExists { .. }
             ));
             if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
                 return ShadowCommandVerification::Completed {
@@ -14906,6 +14910,28 @@ mod tests {
                 workspace.path(),
                 Some("npm run start"),
                 &page_condition,
+            )
+            .await;
+            assert!(supported);
+            assert_eq!(result.passed, expected_passed);
+            assert!(evidence.artifact_sha256.is_some());
+            assert!(result.detail.contains("browser"));
+        }
+
+        let element_condition = SuccessCondition::ElementExists {
+            url: "http://127.0.0.1:43123/app".into(),
+            selector: "main#app[data-state='ready']".into(),
+        };
+        for (fixture, expected_passed) in [
+            (FixtureShadowCommandResult::Pass, true),
+            (FixtureShadowCommandResult::Fail, false),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &element_condition,
             )
             .await;
             assert!(supported);

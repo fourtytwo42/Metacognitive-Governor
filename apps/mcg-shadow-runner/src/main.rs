@@ -12,7 +12,7 @@ use chromiumoxide::{Browser, BrowserConfig};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_SCHEMA_VERSION: u16 = 4;
+const REQUEST_SCHEMA_VERSION: u16 = 5;
 const SETUP_FAILURE_EXIT_CODE: i32 = 125;
 const COMMAND_FAILURE_EXIT_CODE: i32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
@@ -23,6 +23,7 @@ const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
+const MAX_SELECTOR_BYTES: usize = 4 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const MAX_RENDERED_DOM_BYTES: usize = 4 * 1024 * 1024;
 const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,6 +57,10 @@ enum RunnerProbe {
     },
     PageRender {
         url: String,
+    },
+    ElementExists {
+        url: String,
+        selector: String,
     },
 }
 
@@ -148,6 +153,11 @@ fn execute_service_probe(
             target: LoopbackHttpTarget,
             browser: String,
         },
+        ElementExists {
+            target: LoopbackHttpTarget,
+            browser: String,
+            selector: String,
+        },
     }
     let active = match probe {
         RunnerProbe::HttpStatus {
@@ -167,12 +177,20 @@ fn execute_service_probe(
                 .clone()
                 .ok_or("page render probe requires a browser")?,
         },
+        RunnerProbe::ElementExists { url, selector } => ActiveProbe::ElementExists {
+            target: LoopbackHttpTarget::parse(url)?,
+            browser: request
+                .browser_executable
+                .clone()
+                .ok_or("element probe requires a browser")?,
+            selector: selector.clone(),
+        },
     };
     let (service_host, port) = match &active {
         ActiveProbe::Tcp(target) => (target.service_host(), target.port()),
-        ActiveProbe::Http { target, .. } | ActiveProbe::PageRender { target, .. } => {
-            (target.service_host(), target.port())
-        }
+        ActiveProbe::Http { target, .. }
+        | ActiveProbe::PageRender { target, .. }
+        | ActiveProbe::ElementExists { target, .. } => (target.service_host(), target.port()),
     };
     let mut command = prepared_command(request, workspace)?;
     command
@@ -195,7 +213,15 @@ fn execute_service_probe(
             ActiveProbe::PageRender { target, browser } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target)),
+                .map(|_| render_page(browser, workspace, target, None)),
+            ActiveProbe::ElementExists {
+                target,
+                browser,
+                selector,
+            } => target
+                .request_status()
+                .filter(|status| (200..300).contains(status))
+                .map(|_| render_page(browser, workspace, target, Some(selector))),
         };
         if let Some(passed) = passed {
             break if passed { 0 } else { COMMAND_FAILURE_EXIT_CODE };
@@ -262,6 +288,13 @@ fn validate_request(
                 LoopbackHttpTarget::parse(url)?;
                 if request.browser_executable.is_none() {
                     return Err("page render probe requires a browser");
+                }
+            }
+            RunnerProbe::ElementExists { url, selector } => {
+                LoopbackHttpTarget::parse(url)?;
+                validate_selector(selector)?;
+                if request.browser_executable.is_none() {
+                    return Err("element probe requires a browser");
                 }
             }
         }
@@ -348,7 +381,23 @@ fn browser_is_exact(browser: &str, enforce_sandbox_paths: bool) -> bool {
     }
 }
 
-fn render_page(browser: &str, workspace: &Path, target: &LoopbackHttpTarget) -> bool {
+fn validate_selector(selector: &str) -> Result<(), &'static str> {
+    if selector.trim().is_empty()
+        || selector.len() > MAX_SELECTOR_BYTES
+        || selector.contains('\0')
+        || selector.chars().any(char::is_control)
+    {
+        return Err("element selector is invalid");
+    }
+    Ok(())
+}
+
+fn render_page(
+    browser: &str,
+    workspace: &Path,
+    target: &LoopbackHttpTarget,
+    selector: Option<&str>,
+) -> bool {
     let profile = workspace.join(".mcg-browser-profile");
     if fs::create_dir(&profile).is_err() {
         return false;
@@ -356,7 +405,11 @@ fn render_page(browser: &str, workspace: &Path, target: &LoopbackHttpTarget) -> 
     let rendered = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .is_ok_and(|runtime| runtime.block_on(render_page_with_browser(browser, &profile, target)));
+        .is_ok_and(|runtime| {
+            runtime.block_on(render_page_with_browser(
+                browser, &profile, target, selector,
+            ))
+        });
     let _ = fs::remove_dir_all(&profile);
     rendered
 }
@@ -365,12 +418,20 @@ async fn render_page_with_browser(
     executable: &str,
     profile: &Path,
     target: &LoopbackHttpTarget,
+    selector: Option<&str>,
 ) -> bool {
     let config = BrowserConfig::builder()
         .chrome_executable(executable)
         .user_data_dir(profile)
         .window_size(1_280, 800)
+        .new_headless_mode()
         .no_sandbox()
+        // Chrome launched as the Windows Sandbox System identity does not emit
+        // its DevTools endpoint on the inherited stderr pipe unless logging is
+        // explicitly directed there. Chromiumoxide discovers the random,
+        // loopback-only endpoint from that line; keeping port 0 also prevents
+        // an untrusted sibling service from pre-binding a known debug port.
+        .arg(("enable-logging", "stderr"))
         .launch_timeout(BROWSER_LAUNCH_TIMEOUT)
         .request_timeout(BROWSER_RENDER_TIMEOUT)
         .build();
@@ -395,6 +456,12 @@ async fn render_page_with_browser(
         let final_target = LoopbackHttpTarget::parse(&final_url).ok()?;
         if final_target.authority != target.authority {
             return None;
+        }
+        if let Some(selector) = selector {
+            let found = page.find_elements(selector).await.ok()?;
+            if found.is_empty() {
+                return None;
+            }
         }
         let state: RenderState = page
             .evaluate(
@@ -1017,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn page_render_contract_requires_exact_browser_and_hydrated_body() {
+    fn browser_contract_requires_exact_runtime_hydrated_body_and_bounded_selector() {
         assert!(rendered_dom_is_valid(
             b"<!doctype html><html><body><main>ready</main></body></html>"
         ));
@@ -1054,6 +1121,26 @@ mod tests {
             r"C:\outside\chrome.exe".into()
         } else {
             "/outside/chrome".into()
+        });
+        assert!(validate_request(&request, true).is_err());
+        request.browser_executable = Some(if cfg!(windows) {
+            r"C:\mcg-browser\chrome.exe".into()
+        } else {
+            "/mcg-browser/chrome".into()
+        });
+        request.probe = Some(RunnerProbe::ElementExists {
+            url: "http://127.0.0.1:8080/".into(),
+            selector: "main#app[data-state='ready']".into(),
+        });
+        assert!(validate_request(&request, true).is_ok());
+        request.probe = Some(RunnerProbe::ElementExists {
+            url: "http://127.0.0.1:8080/".into(),
+            selector: " ".into(),
+        });
+        assert!(validate_request(&request, true).is_err());
+        request.probe = Some(RunnerProbe::ElementExists {
+            url: "http://127.0.0.1:8080/".into(),
+            selector: "x".repeat(MAX_SELECTOR_BYTES + 1),
         });
         assert!(validate_request(&request, true).is_err());
     }
@@ -1117,5 +1204,36 @@ while ($true) {{
             }),
         };
         assert_eq!(execute_request(&request, false), Ok(0));
+
+        let element_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("element-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::ElementExists {
+                url: format!("http://127.0.0.1:{port}/"),
+                selector: "main#app".into(),
+            }),
+            ..request.clone()
+        };
+        assert_eq!(execute_request(&element_request, false), Ok(0));
+
+        let missing_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("missing-element-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::ElementExists {
+                url: format!("http://127.0.0.1:{port}/"),
+                selector: "#missing".into(),
+            }),
+            ..request
+        };
+        assert_eq!(
+            execute_request(&missing_request, false),
+            Ok(COMMAND_FAILURE_EXIT_CODE)
+        );
     }
 }

@@ -65,6 +65,8 @@ const BROWSER_RUNTIME_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const BROWSER_RUNTIME_MAX_FILES: u64 = 100_000;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 const BROWSER_RUNTIME_MAX_DEPTH: usize = 16;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const SHADOW_MAX_SELECTOR_BYTES: usize = 4 * 1024;
 #[cfg(any(target_os = "windows", test))]
 const WSB_START_TIMEOUT_SECONDS: u64 = 180;
 #[cfg(any(target_os = "windows", test))]
@@ -131,6 +133,10 @@ enum ShadowServiceProbe {
     PageRender {
         url: String,
     },
+    ElementExists {
+        url: String,
+        selector: String,
+    },
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -138,7 +144,9 @@ impl ShadowServiceProbe {
     fn endpoint(&self) -> &str {
         match self {
             Self::Tcp { endpoint } => endpoint,
-            Self::Http { url, .. } | Self::PageRender { url } => url,
+            Self::Http { url, .. } | Self::PageRender { url } | Self::ElementExists { url, .. } => {
+                url
+            }
         }
     }
 
@@ -147,7 +155,7 @@ impl ShadowServiceProbe {
             Self::Http {
                 expected_status, ..
             } => *expected_status,
-            Self::Tcp { .. } | Self::PageRender { .. } => None,
+            Self::Tcp { .. } | Self::PageRender { .. } | Self::ElementExists { .. } => None,
         }
     }
 
@@ -156,7 +164,15 @@ impl ShadowServiceProbe {
             Self::Http { .. } => "http",
             Self::Tcp { .. } => "tcp",
             Self::PageRender { .. } => "page_render",
+            Self::ElementExists { .. } => "element_exists",
         }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+impl ShadowServiceProbe {
+    const fn requires_browser(&self) -> bool {
+        matches!(self, Self::PageRender { .. } | Self::ElementExists { .. })
     }
 }
 
@@ -330,6 +346,7 @@ impl LinuxBubblewrapVerifier {
         capture_shadow_transcript(artifacts, condition, exit_code, timed_out, stdout, stderr)
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the complete same-sandbox browser mapping and process profile auditable.
     async fn verify_service_inner(
         &self,
         workspace_root: &Path,
@@ -342,22 +359,24 @@ impl LinuxBubblewrapVerifier {
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
         let probe = shadow_service_probe(condition)?;
-        let browser = matches!(probe, ShadowServiceProbe::PageRender { .. })
+        let browser = probe
+            .requires_browser()
             .then(discover_browser_runtime)
             .transpose()?
             .flatten();
-        if matches!(probe, ShadowServiceProbe::PageRender { .. }) && browser.is_none() {
+        if probe.requires_browser() && browser.is_none() {
             return Err(ToolError::Unavailable(
-                "same-sandbox page rendering requires a configured browser runtime".into(),
+                "same-sandbox browser verification requires a configured browser runtime".into(),
             ));
         }
         let probe_program_available = match probe {
             ShadowServiceProbe::Tcp { .. } => Path::new("/bin/bash").is_file(),
             ShadowServiceProbe::Http { .. } => Path::new("/usr/bin/curl").is_file(),
-            ShadowServiceProbe::PageRender { .. } => true,
+            ShadowServiceProbe::PageRender { .. } | ShadowServiceProbe::ElementExists { .. } => {
+                true
+            }
         };
-        let sleep_available = matches!(probe, ShadowServiceProbe::PageRender { .. })
-            || Path::new("/usr/bin/sleep").is_file();
+        let sleep_available = probe.requires_browser() || Path::new("/usr/bin/sleep").is_file();
         if !probe_program_available || !sleep_available {
             return Err(ToolError::Unavailable(
                 "Linux shadow service verification requires its trusted probe utility and sleep"
@@ -367,10 +386,10 @@ impl LinuxBubblewrapVerifier {
         let (executable, command_arguments) = split_command(service_command)?;
         let toolchain = discover_node_toolchain(executable)?;
         let proof = EphemeralProof::create(&workspace_root)?;
-        let runner_request = if matches!(probe, ShadowServiceProbe::PageRender { .. }) {
+        let runner_request = if probe.requires_browser() {
             self.runner.as_deref().ok_or_else(|| {
                 ToolError::Unavailable(
-                    "same-sandbox page rendering requires the packaged shadow runner".into(),
+                    "same-sandbox browser verification requires the packaged shadow runner".into(),
                 )
             })?;
             Some(LinuxRunnerRequestFile::create(
@@ -569,13 +588,14 @@ impl WindowsSandboxVerifier {
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
         let probe = shadow_service_probe(condition)?;
-        let browser = matches!(probe, ShadowServiceProbe::PageRender { .. })
+        let browser = probe
+            .requires_browser()
             .then(discover_browser_runtime)
             .transpose()?
             .flatten();
-        if matches!(probe, ShadowServiceProbe::PageRender { .. }) && browser.is_none() {
+        if probe.requires_browser() && browser.is_none() {
             return Err(ToolError::Unavailable(
-                "same-sandbox page rendering requires a configured browser runtime".into(),
+                "same-sandbox browser verification requires a configured browser runtime".into(),
             ));
         }
         let (executable, command_arguments) = split_command(service_command)?;
@@ -759,6 +779,10 @@ enum WindowsRunnerProbe<'a> {
     PageRender {
         url: &'a str,
     },
+    ElementExists {
+        url: &'a str,
+        selector: &'a str,
+    },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -788,7 +812,7 @@ impl WindowsSandboxHarness {
                 ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
             })?;
             let request = WindowsRunnerRequest {
-                schema_version: 4,
+                schema_version: 5,
                 source_root: r"C:\mcg-source",
                 workspace_root: r"C:\mcg-workspace",
                 executable,
@@ -809,6 +833,9 @@ impl WindowsSandboxHarness {
                     }
                     ShadowServiceProbe::PageRender { url } => {
                         WindowsRunnerProbe::PageRender { url }
+                    }
+                    ShadowServiceProbe::ElementExists { url, selector } => {
+                        WindowsRunnerProbe::ElementExists { url, selector }
                     }
                 }),
             };
@@ -1107,10 +1134,12 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
         SuccessCondition::HttpResponds { url, status } => (url, Some(*status), "http"),
         SuccessCondition::ServiceHealthy { endpoint } => (endpoint, None, "http"),
         SuccessCondition::PortListening { endpoint } => (endpoint, None, "tcp"),
-        SuccessCondition::PageRenders { url } => (url, None, "http"),
+        SuccessCondition::PageRenders { url } | SuccessCondition::ElementExists { url, .. } => {
+            (url, None, "http")
+        }
         _ => {
             return Err(ToolError::Invalid(
-                "shadow service verifier requires an HTTP, service-health, TCP-port, or page-render condition".into(),
+                "shadow service verifier requires an HTTP, service-health, TCP-port, page-render, or element condition".into(),
             ));
         }
     };
@@ -1143,7 +1172,21 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
                 .into(),
         ));
     }
-    if matches!(condition, SuccessCondition::PageRenders { .. }) {
+    if let SuccessCondition::ElementExists { selector, .. } = condition {
+        if selector.trim().is_empty()
+            || selector.len() > SHADOW_MAX_SELECTOR_BYTES
+            || selector.contains('\0')
+            || selector.chars().any(char::is_control)
+        {
+            return Err(ToolError::Invalid(
+                "shadow element selector exceeds its bounded CSS-selector contract".into(),
+            ));
+        }
+        Ok(ShadowServiceProbe::ElementExists {
+            url: value.clone(),
+            selector: selector.clone(),
+        })
+    } else if matches!(condition, SuccessCondition::PageRenders { .. }) {
         Ok(ShadowServiceProbe::PageRender { url: value.clone() })
     } else if scheme == "tcp" {
         Ok(ShadowServiceProbe::Tcp {
@@ -1583,14 +1626,14 @@ fn bubblewrap_service_arguments(
     } else {
         "/usr/bin:/bin"
     };
-    let use_runner = matches!(probe, ShadowServiceProbe::PageRender { .. });
+    let use_runner = probe.requires_browser();
     if use_runner != (runner.is_some() && runner_request.is_some()) {
         return Err(ToolError::Invalid(
-            "page-render sandbox runner mappings are incomplete".into(),
+            "browser sandbox runner mappings are incomplete".into(),
         ));
     }
     let sandbox_source = if use_runner { "/mcg-source" } else { "/source" };
-    let address_space_bytes = if matches!(probe, ShadowServiceProbe::PageRender { .. }) {
+    let address_space_bytes = if probe.requires_browser() {
         BWRAP_BROWSER_ADDRESS_SPACE_BYTES
     } else {
         BWRAP_ADDRESS_SPACE_BYTES
@@ -1887,6 +1930,7 @@ struct LinuxRunnerRequest<'a> {
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum LinuxRunnerProbe<'a> {
     PageRender { url: &'a str },
+    ElementExists { url: &'a str, selector: &'a str },
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1904,24 +1948,30 @@ impl LinuxRunnerRequestFile {
         browser: &BrowserRuntime,
         probe: &ShadowServiceProbe,
     ) -> Result<Self, ToolError> {
-        let ShadowServiceProbe::PageRender { url } = probe else {
-            return Err(ToolError::Invalid(
-                "Linux runner request requires a page-render probe".into(),
-            ));
+        let probe = match probe {
+            ShadowServiceProbe::PageRender { url } => LinuxRunnerProbe::PageRender { url },
+            ShadowServiceProbe::ElementExists { url, selector } => {
+                LinuxRunnerProbe::ElementExists { url, selector }
+            }
+            _ => {
+                return Err(ToolError::Invalid(
+                    "Linux runner request requires a browser probe".into(),
+                ));
+            }
         };
         let parent = workspace_root
             .parent()
             .ok_or_else(|| ToolError::Invalid("shadow workspace has no parent".into()))?;
         let path = parent.join(format!(".mcg-shadow-request-{}.json", Uuid::new_v4()));
         let request = LinuxRunnerRequest {
-            schema_version: 4,
+            schema_version: 5,
             source_root: "/mcg-source",
             workspace_root: "/tmp/mcg-workspace",
             executable,
             argv,
             toolchain_root: toolchain.map(|_| "/mcg-toolchain"),
             browser_executable: format!("/mcg-browser/{}", browser.executable_name),
-            probe: LinuxRunnerProbe::PageRender { url },
+            probe,
         };
         let bytes = serde_json::to_vec(&request).map_err(|error| {
             ToolError::Execution(format!("serialize Linux shadow-runner request: {error}"))
@@ -2286,6 +2336,27 @@ mod tests {
             .expect("exact loopback page URL"),
             ShadowServiceProbe::PageRender { .. }
         ));
+        assert!(matches!(
+            shadow_service_probe(&SuccessCondition::ElementExists {
+                url: "http://127.0.0.1:43123/app".into(),
+                selector: "main#app[data-state='ready']".into(),
+            })
+            .expect("exact loopback element assertion"),
+            ShadowServiceProbe::ElementExists { .. }
+        ));
+        for selector in [
+            String::new(),
+            " \t".to_owned(),
+            "x".repeat(SHADOW_MAX_SELECTOR_BYTES + 1),
+        ] {
+            assert!(
+                shadow_service_probe(&SuccessCondition::ElementExists {
+                    url: "http://127.0.0.1:43123/app".into(),
+                    selector,
+                })
+                .is_err()
+            );
+        }
         for url in [
             "https://127.0.0.1:43123/health",
             "http://127.0.0.1/health",
@@ -2659,6 +2730,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture keeps every versioned Windows probe variant auditable together.
     fn windows_service_request_is_schema_bound_and_probe_tagged() {
         let parent = tempfile::tempdir().expect("parent");
         let workspace = parent.path().join("workspace");
@@ -2682,7 +2754,7 @@ mod tests {
         let request: serde_json::Value =
             serde_json::from_slice(&fs::read(harness.path.join("request.json")).expect("request"))
                 .expect("request JSON");
-        assert_eq!(request["schema_version"], 4);
+        assert_eq!(request["schema_version"], 5);
         assert_eq!(request["source_root"], r"C:\mcg-source");
         assert_eq!(request["workspace_root"], r"C:\mcg-workspace");
         assert_eq!(request["executable"], "npm.cmd");
@@ -2741,6 +2813,31 @@ mod tests {
         assert_eq!(
             page_request["browser_executable"],
             r"C:\mcg-browser\chrome.exe"
+        );
+
+        let element_probe = ShadowServiceProbe::ElementExists {
+            url: "http://127.0.0.1:43123/app".into(),
+            selector: "main#app[data-state='ready']".into(),
+        };
+        let element_harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&browser),
+            Some(&element_probe),
+        )
+        .expect("element harness");
+        let element_request: serde_json::Value = serde_json::from_slice(
+            &fs::read(element_harness.path.join("request.json")).expect("element request"),
+        )
+        .expect("element request JSON");
+        assert_eq!(element_request["probe"]["kind"], "element_exists");
+        assert_eq!(element_request["probe"]["url"], element_probe.endpoint());
+        assert_eq!(
+            element_request["probe"]["selector"],
+            "main#app[data-state='ready']"
         );
     }
 
@@ -3021,6 +3118,27 @@ http.createServer((request, response) => {
             assert_eq!(record.exit_code, Some(0));
             assert!(!record.timed_out);
             assert_no_windows_sandbox_sessions(verifier, workspace).await;
+
+            for (selector, expected_exit_code) in [("main#app", 0), ("#missing", 1)] {
+                let element_condition = SuccessCondition::ElementExists {
+                    url: format!("http://{address}/app"),
+                    selector: selector.into(),
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(workspace, "node server.js", &element_condition, artifacts)
+                    .await
+                else {
+                    panic!("same-sandbox Windows element probe must produce measured evidence");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("element service transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("element service record");
+                assert_eq!(record.exit_code, Some(expected_exit_code));
+                assert!(!record.timed_out);
+                assert_no_windows_sandbox_sessions(verifier, workspace).await;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(service_hits.load(Ordering::SeqCst), 0);
@@ -3357,6 +3475,31 @@ http.createServer((request, response) => {
                         serde_json::from_slice(&bytes).expect("browser service record");
                     assert_eq!(record.exit_code, Some(0));
                     assert!(!record.timed_out);
+
+                    for (selector, expected_exit_code) in [("main#app", 0), ("#missing", 1)] {
+                        let element_condition = SuccessCondition::ElementExists {
+                            url: format!("http://{address}/app"),
+                            selector: selector.into(),
+                        };
+                        let ShadowCommandVerification::Completed { transcript } = verifier
+                            .verify_service(
+                                workspace.path(),
+                                "node server.js",
+                                &element_condition,
+                                &artifacts,
+                            )
+                            .await
+                        else {
+                            panic!("same-sandbox element probe must produce measured evidence");
+                        };
+                        let bytes = artifacts
+                            .read_verified_reference(&transcript, 1024 * 1024)
+                            .expect("element service transcript");
+                        let record: ShadowCommandTranscript =
+                            serde_json::from_slice(&bytes).expect("element service record");
+                        assert_eq!(record.exit_code, Some(expected_exit_code));
+                        assert!(!record.timed_out);
+                    }
                 }
 
                 let tcp_condition = SuccessCondition::PortListening {

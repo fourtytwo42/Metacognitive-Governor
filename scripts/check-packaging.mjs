@@ -173,7 +173,7 @@ for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [li
 for (const invariant of ["target-feature=+crt-static", "VCRUNTIME", "MSVCP", "ReadAllBytes", '"rustc", "-p", "mcg-shadow-runner"']) {
   requireText(windowsPrepare, invariant, "Windows self-contained Sandbox runner build");
 }
-for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 4', 'toolchain_root', 'C:\\mcg-toolchain', 'browser_executable', 'C:\\mcg-browser', 'Browser::launch', 'BROWSER_RENDER_TIMEOUT']) {
+for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 5', 'toolchain_root', 'C:\\mcg-toolchain', 'browser_executable', 'C:\\mcg-browser', 'Browser::launch', 'BROWSER_RENDER_TIMEOUT', 'ElementExists', 'enable-logging']) {
   requireText(shadowRunner, invariant, "Windows Sandbox runner contract");
 }
 for (const invariant of ["NODE_TOOLCHAIN_MAX_BYTES", "NODE_TOOLCHAIN_MAX_FILES", "NODE_TOOLCHAIN_MAX_DEPTH", "BROWSER_RUNTIME_MAX_BYTES", "BROWSER_RUNTIME_MAX_FILES", "BROWSER_RUNTIME_MAX_DEPTH", '"--ro-bind"', 'r"C:\\mcg-toolchain"', 'r"C:\\mcg-browser"', '"/mcg-shadow-runner"']) {

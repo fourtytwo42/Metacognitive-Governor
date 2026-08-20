@@ -370,7 +370,7 @@ Windows tests prove the generated
 Windows Sandbox profile disables network/device/redirection surfaces, enables
 Protected Client, XML-escapes host paths, exposes exactly two mandatory read-only
 host mappings plus exactly one optional bounded Node toolchain mapping, runs the
-package-local helper as `System`, preserves the schema-4 JSON argument and typed
+package-local helper as `System`, preserves the schema-5 JSON argument and typed
 loopback/browser-probe
 boundary behind the CLI's single compile-time command value, rejects canonical
 path-prefix confusion, and produces no evidence or workspace effect when the CLI
@@ -385,7 +385,7 @@ Live Win11 qualification on the current Store-delivered Sandbox CLI proves
 official-package discovery, serialized start/exec/probe/stop compatibility,
 real nested runner execution, ephemeral command writes, and no persistence
 through the read-only host mapping. An optional browser distribution is
-independently bounded and read-only, and the schema-4 runner retains the static
+independently bounded and read-only, and the schema-5 runner retains the static
 C-runtime contract while embedding the DevTools client. Windows Sandbox may satisfy a mapped-folder
 write through its disposable view, so the gate measures host non-persistence
 rather than assuming the child must fail. The same owner-controlled gate proves
@@ -409,11 +409,14 @@ network-unshared bubblewrap namespace while an identically addressed host
 listener remains unreachable; it
 requires exact-status success, wrong-status failure, zero host hits, and service
 cleanup. The Ubuntu lane additionally loads a hydrated page through Chromium's
-DevTools protocol using the package-adjacent schema-4 runner in that same
-namespace, proves the colliding host listener still receives zero requests, and
-leaves zero candidate/browser processes. The corresponding real Win11 lane uses
-runner schema 4 and must prove the same HTTP/TCP/browser behavior with no Sandbox
-session left behind.
+DevTools protocol using the package-adjacent schema-5 runner in that same
+namespace, proves both hydrated-page and bounded CSS-selector assertions, proves
+the colliding host listener still receives zero requests, and leaves zero
+candidate/browser processes. The corresponding real Win11 lane uses runner
+schema 5 and must prove the same HTTP/TCP/page/element behavior with no Sandbox
+session left behind. Chromium is launched in new-headless mode with its random
+loopback DevTools endpoint explicitly emitted to the inherited stderr pipe so
+the System-context runner never relies on a fixed, pre-bindable debug port.
 The same file-backed scenario simulates a crash after paired benchmark commit,
 then reopens storage and proves the stable automatic decision promotes only the
 independently verified candidate while retaining one evaluation, benchmark, and
