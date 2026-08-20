@@ -1824,6 +1824,27 @@ test("native project selection discovers the folder and associates the new task"
   }));
 });
 
+test("rediscovering a known Windows folder preserves its durable project identity", async () => {
+  const selectedRoot = "C:\\Projects\\sample";
+  const project = {
+    id: "00000000-0000-4000-8000-000000000020",
+    project_id: "00000000-0000-4000-8000-000000000021",
+    root: "\\\\?\\C:\\Projects\\sample",
+    observed_at: "2026-08-20T00:00:00Z",
+    repository: { is_git: false, branch: null, dirty: false },
+    languages: [], build_systems: [], test_systems: [], instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.pickProject.mockResolvedValue(selectedRoot);
+  client.discoverProject.mockResolvedValue({ project: { ...project, root: selectedRoot } });
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("link", { name: "Projects" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Add project folder" }));
+
+  await waitFor(() => expect(client.discoverProject).toHaveBeenCalledWith(selectedRoot, project.project_id));
+});
+
 test("desktop project memory is simple to add and advanced lifecycle evidence stays visible", async () => {
   const project = {
     schema_version: 1,
@@ -1984,6 +2005,11 @@ test("simple mode separately reviews and policy-runs a snapshot-pinned topology 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
   const intelligence = await screen.findByLabelText("Project intelligence and memory");
+  await enableAdvancedMode();
+  const authority = within(intelligence).getByLabelText("Reviewed topology authority");
+  expect(within(authority).getByText("Snapshot")).toBeInTheDocument();
+  expect(within(authority).getByText("Topology SHA-256")).toBeInTheDocument();
+  expect(within(authority).getByText("Retry identity")).toBeInTheDocument();
   fireEvent.change(within(intelligence).getByLabelText("Reviewed topology reason"), { target: { value: "Verify the reviewed project" } });
   fireEvent.click(within(intelligence).getByRole("button", { name: "Review this plan" }));
   await waitFor(() => expect(client.createReviewedTopologyPlan).toHaveBeenCalledWith(project.project_id, expect.objectContaining({
@@ -1992,6 +2018,9 @@ test("simple mode separately reviews and policy-runs a snapshot-pinned topology 
     reason: "Verify the reviewed project",
     steps: [expect.objectContaining({ command_name: "test", command: "cargo test", stage_index: 0 })]
   })));
+  const planAuthority = await within(intelligence).findByLabelText("Authority for test · reviewed");
+  expect(within(planAuthority).getByText("Plan identity")).toBeInTheDocument();
+  expect(within(planAuthority).getByText("Definition SHA-256")).toBeInTheDocument();
   fireEvent.click(await within(intelligence).findByRole("button", { name: "Run reviewed plan" }));
   fireEvent.click(await within(intelligence).findByRole("button", { name: "Approve and run" }));
   await waitFor(() => expect(client.approveRequest).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000534"));

@@ -1390,8 +1390,8 @@ export function pickProjectDirectory(): Promise<string | null> {
   return invoke("pick_project_directory");
 }
 
-export function discoverProject(root: string): Promise<ProjectMutation> {
-  return invoke("discover_project", { request: { root, project_id: null } });
+export function discoverProject(root: string, projectId?: string): Promise<ProjectMutation> {
+  return invoke("discover_project", { request: { root, project_id: projectId ?? null } });
 }
 
 export function listProjects(): Promise<ProjectListResponse> {

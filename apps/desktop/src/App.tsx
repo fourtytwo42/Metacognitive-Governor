@@ -187,6 +187,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function projectRootKey(root: string): string {
+  const trimmed = root.trim();
+  const windowsPath = /^\\\\\?\\|^[A-Za-z]:[\\/]|^\\\\/.test(trimmed);
+  if (!windowsPath) return trimmed.replace(/\/+$/, "");
+  return trimmed
+    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+    .replace(/^\\\\\?\\/, "")
+    .replace(/\//g, "\\")
+    .replace(/\\+$/, "")
+    .toLocaleLowerCase("en-US");
+}
+
+function reviewedTopologyErrorMessage(error: unknown): string {
+  const message = errorMessage(error);
+  return /409 Conflict|code conflict/i.test(message)
+    ? `${message} Refresh the project folder to revalidate its files, then create a new review.`
+    : message;
+}
+
 function positiveWholeNumber(value: string, label: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -1634,7 +1653,10 @@ export function App() {
     try {
       const root = await pickProjectDirectory();
       if (!root) return;
-      const mutation = await discoverProject(root);
+      const existingProject = projects.find((project) => projectRootKey(project.root) === projectRootKey(root));
+      const mutation = existingProject
+        ? await discoverProject(root, existingProject.project_id)
+        : await discoverProject(root);
       setSelectedProject(mutation.project);
       setProjects((current) => [
         mutation.project,
@@ -1690,7 +1712,7 @@ export function App() {
       setReviewedTopologyStepId(crypto.randomUUID());
       setReviewedTopologyReason("");
     } catch (error) {
-      setReviewedTopologyError(errorMessage(error));
+      setReviewedTopologyError(reviewedTopologyErrorMessage(error));
     } finally {
       setReviewedTopologyBusy(false);
     }
@@ -2788,7 +2810,7 @@ export function App() {
                 </div>
                 <span className="count-badge">{reviewedTopologyPlans.length} plans</span>
               </div>
-              {topologyPlan?.status === "ready" && selectedProject.commands.length > 0 ? <div className="memory-composer" aria-label="Review topology execution plan">
+              {topologyPlan?.status === "ready" && selectedProject.commands.length > 0 ? <div className="memory-composer reviewed-topology-composer" aria-label="Review topology execution plan">
                 <label>Discovered command<select aria-label="Reviewed topology command" value={reviewedTopologyCommand} onChange={(event) => setReviewedTopologyCommand(event.target.value)}>
                   {selectedProject.commands.map((command, index) => <option value={String(index)} key={`${command.name}-${command.command}-${index}`}>{command.name} · {command.command}</option>)}
                 </select></label>
@@ -2796,19 +2818,30 @@ export function App() {
                   {topologyPlan.stages.map((stage) => <option value={String(stage.index)} key={stage.index}>Stage {stage.index + 1} · {stage.nodes.map((node) => node.label).join(", ")}</option>)}
                 </select></label>
                 <label>Why should this run?<textarea aria-label="Reviewed topology reason" value={reviewedTopologyReason} onChange={(event) => setReviewedTopologyReason(event.target.value)} maxLength={1024} placeholder="Verify the project after its declared dependencies are ready." /></label>
-                {advanced && <><small>Snapshot <code>{topologyPlan.project_snapshot_id}</code></small><small>Topology SHA-256 <code>{topologyPlan.sha256}</code></small><small>Retry identity <code>{reviewedTopologyPlanId}</code></small></>}
+                {advanced && <div className="reviewed-topology-metadata" aria-label="Reviewed topology authority">
+                  <small><span>Snapshot</span><code>{topologyPlan.project_snapshot_id}</code></small>
+                  <small><span>Topology SHA-256</span><code>{topologyPlan.sha256}</code></small>
+                  <small><span>Retry identity</span><code>{reviewedTopologyPlanId}</code></small>
+                </div>}
                 <button className="primary" type="button" disabled={reviewedTopologyBusy || !reviewedTopologyReason.trim()} onClick={reviewTopologyExecution}>{reviewedTopologyBusy ? "Working…" : "Review this plan"}</button>
               </div> : <p className="empty-state">A ready explicit topology and a manifest-discovered command are required before MCG can create an execution plan.</p>}
               {reviewedTopologyError && <p className="error-message" role="alert">{reviewedTopologyError}</p>}
               {reviewedTopologyPlans.length > 0 && <div className="memory-list" aria-label="Reviewed topology plans">
                 {reviewedTopologyPlans.map((plan) => <article className="memory-card reviewed-topology-card" key={plan.id}>
-                  <div>
-                    <strong>{plan.display_name}</strong>
-                    <span className={`task-state state-${plan.state}`}>{plan.state}</span>
+                  <div className="reviewed-plan-content">
+                    <div className="reviewed-plan-heading"><strong>{plan.display_name}</strong><span className={`task-state state-${plan.state}`}>{plan.state}</span></div>
                     <p>{plan.reason}</p>
-                    <small>{plan.steps.length} command{plan.steps.length === 1 ? "" : "s"} · reviewed {new Date(plan.created_at).toLocaleString()}</small>
-                    {plan.steps.map((step) => <small key={step.id}><strong>{step.command}</strong> · stage {step.stage_index + 1} · {step.state}{step.detail ? ` · ${step.detail}` : ""}</small>)}
-                    {advanced && <><code>{plan.id}</code><small>Definition SHA-256 <code>{plan.definition_hash}</code></small><small>Snapshot <code>{plan.project_snapshot_id}</code> · topology <code>{plan.topology_sha256}</code></small>{plan.steps.flatMap((step) => step.log_artifact_sha256).map((digest) => <small key={digest}>Log artifact <code>{digest}</code></small>)}</>}
+                    <div className="reviewed-plan-metadata">
+                      <small>{plan.steps.length} command{plan.steps.length === 1 ? "" : "s"} · reviewed {new Date(plan.created_at).toLocaleString()}</small>
+                      {plan.steps.map((step) => <small key={step.id}><strong>{step.command}</strong><span>Stage {step.stage_index + 1} · {step.state}{step.detail ? ` · ${step.detail}` : ""}</span></small>)}
+                    </div>
+                    {advanced && <div className="reviewed-topology-metadata reviewed-plan-authority" aria-label={`Authority for ${plan.display_name}`}>
+                      <small><span>Plan identity</span><code>{plan.id}</code></small>
+                      <small><span>Definition SHA-256</span><code>{plan.definition_hash}</code></small>
+                      <small><span>Snapshot</span><code>{plan.project_snapshot_id}</code></small>
+                      <small><span>Topology SHA-256</span><code>{plan.topology_sha256}</code></small>
+                      {plan.steps.flatMap((step) => step.log_artifact_sha256).map((digest) => <small key={digest}><span>Log artifact</span><code>{digest}</code></small>)}
+                    </div>}
                   </div>
                   <div className="memory-actions">
                     {(plan.state === "reviewed" || (plan.state === "waiting" && !reviewedTopologyApprovals[plan.id])) && <button className="primary" type="button" disabled={reviewedTopologyBusy} onClick={() => executeReviewedTopologyPlan(plan.id)}>{plan.state === "waiting" ? "Continue approval" : "Run reviewed plan"}</button>}

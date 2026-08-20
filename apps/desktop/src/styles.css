@@ -138,6 +138,20 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .memory-card p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .memory-card small { color: #8e9daf; }
 .memory-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.reviewed-topology-composer { grid-template-columns: minmax(0, 1fr); }
+.reviewed-topology-composer > label, .reviewed-topology-composer > button, .reviewed-topology-metadata { grid-column: 1 / -1; }
+.reviewed-topology-metadata { display: grid; gap: 8px; min-width: 0; }
+.reviewed-topology-metadata small { display: grid; gap: 3px; min-width: 0; line-height: 1.35; }
+.reviewed-topology-metadata span { color: #8e9daf; }
+.reviewed-topology-metadata code { display: block; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; white-space: normal; color: #b9ccdc; }
+.reviewed-topology-card, .reviewed-plan-content { min-width: 0; }
+.reviewed-plan-content { display: grid; gap: 8px; }
+.reviewed-plan-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.reviewed-plan-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.reviewed-plan-metadata { display: grid; gap: 7px; min-width: 0; }
+.reviewed-plan-metadata small { display: grid; gap: 3px; line-height: 1.4; overflow-wrap: anywhere; }
+.reviewed-plan-metadata small > strong, .reviewed-plan-metadata small > span { display: block; margin: 0; }
+.reviewed-plan-authority { margin-top: 4px; padding-top: 9px; border-top: 1px solid #243246; }
 .memory-actions textarea { flex: 1 1 240px; min-height: 60px; }
 .memory-history { grid-column: 1 / -1; margin: 0; padding-left: 22px; color: #aebed0; }
 .memory-history li { margin: 5px 0; overflow-wrap: anywhere; }
