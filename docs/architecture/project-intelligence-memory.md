@@ -36,6 +36,13 @@ Helm `Chart.yaml` files in the project root or conventional `helm/`, `charts/`,
 nodes, chart dependencies, and dependency-derived database edges. Discovery
 deliberately does not parse Helm templates, `values.yaml`, dependency repository
 URLs, or condition/value fields; those surfaces may contain templates or secrets.
+AWS CloudFormation and SAM JSON/YAML in conventional root, `cloudformation/`,
+`infra/cloudformation/`, or `deploy/cloudformation/` templates contribute one
+stack deployment, typed AWS service/API/database/resource nodes, and only
+explicit same-template `DependsOn` edges. Logical IDs and `AWS::` resource types
+are bounded identifiers. MCG deliberately ignores every property, parameter,
+output, metadata, transform value, and unknown dependency so infrastructure
+topology cannot become a secret or configuration-value store.
 Package `homepage` contributes only a credential-free HTTP(S) origin. Every node
 and relationship retains its manifest source and uses a content-stable identity;
 the desktop resolves those identities back to consumer-readable labels.

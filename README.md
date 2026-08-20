@@ -126,7 +126,8 @@ bounded scheduler batches and retract after a seven-day grace period while
 retaining their immutable provenance and history.
 
 Advanced project intelligence also renders a source-backed topology from common
-package/Cargo/Python/Go, Docker Compose, OpenAPI/Swagger, and deployment
+package/Cargo/Python/Go, Docker Compose, Kubernetes, Helm, CloudFormation/SAM,
+OpenAPI/Swagger, and deployment
 manifests. Named services, databases, dependencies, runtimes, API origins,
 deployment targets, and their declared relationships use stable identities and
 remain bounded; credential-bearing URLs are never admitted to the graph. The

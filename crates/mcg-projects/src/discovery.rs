@@ -556,6 +556,7 @@ fn is_manifest(path: &str) -> bool {
         || is_openapi_manifest(path)
         || is_kubernetes_manifest(path)
         || is_helm_chart(path)
+        || is_cloudformation_manifest(path)
 }
 
 fn fingerprint(inputs: &BTreeMap<String, String>) -> String {
@@ -798,6 +799,7 @@ fn world_model(
     add_compose_facts(root, files, &mut graph)?;
     add_kubernetes_facts(root, files, &mut graph)?;
     add_helm_facts(root, files, &mut graph)?;
+    add_cloudformation_facts(root, files, &mut graph)?;
     add_openapi_facts(root, files, &mut graph)?;
     add_deployment_facts(root, files, &mut graph);
     Ok(graph.finish())
@@ -1701,6 +1703,243 @@ fn valid_helm_name(value: &str) -> bool {
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
+#[derive(Debug)]
+struct CloudFormationResource {
+    logical_id: String,
+    type_name: String,
+    dependencies: Vec<String>,
+}
+
+fn add_cloudformation_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    for path in files
+        .iter()
+        .filter(|path| is_cloudformation_manifest(&relative(root, path)))
+    {
+        let source = relative(root, path);
+        let text = read_bounded_manifest(path)?;
+        if ambiguous_root_cloudformation_template(&source)
+            && !(text.contains("Resources") && text.contains("AWS::"))
+        {
+            continue;
+        }
+        let resources = cloudformation_resources(path, &text)?;
+        if resources.is_empty() {
+            continue;
+        }
+        let stack_id = graph.add_node(
+            WorldNodeKind::Deployment,
+            &format!("CloudFormation stack {source}"),
+            &source,
+        );
+        graph.add_relationship("repository", "deploys_to", &stack_id, &source);
+        let mut resource_ids = BTreeMap::new();
+        for resource in &resources {
+            let fact_source = format!("{source}#Resources.{}", resource.logical_id);
+            let resource_id = graph.add_node(
+                cloudformation_world_kind(&resource.type_name),
+                &format!("{} ({})", resource.logical_id, resource.type_name),
+                &fact_source,
+            );
+            graph.add_relationship(&stack_id, "provisions", &resource_id, &fact_source);
+            resource_ids.insert(resource.logical_id.clone(), resource_id);
+        }
+        for resource in &resources {
+            let Some(from) = resource_ids.get(&resource.logical_id) else {
+                continue;
+            };
+            for dependency in &resource.dependencies {
+                if let Some(to) = resource_ids.get(dependency) {
+                    graph.add_relationship(
+                        from,
+                        "depends_on",
+                        to,
+                        &format!("{source}#Resources.{}.DependsOn", resource.logical_id),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cloudformation_resources(
+    path: &Path,
+    text: &str,
+) -> Result<Vec<CloudFormationResource>, ProjectDiscoveryError> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        let document: serde_json::Value = serde_json::from_str(text)?;
+        let Some(resources) = document
+            .get("Resources")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Ok(Vec::new());
+        };
+        return Ok(resources
+            .iter()
+            .take(MAX_MANIFEST_ITEMS)
+            .filter_map(|(logical_id, definition)| {
+                let logical_id =
+                    valid_cloudformation_logical_id(logical_id).then(|| logical_id.clone())?;
+                let type_name = definition
+                    .get("Type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| valid_cloudformation_type(value))?
+                    .to_owned();
+                let dependencies = definition
+                    .get("DependsOn")
+                    .map(json_cloudformation_dependencies)
+                    .unwrap_or_default();
+                Some(CloudFormationResource {
+                    logical_id,
+                    type_name,
+                    dependencies,
+                })
+            })
+            .collect());
+    }
+    let documents = YamlLoader::load_from_str(text)
+        .map_err(|error| ProjectDiscoveryError::Yaml(error.to_string()))?;
+    let Some(document) = documents.first() else {
+        return Ok(Vec::new());
+    };
+    let Some(resources) = yaml_field(document, "Resources").and_then(Yaml::as_hash) else {
+        return Ok(Vec::new());
+    };
+    Ok(resources
+        .iter()
+        .take(MAX_MANIFEST_ITEMS)
+        .filter_map(|(logical_id, definition)| {
+            let logical_id = logical_id
+                .as_str()
+                .filter(|value| valid_cloudformation_logical_id(value))?
+                .to_owned();
+            let type_name = yaml_field(definition, "Type")
+                .and_then(Yaml::as_str)
+                .filter(|value| valid_cloudformation_type(value))?
+                .to_owned();
+            let dependencies = yaml_field(definition, "DependsOn")
+                .map(yaml_cloudformation_dependencies)
+                .unwrap_or_default();
+            Some(CloudFormationResource {
+                logical_id,
+                type_name,
+                dependencies,
+            })
+        })
+        .collect())
+}
+
+fn json_cloudformation_dependencies(value: &serde_json::Value) -> Vec<String> {
+    let values = value
+        .as_array()
+        .map_or_else(|| std::slice::from_ref(value), Vec::as_slice);
+    bounded_cloudformation_dependencies(values.iter().filter_map(serde_json::Value::as_str))
+}
+
+fn yaml_cloudformation_dependencies(value: &Yaml) -> Vec<String> {
+    let values = value
+        .as_vec()
+        .map_or_else(|| std::slice::from_ref(value), Vec::as_slice);
+    bounded_cloudformation_dependencies(values.iter().filter_map(Yaml::as_str))
+}
+
+fn bounded_cloudformation_dependencies<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut dependencies = values
+        .take(MAX_MANIFEST_ITEMS)
+        .filter(|value| valid_cloudformation_logical_id(value))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+fn is_cloudformation_manifest(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let conventional_name = matches!(
+        name,
+        "template.yaml"
+            | "template.yml"
+            | "template.json"
+            | "sam-template.yaml"
+            | "sam-template.yml"
+            | "cloudformation.yaml"
+            | "cloudformation.yml"
+            | "cloudformation.json"
+    );
+    conventional_name
+        && (!normalized.contains('/')
+            || normalized.starts_with("cloudformation/")
+            || normalized.starts_with("infra/cloudformation/")
+            || normalized.starts_with("deploy/cloudformation/"))
+}
+
+fn valid_cloudformation_logical_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn valid_cloudformation_type(value: &str) -> bool {
+    if value.len() > 256 {
+        return false;
+    }
+    let parts = value.split("::").collect::<Vec<_>>();
+    parts.len() == 3
+        && parts[0] == "AWS"
+        && parts[1..]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+}
+
+fn ambiguous_root_cloudformation_template(path: &str) -> bool {
+    !path.contains('/')
+        && matches!(
+            path.to_ascii_lowercase().as_str(),
+            "template.yaml" | "template.yml" | "template.json"
+        )
+}
+
+fn cloudformation_world_kind(type_name: &str) -> WorldNodeKind {
+    if [
+        "AWS::RDS::",
+        "AWS::DynamoDB::",
+        "AWS::ElastiCache::",
+        "AWS::Neptune::",
+        "AWS::DocumentDB::",
+        "AWS::Timestream::",
+    ]
+    .iter()
+    .any(|prefix| type_name.starts_with(prefix))
+    {
+        WorldNodeKind::Database
+    } else if type_name.starts_with("AWS::ApiGateway::")
+        || type_name.starts_with("AWS::ApiGatewayV2::")
+        || type_name == "AWS::AppSync::GraphQLApi"
+    {
+        WorldNodeKind::Api
+    } else if matches!(
+        type_name,
+        "AWS::Lambda::Function"
+            | "AWS::Serverless::Function"
+            | "AWS::ECS::Service"
+            | "AWS::ElasticBeanstalk::Application"
+            | "AWS::AppRunner::Service"
+    ) {
+        WorldNodeKind::Service
+    } else {
+        WorldNodeKind::Deployment
+    }
+}
+
 fn add_openapi_facts(
     root: &Path,
     files: &[PathBuf],
@@ -2284,6 +2523,127 @@ dependencies:
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture proves YAML/JSON typing, dependencies, and value exclusion together.
+    fn cloudformation_topology_is_typed_dependency_aware_and_value_free() {
+        let root = tempdir().expect("root");
+        let cloudformation = root.path().join("infra/cloudformation");
+        fs::create_dir_all(&cloudformation).expect("CloudFormation directory");
+        fs::write(
+            cloudformation.join("template.yaml"),
+            r"AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  OrdersDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      MasterUserPassword: never-retain-this
+  OrdersFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: OrdersDatabase
+    Properties:
+      Role: !Ref ExecutionRole
+      Environment:
+        Variables:
+          API_TOKEN: also-secret
+  OrdersApi:
+    Type: AWS::ApiGatewayV2::Api
+    DependsOn:
+      - OrdersFunction
+      - MissingResource
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+  Bad-Logical-Id:
+    Type: AWS::SQS::Queue
+  CustomResource:
+    Type: Custom::Unsafe
+",
+        )
+        .expect("CloudFormation YAML");
+        fs::write(
+            cloudformation.join("cloudformation.json"),
+            r#"{"Resources":{"Queue":{"Type":"AWS::SQS::Queue"},"Worker":{"Type":"AWS::Lambda::Function","DependsOn":["Queue","Queue"]}}}"#,
+        )
+        .expect("CloudFormation JSON");
+        let unrelated = root.path().join("other");
+        fs::create_dir_all(&unrelated).expect("unrelated directory");
+        fs::write(
+            unrelated.join("template.yaml"),
+            "Resources: [this file is outside an admitted path",
+        )
+        .expect("unrelated template");
+        fs::write(
+            root.path().join("template.yaml"),
+            "emailTemplate: [not-cloudformation",
+        )
+        .expect("ambiguous non-CloudFormation root template");
+
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
+        let second = ProjectDiscoverer::discover(root.path(), project_id).expect("rediscover");
+        assert_eq!(first.world, second.world);
+        for admitted in [
+            "infra/cloudformation/template.yaml",
+            "infra/cloudformation/cloudformation.json",
+        ] {
+            assert!(first.watched_inputs.contains_key(admitted));
+        }
+        assert!(!first.watched_inputs.contains_key("other/template.yaml"));
+        assert!(first.watched_inputs.contains_key("template.yaml"));
+
+        let node_id = |kind, label: &str| {
+            first
+                .world
+                .nodes
+                .iter()
+                .find(|node| node.kind == kind && node.label == label)
+                .map(|node| node.id.clone())
+                .expect("world node")
+        };
+        let yaml_stack = node_id(
+            WorldNodeKind::Deployment,
+            "CloudFormation stack infra/cloudformation/template.yaml",
+        );
+        let database = node_id(
+            WorldNodeKind::Database,
+            "OrdersDatabase (AWS::RDS::DBInstance)",
+        );
+        let function = node_id(
+            WorldNodeKind::Service,
+            "OrdersFunction (AWS::Lambda::Function)",
+        );
+        let api = node_id(WorldNodeKind::Api, "OrdersApi (AWS::ApiGatewayV2::Api)");
+        let bucket = node_id(WorldNodeKind::Deployment, "AssetsBucket (AWS::S3::Bucket)");
+        let queue = node_id(WorldNodeKind::Deployment, "Queue (AWS::SQS::Queue)");
+        let worker = node_id(WorldNodeKind::Service, "Worker (AWS::Lambda::Function)");
+        for (from, relation, to) in [
+            ("repository", "deploys_to", yaml_stack.as_str()),
+            (yaml_stack.as_str(), "provisions", database.as_str()),
+            (yaml_stack.as_str(), "provisions", function.as_str()),
+            (yaml_stack.as_str(), "provisions", api.as_str()),
+            (yaml_stack.as_str(), "provisions", bucket.as_str()),
+            (function.as_str(), "depends_on", database.as_str()),
+            (api.as_str(), "depends_on", function.as_str()),
+            (worker.as_str(), "depends_on", queue.as_str()),
+        ] {
+            assert!(
+                first.world.relationships.iter().any(|edge| {
+                    edge.from == from && edge.relation == relation && edge.to == to
+                })
+            );
+        }
+        let retained = serde_json::to_string(&first.world).expect("serialize world model");
+        for forbidden in [
+            "never-retain-this",
+            "also-secret",
+            "MissingResource",
+            "Bad-Logical-Id",
+            "Custom::Unsafe",
+            "not-cloudformation",
+        ] {
+            assert!(!retained.contains(forbidden), "retained {forbidden}");
+        }
+    }
+
+    #[test]
     fn oversized_or_malformed_topology_manifests_fail_before_unbounded_parsing() {
         let oversized = tempdir().expect("oversized root");
         fs::write(
@@ -2328,6 +2688,17 @@ dependencies:
         assert!(matches!(
             ProjectDiscoverer::discover(malformed_helm.path(), ProjectId::new()),
             Err(ProjectDiscoveryError::Yaml(_))
+        ));
+
+        let malformed_cloudformation = tempdir().expect("malformed CloudFormation root");
+        fs::write(
+            malformed_cloudformation.path().join("cloudformation.json"),
+            r#"{"Resources":{"Broken": "#,
+        )
+        .expect("malformed CloudFormation template");
+        assert!(matches!(
+            ProjectDiscoverer::discover(malformed_cloudformation.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Json(_))
         ));
     }
 
