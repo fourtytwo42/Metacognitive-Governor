@@ -115,6 +115,13 @@ function Test-ConsumerCli(
     )
     $base = @("--host", $HostUrl, "--token-file", $TokenFile, "-C", $Project)
     $results = [Collections.Generic.List[object]]::new()
+    $baselineTasks = Invoke-ConsumerCliProcess $Executable ($base + @("task", "list", "--json")) $null $EvidenceRoot "consumer-baseline-tasks"
+    $baselineProjects = Invoke-ConsumerCliProcess $Executable ($base + @("project", "list", "--json")) $null $EvidenceRoot "consumer-baseline-projects"
+    if ($baselineTasks.ExitCode -ne 0 -or $baselineProjects.ExitCode -ne 0) {
+        throw "Installed consumer CLI could not establish its durable baseline."
+    }
+    $baselineTaskCount = @((($baselineTasks.Stdout | ConvertFrom-Json).tasks)).Count
+    $baselineProjectCount = @((($baselineProjects.Stdout | ConvertFrom-Json).projects)).Count
 
     $bare = Invoke-ConsumerCliProcess $Executable ($base + @("review", "this", "diff")) ("diff --git a/file.txt b/file.txt`n+private fixture content`n") $EvidenceRoot "consumer-bare"
     $results.Add($bare)
@@ -154,7 +161,9 @@ function Test-ConsumerCli(
     $results.Add($projects)
     $taskValues = @((($tasks.Stdout | ConvertFrom-Json).tasks))
     $projectValues = @((($projects.Stdout | ConvertFrom-Json).projects))
-    if ($tasks.ExitCode -ne 0 -or $projects.ExitCode -ne 0 -or $taskValues.Count -ne 4 -or $projectValues.Count -ne 1) {
+    if ($tasks.ExitCode -ne 0 -or $projects.ExitCode -ne 0 `
+        -or ($taskValues.Count - $baselineTaskCount) -ne 4 `
+        -or ($projectValues.Count - $baselineProjectCount) -ne 1) {
         throw "Installed consumer CLI did not reuse one durable project across four tasks."
     }
 
@@ -174,6 +183,8 @@ function Test-ConsumerCli(
         oversized_rejected = $true
         task_count = $taskValues.Count
         project_count = $projectValues.Count
+        created_task_count = $taskValues.Count - $baselineTaskCount
+        created_project_count = $projectValues.Count - $baselineProjectCount
     }
     [IO.File]::WriteAllText(
         (Join-Path $EvidenceRoot "consumer-cli.json"),

@@ -287,6 +287,12 @@ def invoke(name, arguments=(), stdin=b""):
     pathlib.Path(report_path).with_name(f"{name}.stderr").write_bytes(result.stderr)
     return result
 
+baseline_tasks = invoke("consumer-baseline-tasks", ["task", "list", "--json"])
+baseline_projects = invoke("consumer-baseline-projects", ["project", "list", "--json"])
+assert baseline_tasks.returncode == 0 and baseline_projects.returncode == 0
+baseline_task_count = len(json.loads(baseline_tasks.stdout)["tasks"])
+baseline_project_count = len(json.loads(baseline_projects.stdout)["projects"])
+
 bare = invoke(
     "consumer-bare",
     ["review this diff"],
@@ -344,7 +350,8 @@ tasks = invoke("consumer-tasks", ["task", "list", "--json"])
 projects = invoke("consumer-projects", ["project", "list", "--json"])
 task_values = json.loads(tasks.stdout)["tasks"]
 project_values = json.loads(projects.stdout)["projects"]
-assert len(task_values) == 5 and len(project_values) == 1
+assert len(task_values) - baseline_task_count == 5
+assert len(project_values) - baseline_project_count == 1
 
 token = pathlib.Path(data_root, "local-auth-token").read_bytes().strip()
 for result in [bare, structured, stream, piped, oversized, interactive, tasks, projects]:
@@ -361,6 +368,8 @@ pathlib.Path(report_path).write_text(
         "interactive_tty": True,
         "task_count": len(task_values),
         "project_count": len(project_values),
+        "created_task_count": len(task_values) - baseline_task_count,
+        "created_project_count": len(project_values) - baseline_project_count,
     }),
     encoding="utf-8",
 )
