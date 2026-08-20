@@ -37,6 +37,7 @@ const client = vi.hoisted(() => ({
   pickProject: vi.fn(),
   discoverProject: vi.fn(),
   listProjects: vi.fn(),
+  projectTopologyPlan: vi.fn(),
   listProjectMemory: vi.fn(),
   createProjectMemory: vi.fn(),
   correctProjectMemory: vi.fn(),
@@ -148,6 +149,7 @@ vi.mock("./desktop-client", () => ({
   pickProjectDirectory: client.pickProject,
   discoverProject: client.discoverProject,
   listProjects: client.listProjects,
+  projectTopologyPlan: client.projectTopologyPlan,
   listProjectMemory: client.listProjectMemory,
   createProjectMemory: client.createProjectMemory,
   correctProjectMemory: client.correctProjectMemory,
@@ -262,6 +264,7 @@ beforeEach(() => {
   client.pickProject.mockReset();
   client.discoverProject.mockReset();
   client.listProjects.mockReset();
+  client.projectTopologyPlan.mockReset();
   client.listProjectMemory.mockReset();
   client.createProjectMemory.mockReset();
   client.correctProjectMemory.mockReset();
@@ -348,6 +351,14 @@ beforeEach(() => {
   client.listPlugins.mockResolvedValue({ plugins: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
+  client.projectTopologyPlan.mockResolvedValue({
+    schema_version: 1,
+    project_id: "00000000-0000-4000-8000-000000000000",
+    project_snapshot_id: "00000000-0000-4000-8000-000000000000",
+    status: "empty",
+    stages: [],
+    unresolved_nodes: []
+  });
   client.listProjectMemory.mockResolvedValue({ claims: [] });
   client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n" });
   client.listOrganizations.mockResolvedValue({ organizations: [] });
@@ -1835,10 +1846,23 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   client.transitionProjectMemory.mockResolvedValue({ claim: { ...claim, state: "working", usefulness_count: 1 }, previous: claim, event: { sequence: 2, kind: "memory_claim_state_changed", occurred_at: claim.observed_at } });
   client.correctProjectMemory.mockResolvedValue({ claim: { ...claim, id: "00000000-0000-4000-8000-000000000513", value: "pnpm 10", state: "working" }, previous: claim, event: { sequence: 3, kind: "memory_claim_corrected", occurred_at: claim.observed_at } });
   client.loadProjectMemoryHistory.mockResolvedValue({ claims: [claim] });
+  client.projectTopologyPlan.mockResolvedValue({
+    schema_version: 1,
+    project_id: project.project_id,
+    project_snapshot_id: project.id,
+    status: "ready",
+    stages: [
+      { index: 0, nodes: [{ id: "database:main", kind: "database", label: "main database", source: "compose.yaml" }] },
+      { index: 1, nodes: [{ id: "service:web", kind: "service", label: "web", source: "compose.yaml" }] }
+    ],
+    unresolved_nodes: []
+  });
 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
   const intelligence = await screen.findByLabelText("Project intelligence and memory");
+  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("Stage 1main databaseStage 2web");
+  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).not.toHaveTextContent("compose.yaml");
   fireEvent.change(within(intelligence).getByLabelText("Memory fact name"), { target: { value: "package_manager" } });
   fireEvent.change(within(intelligence).getByLabelText("Memory value"), { target: { value: "pnpm" } });
   fireEvent.click(within(intelligence).getByRole("button", { name: "Remember this" }));
@@ -1852,6 +1876,7 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   expect(await within(intelligence).findByText("pnpm")).toBeInTheDocument();
 
   await enableAdvancedMode();
+  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("database · compose.yaml");
   fireEvent.change(within(intelligence).getByLabelText("Memory fact name"), { target: { value: "temporary_endpoint" } });
   fireEvent.change(within(intelligence).getByLabelText("Memory value"), { target: { value: "http://127.0.0.1:4173" } });
   fireEvent.change(within(intelligence).getByLabelText("Memory fresh until"), { target: { value: "2026-08-20T12:00" } });

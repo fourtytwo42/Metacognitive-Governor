@@ -92,6 +92,26 @@ The current estimator is deliberately provider-independent and conservative.
 Later model-specific tokenizers may refine estimates without changing the
 preservation order or context contract.
 
+## Read-only topology planning
+
+Every project snapshot can derive a deterministic, read-only topology plan.
+Selection is limited to nodes explicitly provisioned or deployed by admitted
+manifests and nodes participating in explicit `depends_on` relationships.
+`depends_on` is the only relationship that creates ordering; containment,
+routing, API origins, ports, and inventory never become inferred authority.
+
+The planner uses stable parallel stages: dependencies appear before their
+dependents, and independent ready nodes share one ordered stage. Duplicate
+relationships are coalesced. If the selected graph contains a cycle, the result
+is `blocked_by_cycle`, contains no partial stages, and retains the unresolved
+node identities for advanced diagnosis. An empty explicit dependency surface is
+reported as `empty`, not as a guessed plan. Results bind both the durable project
+identity and exact immutable snapshot identity.
+
+This contract does not execute deployments or grant tool authority. A future
+execution workflow must separately pin a plan, request normal policy authority,
+and retain durable evidence rather than treating this read-only view as consent.
+
 ## Structured and managed memory
 
 Every claim includes project scope, namespace/key, JSON value, confidence,
@@ -126,6 +146,7 @@ and provenance fields that Markdown intentionally summarizes.
 The authenticated loopback API and CLI support:
 
 - project add/list/get/refresh/history;
+- stable read-only topology-plan inspection;
 - target-aware bounded context assembly;
 - memory add/list/correct/history;
 - reinforcement, decay, and retraction;
@@ -156,6 +177,13 @@ provenance, credential-bearing URL exclusion, malformed YAML, oversized
 manifests, precise watch invalidation, compression priority, authenticated REST
 assembly, and an actual bounded Evaluator turn with readable labels rather than
 internal graph identifiers.
+
+Planner fixtures additionally prove stable parallel stages, dependency-first
+ordering, duplicate-edge coalescing, empty inventory/routing behavior, and
+cycle refusal with zero partial stages. Authenticated REST and MCP tests bind the
+result to the exact snapshot; CLI parsing, Tauri compilation, component tests,
+and Playwright cover the remaining consumer interfaces and simple/advanced
+provenance disclosure.
 
 Desktop component and Playwright journeys additionally prove that a consumer
 can record a plain-language fact in simple mode, reveal its provenance and

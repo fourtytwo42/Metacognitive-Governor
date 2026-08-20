@@ -60,6 +60,7 @@ identity metadata on every successful tool result.
 | `mcg_query_organization` | Lists immutable revision history, exports one bounded content-addressed genome, or compares two identity-independent revisions. |
 | `mcg_import_organization` | Imports one validated portable genome under caller-owned idempotent authority; conflicting retries fail closed. |
 | `mcg_project_context` | Assembles current target-aware context within a caller-selected, server-bounded token budget. |
+| `mcg_project_topology_plan` | Reads deterministic snapshot-bound stages derived only from explicit manifest dependencies; cycles return no partial stages. |
 | `mcg_memory_search` | Searches current provenance-bearing claims by project, optional namespace, freshness, and bounded result count. |
 | `mcg_query_task` | Reads one task with cursor-bounded authoritative events, offset-bounded governed-tool audit, and its consumer run when present. |
 | `mcg_query_run` | Reads a complete durable plan, authority, usage, evaluation, and turn-result view. |

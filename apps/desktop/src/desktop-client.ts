@@ -547,6 +547,28 @@ export interface ProjectListResponse {
   projects: ProjectModel[];
 }
 
+export interface ProjectTopologyPlan {
+  schema_version: number;
+  project_id: string;
+  project_snapshot_id: string;
+  status: "ready" | "empty" | "blocked_by_cycle";
+  stages: Array<{
+    index: number;
+    nodes: Array<{
+      id: string;
+      kind: ProjectModel["world"]["nodes"][number]["kind"];
+      label: string;
+      source: string;
+    }>;
+  }>;
+  unresolved_nodes: Array<{
+    id: string;
+    kind: ProjectModel["world"]["nodes"][number]["kind"];
+    label: string;
+    source: string;
+  }>;
+}
+
 export type MemoryState = "new" | "working" | "durable" | "decaying" | "superseded" | "retracted";
 export type MemoryLifecycleAction = "reinforce" | "decay" | "retract";
 
@@ -1288,6 +1310,10 @@ export function discoverProject(root: string): Promise<ProjectMutation> {
 
 export function listProjects(): Promise<ProjectListResponse> {
   return invoke("list_projects");
+}
+
+export function projectTopologyPlan(projectId: string): Promise<ProjectTopologyPlan> {
+  return invoke("project_topology_plan", { projectId });
 }
 
 export function listProjectMemory(projectId: string): Promise<MemoryClaimListResponse> {

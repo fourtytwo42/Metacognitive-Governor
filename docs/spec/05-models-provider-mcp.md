@@ -227,6 +227,7 @@ External systems may access MCG capabilities such as:
 
 ```text
 mcg_project_context
+mcg_project_topology_plan
 mcg_run_agent
 mcg_query_project
 mcg_memory_search

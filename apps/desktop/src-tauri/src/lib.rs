@@ -16,16 +16,17 @@ use mcg_api::{
     McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
     OrganizationMutationResponse, PlatformSessionHistoryResponse, PlatformSessionListResponse,
-    PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse, ProviderListResponse,
-    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
-    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
-    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
-    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
-    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransitionExperimentRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
-    UpdateUserSettingsRequest, UserSettingsHistoryResponse, WakeScheduleRequest,
+    PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse, ProjectTopologyPlan,
+    ProviderListResponse, ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
+    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
@@ -1960,6 +1961,16 @@ async fn list_projects() -> Result<ProjectListResponse, String> {
         .map_err(|error| format!("Project list response was invalid: {error}"))
 }
 
+#[tauri::command]
+async fn project_topology_plan(project_id: String) -> Result<ProjectTopologyPlan, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/topology-plan"),
+        "Project topology plan",
+    )
+    .await
+}
+
 fn canonical_uuid(value: &str, label: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|_| format!("{label} must be a UUID"))
 }
@@ -2202,6 +2213,7 @@ pub fn run() {
             pick_project_directory,
             discover_project,
             list_projects,
+            project_topology_plan,
             list_project_memory,
             create_project_memory,
             correct_project_memory,

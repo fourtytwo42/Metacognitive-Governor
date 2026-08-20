@@ -143,6 +143,9 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .memory-history li { margin: 5px 0; overflow-wrap: anywhere; }
 .world-model { display: grid; gap: 6px; padding-left: 20px; }
 .world-model small { display: block; color: #738ba1; }
+.topology-plan { display: grid; gap: 10px; margin: 0; padding-left: 24px; }
+.topology-plan > li > ul { display: grid; gap: 4px; margin-top: 5px; padding-left: 20px; }
+.topology-plan small { display: block; color: #738ba1; }
 .managed-memory { max-height: 320px; overflow: auto; padding: 12px; border: 1px solid #243246; background: #060b12; white-space: pre-wrap; }
 .project-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .project-tags span { padding: 3px 6px; border: 1px solid #29384b; color: #aebed0; font-size: .65rem; }

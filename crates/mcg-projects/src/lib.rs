@@ -4,6 +4,7 @@ mod context;
 mod contracts;
 mod discovery;
 mod memory;
+mod topology;
 
 pub use context::*;
 pub use contracts::*;

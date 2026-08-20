@@ -47,6 +47,7 @@ use mcg_domain::{
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
 use mcg_plugin_trust::PluginSignatureProof;
+pub use mcg_projects::ProjectTopologyPlan;
 use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction, ProjectModel,
 };
@@ -1281,6 +1282,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/projects/{project_id}/history",
             get(project_history),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/topology-plan",
+            get(project_topology_plan),
         )
         .route(
             "/api/v1/projects/{project_id}/context",
@@ -4491,6 +4496,18 @@ async fn project_history(
     }))
 }
 
+async fn project_topology_plan(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectTopologyPlan>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .project(project_id)?
+        .map(|project| Json(project.topology_plan()))
+        .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))
+}
+
 async fn create_memory_claim(
     State(state): State<ApiState>,
     Path(project_id): Path<String>,
@@ -7374,6 +7391,19 @@ form.addEventListener('submit', (event) => {
             r#"{"scripts":{"test":"vitest"}}"#,
         )
         .expect("project fixture");
+        std::fs::write(
+            project_root.join("compose.yaml"),
+            concat!(
+                "services:\n",
+                "  api:\n",
+                "    image: example/api:1\n",
+                "    depends_on:\n",
+                "      - database\n",
+                "  database:\n",
+                "    image: postgres:17\n",
+            ),
+        )
+        .expect("topology fixture");
         let config = AppConfig::default().with_data_directory(directory.path().join("data"));
         let runtime = Arc::new(
             AppRuntime::open_in_memory(config, TEST_TOKEN.to_owned()).expect("runtime should open"),
@@ -7531,6 +7561,7 @@ form.addEventListener('submit', (event) => {
             vec![
                 "mcg_memory_search",
                 "mcg_project_context",
+                "mcg_project_topology_plan",
                 "mcg_query_project",
                 "mcg_query_organization",
                 "mcg_import_organization",
@@ -7645,10 +7676,47 @@ form.addEventListener('submit', (event) => {
                 .is_some_and(|items| !items.is_empty())
         );
 
-        let memory = app
+        let topology_plan = app
             .clone()
             .oneshot(mcp_request(
                 &serde_json::json!(8),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_project_topology_plan"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({"project_id": project.project_id}),
+                    ),
+                ]),
+                Some("mcg_project_topology_plan"),
+            ))
+            .await
+            .expect("topology-plan tool response");
+        let topology_plan = response_json(topology_plan).await;
+        assert_eq!(
+            topology_plan.pointer("/result/structuredContent/project_id"),
+            Some(&serde_json::json!(project.project_id))
+        );
+        assert_eq!(
+            topology_plan.pointer("/result/structuredContent/status"),
+            Some(&serde_json::json!("ready"))
+        );
+        assert_eq!(
+            topology_plan.pointer("/result/structuredContent/stages/0/nodes/0/label"),
+            Some(&serde_json::json!("database"))
+        );
+        assert_eq!(
+            topology_plan.pointer("/result/structuredContent/stages/1/nodes/0/label"),
+            Some(&serde_json::json!("api"))
+        );
+
+        let memory = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(9),
                 "tools/call",
                 serde_json::Map::from_iter([
                     ("name".into(), serde_json::json!("mcg_memory_search")),
@@ -13105,6 +13173,109 @@ form.addEventListener('submit', (event) => {
             .to_bytes();
         let audit: ToolAuditResponse = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(audit.records, vec![record]);
+    }
+
+    #[tokio::test]
+    async fn project_topology_plan_is_authenticated_snapshot_bound_and_fail_closed() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(
+            project_root.path().join("compose.yaml"),
+            concat!(
+                "services:\n",
+                "  api:\n",
+                "    image: example/api:1\n",
+                "    depends_on:\n",
+                "      database:\n",
+                "        condition: service_healthy\n",
+                "  database:\n",
+                "    image: postgres:17\n",
+            ),
+        )
+        .expect("Compose fixture");
+        let app = router(test_runtime());
+        let discover_body = serde_json::to_vec(&DiscoverProjectRequest {
+            root: project_root.path().to_string_lossy().into_owned(),
+            project_id: None,
+        })
+        .expect("discover body");
+        let discovered = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(discover_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("discover");
+        assert_eq!(discovered.status(), StatusCode::CREATED);
+        let project: ProjectMutation =
+            serde_json::from_value(response_json(discovered).await).expect("project response");
+        let path = format!(
+            "/api/v1/projects/{}/topology-plan",
+            project.project.project_id
+        );
+
+        let unauthorized = app
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).expect("request"))
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(&path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("topology-plan response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let plan: ProjectTopologyPlan =
+            serde_json::from_value(response_json(response).await).expect("topology plan");
+        assert_eq!(plan.project_id, project.project.project_id);
+        assert_eq!(plan.project_snapshot_id, project.project.id);
+        assert_eq!(plan.status, mcg_projects::TopologyPlanStatus::Ready);
+        assert_eq!(
+            plan.stages
+                .iter()
+                .map(|stage| stage
+                    .nodes
+                    .iter()
+                    .map(|node| node.label.as_str())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec!["database"], vec!["api"]]
+        );
+        assert!(plan.unresolved_nodes.is_empty());
+
+        let repeated = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(&path))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("repeated topology-plan response");
+        let repeated: ProjectTopologyPlan =
+            serde_json::from_value(response_json(repeated).await).expect("repeated plan");
+        assert_eq!(repeated, plan);
+
+        let missing = app
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/projects/{}/topology-plan",
+                    ProjectId::new()
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("missing-project response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

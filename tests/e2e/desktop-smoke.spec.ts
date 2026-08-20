@@ -103,6 +103,17 @@ test.beforeEach(async ({ page }) => {
           }
           if (command === "compare_organizations") return { equivalent: true, left_sha256: portableOrganization.content_sha256, right_sha256: portableOrganization.content_sha256, sections_changed: [], roles_added: [], roles_removed: [], roles_changed: [], relationships_added: [], relationships_removed: [] };
           if (command === "list_project_memory") return { claims: memoryClaims };
+          if (command === "project_topology_plan") return {
+            schema_version: 1,
+            project_id: project.project_id,
+            project_snapshot_id: project.id,
+            status: "ready",
+            stages: [
+              { index: 0, nodes: [{ id: "database:main", kind: "database", label: "main database", source: "compose.yaml" }] },
+              { index: 1, nodes: [{ id: "service:web", kind: "service", label: "web", source: "compose.yaml" }] }
+            ],
+            unresolved_nodes: []
+          };
           if (command === "managed_project_memory") return { markdown: `# Managed Project Memory\n\n${memoryClaims.map((claim) => `- ${claim.key}: ${claim.value}`).join("\n")}` };
           if (command === "create_project_memory") {
             const claim = { schema_version: 1, id: "00000000-0000-4000-8000-000000000243", project_id: project.project_id, state: "new", observed_at: now, correction_count: 0, usefulness_count: 0, ...args.request };
@@ -315,6 +326,9 @@ test("consumer manages provenance-bearing project memory and inspects the world 
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("button", { name: "Use project" }).click();
   const intelligence = page.getByLabel("Project intelligence and memory");
+  await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("Stage 1");
+  await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("main database");
+  await expect(intelligence.getByRole("list", { name: "Project topology plan" })).not.toContainText("compose.yaml");
   await intelligence.getByLabel("Memory fact name").fill("package_manager");
   await intelligence.getByLabel("Memory value").fill("pnpm");
   await intelligence.getByRole("button", { name: "Remember this" }).click();
@@ -322,6 +336,7 @@ test("consumer manages provenance-bearing project memory and inspects the world 
   await expect(intelligence.getByText("pnpm", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Advanced mode" }).click();
+  await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("database · compose.yaml");
   await expect(intelligence.getByLabel("Memory namespace")).toHaveValue("project");
   await expect(intelligence.getByLabel("Memory fresh until")).toBeVisible();
   await intelligence.getByText("World model and managed MEMORY.md").click();

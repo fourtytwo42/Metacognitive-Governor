@@ -705,6 +705,20 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_annotations,
         }),
         json!({
+            "name": "mcg_project_topology_plan",
+            "title": "Plan MCG Project Topology",
+            "description": "Derive stable read-only stages from explicit project manifest dependencies. Cycles fail closed and routing or inventory never invents execution order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["project_id"],
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
             "name": "mcg_query_project",
             "title": "Query MCG Projects",
             "description": "List current project models or return one exact project model by id.",
@@ -1542,6 +1556,7 @@ async fn call_tool(
         "mcg_query_task" => query_task(state, &arguments),
         "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
+        "mcg_project_topology_plan" => project_topology_plan(state, &arguments),
         "mcg_memory_search" => memory_search(state, &arguments),
         "mcg_scheduler_list" => scheduler_list(state, &arguments),
         "mcg_scheduler_create" => scheduler_create(state, &arguments),
@@ -4405,6 +4420,25 @@ fn project_context(
         Err(_) => Ok(tool_error(
             "runtime_error",
             "MCG could not assemble project context",
+        )),
+    }
+}
+
+fn project_topology_plan(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &["project_id"])?;
+    let project_id = project_id(arguments)?;
+    match state.runtime.project(project_id) {
+        Ok(Some(project)) => tool_success(serde_json::to_value(project.topology_plan())),
+        Ok(None) => Ok(tool_error(
+            "project_not_found",
+            "The requested project is not known to MCG",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not derive the project topology plan",
         )),
     }
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const PROJECT_MODEL_SCHEMA_VERSION: u16 = 1;
 pub const MEMORY_CLAIM_SCHEMA_VERSION: u16 = 1;
+pub const TOPOLOGY_PLAN_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectModel {
@@ -140,6 +141,38 @@ pub struct WorldRelationship {
     pub from: String,
     pub relation: String,
     pub to: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectTopologyPlan {
+    pub schema_version: u16,
+    pub project_id: ProjectId,
+    pub project_snapshot_id: ProjectSnapshotId,
+    pub status: TopologyPlanStatus,
+    pub stages: Vec<TopologyPlanStage>,
+    pub unresolved_nodes: Vec<TopologyPlanNode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyPlanStatus {
+    Ready,
+    Empty,
+    BlockedByCycle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyPlanStage {
+    pub index: u16,
+    pub nodes: Vec<TopologyPlanNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyPlanNode {
+    pub id: String,
+    pub kind: WorldNodeKind,
+    pub label: String,
     pub source: String,
 }
 

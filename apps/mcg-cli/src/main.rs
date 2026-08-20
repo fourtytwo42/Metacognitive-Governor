@@ -1162,6 +1162,8 @@ enum ProjectCommand {
     },
     /// Read immutable project discovery history.
     History { id: String },
+    /// Derive stable stages from explicit project-topology dependencies.
+    Plan { id: String },
     /// Assemble bounded project context from current facts and memory.
     Context {
         id: String,
@@ -5066,6 +5068,18 @@ async fn run_project(
                 .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        ProjectCommand::Plan { id } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let response: mcg_projects::ProjectTopologyPlan = client
+                .get(format!("{host}/api/v1/projects/{project_id}/topology-plan"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
         ProjectCommand::Context {
             id,
             token_budget,
@@ -5555,6 +5569,21 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn project_plan_accepts_one_exact_project_id() {
+        let project_id = "00000000-0000-0000-0000-000000000001";
+        let cli = Cli::try_parse_from(["mcg", "project", "plan", project_id])
+            .expect("project plan command");
+        assert!(matches!(
+            cli.command.expect("command"),
+            Command::Project {
+                command: ProjectCommand::Plan { id }
+            } if id == project_id
+        ));
+        assert!(Cli::try_parse_from(["mcg", "project", "plan"]).is_err());
+        assert!(Cli::try_parse_from(["mcg", "project", "plan", project_id, "extra"]).is_err());
     }
 
     #[test]

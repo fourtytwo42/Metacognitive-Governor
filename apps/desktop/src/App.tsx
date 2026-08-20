@@ -47,6 +47,7 @@ import {
   listSchedulerNotifications,
   listProjects,
   listProjectMemory,
+  projectTopologyPlan,
   listPlatformSessions,
   listSites,
   listSshHosts,
@@ -104,6 +105,7 @@ import {
   type PersistentBrowserObservation,
   pickProjectDirectory,
   type ProjectModel,
+  type ProjectTopologyPlan,
   type MemoryClaim,
   type MemoryClaimHistoryResponse,
   type MemoryLifecycleAction,
@@ -439,6 +441,8 @@ export function App() {
   const [replayBusyTask, setReplayBusyTask] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
+  const [topologyPlan, setTopologyPlan] = useState<ProjectTopologyPlan | null>(null);
+  const [topologyPlanError, setTopologyPlanError] = useState<string | null>(null);
   const [memoryClaims, setMemoryClaims] = useState<MemoryClaim[]>([]);
   const [memoryNamespace, setMemoryNamespace] = useState("project");
   const [memoryKey, setMemoryKey] = useState("");
@@ -709,12 +713,15 @@ export function App() {
   useEffect(() => {
     let active = true;
     setMemoryError(null);
+    setTopologyPlanError(null);
     setMemoryHistory({});
     if (!selectedProject) {
       setMemoryClaims([]);
       setManagedMemory("");
+      setTopologyPlan(null);
       return () => { active = false; };
     }
+    setTopologyPlan(null);
     Promise.all([
       listProjectMemory(selectedProject.project_id),
       loadManagedProjectMemory(selectedProject.project_id)
@@ -728,6 +735,9 @@ export function App() {
       .catch((error) => {
         if (active) setMemoryError(errorMessage(error));
       });
+    projectTopologyPlan(selectedProject.project_id)
+      .then((plan) => { if (active) setTopologyPlan(plan); })
+      .catch((error) => { if (active) setTopologyPlanError(errorMessage(error)); });
     return () => { active = false; };
   }, [selectedProject]);
 
@@ -2561,6 +2571,16 @@ export function App() {
             </div>}
             {projectError && projectErrorSurface === "projects" && <p className="error-message" role="alert">{projectError}</p>}
             {selectedProject && <div className="project-intelligence" aria-label="Project intelligence and memory">
+              <div className="section-heading compact-heading">
+                <div>
+                  <h3>Topology plan</h3>
+                  <p className="muted">Read-only stages come only from explicit manifest dependencies.</p>
+                </div>
+                {topologyPlan && <span className="count-badge">{topologyPlan.status === "ready" ? `${topologyPlan.stages.length} stages` : topologyPlan.status.replaceAll("_", " ")}</span>}
+              </div>
+              {topologyPlanError ? <p className="error-message" role="alert">The topology plan could not be loaded: {topologyPlanError}</p> : !topologyPlan ? <p className="empty-state">Loading the current topology plan…</p> : topologyPlan.status === "empty" ? <p className="empty-state">No explicit deployment dependencies were discovered.</p> : topologyPlan.status === "blocked_by_cycle" ? <div className="error-message" role="alert">Dependency cycle detected. MCG will not present partial execution stages.{advanced && topologyPlan.unresolved_nodes.length > 0 && <small>{topologyPlan.unresolved_nodes.map((node) => node.label).join(", ")}</small>}</div> : <ol className="topology-plan" aria-label="Project topology plan">
+                {topologyPlan.stages.map((stage) => <li key={stage.index}><strong>Stage {stage.index + 1}</strong><ul>{stage.nodes.map((node) => <li key={node.id}>{node.label}{advanced && <small>{node.kind} · {node.source}</small>}</li>)}</ul></li>)}
+              </ol>}
               <div className="section-heading compact-heading">
                 <div>
                   <h3>What MCG remembers</h3>

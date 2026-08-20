@@ -135,6 +135,14 @@ same readable, provenance-bearing topology is injected into bounded worker and
 evaluator context, with dependency relationships retained ahead of lower-value
 inventory when compression is required.
 
+Selecting a project also derives a read-only topology plan from the current
+immutable snapshot. Only explicit manifest `depends_on` relationships create
+ordering; containment, routing, and inventory never invent execution authority.
+Independent nodes share a deterministic stage, and any dependency cycle fails
+closed without presenting partial executable-looking stages. The plan is visible
+in desktop simple/advanced modes and through `mcg project plan PROJECT_ID`, REST,
+MCP, and Tauri.
+
 Create a routine portable, secret-free backup from the desktop Settings workspace
 or with `mcg backup create`. Advanced mode or `mcg backup create
 --include-secrets` can instead include the exact provider/MCP credential catalog
