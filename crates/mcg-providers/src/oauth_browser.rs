@@ -35,7 +35,7 @@ impl Default for BrowserAuthorizationConfig {
             issuer: OPENAI_AUTH_ISSUER.into(),
             client_id: OPENAI_CODEX_PUBLIC_CLIENT_ID.into(),
             callback_ports: vec![1455, 1457],
-            timeout: Duration::from_secs(10 * 60),
+            timeout: Duration::from_mins(10),
         }
     }
 }

@@ -886,10 +886,10 @@ pub(super) async fn chat_completions(
     }
 }
 
-const ENSEMBLE_MEMBER_DEADLINE: Duration = Duration::from_secs(120);
-const ENSEMBLE_SYNTHESIS_DEADLINE: Duration = Duration::from_secs(120);
+const ENSEMBLE_MEMBER_DEADLINE: Duration = Duration::from_mins(2);
+const ENSEMBLE_SYNTHESIS_DEADLINE: Duration = Duration::from_mins(2);
 const ENSEMBLE_RESPONSE_MAX_BYTES: usize = 1_048_576;
-const PROVIDER_SHADOW_DEADLINE: Duration = Duration::from_secs(120);
+const PROVIDER_SHADOW_DEADLINE: Duration = Duration::from_mins(2);
 
 fn validate_ensemble_response_size(response: &ModelResponse) -> Result<(), ProviderError> {
     let size = serde_json::to_vec(&response.output)

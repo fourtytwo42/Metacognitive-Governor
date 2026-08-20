@@ -709,7 +709,7 @@ mod tests {
         assert!(handed_off.handed_off);
         assert!(handed_off.title.is_none());
         println!("Visible browser handed off; activate it and select Confirm local control.");
-        if tokio::time::timeout(Duration::from_secs(300), owner_confirmed.notified())
+        if tokio::time::timeout(Duration::from_mins(5), owner_confirmed.notified())
             .await
             .is_err()
         {

@@ -43,7 +43,7 @@ impl LegacyHttpMcpClient {
         }
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_mins(1))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| McpError::Transport(error.to_string()))?;

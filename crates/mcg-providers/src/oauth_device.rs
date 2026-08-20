@@ -26,7 +26,7 @@ impl Default for DeviceAuthorizationConfig {
         Self {
             issuer: OPENAI_AUTH_ISSUER.into(),
             client_id: OPENAI_CODEX_PUBLIC_CLIENT_ID.into(),
-            timeout: Duration::from_secs(15 * 60),
+            timeout: Duration::from_mins(15),
         }
     }
 }

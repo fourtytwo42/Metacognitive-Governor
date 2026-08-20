@@ -26,8 +26,8 @@ pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex"
 pub const OPENAI_CODEX_WIRE_COMPATIBILITY_VERSION: &str = "0.147.0";
 const MAX_SSE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
-const DEFAULT_CLOUD_TIMEOUT: Duration = Duration::from_secs(120);
-const DEFAULT_COMPATIBLE_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_CLOUD_TIMEOUT: Duration = Duration::from_mins(2);
+const DEFAULT_COMPATIBLE_TIMEOUT: Duration = Duration::from_mins(5);
 
 pub struct OpenAiCompatibleProviderBuilder {
     connection: ProviderConnection,

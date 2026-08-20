@@ -106,7 +106,7 @@ impl PluginRunnerClient {
         let executable = executable.as_ref();
         if executable.file_name() != Some(std::ffi::OsStr::new(runner_file_name()))
             || outer_timeout.is_zero()
-            || outer_timeout > Duration::from_secs(300)
+            || outer_timeout > Duration::from_mins(5)
         {
             return Err(PluginRunnerClientError::Unavailable);
         }

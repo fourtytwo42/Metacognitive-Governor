@@ -18,7 +18,7 @@ use crate::{
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_TTL_MS: i64 = 300_000;
 

@@ -2319,11 +2319,9 @@ impl AppRuntime {
 
         let durable = self.data_lock.is_some();
         let auth_is_regular = if durable {
-            fs::symlink_metadata(self.config.auth_token_path())
-                .map(|metadata| {
-                    metadata.file_type().is_file() && !metadata.file_type().is_symlink()
-                })
-                .unwrap_or(false)
+            fs::symlink_metadata(self.config.auth_token_path()).is_ok_and(|metadata| {
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+            })
         } else {
             true
         };

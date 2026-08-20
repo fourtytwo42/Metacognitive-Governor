@@ -1195,14 +1195,11 @@ fn compare_png_screenshots(
         .count();
     let changed_pixels = u64::try_from(changed_pixels)
         .map_err(|_| ToolError::Execution("screenshot pixel count overflow".into()))?;
-    let changed_basis_points = if total_pixels == 0 {
-        10_000
-    } else {
-        changed_pixels
-            .saturating_mul(10_000)
-            .saturating_add(total_pixels - 1)
-            / total_pixels
-    };
+    let changed_basis_points = changed_pixels
+        .saturating_mul(10_000)
+        .saturating_add(total_pixels.saturating_sub(1))
+        .checked_div(total_pixels)
+        .unwrap_or(10_000);
     let passed = total_pixels > 0
         && changed_pixels.saturating_mul(10_000)
             <= u64::from(max_changed_basis_points).saturating_mul(total_pixels);
