@@ -11,7 +11,9 @@ futures-util.workspace = true
 mcg-browser-contracts.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

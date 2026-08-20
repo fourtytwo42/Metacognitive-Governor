@@ -7463,6 +7463,7 @@ impl AppRuntime {
                         | SuccessCondition::PageRenders { .. }
                         | SuccessCondition::Accessibility { .. }
                         | SuccessCondition::ElementExists { .. }
+                        | SuccessCondition::BrowserWorkflow { .. }
                 ) {
                     let command = self
                         .baseline_shadow_service_command(candidate, receipt, baseline, condition)?;
@@ -12375,6 +12376,7 @@ async fn verify_isolated_service_condition(
             | SuccessCondition::PageRenders { .. }
             | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
+            | SuccessCondition::BrowserWorkflow { .. }
     ) {
         return (
             ConditionResult {
@@ -12530,6 +12532,7 @@ fn isolated_evaluation_regressions(
                     | SuccessCondition::PageRenders { .. }
                     | SuccessCondition::Accessibility { .. }
                     | SuccessCondition::ElementExists { .. }
+                    | SuccessCondition::BrowserWorkflow { .. }
             ) {
                 "candidate failed an isolated service objective".into()
             } else {
@@ -13647,6 +13650,7 @@ mod tests {
                     | SuccessCondition::PageRenders { .. }
                     | SuccessCondition::Accessibility { .. }
                     | SuccessCondition::ElementExists { .. }
+                    | SuccessCondition::BrowserWorkflow { .. }
             ));
             if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
                 return ShadowCommandVerification::Completed {
@@ -14957,6 +14961,29 @@ mod tests {
                 workspace.path(),
                 Some("npm run start"),
                 &accessibility_condition,
+            )
+            .await;
+            assert!(supported);
+            assert_eq!(result.passed, expected_passed);
+            assert!(evidence.artifact_sha256.is_some());
+            assert!(result.detail.contains("browser"));
+        }
+
+        let workflow_condition = SuccessCondition::BrowserWorkflow {
+            name: "consumer flow".into(),
+            path: "tests/browser-flow.json".into(),
+            expected_sha256: "a".repeat(64),
+        };
+        for (fixture, expected_passed) in [
+            (FixtureShadowCommandResult::Pass, true),
+            (FixtureShadowCommandResult::Fail, false),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &workflow_condition,
             )
             .await;
             assert!(supported);

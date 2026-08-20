@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+use std::io::Read as _;
 #[cfg(target_os = "windows")]
 use std::path::Path as StdPath;
 #[cfg(target_os = "windows")]
@@ -15,13 +17,15 @@ use mcg_agents::SuccessCondition;
 use mcg_domain::{TaskId, ToolExecutionId};
 #[cfg(any(target_os = "windows", test))]
 use mcg_tools::ToolOutcome;
-use mcg_tools::{ArtifactReference, ArtifactStore};
+use mcg_tools::{ArtifactReference, ArtifactStore, BrowserWorkflowDocument};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use mcg_tools::{
     ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver, ToolError,
     ToolExecutor, ToolRequest, ToolRequestKind,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use uuid::Uuid;
@@ -67,6 +71,8 @@ const BROWSER_RUNTIME_MAX_FILES: u64 = 100_000;
 const BROWSER_RUNTIME_MAX_DEPTH: usize = 16;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 const SHADOW_MAX_SELECTOR_BYTES: usize = 4 * 1024;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const SHADOW_MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
 #[cfg(any(target_os = "windows", test))]
 const WSB_START_TIMEOUT_SECONDS: u64 = 180;
 #[cfg(any(target_os = "windows", test))]
@@ -140,6 +146,12 @@ enum ShadowServiceProbe {
         url: String,
         selector: String,
     },
+    BrowserWorkflow {
+        name: String,
+        workflow_path: String,
+        expected_sha256: String,
+        start_url: String,
+    },
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -151,6 +163,7 @@ impl ShadowServiceProbe {
             | Self::PageRender { url }
             | Self::Accessibility { url }
             | Self::ElementExists { url, .. } => url,
+            Self::BrowserWorkflow { start_url, .. } => start_url,
         }
     }
 
@@ -162,7 +175,8 @@ impl ShadowServiceProbe {
             Self::Tcp { .. }
             | Self::PageRender { .. }
             | Self::Accessibility { .. }
-            | Self::ElementExists { .. } => None,
+            | Self::ElementExists { .. }
+            | Self::BrowserWorkflow { .. } => None,
         }
     }
 
@@ -173,6 +187,7 @@ impl ShadowServiceProbe {
             Self::PageRender { .. } => "page_render",
             Self::Accessibility { .. } => "accessibility",
             Self::ElementExists { .. } => "element_exists",
+            Self::BrowserWorkflow { .. } => "browser_workflow",
         }
     }
 }
@@ -182,7 +197,10 @@ impl ShadowServiceProbe {
     const fn requires_browser(&self) -> bool {
         matches!(
             self,
-            Self::PageRender { .. } | Self::Accessibility { .. } | Self::ElementExists { .. }
+            Self::PageRender { .. }
+                | Self::Accessibility { .. }
+                | Self::ElementExists { .. }
+                | Self::BrowserWorkflow { .. }
         )
     }
 }
@@ -369,7 +387,7 @@ impl LinuxBubblewrapVerifier {
             .canonicalize()
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
-        let probe = shadow_service_probe(condition)?;
+        let probe = shadow_service_probe_for_workspace(&workspace_root, condition)?;
         let browser = probe
             .requires_browser()
             .then(discover_browser_runtime)
@@ -385,7 +403,8 @@ impl LinuxBubblewrapVerifier {
             ShadowServiceProbe::Http { .. } => Path::new("/usr/bin/curl").is_file(),
             ShadowServiceProbe::PageRender { .. }
             | ShadowServiceProbe::Accessibility { .. }
-            | ShadowServiceProbe::ElementExists { .. } => true,
+            | ShadowServiceProbe::ElementExists { .. }
+            | ShadowServiceProbe::BrowserWorkflow { .. } => true,
         };
         let sleep_available = probe.requires_browser() || Path::new("/usr/bin/sleep").is_file();
         if !probe_program_available || !sleep_available {
@@ -598,7 +617,7 @@ impl WindowsSandboxVerifier {
             .canonicalize()
             .map_err(|error| ToolError::Execution(format!("resolve shadow workspace: {error}")))?;
         verify_workspace_bounds(&workspace_root)?;
-        let probe = shadow_service_probe(condition)?;
+        let probe = shadow_service_probe_for_workspace(&workspace_root, condition)?;
         let browser = probe
             .requires_browser()
             .then(discover_browser_runtime)
@@ -797,6 +816,11 @@ enum WindowsRunnerProbe<'a> {
         url: &'a str,
         selector: &'a str,
     },
+    BrowserWorkflow {
+        name: &'a str,
+        workflow_path: &'a str,
+        expected_sha256: &'a str,
+    },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -826,7 +850,7 @@ impl WindowsSandboxHarness {
                 ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
             })?;
             let request = WindowsRunnerRequest {
-                schema_version: 6,
+                schema_version: 7,
                 source_root: r"C:\mcg-source",
                 workspace_root: r"C:\mcg-workspace",
                 executable,
@@ -854,6 +878,16 @@ impl WindowsSandboxHarness {
                     ShadowServiceProbe::ElementExists { url, selector } => {
                         WindowsRunnerProbe::ElementExists { url, selector }
                     }
+                    ShadowServiceProbe::BrowserWorkflow {
+                        name,
+                        workflow_path,
+                        expected_sha256,
+                        ..
+                    } => WindowsRunnerProbe::BrowserWorkflow {
+                        name,
+                        workflow_path,
+                        expected_sha256,
+                    },
                 }),
             };
             let bytes = serde_json::to_vec(&request).map_err(|error| {
@@ -1217,6 +1251,94 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
             expected_status,
         })
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn shadow_service_probe_for_workspace(
+    workspace_root: &Path,
+    condition: &SuccessCondition,
+) -> Result<ShadowServiceProbe, ToolError> {
+    let SuccessCondition::BrowserWorkflow {
+        name,
+        path,
+        expected_sha256,
+    } = condition
+    else {
+        return shadow_service_probe(condition);
+    };
+    let relative = Path::new(path);
+    if name.trim().is_empty()
+        || name.chars().count() > 128
+        || path.is_empty()
+        || path.len() > 4 * 1024
+        || path.contains(['\\', ':', '\0'])
+        || path.chars().any(char::is_control)
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+            )
+        })
+        || expected_sha256.len() != 64
+        || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ToolError::Invalid(
+            "shadow browser workflow binding is invalid".into(),
+        ));
+    }
+    let workflow_path = workspace_root.join(relative);
+    let metadata = fs::symlink_metadata(&workflow_path)
+        .map_err(|error| ToolError::Execution(format!("inspect shadow workflow: {error}")))?;
+    if metadata_is_link_or_reparse(&metadata)
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > SHADOW_MAX_WORKFLOW_BYTES
+    {
+        return Err(ToolError::Denied(
+            "shadow browser workflow must be one bounded regular file".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .map_err(|_| ToolError::Invalid("shadow workflow size is invalid".into()))?,
+    );
+    fs::File::open(&workflow_path)
+        .map_err(|error| ToolError::Execution(format!("open shadow workflow: {error}")))?
+        .take(SHADOW_MAX_WORKFLOW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ToolError::Execution(format!("read shadow workflow: {error}")))?;
+    if bytes.len() as u64 != metadata.len()
+        || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256)
+    {
+        return Err(ToolError::Execution(
+            "shadow browser workflow changed after objective binding".into(),
+        ));
+    }
+    let document: BrowserWorkflowDocument = serde_json::from_slice(&bytes)
+        .map_err(|error| ToolError::Invalid(format!("parse shadow workflow: {error}")))?;
+    document.validate().map_err(ToolError::Invalid)?;
+    if document.name != *name {
+        return Err(ToolError::Execution(
+            "shadow browser workflow name does not match the bound condition".into(),
+        ));
+    }
+    let start_url = document.start_url;
+    match shadow_service_probe(&SuccessCondition::PageRenders {
+        url: start_url.clone(),
+    })? {
+        ShadowServiceProbe::PageRender { .. } => {}
+        _ => return Err(ToolError::Invalid("invalid workflow start URL".into())),
+    }
+    Ok(ShadowServiceProbe::BrowserWorkflow {
+        name: name.clone(),
+        workflow_path: path.clone(),
+        expected_sha256: expected_sha256.clone(),
+        start_url,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -1948,9 +2070,21 @@ struct LinuxRunnerRequest<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum LinuxRunnerProbe<'a> {
-    PageRender { url: &'a str },
-    Accessibility { url: &'a str },
-    ElementExists { url: &'a str, selector: &'a str },
+    PageRender {
+        url: &'a str,
+    },
+    Accessibility {
+        url: &'a str,
+    },
+    ElementExists {
+        url: &'a str,
+        selector: &'a str,
+    },
+    BrowserWorkflow {
+        name: &'a str,
+        workflow_path: &'a str,
+        expected_sha256: &'a str,
+    },
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1974,6 +2108,16 @@ impl LinuxRunnerRequestFile {
             ShadowServiceProbe::ElementExists { url, selector } => {
                 LinuxRunnerProbe::ElementExists { url, selector }
             }
+            ShadowServiceProbe::BrowserWorkflow {
+                name,
+                workflow_path,
+                expected_sha256,
+                ..
+            } => LinuxRunnerProbe::BrowserWorkflow {
+                name,
+                workflow_path,
+                expected_sha256,
+            },
             _ => {
                 return Err(ToolError::Invalid(
                     "Linux runner request requires a browser probe".into(),
@@ -1985,7 +2129,7 @@ impl LinuxRunnerRequestFile {
             .ok_or_else(|| ToolError::Invalid("shadow workspace has no parent".into()))?;
         let path = parent.join(format!(".mcg-shadow-request-{}.json", Uuid::new_v4()));
         let request = LinuxRunnerRequest {
-            schema_version: 6,
+            schema_version: 7,
             source_root: "/mcg-source",
             workspace_root: "/tmp/mcg-workspace",
             executable,
@@ -2519,6 +2663,64 @@ mod tests {
     }
 
     #[test]
+    fn workflow_service_probe_revalidates_the_private_file_binding() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::create_dir(workspace.path().join("tests")).expect("workflow directory");
+        let document = BrowserWorkflowDocument {
+            schema_version: mcg_tools::BROWSER_WORKFLOW_SCHEMA_VERSION,
+            name: "consumer flow".into(),
+            start_url: "http://127.0.0.1:43123/app".into(),
+            steps: vec![mcg_tools::BrowserWorkflowStep::AssertElement {
+                selector: "main#app".into(),
+            }],
+        };
+        let bytes = serde_json::to_vec(&document).expect("workflow JSON");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(workspace.path().join("tests/flow.json"), &bytes).expect("workflow file");
+        let condition = SuccessCondition::BrowserWorkflow {
+            name: document.name,
+            path: "tests/flow.json".into(),
+            expected_sha256: digest,
+        };
+        assert!(matches!(
+            shadow_service_probe_for_workspace(workspace.path(), &condition)
+                .expect("workflow probe"),
+            ShadowServiceProbe::BrowserWorkflow { ref start_url, .. }
+                if start_url == "http://127.0.0.1:43123/app"
+        ));
+        let SuccessCondition::BrowserWorkflow {
+            name,
+            expected_sha256,
+            ..
+        } = &condition
+        else {
+            unreachable!();
+        };
+        assert!(
+            shadow_service_probe_for_workspace(
+                workspace.path(),
+                &SuccessCondition::BrowserWorkflow {
+                    name: name.clone(),
+                    path: "../escape.json".into(),
+                    expected_sha256: expected_sha256.clone(),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            shadow_service_probe_for_workspace(
+                workspace.path(),
+                &SuccessCondition::BrowserWorkflow {
+                    name: name.clone(),
+                    path: "tests/flow.json".into(),
+                    expected_sha256: "0".repeat(64),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn command_and_workspace_boundaries_reject_ambiguous_or_unsafe_input() {
         assert!(bubblewrap_version_is_supported("bubblewrap 0.11.2\n"));
         assert!(bubblewrap_version_is_supported("bubblewrap 1.0.0\n"));
@@ -2782,7 +2984,7 @@ mod tests {
         let request: serde_json::Value =
             serde_json::from_slice(&fs::read(harness.path.join("request.json")).expect("request"))
                 .expect("request JSON");
-        assert_eq!(request["schema_version"], 6);
+        assert_eq!(request["schema_version"], 7);
         assert_eq!(request["source_root"], r"C:\mcg-source");
         assert_eq!(request["workspace_root"], r"C:\mcg-workspace");
         assert_eq!(request["executable"], "npm.cmd");
@@ -2886,12 +3088,41 @@ mod tests {
                 .expect("accessibility request"),
         )
         .expect("accessibility request JSON");
-        assert_eq!(accessibility_request["schema_version"], 6);
+        assert_eq!(accessibility_request["schema_version"], 7);
         assert_eq!(accessibility_request["probe"]["kind"], "accessibility");
         assert_eq!(
             accessibility_request["probe"]["url"],
             accessibility_probe.endpoint()
         );
+
+        let workflow_probe = ShadowServiceProbe::BrowserWorkflow {
+            name: "consumer flow".into(),
+            workflow_path: "tests/browser-flow.json".into(),
+            expected_sha256: "a".repeat(64),
+            start_url: "http://127.0.0.1:43123/app".into(),
+        };
+        let workflow_harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&browser),
+            Some(&workflow_probe),
+        )
+        .expect("workflow harness");
+        let workflow_request: serde_json::Value = serde_json::from_slice(
+            &fs::read(workflow_harness.path.join("request.json")).expect("workflow request"),
+        )
+        .expect("workflow request JSON");
+        assert_eq!(workflow_request["schema_version"], 7);
+        assert_eq!(workflow_request["probe"]["kind"], "browser_workflow");
+        assert_eq!(workflow_request["probe"]["name"], "consumer flow");
+        assert_eq!(
+            workflow_request["probe"]["workflow_path"],
+            "tests/browser-flow.json"
+        );
+        assert_eq!(workflow_request["probe"]["expected_sha256"], "a".repeat(64));
     }
 
     #[test]
@@ -3019,6 +3250,48 @@ mod tests {
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn write_browser_workflow_condition(
+        workspace: &Path,
+        address: std::net::SocketAddr,
+        file_name: &str,
+        expected_text: &str,
+    ) -> SuccessCondition {
+        let name = format!("same-sandbox flow {file_name}");
+        let document = BrowserWorkflowDocument {
+            schema_version: mcg_tools::BROWSER_WORKFLOW_SCHEMA_VERSION,
+            name: name.clone(),
+            start_url: format!("http://{address}/app"),
+            steps: vec![
+                mcg_tools::BrowserWorkflowStep::AssertElement {
+                    selector: "main#app".into(),
+                },
+                mcg_tools::BrowserWorkflowStep::Type {
+                    selector: "#name".into(),
+                    value: "Ada".into(),
+                },
+                mcg_tools::BrowserWorkflowStep::Click {
+                    selector: "#go".into(),
+                },
+                mcg_tools::BrowserWorkflowStep::AssertText {
+                    selector: "#result".into(),
+                    contains: expected_text.into(),
+                },
+                mcg_tools::BrowserWorkflowStep::AssertUrl {
+                    url: format!("http://{address}/app"),
+                },
+            ],
+        };
+        let bytes = serde_json::to_vec(&document).expect("workflow JSON");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(workspace.join(file_name), bytes).expect("workflow file");
+        SuccessCondition::BrowserWorkflow {
+            name,
+            path: file_name.into(),
+            expected_sha256: digest,
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn encoded_powershell_condition(script: &str) -> SuccessCondition {
         let mut bytes = Vec::with_capacity(script.len().saturating_mul(2));
@@ -3087,7 +3360,7 @@ http.createServer((request, response) => {
     response.end();
   } else if (request.url === '/app') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
-    response.end('<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+    response.end('<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"><input id="name" aria-label="Name"><button id="go">Go</button><p id="result">waiting</p></main><script>document.getElementById("go").addEventListener("click",()=>{document.getElementById("result").textContent="Hello "+document.getElementById("name").value;});</script></body></html>');
   } else if (request.url === '/inaccessible') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
     response.end('<!doctype html><html><body><button></button></body></html>');
@@ -3221,12 +3494,33 @@ http.createServer((request, response) => {
                 assert!(!record.timed_out);
                 assert_no_windows_sandbox_sessions(verifier, workspace).await;
             }
+            for (file_name, expected_text, expected_exit_code) in [
+                ("workflow-pass.json", "Hello Ada", 0),
+                ("workflow-fail.json", "Goodbye Ada", 1),
+            ] {
+                let workflow_condition =
+                    write_browser_workflow_condition(workspace, address, file_name, expected_text);
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(workspace, "node server.js", &workflow_condition, artifacts)
+                    .await
+                else {
+                    panic!("same-sandbox Windows workflow probe must produce measured evidence");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("workflow service transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("workflow service record");
+                assert_eq!(record.exit_code, Some(expected_exit_code));
+                assert!(!record.timed_out);
+                assert_no_windows_sandbox_sessions(verifier, workspace).await;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(service_hits.load(Ordering::SeqCst), 0);
         host_service.abort();
         eprintln!(
-            "qualified same-sandbox Windows Node HTTP/TCP/browser service pass/fail with zero host-network hits"
+            "qualified same-sandbox Windows Node HTTP/TCP/browser/workflow service pass/fail with zero host-network hits"
         );
     }
 
@@ -3488,7 +3782,7 @@ http.createServer((request, response) => {
     response.end();
   } else if (request.url === '/app') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
-    response.end('<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+    response.end('<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"><input id="name" aria-label="Name"><button id="go">Go</button><p id="result">waiting</p></main><script>document.getElementById("go").addEventListener("click",()=>{document.getElementById("result").textContent="Hello "+document.getElementById("name").value;});</script></body></html>');
   } else if (request.url === '/inaccessible') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
     response.end('<!doctype html><html><body><button></button></body></html>');
@@ -3610,6 +3904,35 @@ http.createServer((request, response) => {
                         assert_eq!(record.exit_code, Some(expected_exit_code));
                         assert!(!record.timed_out);
                     }
+                    for (file_name, expected_text, expected_exit_code) in [
+                        ("workflow-pass.json", "Hello Ada", 0),
+                        ("workflow-fail.json", "Goodbye Ada", 1),
+                    ] {
+                        let workflow_condition = write_browser_workflow_condition(
+                            workspace.path(),
+                            address,
+                            file_name,
+                            expected_text,
+                        );
+                        let ShadowCommandVerification::Completed { transcript } = verifier
+                            .verify_service(
+                                workspace.path(),
+                                "node server.js",
+                                &workflow_condition,
+                                &artifacts,
+                            )
+                            .await
+                        else {
+                            panic!("same-sandbox workflow probe must produce measured evidence");
+                        };
+                        let bytes = artifacts
+                            .read_verified_reference(&transcript, 1024 * 1024)
+                            .expect("workflow service transcript");
+                        let record: ShadowCommandTranscript =
+                            serde_json::from_slice(&bytes).expect("workflow service record");
+                        assert_eq!(record.exit_code, Some(expected_exit_code));
+                        assert!(!record.timed_out);
+                    }
                 }
 
                 let tcp_condition = SuccessCondition::PortListening {
@@ -3660,7 +3983,7 @@ http.createServer((request, response) => {
                 assert_eq!(service_hits.load(Ordering::SeqCst), 0);
                 host_service.abort();
                 eprintln!(
-                    "qualified same-sandbox Node HTTP/TCP/browser service pass/fail with zero host-network hits"
+                    "qualified same-sandbox Node HTTP/TCP/browser/workflow service pass/fail with zero host-network hits"
                 );
             }
         }

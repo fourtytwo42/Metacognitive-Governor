@@ -8,12 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chromiumoxide::{Browser, BrowserConfig};
+use chromiumoxide::{Browser, BrowserConfig, Element, Page};
 use futures_util::StreamExt;
-use mcg_browser_contracts::{ACCESSIBILITY_AUDIT_SCRIPT, AccessibilityAudit};
+use mcg_browser_contracts::{
+    ACCESSIBILITY_AUDIT_SCRIPT, AccessibilityAudit, BrowserWorkflowDocument, BrowserWorkflowStep,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use url::Url;
 
-const REQUEST_SCHEMA_VERSION: u16 = 6;
+const REQUEST_SCHEMA_VERSION: u16 = 7;
 const SETUP_FAILURE_EXIT_CODE: i32 = 125;
 const COMMAND_FAILURE_EXIT_CODE: i32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
@@ -25,6 +29,8 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
 const MAX_SELECTOR_BYTES: usize = 4 * 1024;
+const MAX_WORKFLOW_PATH_BYTES: usize = 4 * 1024;
+const MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const MAX_RENDERED_DOM_BYTES: usize = 4 * 1024 * 1024;
 const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -66,6 +72,11 @@ enum RunnerProbe {
     Accessibility {
         url: String,
     },
+    BrowserWorkflow {
+        name: String,
+        workflow_path: String,
+        expected_sha256: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +86,18 @@ struct RenderState {
     body_present: bool,
     width: u64,
     height: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InteractionTarget {
+    href: Option<String>,
+    target: Option<String>,
+    download: bool,
+    has_form: bool,
+    form_action: Option<String>,
+    form_target: Option<String>,
+    form_method: Option<String>,
 }
 
 fn main() {
@@ -167,6 +190,11 @@ fn execute_service_probe(
             target: LoopbackHttpTarget,
             browser: String,
         },
+        BrowserWorkflow {
+            target: LoopbackHttpTarget,
+            browser: String,
+            document: BrowserWorkflowDocument,
+        },
     }
     let active = match probe {
         RunnerProbe::HttpStatus {
@@ -201,13 +229,29 @@ fn execute_service_probe(
                 .clone()
                 .ok_or("accessibility probe requires a browser")?,
         },
+        RunnerProbe::BrowserWorkflow {
+            name,
+            workflow_path,
+            expected_sha256,
+        } => {
+            let document = load_bound_workflow(workspace, name, workflow_path, expected_sha256)?;
+            ActiveProbe::BrowserWorkflow {
+                target: LoopbackHttpTarget::parse(&document.start_url)?,
+                browser: request
+                    .browser_executable
+                    .clone()
+                    .ok_or("browser workflow probe requires a browser")?,
+                document,
+            }
+        }
     };
     let (service_host, port) = match &active {
         ActiveProbe::Tcp(target) => (target.service_host(), target.port()),
         ActiveProbe::Http { target, .. }
         | ActiveProbe::PageRender { target, .. }
         | ActiveProbe::ElementExists { target, .. }
-        | ActiveProbe::Accessibility { target, .. } => (target.service_host(), target.port()),
+        | ActiveProbe::Accessibility { target, .. }
+        | ActiveProbe::BrowserWorkflow { target, .. } => (target.service_host(), target.port()),
     };
     let mut command = prepared_command(request, workspace)?;
     command
@@ -230,7 +274,7 @@ fn execute_service_probe(
             ActiveProbe::PageRender { target, browser } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, None, false)),
+                .map(|_| render_page(browser, workspace, target, None, false, None)),
             ActiveProbe::ElementExists {
                 target,
                 browser,
@@ -238,11 +282,19 @@ fn execute_service_probe(
             } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, Some(selector), false)),
+                .map(|_| render_page(browser, workspace, target, Some(selector), false, None)),
             ActiveProbe::Accessibility { target, browser } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, None, true)),
+                .map(|_| render_page(browser, workspace, target, None, true, None)),
+            ActiveProbe::BrowserWorkflow {
+                target,
+                browser,
+                document,
+            } => target
+                .request_status()
+                .filter(|status| (200..300).contains(status))
+                .map(|_| render_page(browser, workspace, target, None, false, Some(document))),
         };
         if let Some(passed) = passed {
             break if passed { 0 } else { COMMAND_FAILURE_EXIT_CODE };
@@ -322,6 +374,16 @@ fn validate_request(
                 LoopbackHttpTarget::parse(url)?;
                 if request.browser_executable.is_none() {
                     return Err("accessibility probe requires a browser");
+                }
+            }
+            RunnerProbe::BrowserWorkflow {
+                name,
+                workflow_path,
+                expected_sha256,
+            } => {
+                validate_workflow_binding(name, workflow_path, expected_sha256)?;
+                if request.browser_executable.is_none() {
+                    return Err("browser workflow probe requires a browser");
                 }
             }
         }
@@ -419,12 +481,82 @@ fn validate_selector(selector: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn validate_workflow_binding(
+    name: &str,
+    workflow_path: &str,
+    expected_sha256: &str,
+) -> Result<(), &'static str> {
+    let path = Path::new(workflow_path);
+    if name.trim().is_empty()
+        || name.chars().count() > 128
+        || workflow_path.is_empty()
+        || workflow_path.len() > MAX_WORKFLOW_PATH_BYTES
+        || workflow_path.contains(['\\', ':', '\0'])
+        || workflow_path.chars().any(char::is_control)
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_)
+                    | Component::RootDir
+                    | Component::CurDir
+                    | Component::ParentDir
+            )
+        })
+        || expected_sha256.len() != 64
+        || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("browser workflow binding is invalid");
+    }
+    Ok(())
+}
+
+fn load_bound_workflow(
+    workspace: &Path,
+    name: &str,
+    workflow_path: &str,
+    expected_sha256: &str,
+) -> Result<BrowserWorkflowDocument, &'static str> {
+    validate_workflow_binding(name, workflow_path, expected_sha256)?;
+    let path = workspace.join(workflow_path);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| "inspect browser workflow")?;
+    if path_is_link_or_reparse(&path, &metadata)
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_WORKFLOW_BYTES
+    {
+        return Err("browser workflow must be one bounded regular file");
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| "size")?);
+    fs::File::open(&path)
+        .map_err(|_| "open browser workflow")?
+        .take(MAX_WORKFLOW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "read browser workflow")?;
+    if bytes.len() as u64 != metadata.len()
+        || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256)
+    {
+        return Err("browser workflow changed after binding");
+    }
+    let document: BrowserWorkflowDocument =
+        serde_json::from_slice(&bytes).map_err(|_| "parse browser workflow")?;
+    document
+        .validate()
+        .map_err(|_| "validate browser workflow")?;
+    if document.name != name {
+        return Err("browser workflow name changed after binding");
+    }
+    LoopbackHttpTarget::parse(&document.start_url)?;
+    Ok(document)
+}
+
 fn render_page(
     browser: &str,
     workspace: &Path,
     target: &LoopbackHttpTarget,
     selector: Option<&str>,
     audit_accessibility: bool,
+    workflow: Option<&BrowserWorkflowDocument>,
 ) -> bool {
     let profile = workspace.join(".mcg-browser-profile");
     if fs::create_dir(&profile).is_err() {
@@ -440,18 +572,21 @@ fn render_page(
                 target,
                 selector,
                 audit_accessibility,
+                workflow,
             ))
         });
     let _ = fs::remove_dir_all(&profile);
     rendered
 }
 
+#[allow(clippy::too_many_lines)] // Keep navigation, typed interaction, and final render checks in one browser lifecycle.
 async fn render_page_with_browser(
     executable: &str,
     profile: &Path,
     target: &LoopbackHttpTarget,
     selector: Option<&str>,
     audit_accessibility: bool,
+    workflow: Option<&BrowserWorkflowDocument>,
 ) -> bool {
     let config = BrowserConfig::builder()
         .chrome_executable(executable)
@@ -485,6 +620,13 @@ async fn render_page_with_browser(
     let rendered = tokio::time::timeout(BROWSER_RENDER_TIMEOUT, async {
         let page = browser.new_page("about:blank").await.ok()?;
         page.goto(&url).await.ok()?;
+        if workflow.is_some() {
+            page.evaluate(
+                "(() => { const deny = () => null; try { Object.defineProperty(window, 'open', { value: deny, configurable: false, writable: false }); } catch {} try { Object.defineProperty(window, 'showOpenFilePicker', { value: deny, configurable: false, writable: false }); } catch {} try { Object.defineProperty(window, 'showSaveFilePicker', { value: deny, configurable: false, writable: false }); } catch {} })()",
+            )
+            .await
+            .ok()?;
+        }
         let final_url = page.url().await.ok().flatten()?;
         let final_target = LoopbackHttpTarget::parse(&final_url).ok()?;
         if final_target.authority != target.authority {
@@ -505,6 +647,27 @@ async fn render_page_with_browser(
                 .ok()?;
             if !audit.passed() {
                 return None;
+            }
+        }
+        if let Some(workflow) = workflow {
+            let origin = Url::parse(&workflow.start_url)
+                .ok()?
+                .origin()
+                .ascii_serialization();
+            for step in &workflow.steps {
+                execute_workflow_step(&page, step, &origin).await.ok()?;
+                if matches!(
+                    step,
+                    BrowserWorkflowStep::Click { .. }
+                        | BrowserWorkflowStep::Type { .. }
+                        | BrowserWorkflowStep::Press { .. }
+                ) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let current = current_browser_url(&page).await.ok()?;
+                if current.origin().ascii_serialization() != origin {
+                    return None;
+                }
             }
         }
         let state: RenderState = page
@@ -530,6 +693,110 @@ async fn render_page_with_browser(
     let _ = tokio::time::timeout(BROWSER_SHUTDOWN_TIMEOUT, browser.wait()).await;
     handler_task.abort();
     rendered
+}
+
+async fn current_browser_url(page: &Page) -> Result<Url, ()> {
+    page.url()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| Url::parse(&value).ok())
+        .ok_or(())
+}
+
+async fn execute_workflow_step(
+    page: &Page,
+    step: &BrowserWorkflowStep,
+    origin: &str,
+) -> Result<(), ()> {
+    match step {
+        BrowserWorkflowStep::AssertElement { selector } => page
+            .find_elements(selector)
+            .await
+            .ok()
+            .filter(|elements| !elements.is_empty())
+            .map(|_| ())
+            .ok_or(()),
+        BrowserWorkflowStep::Click { selector } => {
+            let element = page.find_element(selector).await.map_err(|_| ())?;
+            validate_interaction_target(&element, origin).await?;
+            element.click().await.map(|_| ()).map_err(|_| ())
+        }
+        BrowserWorkflowStep::Type { selector, value } => {
+            let element = page.find_element(selector).await.map_err(|_| ())?;
+            element.click().await.map_err(|_| ())?;
+            element.type_str(value).await.map(|_| ()).map_err(|_| ())
+        }
+        BrowserWorkflowStep::Press { selector, key } => {
+            let element = page.find_element(selector).await.map_err(|_| ())?;
+            validate_interaction_target(&element, origin).await?;
+            element.focus().await.map_err(|_| ())?;
+            element.press_key(key).await.map(|_| ()).map_err(|_| ())
+        }
+        BrowserWorkflowStep::AssertText { selector, contains } => {
+            let text = page
+                .find_element(selector)
+                .await
+                .map_err(|_| ())?
+                .inner_text()
+                .await
+                .map_err(|_| ())?
+                .unwrap_or_default();
+            text.contains(contains).then_some(()).ok_or(())
+        }
+        BrowserWorkflowStep::AssertUrl { url } => (current_browser_url(page).await?.as_str()
+            == url)
+            .then_some(())
+            .ok_or(()),
+    }
+}
+
+async fn validate_interaction_target(element: &Element, origin: &str) -> Result<(), ()> {
+    let response = element
+        .call_js_fn(
+            "function() { const form = this.form || this.closest?.('form') || null; return JSON.stringify({ href: this.href || null, target: this.target || null, download: this.hasAttribute?.('download') || false, hasForm: !!form, formAction: form ? (this.formAction || form.action || null) : null, formTarget: form ? (this.formTarget || form.target || null) : null, formMethod: form ? (this.formMethod || form.method || 'get') : null }); }",
+            false,
+        )
+        .await
+        .map_err(|_| ())?;
+    let target_json = response
+        .result
+        .value
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or(())?;
+    let target: InteractionTarget = serde_json::from_str(&target_json).map_err(|_| ())?;
+    if target.download
+        || target
+            .target
+            .as_deref()
+            .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("_self"))
+        || target
+            .form_target
+            .as_deref()
+            .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("_self"))
+    {
+        return Err(());
+    }
+    for destination in [target.href.as_deref(), target.form_action.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let url = Url::parse(destination).map_err(|_| ())?;
+        if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != origin
+        {
+            return Err(());
+        }
+    }
+    if target.has_form
+        && !target
+            .form_method
+            .as_deref()
+            .unwrap_or("get")
+            .eq_ignore_ascii_case("get")
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 fn rendered_dom_is_valid(bytes: &[u8]) -> bool {
@@ -1191,6 +1458,70 @@ mod tests {
             url: "http://127.0.0.1:8080/".into(),
         });
         assert!(validate_request(&request, true).is_ok());
+
+        request.probe = Some(RunnerProbe::BrowserWorkflow {
+            name: "consumer flow".into(),
+            workflow_path: "tests/browser-flow.json".into(),
+            expected_sha256: "a".repeat(64),
+        });
+        assert!(validate_request(&request, true).is_ok());
+        request.probe = Some(RunnerProbe::BrowserWorkflow {
+            name: "consumer flow".into(),
+            workflow_path: "../escape.json".into(),
+            expected_sha256: "a".repeat(64),
+        });
+        assert!(validate_request(&request, true).is_err());
+        request.probe = Some(RunnerProbe::BrowserWorkflow {
+            name: "consumer flow".into(),
+            workflow_path: "tests/browser-flow.json".into(),
+            expected_sha256: "not-a-digest".into(),
+        });
+        assert!(validate_request(&request, true).is_err());
+    }
+
+    #[test]
+    fn workflow_binding_revalidates_exact_regular_json_inside_the_copied_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::create_dir(workspace.path().join("tests")).expect("workflow directory");
+        let document = BrowserWorkflowDocument {
+            schema_version: mcg_browser_contracts::BROWSER_WORKFLOW_SCHEMA_VERSION,
+            name: "consumer flow".into(),
+            start_url: "http://127.0.0.1:43123/app".into(),
+            steps: vec![BrowserWorkflowStep::AssertElement {
+                selector: "main#app".into(),
+            }],
+        };
+        let bytes = serde_json::to_vec(&document).expect("workflow JSON");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(workspace.path().join("tests/browser-flow.json"), &bytes).expect("workflow file");
+        assert_eq!(
+            load_bound_workflow(
+                workspace.path(),
+                "consumer flow",
+                "tests/browser-flow.json",
+                &digest,
+            )
+            .expect("bound workflow"),
+            document
+        );
+        assert!(
+            load_bound_workflow(
+                workspace.path(),
+                "different name",
+                "tests/browser-flow.json",
+                &digest,
+            )
+            .is_err()
+        );
+        assert!(
+            load_bound_workflow(
+                workspace.path(),
+                "consumer flow",
+                "tests/browser-flow.json",
+                &"0".repeat(64),
+            )
+            .is_err()
+        );
     }
 
     #[cfg(windows)]
@@ -1221,7 +1552,7 @@ while ($true) {{
   if ($requestLine -like 'GET /inaccessible *') {{
     $body = '<!doctype html><html><body><button></button></body></html>'
   }} else {{
-    $body = '<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>'
+    $body = '<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"><input id="name" aria-label="Name"><button id="go">Go</button><p id="result">waiting</p></main><script>document.getElementById("go").addEventListener("click",()=>{{document.getElementById("result").textContent="Hello "+document.getElementById("name").value;}});</script></body></html>'
   }}
   $bytes = [Text.Encoding]::UTF8.GetBytes($body)
   $header = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n")
@@ -1302,6 +1633,63 @@ while ($true) {{
             ..request.clone()
         };
         assert_eq!(execute_request(&accessibility_request, false), Ok(0));
+
+        let workflow = BrowserWorkflowDocument {
+            schema_version: mcg_browser_contracts::BROWSER_WORKFLOW_SCHEMA_VERSION,
+            name: "consumer flow".into(),
+            start_url: format!("http://127.0.0.1:{port}/"),
+            steps: vec![
+                BrowserWorkflowStep::AssertElement {
+                    selector: "main#app".into(),
+                },
+                BrowserWorkflowStep::Type {
+                    selector: "#name".into(),
+                    value: "Ada".into(),
+                },
+                BrowserWorkflowStep::Click {
+                    selector: "#go".into(),
+                },
+                BrowserWorkflowStep::AssertText {
+                    selector: "#result".into(),
+                    contains: "Hello Ada".into(),
+                },
+                BrowserWorkflowStep::AssertUrl {
+                    url: format!("http://127.0.0.1:{port}/"),
+                },
+            ],
+        };
+        let workflow_bytes = serde_json::to_vec(&workflow).expect("workflow JSON");
+        let workflow_digest = format!("{:x}", Sha256::digest(&workflow_bytes));
+        fs::write(source.path().join("workflow.json"), &workflow_bytes).expect("workflow file");
+        let workflow_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("workflow-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::BrowserWorkflow {
+                name: workflow.name.clone(),
+                workflow_path: "workflow.json".into(),
+                expected_sha256: workflow_digest.clone(),
+            }),
+            ..request.clone()
+        };
+        assert_eq!(execute_request(&workflow_request, false), Ok(0));
+
+        let workflow_mismatch_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("workflow-mismatch-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::BrowserWorkflow {
+                name: workflow.name,
+                workflow_path: "workflow.json".into(),
+                expected_sha256: "0".repeat(64),
+            }),
+            ..request.clone()
+        };
+        assert!(execute_request(&workflow_mismatch_request, false).is_err());
 
         let inaccessible_request = RunnerRequest {
             workspace_root: destination_parent

@@ -7,130 +7,15 @@ use mcg_domain::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use url::Url;
+
+pub use mcg_browser_contracts::{
+    BROWSER_WORKFLOW_SCHEMA_VERSION, BrowserWorkflowDocument, BrowserWorkflowStep,
+};
 
 use crate::computer_use::ComputerUseAction;
 
 pub const TOOL_SCHEMA_VERSION: u16 = 1;
 pub const RESEARCH_EVIDENCE_SCHEMA_VERSION: u16 = 1;
-pub const BROWSER_WORKFLOW_SCHEMA_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowserWorkflowDocument {
-    pub schema_version: u16,
-    pub name: String,
-    pub start_url: String,
-    pub steps: Vec<BrowserWorkflowStep>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum BrowserWorkflowStep {
-    AssertElement { selector: String },
-    Click { selector: String },
-    Type { selector: String, value: String },
-    Press { selector: String, key: String },
-    AssertText { selector: String, contains: String },
-    AssertUrl { url: String },
-}
-
-impl BrowserWorkflowDocument {
-    /// Validates the bounded, same-origin, non-script workflow language.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable explanation for malformed or unsafe workflow input.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != BROWSER_WORKFLOW_SCHEMA_VERSION
-            || self.name.trim().is_empty()
-            || self.name.chars().count() > 128
-            || self.steps.is_empty()
-            || self.steps.len() > 64
-        {
-            return Err(
-                "browser workflow requires schema version 1, a bounded name, and 1 to 64 steps"
-                    .into(),
-            );
-        }
-        let start = workflow_url(&self.start_url)?;
-        let origin = start.origin().ascii_serialization();
-        for step in &self.steps {
-            match step {
-                BrowserWorkflowStep::AssertElement { selector }
-                | BrowserWorkflowStep::Click { selector }
-                | BrowserWorkflowStep::Type { selector, .. }
-                | BrowserWorkflowStep::Press { selector, .. }
-                | BrowserWorkflowStep::AssertText { selector, .. } => {
-                    validate_workflow_selector(selector)?;
-                }
-                BrowserWorkflowStep::AssertUrl { url } => {
-                    if workflow_url(url)?.origin().ascii_serialization() != origin {
-                        return Err(
-                            "browser workflow URL assertions must remain on the start origin"
-                                .into(),
-                        );
-                    }
-                }
-            }
-            match step {
-                BrowserWorkflowStep::Type { value, .. }
-                    if value.chars().count() > 4_096 || value.contains('\0') =>
-                {
-                    return Err(
-                        "browser workflow typed values must be at most 4096 characters".into(),
-                    );
-                }
-                BrowserWorkflowStep::Press { key, .. }
-                    if !matches!(
-                        key.as_str(),
-                        "Enter"
-                            | "Tab"
-                            | "Escape"
-                            | "Space"
-                            | "ArrowUp"
-                            | "ArrowDown"
-                            | "ArrowLeft"
-                            | "ArrowRight"
-                    ) =>
-                {
-                    return Err("browser workflow key is not in the safe key allowlist".into());
-                }
-                BrowserWorkflowStep::AssertText { contains, .. }
-                    if contains.trim().is_empty() || contains.chars().count() > 1_000 =>
-                {
-                    return Err(
-                        "browser workflow text assertions must contain 1 to 1000 characters".into(),
-                    );
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-}
-
-fn workflow_url(value: &str) -> Result<Url, String> {
-    let url =
-        Url::parse(value).map_err(|error| format!("invalid browser workflow URL: {error}"))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err("browser workflow URLs must use credential-free HTTP(S)".into());
-    }
-    Ok(url)
-}
-
-fn validate_workflow_selector(selector: &str) -> Result<(), String> {
-    if selector.trim().is_empty()
-        || selector.chars().count() > 512
-        || selector.chars().any(char::is_control)
-    {
-        return Err("browser selector must contain 1 to 512 printable characters".into());
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchEvidenceDocument {
     pub schema_version: u16,
