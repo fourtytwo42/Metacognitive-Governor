@@ -2839,7 +2839,7 @@ export function App() {
               {experiments.length === 0 ? <p className="empty-state">Load an organization to inspect its measured experiments.</p> : experiments.map((experiment) => {
                 const evidence = experimentEvidence[experiment.id] ?? { shadow: 0, benchmarks: 0, decisions: 0 };
                 const next = experiment.state === "draft" ? "ready" : experiment.state === "ready" ? "running" : experiment.state === "running" ? "awaiting_decision" : null;
-                return <article className="schedule-card" key={experiment.id}>
+                return <article className="schedule-card experiment-card" key={experiment.id}>
                   <div><strong>{experiment.hypothesis}</strong><span>{experiment.mode} · {experiment.state.replaceAll("_", " ")}</span></div>
                   <p>{experiment.task_classes.join(", ")}</p>
                   <small>{evidence.shadow} shadow · {evidence.benchmarks}/{experiment.required_benchmarks} benchmarks · {evidence.decisions} decisions</small>

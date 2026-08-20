@@ -805,7 +805,8 @@ test("measured improvement stays simple by default and exposes controlled transi
   expect(within(panel).getByText("Candidates stay inactive until benchmark evidence supports promotion. Shadow work can evaluate, but cannot change a real task.")).toBeTruthy();
   fireEvent.change(within(panel).getByLabelText("Organization for experiments"), { target: { value: experiment.organization_id } });
   fireEvent.click(within(panel).getByRole("button", { name: "Load experiments" }));
-  await within(panel).findByText(experiment.hypothesis);
+  const hypothesis = await within(panel).findByText(experiment.hypothesis);
+  expect(hypothesis.closest("article")).toHaveClass("experiment-card");
   expect(within(panel).getByText("1 shadow · 1/2 benchmarks · 0 decisions")).toBeTruthy();
   expect(within(panel).queryByLabelText("Measured improvement JSON")).toBeNull();
   await enableAdvancedMode();
