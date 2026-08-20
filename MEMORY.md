@@ -8,6 +8,12 @@ Durable project context lives here. Update this file whenever information should
 - Result: Win11 built the release/NSIS package successfully in 10m14s from clean source commit `af64d8eedeef332467cd029d82555ec35114bb47`. `target/release/bundle/nsis/MCG_0.1.0_x64-setup.exe` is 24,236,504 bytes with SHA-256 `EF78851C676F68D656402683965419D32439579C38F55BC7260DE3B53DF859DD`; `target/release/release-manifest.json` is 390 bytes with SHA-256 `8023C7CD0B15839181BA7312AC429542234339AD6A16B93D80863149DF0FD56B`. The manifest independently records schema 1, version 0.1.0, the exact source commit, `source_dirty: false`, and the identical installer size/hash.
 - Follow-up: Run `scripts/test-windows-installer.ps1` against this exact installer, retain experiment initial/restart reports, then perform native Improvement UI UAT and verify zero residual processes/listeners.
 
+### 2026-08-20 - M9 typed verifier inventory is complete
+
+- Context: The Win11 installed-package action was waiting at a browser-enforced confirmation boundary, so the remaining M9 success-condition inventory was audited rather than idling.
+- Result: Every `SuccessCondition` variant with deterministic semantics is routed through an objective-specific isolated verifier: command/build/test/static/configuration, file, HTTP/service health, bounded TCP listener, page render, CSS element, accessibility, typed browser workflow, screenshot, and research sources. `Custom` supports the explicit bounded command contract; arbitrary prose correctly remains non-executable/inconclusive. There is no missing typed verifier to invent. The readiness matrix now reports M9 as implemented with cross-platform package gates open and records the exact `af64d8e` Ubuntu installed REST/CLI/MCP restart plus native simple/advanced UI evidence.
+- Follow-up: Complete the prepared exact Win11 installed-package/native UI lane and the corresponding final macOS lane before marking M9 qualified.
+
 ### 2026-08-20 - Installed experiment lifecycle verifier passes local restart qualification
 
 - Context: M9 had deep source coverage and every REST/CLI/MCP experiment surface, but package UAT only enumerated the MCP catalog and did not execute a representative measured-improvement lifecycle or re-open its evidence after restart.
