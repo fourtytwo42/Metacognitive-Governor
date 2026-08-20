@@ -1162,6 +1162,14 @@ Durable project context lives here. Update this file whenever information should
 - Rollback preflight: `snapshot-v34-pre-rollback.json` SHA-256 `2B0E3DC9C2330E4DE49A609BEE7667531C7206D689CBF92D0B47AE76CA14EC82`. Candidate CLI independently reverified the exact success backup as application `0.1.0`, schema 2, and secret-free; sealed baseline installer SHA-256 remains `712493572FF9098CA549FDE14CC768FFFF5C5F2D4D2B847A3B06FC2A8CA295E9`.
 - Follow-up: Execute the documented offline restore/baseline reinstall rollback lane, remove only the disposable updater-test CA and prove fresh distrust, then checkpoint/push the completed exact-v34 boundary. No GitHub-hosted compute ran.
 
+### 2026-08-20 - M9 Windows isolation source gate refreshed while rollback awaits confirmation
+
+- Context: The exact-v34 offline restore/baseline reinstall remains paused at the browser policy's action-time confirmation boundary, so the independent M9 Windows candidate-service/Sandbox gate was refreshed locally instead of idling.
+- Commands/tests: `cargo test -p mcg-runtime shadow_verification -- --nocapture` passed 11 focused schema/profile/path/toolchain/service-probe tests with zero failures; only the two owner-VM live Windows Sandbox tests remained intentionally ignored for real Win11 execution.
+- Result: Current source still proves schema-3 request binding, locked-down read-only Windows Sandbox configuration, System-context fixed CLI arguments, nested-exit parsing, bounded read-only Node mapping with link-escape rejection, loopback-only same-sandbox service probes, networkless Bubblewrap structure, unsafe-input rejection, and fail-closed missing-backend behavior. This does not replace the still-open live Win11 Sandbox execution gate.
+- Cleanup: The focused build raised the repository from `49,086,578,940` to `52,388,359,042` bytes, crossing the repository's 50 GB limit. The exact non-reparse `target\debug` contained `27,827,754,635` bytes and had zero executing processes; `cargo clean --profile dev` removed 33,987 generated files / 25.9 GiB. `target\debug` is absent afterward, the repository is `24,560,604,407` bytes, and `target\release` remained absent before and after. Source, evidence, and user data were untouched.
+- Follow-up: After owner confirmation, complete exact-v34 rollback and CA teardown. Independently run the two ignored schema-3 tests on Win11 with the current exact source/artifacts and require zero residual Sandbox sessions.
+
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
