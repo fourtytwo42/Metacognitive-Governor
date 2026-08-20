@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Bounded Terraform JSON project intelligence implemented
+
+- Context: The exact Win11 installer remained prepared at a browser-enforced action-time confirmation boundary, so the next independent M10 manifest-ecosystem slice proceeded locally.
+- Decision/files: `mcg-projects` now admits root or conventional `infra/`, `terraform/`, and `iac/` `*.tf.json` manifests while excluding `.terraform/` caches and unrelated trees. It records one configuration, strictly bounded required-provider dependencies, typed resources/modules, provider relationships, and only exact same-manifest `depends_on` ordering. Variables, outputs, provider/resource configuration, module sources, versions, unknown dependencies, credentials, and arbitrary values never enter the world model; discovery remains read-only and grants no Terraform execution authority. Updated `crates/mcg-projects/src/discovery.rs`, project-intelligence architecture, and the readiness matrix.
+- Commands/tests: Formatting, all 18 `mcg-projects` tests, strict all-target/all-feature `mcg-projects` Clippy, documentation validation, diff hygiene, and the authenticated snapshot-bound API topology-plan integration test pass locally.
+- Cleanup: The repository measured 53.22 GiB after native tests, triggering the `AGENTS.md` cache rule. The exact resolved `target/debug` contained no executing repository process; `cargo clean --target-dir <repository>/target/debug` removed 26,577 generated files and 29.6 GiB. `target/debug` is absent afterward and the repository measures 23.65 GiB; source/evidence were preserved and no local `target/release` existed to remove.
+- Follow-up: Commit/push this checkpoint, exact-qualify it on Ubuntu/Win11 in a later source candidate, and continue the prepared installed M9 lanes when the browser confirmation arrives.
+
 ### 2026-08-20 - Exact af64d8e Windows package built
 
 - Context: The installed experiment lifecycle verifier and baseline-aware consumer CLI assertions required a fresh exact Win11 package before installed-package and native UI UAT.

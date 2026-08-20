@@ -43,6 +43,15 @@ explicit same-template `DependsOn` edges. Logical IDs and `AWS::` resource types
 are bounded identifiers. MCG deliberately ignores every property, parameter,
 output, metadata, transform value, and unknown dependency so infrastructure
 topology cannot become a secret or configuration-value store.
+Terraform JSON syntax (`*.tf.json`) in the project root or conventional
+`infra/`, `terraform/`, and `iac/` trees contributes one configuration,
+bounded provider dependencies, typed resource/module nodes, and only exact
+same-manifest `depends_on` addresses. `.terraform/` caches and other directories
+are excluded. Provider addresses and resource identifiers use strict bounded
+grammars; variable, output, provider configuration, resource property, module
+source, version-constraint, and unknown dependency values are never retained.
+This discovery is read-only and does not run Terraform or turn topology into
+deployment authority.
 Package `homepage` contributes only a credential-free HTTP(S) origin. Every node
 and relationship retains its manifest source and uses a content-stable identity;
 the desktop resolves those identities back to consumer-readable labels.
@@ -172,7 +181,8 @@ Topology fixtures cover cross-language runtimes/dependencies, named Compose
 service-to-database relationships, scalar and structured port declarations,
 Kubernetes workloads/init containers/images/selector-matched Services/TLS
 Ingress routes, Kubernetes Secret exclusion, unrelated YAML exclusion, OpenAPI
-origins, deployment targets, stable graph identities, complete source
+origins, Terraform JSON providers/typed resources/modules/explicit dependencies
+and secret exclusion, deployment targets, stable graph identities, complete source
 provenance, credential-bearing URL exclusion, malformed YAML, oversized
 manifests, precise watch invalidation, compression priority, authenticated REST
 assembly, and an actual bounded Evaluator turn with readable labels rather than

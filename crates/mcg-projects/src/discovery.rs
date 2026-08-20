@@ -195,7 +195,7 @@ impl ProjectDiscoverer {
         );
         let fingerprint = fingerprint(&watched_inputs);
         let languages = discover_languages(&files);
-        let build_systems = discover_build_systems(&files);
+        let build_systems = discover_build_systems(&root, &files);
         let test_systems = discover_test_systems(&root, &files)?;
         let package_managers = discover_package_managers(&files);
         let services = discover_services(&root, &files);
@@ -557,6 +557,7 @@ fn is_manifest(path: &str) -> bool {
         || is_kubernetes_manifest(path)
         || is_helm_chart(path)
         || is_cloudformation_manifest(path)
+        || is_terraform_json_manifest(path)
 }
 
 fn fingerprint(inputs: &BTreeMap<String, String>) -> String {
@@ -593,8 +594,8 @@ fn discover_languages(files: &[PathBuf]) -> Vec<String> {
     languages.into_iter().collect()
 }
 
-fn discover_build_systems(files: &[PathBuf]) -> Vec<String> {
-    named_presence(
+fn discover_build_systems(root: &Path, files: &[PathBuf]) -> Vec<String> {
+    let mut systems = named_presence(
         files,
         &[
             ("Cargo.toml", "Cargo"),
@@ -604,7 +605,16 @@ fn discover_build_systems(files: &[PathBuf]) -> Vec<String> {
             ("pyproject.toml", "Python pyproject"),
             ("go.mod", "Go modules"),
         ],
-    )
+    );
+    if files
+        .iter()
+        .any(|path| is_terraform_json_manifest(&relative(root, path)))
+    {
+        systems.push("Terraform JSON".into());
+        systems.sort();
+        systems.dedup();
+    }
+    systems
 }
 
 fn discover_test_systems(
@@ -800,6 +810,7 @@ fn world_model(
     add_kubernetes_facts(root, files, &mut graph)?;
     add_helm_facts(root, files, &mut graph)?;
     add_cloudformation_facts(root, files, &mut graph)?;
+    add_terraform_json_facts(root, files, &mut graph)?;
     add_openapi_facts(root, files, &mut graph)?;
     add_deployment_facts(root, files, &mut graph);
     Ok(graph.finish())
@@ -1940,6 +1951,252 @@ fn cloudformation_world_kind(type_name: &str) -> WorldNodeKind {
     }
 }
 
+#[derive(Debug)]
+struct TerraformResource {
+    address: String,
+    type_name: String,
+    name: String,
+    dependencies: Vec<String>,
+}
+
+fn add_terraform_json_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    for path in files
+        .iter()
+        .filter(|path| is_terraform_json_manifest(&relative(root, path)))
+    {
+        let source = relative(root, path);
+        let document: serde_json::Value = serde_json::from_str(&read_bounded_manifest(path)?)?;
+        let providers = terraform_required_providers(&document);
+        let resources = terraform_resources(&document);
+        if providers.is_empty() && resources.is_empty() {
+            continue;
+        }
+        let configuration_id = graph.add_node(
+            WorldNodeKind::Deployment,
+            &format!("Terraform configuration {source}"),
+            &source,
+        );
+        graph.add_relationship("repository", "deploys_to", &configuration_id, &source);
+
+        let mut provider_ids = BTreeMap::new();
+        for (local_name, provider_source) in providers {
+            let fact_source = format!("{source}#terraform.required_providers.{local_name}");
+            let provider_id = graph.add_node(
+                WorldNodeKind::Dependency,
+                &format!("Terraform provider {provider_source}"),
+                &fact_source,
+            );
+            graph.add_relationship(&configuration_id, "depends_on", &provider_id, &fact_source);
+            provider_ids.insert(local_name, provider_id);
+        }
+
+        let mut resource_ids = BTreeMap::new();
+        for resource in &resources {
+            let fact_source = format!("{source}#{}", resource.address);
+            let label = if resource.type_name == "module" {
+                format!("Terraform module {}", resource.name)
+            } else {
+                format!("{} ({})", resource.name, resource.type_name)
+            };
+            let resource_id = graph.add_node(
+                terraform_world_kind(&resource.type_name),
+                &label,
+                &fact_source,
+            );
+            graph.add_relationship(&configuration_id, "provisions", &resource_id, &fact_source);
+            if let Some(local_provider) = resource.type_name.split('_').next()
+                && let Some(provider_id) = provider_ids.get(local_provider)
+            {
+                graph.add_relationship(&resource_id, "uses_provider", provider_id, &fact_source);
+            }
+            resource_ids.insert(resource.address.clone(), resource_id);
+        }
+        for resource in &resources {
+            let Some(from) = resource_ids.get(&resource.address) else {
+                continue;
+            };
+            for dependency in &resource.dependencies {
+                if let Some(to) = resource_ids.get(dependency) {
+                    graph.add_relationship(
+                        from,
+                        "depends_on",
+                        to,
+                        &format!("{source}#{}.depends_on", resource.address),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn terraform_required_providers(document: &serde_json::Value) -> BTreeMap<String, String> {
+    document
+        .pointer("/terraform/required_providers")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|providers| providers.iter())
+        .take(MAX_MANIFEST_ITEMS)
+        .filter_map(|(local_name, definition)| {
+            if !valid_terraform_name(local_name) {
+                return None;
+            }
+            let source = definition
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(local_name);
+            valid_terraform_provider_source(source).then(|| (local_name.clone(), source.to_owned()))
+        })
+        .collect()
+}
+
+fn terraform_resources(document: &serde_json::Value) -> Vec<TerraformResource> {
+    let mut resources = Vec::new();
+    if let Some(types) = document
+        .get("resource")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (type_name, instances) in types.iter().take(MAX_MANIFEST_ITEMS) {
+            if resources.len() >= MAX_MANIFEST_ITEMS {
+                break;
+            }
+            if !valid_terraform_name(type_name) {
+                continue;
+            }
+            let Some(instances) = instances.as_object() else {
+                continue;
+            };
+            for (name, definition) in instances {
+                if resources.len() >= MAX_MANIFEST_ITEMS {
+                    break;
+                }
+                if !valid_terraform_name(name) || !definition.is_object() {
+                    continue;
+                }
+                resources.push(TerraformResource {
+                    address: format!("{type_name}.{name}"),
+                    type_name: type_name.clone(),
+                    name: name.clone(),
+                    dependencies: terraform_dependencies(definition),
+                });
+            }
+        }
+    }
+    if let Some(modules) = document
+        .get("module")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, definition) in modules.iter().take(MAX_MANIFEST_ITEMS) {
+            if resources.len() >= MAX_MANIFEST_ITEMS {
+                break;
+            }
+            if !valid_terraform_name(name) || !definition.is_object() {
+                continue;
+            }
+            resources.push(TerraformResource {
+                address: format!("module.{name}"),
+                type_name: "module".into(),
+                name: name.clone(),
+                dependencies: terraform_dependencies(definition),
+            });
+        }
+    }
+    resources.sort_by(|left, right| left.address.cmp(&right.address));
+    resources
+}
+
+fn terraform_dependencies(definition: &serde_json::Value) -> Vec<String> {
+    let mut dependencies = definition
+        .get("depends_on")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_MANIFEST_ITEMS)
+        .filter_map(serde_json::Value::as_str)
+        .filter(|value| valid_terraform_address(value))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+fn is_terraform_json_manifest(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase();
+    if !normalized.ends_with(".tf.json") {
+        return false;
+    }
+    let segments = normalized.split('/').collect::<Vec<_>>();
+    !segments.contains(&".terraform")
+        && (segments.len() == 1
+            || matches!(segments.first(), Some(&"infra" | &"terraform" | &"iac")))
+}
+
+fn valid_terraform_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_terraform_provider_source(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+}
+
+fn valid_terraform_address(value: &str) -> bool {
+    if value.len() > 260 || value.chars().any(char::is_control) {
+        return false;
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 2 && parts.iter().all(|part| valid_terraform_name(part))
+}
+
+fn terraform_world_kind(type_name: &str) -> WorldNodeKind {
+    if type_name == "module" {
+        return WorldNodeKind::Deployment;
+    }
+    if type_name.starts_with("aws_db_")
+        || type_name.starts_with("aws_rds_")
+        || type_name.starts_with("aws_dynamodb_")
+        || type_name.starts_with("aws_elasticache_")
+        || type_name.starts_with("google_sql_")
+        || type_name.starts_with("azurerm_postgresql_")
+        || type_name.starts_with("azurerm_mysql_")
+        || type_name.starts_with("azurerm_cosmosdb_")
+    {
+        WorldNodeKind::Database
+    } else if type_name.starts_with("aws_api_gateway_")
+        || type_name.starts_with("aws_apigatewayv2_")
+        || type_name.starts_with("google_api_gateway_")
+        || type_name.starts_with("azurerm_api_management_")
+    {
+        WorldNodeKind::Api
+    } else if matches!(
+        type_name,
+        "aws_lambda_function"
+            | "aws_ecs_service"
+            | "google_cloud_run_service"
+            | "google_cloudfunctions_function"
+            | "azurerm_linux_web_app"
+            | "azurerm_windows_web_app"
+            | "kubernetes_deployment"
+    ) {
+        WorldNodeKind::Service
+    } else {
+        WorldNodeKind::Deployment
+    }
+}
+
 fn add_openapi_facts(
     root: &Path,
     files: &[PathBuf],
@@ -2080,6 +2337,7 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TopologyPlanStatus;
     use tempfile::tempdir;
 
     #[test]
@@ -2644,6 +2902,142 @@ Resources:
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture proves providers, resources, modules, ordering, and secret exclusion together.
+    fn terraform_json_topology_is_typed_dependency_aware_and_value_free() {
+        let root = tempdir().expect("root");
+        fs::create_dir_all(root.path().join("infra")).expect("Terraform directory");
+        fs::write(
+            root.path().join("infra/main.tf.json"),
+            r#"{
+  "terraform": {
+    "required_providers": {
+      "aws": {"source": "hashicorp/aws", "version": "~> 5.0"},
+      "bad": {"source": "https://user:password@example.test/provider"}
+    }
+  },
+  "module": {
+    "network": {"source": "./network", "api_token": "module-secret"}
+  },
+  "resource": {
+    "aws_db_instance": {
+      "orders": {"password": "never-retain-this"}
+    },
+    "aws_lambda_function": {
+      "worker": {
+        "environment": {"variables": {"API_TOKEN": "also-secret"}},
+        "depends_on": ["aws_db_instance.orders", "module.network", "module.network"]
+      }
+    },
+    "aws_apigatewayv2_api": {
+      "orders": {"depends_on": ["aws_lambda_function.worker", "missing.resource"]}
+    },
+    "unsafe type": {
+      "ignored": {"password": "ignored-secret"}
+    }
+  },
+  "variable": {"database_password": {"default": "variable-secret"}},
+  "output": {"token": {"value": "output-secret"}}
+}"#,
+        )
+        .expect("Terraform JSON");
+        fs::create_dir_all(root.path().join("vendor")).expect("vendor directory");
+        fs::write(
+            root.path().join("vendor/vendor.tf.json"),
+            r#"{"resource":{"aws_s3_bucket":{"unrelated":{}}}}"#,
+        )
+        .expect("unrelated Terraform JSON");
+        fs::create_dir_all(root.path().join("infra/.terraform")).expect("cache directory");
+        fs::write(
+            root.path().join("infra/.terraform/cache.tf.json"),
+            r#"{"resource":{"aws_s3_bucket":{"cached":{}}}}"#,
+        )
+        .expect("cached Terraform JSON");
+
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
+        let second = ProjectDiscoverer::discover(root.path(), project_id).expect("rediscover");
+        assert_eq!(first.world, second.world);
+        assert!(first.build_systems.contains(&"Terraform JSON".to_owned()));
+        assert!(first.watched_inputs.contains_key("infra/main.tf.json"));
+        assert!(!first.watched_inputs.contains_key("vendor/vendor.tf.json"));
+        assert!(
+            !first
+                .watched_inputs
+                .contains_key("infra/.terraform/cache.tf.json")
+        );
+
+        let node_id = |kind, label: &str| {
+            first
+                .world
+                .nodes
+                .iter()
+                .find(|node| node.kind == kind && node.label == label)
+                .map(|node| node.id.clone())
+                .expect("world node")
+        };
+        let configuration = node_id(
+            WorldNodeKind::Deployment,
+            "Terraform configuration infra/main.tf.json",
+        );
+        let provider = node_id(
+            WorldNodeKind::Dependency,
+            "Terraform provider hashicorp/aws",
+        );
+        let network = node_id(WorldNodeKind::Deployment, "Terraform module network");
+        let database = node_id(WorldNodeKind::Database, "orders (aws_db_instance)");
+        let worker = node_id(WorldNodeKind::Service, "worker (aws_lambda_function)");
+        let api = node_id(WorldNodeKind::Api, "orders (aws_apigatewayv2_api)");
+        for (from, relation, to) in [
+            ("repository", "deploys_to", configuration.as_str()),
+            (configuration.as_str(), "depends_on", provider.as_str()),
+            (configuration.as_str(), "provisions", network.as_str()),
+            (configuration.as_str(), "provisions", database.as_str()),
+            (configuration.as_str(), "provisions", worker.as_str()),
+            (configuration.as_str(), "provisions", api.as_str()),
+            (worker.as_str(), "uses_provider", provider.as_str()),
+            (worker.as_str(), "depends_on", database.as_str()),
+            (worker.as_str(), "depends_on", network.as_str()),
+            (api.as_str(), "depends_on", worker.as_str()),
+        ] {
+            assert!(
+                first.world.relationships.iter().any(|edge| {
+                    edge.from == from && edge.relation == relation && edge.to == to
+                }),
+                "missing {from} {relation} {to}"
+            );
+        }
+        let plan = first.topology_plan();
+        assert_eq!(plan.status, TopologyPlanStatus::Ready);
+        let stage_of = |id: &str| {
+            plan.stages
+                .iter()
+                .find(|stage| stage.nodes.iter().any(|node| node.id == id))
+                .map(|stage| stage.index)
+                .expect("planned node")
+        };
+        assert!(stage_of(&provider) < stage_of(&configuration));
+        assert!(stage_of(&database) < stage_of(&worker));
+        assert!(stage_of(&network) < stage_of(&worker));
+        assert!(stage_of(&worker) < stage_of(&api));
+
+        let retained = serde_json::to_string(&first.world).expect("serialize world model");
+        for forbidden in [
+            "password@example.test",
+            "module-secret",
+            "never-retain-this",
+            "also-secret",
+            "ignored-secret",
+            "variable-secret",
+            "output-secret",
+            "missing.resource",
+            "unrelated",
+            "cached",
+        ] {
+            assert!(!retained.contains(forbidden), "retained {forbidden}");
+        }
+    }
+
+    #[test]
     fn oversized_or_malformed_topology_manifests_fail_before_unbounded_parsing() {
         let oversized = tempdir().expect("oversized root");
         fs::write(
@@ -2698,6 +3092,17 @@ Resources:
         .expect("malformed CloudFormation template");
         assert!(matches!(
             ProjectDiscoverer::discover(malformed_cloudformation.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Json(_))
+        ));
+
+        let malformed_terraform = tempdir().expect("malformed Terraform root");
+        fs::write(
+            malformed_terraform.path().join("main.tf.json"),
+            r#"{"resource":{"aws_s3_bucket": "#,
+        )
+        .expect("malformed Terraform JSON");
+        assert!(matches!(
+            ProjectDiscoverer::discover(malformed_terraform.path(), ProjectId::new()),
             Err(ProjectDiscoveryError::Json(_))
         ));
     }
