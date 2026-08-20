@@ -198,7 +198,7 @@ impl ProjectDiscoverer {
         let build_systems = discover_build_systems(&files);
         let test_systems = discover_test_systems(&root, &files)?;
         let package_managers = discover_package_managers(&files);
-        let services = discover_services(&files);
+        let services = discover_services(&root, &files);
         let ci_systems = discover_ci(&files);
         let important_directories = discover_important_directories(&root);
         let existing_memory = files
@@ -554,6 +554,7 @@ fn is_manifest(path: &str) -> bool {
             | "railway.json"
     ) || path.starts_with(".github/workflows/")
         || is_openapi_manifest(path)
+        || is_kubernetes_manifest(path)
 }
 
 fn fingerprint(inputs: &BTreeMap<String, String>) -> String {
@@ -652,8 +653,8 @@ fn discover_package_managers(files: &[PathBuf]) -> Vec<String> {
     )
 }
 
-fn discover_services(files: &[PathBuf]) -> Vec<String> {
-    named_presence(
+fn discover_services(root: &Path, files: &[PathBuf]) -> Vec<String> {
+    let mut services = named_presence(
         files,
         &[
             ("Dockerfile", "Docker service"),
@@ -662,7 +663,16 @@ fn discover_services(files: &[PathBuf]) -> Vec<String> {
             ("compose.yml", "Docker Compose"),
             ("compose.yaml", "Docker Compose"),
         ],
-    )
+    );
+    if files
+        .iter()
+        .any(|path| is_kubernetes_manifest(&relative(root, path)))
+    {
+        services.push("Kubernetes".into());
+        services.sort();
+        services.dedup();
+    }
+    services
 }
 
 fn discover_dependencies(
@@ -765,7 +775,7 @@ fn world_model(
         graph.add_relationship("repository", "provides", &id, &command.source);
     }
     for service in services {
-        if service == "Docker Compose" {
+        if matches!(service.as_str(), "Docker Compose" | "Kubernetes") {
             continue;
         }
         let id = graph.add_node(WorldNodeKind::Service, service, "project manifest");
@@ -777,6 +787,7 @@ fn world_model(
     add_runtime_and_package_facts(root, files, &mut graph)?;
     add_manifest_dependencies(root, files, &mut graph)?;
     add_compose_facts(root, files, &mut graph)?;
+    add_kubernetes_facts(root, files, &mut graph)?;
     add_openapi_facts(root, files, &mut graph)?;
     add_deployment_facts(root, files, &mut graph);
     Ok(graph.finish())
@@ -1186,6 +1197,406 @@ fn database_kind(image: &str) -> Option<&'static str> {
     .find_map(|(needle, label)| image.contains(needle).then_some(label))
 }
 
+#[derive(Debug)]
+struct KubernetesWorkload {
+    namespace: String,
+    labels: BTreeMap<String, String>,
+    service_id: String,
+}
+
+#[derive(Debug)]
+struct KubernetesEndpoint {
+    namespace: String,
+    name: String,
+    selector: BTreeMap<String, String>,
+    domain_ids: Vec<String>,
+}
+
+type KubernetesIngressBackend = (String, String, String, String);
+
+struct KubernetesFacts<'a> {
+    graph: &'a mut WorldGraph,
+    workloads: Vec<KubernetesWorkload>,
+    endpoints: Vec<KubernetesEndpoint>,
+    ingress_backends: Vec<KubernetesIngressBackend>,
+}
+
+impl<'a> KubernetesFacts<'a> {
+    fn new(graph: &'a mut WorldGraph) -> Self {
+        Self {
+            graph,
+            workloads: Vec::new(),
+            endpoints: Vec::new(),
+            ingress_backends: Vec::new(),
+        }
+    }
+
+    fn add_document(&mut self, document: &Yaml, fact_source: &str) {
+        let Some(kind) = yaml_field(document, "kind")
+            .and_then(Yaml::as_str)
+            .filter(|kind| valid_world_label(kind))
+        else {
+            return;
+        };
+        let Some(metadata) = yaml_field(document, "metadata") else {
+            return;
+        };
+        let Some(name) = yaml_field(metadata, "name")
+            .and_then(Yaml::as_str)
+            .filter(|name| valid_kubernetes_name(name))
+        else {
+            return;
+        };
+        let namespace = yaml_field(metadata, "namespace")
+            .and_then(Yaml::as_str)
+            .filter(|namespace| valid_kubernetes_name(namespace))
+            .unwrap_or("default");
+        match kind {
+            "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob" => {
+                self.add_workload(document, kind, namespace, name, fact_source);
+            }
+            "Service" => self.add_service(document, namespace, name, fact_source),
+            "Ingress" => self.ingress_backends.extend(kubernetes_ingress_backends(
+                document,
+                namespace,
+                fact_source,
+                self.graph,
+            )),
+            _ => {}
+        }
+    }
+
+    fn add_workload(
+        &mut self,
+        document: &Yaml,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        fact_source: &str,
+    ) {
+        let Some(pod_template) = kubernetes_pod_template(document, kind) else {
+            return;
+        };
+        let label = if namespace == "default" {
+            name.to_owned()
+        } else {
+            format!("{namespace}/{name}")
+        };
+        let service_id = self
+            .graph
+            .add_node(WorldNodeKind::Service, &label, fact_source);
+        self.graph
+            .add_relationship("repository", "provides", &service_id, fact_source);
+        let deployment_id = self.graph.add_node(
+            WorldNodeKind::Deployment,
+            &format!("Kubernetes {kind} {namespace}/{name}"),
+            fact_source,
+        );
+        self.graph
+            .add_relationship("repository", "deploys_to", &deployment_id, fact_source);
+        self.graph
+            .add_relationship(&service_id, "deployed_as", &deployment_id, fact_source);
+        let runtime_id = self
+            .graph
+            .add_node(WorldNodeKind::Runtime, "OCI container", fact_source);
+        self.graph
+            .add_relationship(&service_id, "runs_on", &runtime_id, fact_source);
+        if let Some(spec) = yaml_field(pod_template, "spec") {
+            self.add_container_images(&service_id, &label, spec, fact_source);
+        }
+        self.workloads.push(KubernetesWorkload {
+            namespace: namespace.to_owned(),
+            labels: yaml_field(pod_template, "metadata")
+                .and_then(|metadata| yaml_field(metadata, "labels"))
+                .map(kubernetes_string_map)
+                .unwrap_or_default(),
+            service_id,
+        });
+    }
+
+    fn add_container_images(
+        &mut self,
+        service_id: &str,
+        label: &str,
+        spec: &Yaml,
+        fact_source: &str,
+    ) {
+        for image in kubernetes_container_images(spec) {
+            let image_source = format!("{fact_source}.containers");
+            let image_id = self
+                .graph
+                .add_node(WorldNodeKind::Dependency, &image, &image_source);
+            self.graph
+                .add_relationship(service_id, "uses_image", &image_id, fact_source);
+            if let Some(database) = database_kind(&image) {
+                let database_id = self.graph.add_node(
+                    WorldNodeKind::Database,
+                    &format!("{label} ({database})"),
+                    &image_source,
+                );
+                self.graph
+                    .add_relationship(service_id, "provides", &database_id, fact_source);
+            }
+        }
+    }
+
+    fn add_service(&mut self, document: &Yaml, namespace: &str, name: &str, fact_source: &str) {
+        let Some(spec) = yaml_field(document, "spec") else {
+            return;
+        };
+        let selector = yaml_field(spec, "selector")
+            .map(kubernetes_string_map)
+            .unwrap_or_default();
+        let mut domain_ids = Vec::new();
+        if let Some(ports) = yaml_field(spec, "ports").and_then(Yaml::as_vec) {
+            for port in ports.iter().take(64).filter_map(kubernetes_service_port) {
+                let domain = format!("k8s://{namespace}/{name}:{port}");
+                let domain_id = self.graph.add_node(
+                    WorldNodeKind::Domain,
+                    &domain,
+                    &format!("{fact_source}.spec.ports"),
+                );
+                self.graph
+                    .add_relationship("repository", "exposes", &domain_id, fact_source);
+                domain_ids.push(domain_id);
+            }
+        }
+        self.endpoints.push(KubernetesEndpoint {
+            namespace: namespace.to_owned(),
+            name: name.to_owned(),
+            selector,
+            domain_ids,
+        });
+    }
+
+    fn connect_relationships(&mut self) {
+        for endpoint in &self.endpoints {
+            for workload in self.workloads.iter().filter(|workload| {
+                workload.namespace == endpoint.namespace
+                    && !endpoint.selector.is_empty()
+                    && endpoint
+                        .selector
+                        .iter()
+                        .all(|(key, value)| workload.labels.get(key) == Some(value))
+            }) {
+                for domain_id in &endpoint.domain_ids {
+                    self.graph.add_relationship(
+                        &workload.service_id,
+                        "exposed_at",
+                        domain_id,
+                        &format!(
+                            "Kubernetes Service {}/{}",
+                            endpoint.namespace, endpoint.name
+                        ),
+                    );
+                }
+            }
+        }
+        for (namespace, service_name, ingress_domain_id, source) in &self.ingress_backends {
+            let matched = self
+                .endpoints
+                .iter()
+                .filter(|endpoint| {
+                    endpoint.namespace == *namespace && endpoint.name == *service_name
+                })
+                .flat_map(|endpoint| endpoint.domain_ids.iter());
+            for endpoint_domain_id in matched {
+                self.graph.add_relationship(
+                    ingress_domain_id,
+                    "routes_to",
+                    endpoint_domain_id,
+                    source,
+                );
+            }
+        }
+    }
+}
+
+fn add_kubernetes_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    let mut facts = KubernetesFacts::new(graph);
+    for path in files
+        .iter()
+        .filter(|path| is_kubernetes_manifest(&relative(root, path)))
+    {
+        let source = relative(root, path);
+        let documents = YamlLoader::load_from_str(&read_bounded_manifest(path)?)
+            .map_err(|error| ProjectDiscoveryError::Yaml(error.to_string()))?;
+        for (document_index, document) in documents.iter().take(64).enumerate() {
+            let fact_source = format!("{source}#document-{document_index}");
+            facts.add_document(document, &fact_source);
+        }
+    }
+    facts.connect_relationships();
+    Ok(())
+}
+
+fn is_kubernetes_manifest(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let yaml = Path::new(file_name)
+        .extension()
+        .is_some_and(|extension| matches!(extension.to_str(), Some("yaml" | "yml")));
+    yaml && (matches!(
+        file_name,
+        "k8s.yaml" | "k8s.yml" | "kubernetes.yaml" | "kubernetes.yml"
+    ) || normalized.starts_with("k8s/")
+        || normalized.starts_with("kubernetes/")
+        || normalized.starts_with("deploy/kubernetes/")
+        || normalized.starts_with("manifests/kubernetes/"))
+}
+
+fn kubernetes_pod_template<'a>(document: &'a Yaml, kind: &str) -> Option<&'a Yaml> {
+    let spec = yaml_field(document, "spec")?;
+    if kind == "CronJob" {
+        return yaml_field(spec, "jobTemplate")
+            .and_then(|job| yaml_field(job, "spec"))
+            .and_then(|job_spec| yaml_field(job_spec, "template"));
+    }
+    yaml_field(spec, "template")
+}
+
+fn kubernetes_container_images(spec: &Yaml) -> Vec<String> {
+    ["initContainers", "containers"]
+        .into_iter()
+        .flat_map(|field| {
+            yaml_field(spec, field)
+                .and_then(Yaml::as_vec)
+                .into_iter()
+                .flatten()
+                .take(128)
+        })
+        .filter_map(|container| yaml_field(container, "image").and_then(Yaml::as_str))
+        .filter(|image| valid_world_label(image))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn kubernetes_string_map(value: &Yaml) -> BTreeMap<String, String> {
+    value
+        .as_hash()
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|(key, value)| {
+            let key = key.as_str().filter(|key| valid_kubernetes_label(key))?;
+            let value = value
+                .as_str()
+                .filter(|value| valid_kubernetes_label(value))?;
+            Some((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn kubernetes_service_port(value: &Yaml) -> Option<u16> {
+    let port = yaml_field(value, "port")?;
+    port.as_i64()
+        .and_then(|port| u16::try_from(port).ok())
+        .or_else(|| port.as_str().and_then(|port| port.parse::<u16>().ok()))
+        .filter(|port| *port > 0)
+}
+
+fn kubernetes_ingress_backends(
+    document: &Yaml,
+    namespace: &str,
+    fact_source: &str,
+    graph: &mut WorldGraph,
+) -> Vec<(String, String, String, String)> {
+    let Some(spec) = yaml_field(document, "spec") else {
+        return Vec::new();
+    };
+    let tls_hosts = yaml_field(spec, "tls")
+        .and_then(Yaml::as_vec)
+        .into_iter()
+        .flatten()
+        .take(64)
+        .flat_map(|entry| {
+            yaml_field(entry, "hosts")
+                .and_then(Yaml::as_vec)
+                .into_iter()
+                .flatten()
+                .take(64)
+        })
+        .filter_map(Yaml::as_str)
+        .filter(|host| valid_kubernetes_host(host))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut result = Vec::new();
+    let Some(rules) = yaml_field(spec, "rules").and_then(Yaml::as_vec) else {
+        return result;
+    };
+    for rule in rules.iter().take(128) {
+        let Some(host) = yaml_field(rule, "host")
+            .and_then(Yaml::as_str)
+            .filter(|host| valid_kubernetes_host(host))
+        else {
+            continue;
+        };
+        let scheme = if tls_hosts.contains(host) {
+            "https"
+        } else {
+            "http"
+        };
+        let origin = format!("{scheme}://{host}");
+        let domain_id = graph.add_node(WorldNodeKind::Domain, &origin, fact_source);
+        graph.add_relationship("repository", "exposes", &domain_id, fact_source);
+        let paths = yaml_field(rule, "http")
+            .and_then(|http| yaml_field(http, "paths"))
+            .and_then(Yaml::as_vec);
+        for path in paths.into_iter().flatten().take(128) {
+            let Some(backend) = yaml_field(path, "backend") else {
+                continue;
+            };
+            let service_name = yaml_field(backend, "service")
+                .and_then(|service| yaml_field(service, "name"))
+                .and_then(Yaml::as_str)
+                .or_else(|| yaml_field(backend, "serviceName").and_then(Yaml::as_str));
+            if let Some(service_name) = service_name.filter(|name| valid_kubernetes_name(name)) {
+                result.push((
+                    namespace.to_owned(),
+                    service_name.to_owned(),
+                    domain_id.clone(),
+                    fact_source.to_owned(),
+                ));
+            }
+        }
+    }
+    result
+}
+
+fn valid_kubernetes_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+fn valid_kubernetes_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.chars().any(char::is_control)
+        && !value.to_ascii_lowercase().contains("password")
+        && !value.to_ascii_lowercase().contains("token")
+}
+
+fn valid_kubernetes_host(value: &str) -> bool {
+    valid_kubernetes_name(value) && value.contains('.')
+}
+
 fn add_openapi_facts(
     root: &Path,
     files: &[PathBuf],
@@ -1528,6 +1939,153 @@ servers:
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One Kubernetes fixture proves workload, service, ingress, and secret boundaries together.
+    fn kubernetes_world_model_is_bounded_routed_stable_and_secret_safe() {
+        let root = tempdir().expect("root");
+        fs::create_dir_all(root.path().join("k8s")).expect("Kubernetes directory");
+        fs::write(
+            root.path().join("k8s/orders.yaml"),
+            r"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+spec:
+  template:
+    metadata:
+      labels:
+        app: orders-api
+        credential-token: must-not-be-retained
+    spec:
+      initContainers:
+        - name: migrate
+          image: ghcr.io/example/orders-migrate:2
+      containers:
+        - name: api
+          image: ghcr.io/example/orders-api:7
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-api
+spec:
+  selector:
+    app: orders-api
+  ports:
+    - name: http
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orders
+spec:
+  tls:
+    - hosts: [orders.example.test]
+  rules:
+    - host: orders.example.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orders-api
+                port:
+                  number: 8080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: production-credentials
+stringData:
+  password: never-retain-this
+",
+        )
+        .expect("Kubernetes manifest");
+        fs::write(
+            root.path().join("unrelated.yaml"),
+            "this: [is deliberately not parsed",
+        )
+        .expect("unrelated YAML");
+
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
+        let second = ProjectDiscoverer::discover(root.path(), project_id).expect("rediscover");
+        assert_eq!(first.world, second.world);
+        assert!(first.services.contains(&"Kubernetes".to_owned()));
+        assert!(first.watched_inputs.contains_key("k8s/orders.yaml"));
+        assert!(!first.watched_inputs.contains_key("unrelated.yaml"));
+        for (kind, label) in [
+            (WorldNodeKind::Service, "orders-api"),
+            (
+                WorldNodeKind::Deployment,
+                "Kubernetes Deployment default/orders-api",
+            ),
+            (
+                WorldNodeKind::Dependency,
+                "ghcr.io/example/orders-migrate:2",
+            ),
+            (WorldNodeKind::Dependency, "ghcr.io/example/orders-api:7"),
+            (WorldNodeKind::Domain, "k8s://default/orders-api:8080"),
+            (WorldNodeKind::Domain, "https://orders.example.test"),
+            (WorldNodeKind::Runtime, "OCI container"),
+        ] {
+            assert!(
+                first
+                    .world
+                    .nodes
+                    .iter()
+                    .any(|node| node.kind == kind && node.label == label),
+                "missing {kind:?} {label}"
+            );
+        }
+        assert!(first.world.nodes.iter().all(|node| {
+            !node.label.contains("production-credentials")
+                && !node.label.contains("never-retain-this")
+                && !node.label.contains("must-not-be-retained")
+        }));
+        let node_id = |kind, label: &str| {
+            first
+                .world
+                .nodes
+                .iter()
+                .find(|node| node.kind == kind && node.label == label)
+                .map(|node| node.id.clone())
+                .expect("world node")
+        };
+        let repository = "repository".to_owned();
+        let service = node_id(WorldNodeKind::Service, "orders-api");
+        let deployment = node_id(
+            WorldNodeKind::Deployment,
+            "Kubernetes Deployment default/orders-api",
+        );
+        let image = node_id(WorldNodeKind::Dependency, "ghcr.io/example/orders-api:7");
+        let cluster = node_id(WorldNodeKind::Domain, "k8s://default/orders-api:8080");
+        let ingress = node_id(WorldNodeKind::Domain, "https://orders.example.test");
+        for (from, relation, to) in [
+            (&repository, "deploys_to", &deployment),
+            (&service, "deployed_as", &deployment),
+            (&service, "uses_image", &image),
+            (&service, "exposed_at", &cluster),
+            (&ingress, "routes_to", &cluster),
+        ] {
+            assert!(
+                first.world.relationships.iter().any(|edge| {
+                    edge.from == *from && edge.relation == relation && edge.to == *to
+                })
+            );
+        }
+        assert!(first.world.nodes.iter().all(|node| !node.source.is_empty()));
+        assert!(
+            first
+                .world
+                .relationships
+                .iter()
+                .all(|edge| !edge.source.is_empty())
+        );
+    }
+
+    #[test]
     fn oversized_or_malformed_topology_manifests_fail_before_unbounded_parsing() {
         let oversized = tempdir().expect("oversized root");
         fs::write(
@@ -1548,6 +2106,18 @@ servers:
         .expect("malformed manifest");
         assert!(matches!(
             ProjectDiscoverer::discover(malformed.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Yaml(_))
+        ));
+
+        let malformed_kubernetes = tempdir().expect("malformed Kubernetes root");
+        fs::create_dir_all(malformed_kubernetes.path().join("k8s")).expect("Kubernetes directory");
+        fs::write(
+            malformed_kubernetes.path().join("k8s/deployment.yaml"),
+            "apiVersion: apps/v1\nkind: Deployment\nspec: [unterminated",
+        )
+        .expect("malformed Kubernetes manifest");
+        assert!(matches!(
+            ProjectDiscoverer::discover(malformed_kubernetes.path(), ProjectId::new()),
             Err(ProjectDiscoveryError::Yaml(_))
         ));
     }

@@ -25,6 +25,12 @@ runtimes. Docker Compose contributes named services, container images, explicit
 local endpoints. OpenAPI/Swagger JSON or YAML contributes named APIs and
 credential-free server origins. Known Vercel, Netlify, Fly.io, Render,
 Cloudflare Workers, Railway, and Docker manifests contribute deployment nodes.
+Kubernetes YAML in conventional root files or `k8s/`, `kubernetes/`,
+`deploy/kubernetes/`, and `manifests/kubernetes/` contributes Deployment,
+StatefulSet, DaemonSet, Job, and CronJob workloads; init and application images;
+image-derived databases; selector-matched Service endpoints; and HTTP(S)
+Ingress routes. Arbitrary YAML is not interpreted as Kubernetes configuration,
+and Secret documents and secret-like labels never enter the graph.
 Package `homepage` contributes only a credential-free HTTP(S) origin. Every node
 and relationship retains its manifest source and uses a content-stable identity;
 the desktop resolves those identities back to consumer-readable labels.
@@ -131,7 +137,9 @@ lifecycle behavior, and restart recovery.
 
 Topology fixtures cover cross-language runtimes/dependencies, named Compose
 service-to-database relationships, scalar and structured port declarations,
-OpenAPI origins, deployment targets, stable graph identities, complete source
+Kubernetes workloads/init containers/images/selector-matched Services/TLS
+Ingress routes, Kubernetes Secret exclusion, unrelated YAML exclusion, OpenAPI
+origins, deployment targets, stable graph identities, complete source
 provenance, credential-bearing URL exclusion, malformed YAML, oversized
 manifests, precise watch invalidation, compression priority, authenticated REST
 assembly, and an actual bounded Evaluator turn with readable labels rather than
