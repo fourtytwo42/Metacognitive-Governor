@@ -1343,9 +1343,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Continue representative installed-package M9/M10 benchmark and every-interface UAT now that the same-sandbox browser verifier set is complete.
-- Last meaningful change: The new cross-platform installed experiment verifier passes a real isolated local daemon/CLI stop-and-restart qualification across REST, CLI, and MCP. It is integrated into Windows, Linux, and macOS package harnesses but has not yet been counted as installed-package evidence.
-- Next step: Commit/push the verifier checkpoint, then build and run the exact installed Windows and Ubuntu package lanes and perform native desktop experiment UAT; retain independent initial/restart reports and exact package identities.
+- Current task: Finish exact `af64d8e` installed-package M9/M10 benchmark and every-interface UAT on Win11, then run the corresponding final macOS package/native lane.
+- Last meaningful change: Exact Ubuntu `af64d8e` `.deb`/AppImage package UAT and native Improvement UI UAT pass. Initial/restart reports agree across REST, CLI, and MCP; the advanced/simple UI shows one promoted shadow experiment with one receipt, benchmark, and decision. The native desktop/service/Xvfb processes were stopped and port 17780 plus the candidate-process audit were clean. Exact Windows packaging is still compiling from the warm cache.
+- Next step: Let the exact Windows package build finish, verify its commit-bound manifest and installer hashes, run the installed-package harness, and capture native Improvement UAT. Continue without asking for routine disposable-VM permission.
 - Blockers: No discretionary VM permission is outstanding; the owner reconfirmed standing authority for all in-scope administration and qualification on the disposable VMs. Execute installs, administrator prompts, transfers, restarts, tests, browser/desktop interaction, trust changes, and temporary cleanup directly without asking or waiting. If one interaction is genuinely automation-inaccessible, treat it as a technical constraint, try another in-scope route, and continue every independent lane; contact the owner only for an unavoidable identity-bound external-account action, never for redundant VM permission. Exact-v34 disposable updater trust has already been removed and fresh ordinary HTTPS distrust proven. Trusted production signing/notarization identities and unavoidable owner-account OAuth remain external release gates. Credentials are intentionally not retained here.
 - Extended verification: Exact-v27 matched two-hour/10,000-task crash-recovery lanes were freshly reverified on Windows and Ubuntu with the identical repository verifier hash, exact recovery, passing database/schema checks, and zero residual candidate processes/temp roots. Earlier one-hour lanes remain historical evidence only; the final matched multi-hour gate is closed for v27 and must repeat only if the final daemon identity changes.
 
@@ -2372,6 +2372,7 @@ When sources conflict, use this order:
 - Read `AGENTS.md` and `MEMORY.md` before making future changes in this workspace.
 - Update `MEMORY.md` after durable discoveries, decisions, fixes, verification results, blocked work, and handoffs.
 - Never store secrets, tokens, passwords, private keys, or sensitive personal data in `MEMORY.md`.
+- Standing disposable-VM authority is operational, not merely preapproval: directly perform required installs, transfers, administrator actions, restarts, tests, process control, and temporary qualification cleanup without pausing or asking. Contact the owner only for a genuinely unavoidable identity-bound external-account action, and continue all independent work while that action is pending.
 
 ## Archive
 
