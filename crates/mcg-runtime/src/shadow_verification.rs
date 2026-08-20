@@ -73,6 +73,8 @@ const BROWSER_RUNTIME_MAX_DEPTH: usize = 16;
 const SHADOW_MAX_SELECTOR_BYTES: usize = 4 * 1024;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 const SHADOW_MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+const SHADOW_MAX_SCREENSHOT_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(any(target_os = "windows", test))]
 const WSB_START_TIMEOUT_SECONDS: u64 = 180;
 #[cfg(any(target_os = "windows", test))]
@@ -152,6 +154,13 @@ enum ShadowServiceProbe {
         expected_sha256: String,
         start_url: String,
     },
+    ScreenshotMatches {
+        url: String,
+        baseline_path: String,
+        expected_baseline_sha256: String,
+        max_changed_basis_points: u16,
+        per_channel_threshold: u8,
+    },
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -162,7 +171,8 @@ impl ShadowServiceProbe {
             Self::Http { url, .. }
             | Self::PageRender { url }
             | Self::Accessibility { url }
-            | Self::ElementExists { url, .. } => url,
+            | Self::ElementExists { url, .. }
+            | Self::ScreenshotMatches { url, .. } => url,
             Self::BrowserWorkflow { start_url, .. } => start_url,
         }
     }
@@ -176,7 +186,8 @@ impl ShadowServiceProbe {
             | Self::PageRender { .. }
             | Self::Accessibility { .. }
             | Self::ElementExists { .. }
-            | Self::BrowserWorkflow { .. } => None,
+            | Self::BrowserWorkflow { .. }
+            | Self::ScreenshotMatches { .. } => None,
         }
     }
 
@@ -188,6 +199,7 @@ impl ShadowServiceProbe {
             Self::Accessibility { .. } => "accessibility",
             Self::ElementExists { .. } => "element_exists",
             Self::BrowserWorkflow { .. } => "browser_workflow",
+            Self::ScreenshotMatches { .. } => "screenshot_matches",
         }
     }
 }
@@ -201,6 +213,7 @@ impl ShadowServiceProbe {
                 | Self::Accessibility { .. }
                 | Self::ElementExists { .. }
                 | Self::BrowserWorkflow { .. }
+                | Self::ScreenshotMatches { .. }
         )
     }
 }
@@ -404,7 +417,8 @@ impl LinuxBubblewrapVerifier {
             ShadowServiceProbe::PageRender { .. }
             | ShadowServiceProbe::Accessibility { .. }
             | ShadowServiceProbe::ElementExists { .. }
-            | ShadowServiceProbe::BrowserWorkflow { .. } => true,
+            | ShadowServiceProbe::BrowserWorkflow { .. }
+            | ShadowServiceProbe::ScreenshotMatches { .. } => true,
         };
         let sleep_available = probe.requires_browser() || Path::new("/usr/bin/sleep").is_file();
         if !probe_program_available || !sleep_available {
@@ -821,6 +835,13 @@ enum WindowsRunnerProbe<'a> {
         workflow_path: &'a str,
         expected_sha256: &'a str,
     },
+    ScreenshotMatches {
+        url: &'a str,
+        baseline_path: &'a str,
+        expected_baseline_sha256: &'a str,
+        max_changed_basis_points: u16,
+        per_channel_threshold: u8,
+    },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -850,7 +871,7 @@ impl WindowsSandboxHarness {
                 ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
             })?;
             let request = WindowsRunnerRequest {
-                schema_version: 7,
+                schema_version: 8,
                 source_root: r"C:\mcg-source",
                 workspace_root: r"C:\mcg-workspace",
                 executable,
@@ -887,6 +908,19 @@ impl WindowsSandboxHarness {
                         name,
                         workflow_path,
                         expected_sha256,
+                    },
+                    ShadowServiceProbe::ScreenshotMatches {
+                        url,
+                        baseline_path,
+                        expected_baseline_sha256,
+                        max_changed_basis_points,
+                        per_channel_threshold,
+                    } => WindowsRunnerProbe::ScreenshotMatches {
+                        url,
+                        baseline_path,
+                        expected_baseline_sha256,
+                        max_changed_basis_points: *max_changed_basis_points,
+                        per_channel_threshold: *per_channel_threshold,
                     },
                 }),
             };
@@ -1258,6 +1292,23 @@ fn shadow_service_probe_for_workspace(
     workspace_root: &Path,
     condition: &SuccessCondition,
 ) -> Result<ShadowServiceProbe, ToolError> {
+    if let SuccessCondition::ScreenshotMatches {
+        baseline,
+        expected_baseline_sha256,
+        url,
+        max_changed_basis_points,
+        per_channel_threshold,
+    } = condition
+    {
+        return shadow_screenshot_probe_for_workspace(
+            workspace_root,
+            baseline,
+            expected_baseline_sha256,
+            url,
+            *max_changed_basis_points,
+            *per_channel_threshold,
+        );
+    }
     let SuccessCondition::BrowserWorkflow {
         name,
         path,
@@ -1269,20 +1320,7 @@ fn shadow_service_probe_for_workspace(
     let relative = Path::new(path);
     if name.trim().is_empty()
         || name.chars().count() > 128
-        || path.is_empty()
-        || path.len() > 4 * 1024
-        || path.contains(['\\', ':', '\0'])
-        || path.chars().any(char::is_control)
-        || relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::Prefix(_)
-                    | std::path::Component::RootDir
-                    | std::path::Component::CurDir
-                    | std::path::Component::ParentDir
-            )
-        })
+        || !valid_shadow_relative_path(path)
         || expected_sha256.len() != 64
         || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -1339,6 +1377,90 @@ fn shadow_service_probe_for_workspace(
         expected_sha256: expected_sha256.clone(),
         start_url,
     })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn shadow_screenshot_probe_for_workspace(
+    workspace_root: &Path,
+    baseline: &str,
+    expected_baseline_sha256: &str,
+    url: &str,
+    max_changed_basis_points: u16,
+    per_channel_threshold: u8,
+) -> Result<ShadowServiceProbe, ToolError> {
+    let relative = Path::new(baseline);
+    if !valid_shadow_relative_path(baseline)
+        || expected_baseline_sha256.len() != 64
+        || !expected_baseline_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || max_changed_basis_points > 10_000
+    {
+        return Err(ToolError::Invalid(
+            "shadow screenshot baseline binding is invalid".into(),
+        ));
+    }
+    let baseline_path = workspace_root.join(relative);
+    let metadata = fs::symlink_metadata(&baseline_path).map_err(|error| {
+        ToolError::Execution(format!("inspect shadow screenshot baseline: {error}"))
+    })?;
+    if metadata_is_link_or_reparse(&metadata)
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > SHADOW_MAX_SCREENSHOT_BYTES
+    {
+        return Err(ToolError::Denied(
+            "shadow screenshot baseline must be one bounded regular file".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .map_err(|_| ToolError::Invalid("shadow screenshot size is invalid".into()))?,
+    );
+    fs::File::open(&baseline_path)
+        .map_err(|error| ToolError::Execution(format!("open shadow screenshot: {error}")))?
+        .take(SHADOW_MAX_SCREENSHOT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ToolError::Execution(format!("read shadow screenshot: {error}")))?;
+    if bytes.len() as u64 != metadata.len()
+        || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_baseline_sha256)
+    {
+        return Err(ToolError::Execution(
+            "shadow screenshot baseline changed after objective binding".into(),
+        ));
+    }
+    match shadow_service_probe(&SuccessCondition::PageRenders {
+        url: url.to_owned(),
+    })? {
+        ShadowServiceProbe::PageRender { .. } => {}
+        _ => return Err(ToolError::Invalid("invalid screenshot URL".into())),
+    }
+    Ok(ShadowServiceProbe::ScreenshotMatches {
+        url: url.to_owned(),
+        baseline_path: baseline.to_owned(),
+        expected_baseline_sha256: expected_baseline_sha256.to_owned(),
+        max_changed_basis_points,
+        per_channel_threshold,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn valid_shadow_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && value.len() <= 4 * 1024
+        && !value.contains(['\\', ':', '\0'])
+        && !value.chars().any(char::is_control)
+        && !path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+            )
+        })
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -2085,6 +2207,13 @@ enum LinuxRunnerProbe<'a> {
         workflow_path: &'a str,
         expected_sha256: &'a str,
     },
+    ScreenshotMatches {
+        url: &'a str,
+        baseline_path: &'a str,
+        expected_baseline_sha256: &'a str,
+        max_changed_basis_points: u16,
+        per_channel_threshold: u8,
+    },
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -2118,6 +2247,19 @@ impl LinuxRunnerRequestFile {
                 workflow_path,
                 expected_sha256,
             },
+            ShadowServiceProbe::ScreenshotMatches {
+                url,
+                baseline_path,
+                expected_baseline_sha256,
+                max_changed_basis_points,
+                per_channel_threshold,
+            } => LinuxRunnerProbe::ScreenshotMatches {
+                url,
+                baseline_path,
+                expected_baseline_sha256,
+                max_changed_basis_points: *max_changed_basis_points,
+                per_channel_threshold: *per_channel_threshold,
+            },
             _ => {
                 return Err(ToolError::Invalid(
                     "Linux runner request requires a browser probe".into(),
@@ -2129,7 +2271,7 @@ impl LinuxRunnerRequestFile {
             .ok_or_else(|| ToolError::Invalid("shadow workspace has no parent".into()))?;
         let path = parent.join(format!(".mcg-shadow-request-{}.json", Uuid::new_v4()));
         let request = LinuxRunnerRequest {
-            schema_version: 7,
+            schema_version: 8,
             source_root: "/mcg-source",
             workspace_root: "/tmp/mcg-workspace",
             executable,
@@ -2721,6 +2863,63 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_service_probe_revalidates_the_private_file_binding() {
+        use std::io::Cursor;
+
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 6, Rgba([12, 34, 56, 255])))
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode baseline");
+        fs::write(workspace.path().join("baseline.png"), &bytes).expect("baseline");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let condition = SuccessCondition::ScreenshotMatches {
+            baseline: "baseline.png".into(),
+            expected_baseline_sha256: digest.clone(),
+            url: "http://127.0.0.1:43123/visual".into(),
+            max_changed_basis_points: 100,
+            per_channel_threshold: 8,
+        };
+        assert!(matches!(
+            shadow_service_probe_for_workspace(workspace.path(), &condition)
+                .expect("screenshot probe"),
+            ShadowServiceProbe::ScreenshotMatches {
+                ref baseline_path,
+                ref expected_baseline_sha256,
+                ..
+            } if baseline_path == "baseline.png" && expected_baseline_sha256 == &digest
+        ));
+        assert!(
+            shadow_service_probe_for_workspace(
+                workspace.path(),
+                &SuccessCondition::ScreenshotMatches {
+                    baseline: "baseline.png".into(),
+                    expected_baseline_sha256: "0".repeat(64),
+                    url: "http://127.0.0.1:43123/visual".into(),
+                    max_changed_basis_points: 100,
+                    per_channel_threshold: 8,
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            shadow_service_probe_for_workspace(
+                workspace.path(),
+                &SuccessCondition::ScreenshotMatches {
+                    baseline: "../escape.png".into(),
+                    expected_baseline_sha256: digest,
+                    url: "http://127.0.0.1:43123/visual".into(),
+                    max_changed_basis_points: 100,
+                    per_channel_threshold: 8,
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn command_and_workspace_boundaries_reject_ambiguous_or_unsafe_input() {
         assert!(bubblewrap_version_is_supported("bubblewrap 0.11.2\n"));
         assert!(bubblewrap_version_is_supported("bubblewrap 1.0.0\n"));
@@ -2984,7 +3183,7 @@ mod tests {
         let request: serde_json::Value =
             serde_json::from_slice(&fs::read(harness.path.join("request.json")).expect("request"))
                 .expect("request JSON");
-        assert_eq!(request["schema_version"], 7);
+        assert_eq!(request["schema_version"], 8);
         assert_eq!(request["source_root"], r"C:\mcg-source");
         assert_eq!(request["workspace_root"], r"C:\mcg-workspace");
         assert_eq!(request["executable"], "npm.cmd");
@@ -3088,7 +3287,7 @@ mod tests {
                 .expect("accessibility request"),
         )
         .expect("accessibility request JSON");
-        assert_eq!(accessibility_request["schema_version"], 7);
+        assert_eq!(accessibility_request["schema_version"], 8);
         assert_eq!(accessibility_request["probe"]["kind"], "accessibility");
         assert_eq!(
             accessibility_request["probe"]["url"],
@@ -3115,7 +3314,7 @@ mod tests {
             &fs::read(workflow_harness.path.join("request.json")).expect("workflow request"),
         )
         .expect("workflow request JSON");
-        assert_eq!(workflow_request["schema_version"], 7);
+        assert_eq!(workflow_request["schema_version"], 8);
         assert_eq!(workflow_request["probe"]["kind"], "browser_workflow");
         assert_eq!(workflow_request["probe"]["name"], "consumer flow");
         assert_eq!(
@@ -3123,6 +3322,38 @@ mod tests {
             "tests/browser-flow.json"
         );
         assert_eq!(workflow_request["probe"]["expected_sha256"], "a".repeat(64));
+
+        let screenshot_probe = ShadowServiceProbe::ScreenshotMatches {
+            url: "http://127.0.0.1:43123/visual".into(),
+            baseline_path: "tests/baseline.png".into(),
+            expected_baseline_sha256: "b".repeat(64),
+            max_changed_basis_points: 100,
+            per_channel_threshold: 8,
+        };
+        let screenshot_harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&browser),
+            Some(&screenshot_probe),
+        )
+        .expect("screenshot harness");
+        let screenshot_request: serde_json::Value = serde_json::from_slice(
+            &fs::read(screenshot_harness.path.join("request.json")).expect("screenshot request"),
+        )
+        .expect("screenshot request JSON");
+        assert_eq!(screenshot_request["schema_version"], 8);
+        assert_eq!(screenshot_request["probe"]["kind"], "screenshot_matches");
+        assert_eq!(
+            screenshot_request["probe"]["baseline_path"],
+            "tests/baseline.png"
+        );
+        assert_eq!(
+            screenshot_request["probe"]["expected_baseline_sha256"],
+            "b".repeat(64)
+        );
     }
 
     #[test]
@@ -3292,6 +3523,32 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn write_screenshot_condition(
+        workspace: &Path,
+        address: std::net::SocketAddr,
+        file_name: &str,
+        color: [u8; 4],
+    ) -> SuccessCondition {
+        use std::io::Cursor;
+
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1_280, 720, Rgba(color)))
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode screenshot baseline");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(workspace.join(file_name), bytes).expect("screenshot baseline");
+        SuccessCondition::ScreenshotMatches {
+            baseline: file_name.into(),
+            expected_baseline_sha256: digest,
+            url: format!("http://{address}/visual"),
+            max_changed_basis_points: 0,
+            per_channel_threshold: 0,
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn encoded_powershell_condition(script: &str) -> SuccessCondition {
         let mut bytes = Vec::with_capacity(script.len().saturating_mul(2));
@@ -3364,6 +3621,9 @@ http.createServer((request, response) => {
   } else if (request.url === '/inaccessible') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
     response.end('<!doctype html><html><body><button></button></body></html>');
+  } else if (request.url === '/visual') {
+    response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+    response.end('<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;background:rgb(12,34,56)}</style></head><body></body></html>');
   } else {
     response.writeHead(404);
     response.end();
@@ -3515,12 +3775,38 @@ http.createServer((request, response) => {
                 assert!(!record.timed_out);
                 assert_no_windows_sandbox_sessions(verifier, workspace).await;
             }
+            for (file_name, color, expected_exit_code) in [
+                ("screenshot-pass.png", [12, 34, 56, 255], 0),
+                ("screenshot-fail.png", [90, 34, 56, 255], 1),
+            ] {
+                let screenshot_condition =
+                    write_screenshot_condition(workspace, address, file_name, color);
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(
+                        workspace,
+                        "node server.js",
+                        &screenshot_condition,
+                        artifacts,
+                    )
+                    .await
+                else {
+                    panic!("same-sandbox Windows screenshot probe must produce measured evidence");
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("screenshot service transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("screenshot service record");
+                assert_eq!(record.exit_code, Some(expected_exit_code));
+                assert!(!record.timed_out);
+                assert_no_windows_sandbox_sessions(verifier, workspace).await;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(service_hits.load(Ordering::SeqCst), 0);
         host_service.abort();
         eprintln!(
-            "qualified same-sandbox Windows Node HTTP/TCP/browser/workflow service pass/fail with zero host-network hits"
+            "qualified same-sandbox Windows Node HTTP/TCP/browser/workflow/screenshot service pass/fail with zero host-network hits"
         );
     }
 
@@ -3773,7 +4059,7 @@ http.createServer((request, response) => {
             if Path::new("/usr/bin/curl").is_file() && Path::new("/usr/bin/sleep").is_file() {
                 fs::write(
                     workspace.path().join("server.js"),
-                    r#"const http = require('http');
+                r#"const http = require('http');
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT);
 http.createServer((request, response) => {
@@ -3786,6 +4072,9 @@ http.createServer((request, response) => {
   } else if (request.url === '/inaccessible') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
     response.end('<!doctype html><html><body><button></button></body></html>');
+  } else if (request.url === '/visual') {
+    response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+    response.end('<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;background:rgb(12,34,56)}</style></head><body></body></html>');
   } else {
     response.writeHead(404);
     response.end();
@@ -3933,6 +4222,31 @@ http.createServer((request, response) => {
                         assert_eq!(record.exit_code, Some(expected_exit_code));
                         assert!(!record.timed_out);
                     }
+                    for (file_name, color, expected_exit_code) in [
+                        ("screenshot-pass.png", [12, 34, 56, 255], 0),
+                        ("screenshot-fail.png", [90, 34, 56, 255], 1),
+                    ] {
+                        let screenshot_condition =
+                            write_screenshot_condition(workspace.path(), address, file_name, color);
+                        let ShadowCommandVerification::Completed { transcript } = verifier
+                            .verify_service(
+                                workspace.path(),
+                                "node server.js",
+                                &screenshot_condition,
+                                &artifacts,
+                            )
+                            .await
+                        else {
+                            panic!("same-sandbox screenshot probe must produce measured evidence");
+                        };
+                        let bytes = artifacts
+                            .read_verified_reference(&transcript, 1024 * 1024)
+                            .expect("screenshot service transcript");
+                        let record: ShadowCommandTranscript =
+                            serde_json::from_slice(&bytes).expect("screenshot service record");
+                        assert_eq!(record.exit_code, Some(expected_exit_code));
+                        assert!(!record.timed_out);
+                    }
                 }
 
                 let tcp_condition = SuccessCondition::PortListening {
@@ -3983,7 +4297,7 @@ http.createServer((request, response) => {
                 assert_eq!(service_hits.load(Ordering::SeqCst), 0);
                 host_service.abort();
                 eprintln!(
-                    "qualified same-sandbox Node HTTP/TCP/browser/workflow service pass/fail with zero host-network hits"
+                    "qualified same-sandbox Node HTTP/TCP/browser/workflow/screenshot service pass/fail with zero host-network hits"
                 );
             }
         }

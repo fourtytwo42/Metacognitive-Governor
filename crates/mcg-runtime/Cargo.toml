@@ -35,6 +35,7 @@ uuid.workspace = true
 [dev-dependencies]
 axum.workspace = true
 ed25519-dalek.workspace = true
+image.workspace = true
 
 [lints]
 workspace = true

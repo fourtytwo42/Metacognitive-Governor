@@ -3816,6 +3816,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "image 0.25.10",
  "mcg-agents",
  "mcg-config",
  "mcg-domain",
@@ -3846,6 +3847,7 @@ version = "0.1.0"
 dependencies = [
  "chromiumoxide",
  "futures-util",
+ "image 0.25.10",
  "mcg-browser-contracts",
  "serde",
  "serde_json",

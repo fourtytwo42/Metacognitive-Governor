@@ -160,7 +160,7 @@ POSIX `--` argument tail, MCG selects only two compile-time runner command lines
 (probe or request); the untrusted objective executable and argument array remain
 inside the bounded JSON request and never enter that CLI string.
 `HttpResponds`, `ServiceHealthy`, `PortListening`, `PageRenders`,
-`ElementExists`, `Accessibility`, and `BrowserWorkflow` automatic assessment additionally require
+`ElementExists`, `Accessibility`, `BrowserWorkflow`, and `ScreenshotMatches` automatic assessment additionally require
 the source evaluation to contain exactly one passing identical condition and a
 retained completed consumer-evaluation checkpoint whose run matches that source
 evaluation. The checkpoint selects the exact immutable project snapshot; MCG
@@ -171,9 +171,9 @@ exact loopback with an explicit nonzero port; TCP additionally rejects paths,
 queries, and fragments. Service startup and its bounded probe run in the same
 network-isolated OS sandbox: Linux uses fixed system curl for HTTP or Bash's
 connect-only TCP facility inside the bubblewrap namespace, while Windows runner
-schema 7 performs the loopback HTTP request or TCP handshake inside the disposable
-Sandbox VM. For `PageRenders`, `ElementExists`, `Accessibility`, and `BrowserWorkflow`, both platforms map the bounded browser distribution
-read-only and invoke the package-adjacent schema-7 runner inside the sandbox. The
+schema 8 performs the loopback HTTP request or TCP handshake inside the disposable
+Sandbox VM. For `PageRenders`, `ElementExists`, `Accessibility`, `BrowserWorkflow`, and `ScreenshotMatches`, both platforms map the bounded browser distribution
+read-only and invoke the package-adjacent schema-8 runner inside the sandbox. The
 runner first requires an exact loopback 2xx response, then drives Chromium through
 its DevTools protocol under fixed launch, request, render, DOM-size, viewport,
 profile, and shutdown bounds. It requires an interactive or complete document
@@ -191,13 +191,18 @@ performs bounded element, text, URL, click, type, and allowlisted-key steps. Cli
 and key targets are rejected before use when they would download, open another
 context, submit a mutating form, or leave the exact start origin; origin is
 rechecked after every interactive step.
+`ScreenshotMatches` reopens one normalized project-relative regular PNG from the
+copied candidate workspace, requires its exact launch-bound SHA-256, captures the
+candidate at the canonical 1280x720 viewport with device scale factor 1, and applies
+the same explicit per-channel noise and changed-area basis-point thresholds as the
+governed consumer browser. Oversized, malformed, dimension-mismatched, or changed
+baseline bytes and pixel mismatch fail closed.
 Expected status is exact for `HttpResponds`, 200-299 for
 `ServiceHealthy`, and a completed no-payload handshake for `PortListening`;
 startup timeout, early process exit, mismatch/refusal, malformed evidence, or
 sandbox loss fails closed. There is no host-network or host-process fallback.
-Page-render, element-existence, accessibility, and typed-workflow conditions are
-now supported at this boundary; screenshot conditions remain inconclusive until
-their objective-specific pixel evidence is placed inside the same boundary.
+Page-render, element-existence, accessibility, typed-workflow, and screenshot
+conditions are now supported at this boundary.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark
 receives a stable identity, and the configured benchmark, regression, and

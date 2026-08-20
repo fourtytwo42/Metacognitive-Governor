@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Schema-8 screenshot verification implemented locally
+
+- Context: Schema 7 left `ScreenshotMatches` as the final unsupported same-sandbox browser objective. The owner also clarified that standing disposable-VM authorization means work must not pause for routine VM or browser actions.
+- Decision/files: Advance `mcg-shadow-runner` to request schema 8 and add launch-digest-bound, bounded regular PNG baselines, canonical 1280x720 capture, exact dimensions, per-channel noise tolerance, and changed-pixel basis-point comparison. Route the condition through the Linux Bubblewrap and Windows Sandbox service boundaries and automatic objective settlement. Explicit CDP device metrics were also added to `mcg-tools`; testing found that Chromium otherwise ignored the requested window size and captured 800x600, so the prior viewport contract was not truthful.
+- Commands/tests: Formatting, strict affected all-target/all-feature Clippy, 9 active runner tests, 50 active runtime tests, 56 active tools tests, the installed Chromium runner pass/failure fixture, documentation, packaging, and diff hygiene pass locally. The ignored real-browser fixture requires an explicit `MCG_BROWSER_EXECUTABLE`; with installed Playwright Chromium it passes.
+- Result: Schema 8 is implemented and locally green. Exact Ubuntu and Win11 qualification has not yet run, so cross-platform acceptance must not be claimed yet. No GitHub-hosted compute ran.
+- Follow-up: Commit and push the functional checkpoint to the private branch, exact-qualify screenshot pass/failure on Ubuntu and Win11 with zero host hits/residual candidate processes, retain hash-bound evidence, then continue representative installed-package M9/M10 UAT.
+
 ### 2026-08-20 - Schema-7 browser workflow verification passes Ubuntu and Win11
 
 - Context: Schema 6 could prove same-sandbox page rendering, CSS-element presence, and the shared accessibility baseline, but automatic shadow still treated bounded `BrowserWorkflow` objectives as unsupported.
@@ -56,8 +64,8 @@ Durable project context lives here. Update this file whenever information should
 ### 2026-08-19 - Disposable VM authority reconfirmed
 
 - Context: The owner reconfirmed that Win11-VM, Ubuntu, and macOS-VM are disposable qualification environments and does not want routine approval pauses to delay completion.
-- Decision: Within those VMs, proceed without additional owner prompts for dependency/tool installation, administrator configuration, process control, builds, tests, browser lanes, trust-store changes, restarts, cleanup, and removal of temporary qualification artifacts. This standing authorization does not extend to non-VM owner accounts, third-party services, production infrastructure, or secrets; platform-enforced confirmations may still require an owner action when automation cannot satisfy them.
-- Result: Future agents should not ask for discretionary permission for in-scope VM work. Do not retain VM credentials in repository memory.
+- Decision: Within those VMs, proceed immediately without additional owner prompts for dependency/tool installation, administrator configuration, process control, builds, tests, browser lanes, trust-store changes, restarts, cleanup, and removal of temporary qualification artifacts. Do not pause merely because a browser or operating-system flow presents a confirmation: complete any available confirmation UI directly or use another safe in-scope execution path. This standing authorization does not extend to non-VM owner accounts, third-party services, production infrastructure, or secrets.
+- Result: Future agents must not ask for discretionary permission or wait for the owner for in-scope VM work. Contact the owner only when an identity-bound external account step or an automation-inaccessible security boundary makes progress physically impossible, and continue independent work in the meantime. Do not retain VM credentials in repository memory.
 
 ### 2026-08-19 - Exact-v34 changed-version rejection passes real installed UAT
 

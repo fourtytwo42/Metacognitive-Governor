@@ -370,7 +370,7 @@ Windows tests prove the generated
 Windows Sandbox profile disables network/device/redirection surfaces, enables
 Protected Client, XML-escapes host paths, exposes exactly two mandatory read-only
 host mappings plus exactly one optional bounded Node toolchain mapping, runs the
-package-local helper as `System`, preserves the schema-7 JSON argument and typed
+package-local helper as `System`, preserves the schema-8 JSON argument and typed
 loopback/browser-probe
 boundary behind the CLI's single compile-time command value, rejects canonical
 path-prefix confusion, and produces no evidence or workspace effect when the CLI
@@ -385,7 +385,7 @@ Live Win11 qualification on the current Store-delivered Sandbox CLI proves
 official-package discovery, serialized start/exec/probe/stop compatibility,
 real nested runner execution, ephemeral command writes, and no persistence
 through the read-only host mapping. An optional browser distribution is
-independently bounded and read-only, and the schema-7 runner retains the static
+independently bounded and read-only, and the schema-8 runner retains the static
 C-runtime contract while embedding the DevTools client. Windows Sandbox may satisfy a mapped-folder
 write through its disposable view, so the gate measures host non-persistence
 rather than assuming the child must fail. The same owner-controlled gate proves
@@ -409,12 +409,13 @@ network-unshared bubblewrap namespace while an identically addressed host
 listener remains unreachable; it
 requires exact-status success, wrong-status failure, zero host hits, and service
 cleanup. The Ubuntu lane additionally loads a hydrated page through Chromium's
-DevTools protocol using the package-adjacent schema-7 runner in that same
+DevTools protocol using the package-adjacent schema-8 runner in that same
 namespace, proves hydrated-page, bounded CSS-selector, and shared-contract
-accessibility and hash-bound typed-workflow pass/failure assertions, proves
+accessibility, hash-bound typed-workflow, and digest-bound screenshot pixel-diff
+pass/failure assertions at an explicitly emulated 1280x720 viewport, proves
 the colliding host listener still receives zero requests, and leaves zero
 candidate/browser processes. The corresponding real Win11 lane uses runner
-schema 7 and must prove the same HTTP/TCP/page/element/accessibility/workflow behavior with no Sandbox
+schema 8 and must prove the same HTTP/TCP/page/element/accessibility/workflow/screenshot behavior with no Sandbox
 session left behind. Chromium is launched in new-headless mode with its random
 loopback DevTools endpoint explicitly emitted to the inherited stderr pipe so
 the System-context runner never relies on a fixed, pre-bindable debug port.

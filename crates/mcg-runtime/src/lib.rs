@@ -7464,6 +7464,7 @@ impl AppRuntime {
                         | SuccessCondition::Accessibility { .. }
                         | SuccessCondition::ElementExists { .. }
                         | SuccessCondition::BrowserWorkflow { .. }
+                        | SuccessCondition::ScreenshotMatches { .. }
                 ) {
                     let command = self
                         .baseline_shadow_service_command(candidate, receipt, baseline, condition)?;
@@ -12377,6 +12378,7 @@ async fn verify_isolated_service_condition(
             | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
             | SuccessCondition::BrowserWorkflow { .. }
+            | SuccessCondition::ScreenshotMatches { .. }
     ) {
         return (
             ConditionResult {
@@ -12533,6 +12535,7 @@ fn isolated_evaluation_regressions(
                     | SuccessCondition::Accessibility { .. }
                     | SuccessCondition::ElementExists { .. }
                     | SuccessCondition::BrowserWorkflow { .. }
+                    | SuccessCondition::ScreenshotMatches { .. }
             ) {
                 "candidate failed an isolated service objective".into()
             } else {
@@ -13651,6 +13654,7 @@ mod tests {
                     | SuccessCondition::Accessibility { .. }
                     | SuccessCondition::ElementExists { .. }
                     | SuccessCondition::BrowserWorkflow { .. }
+                    | SuccessCondition::ScreenshotMatches { .. }
             ));
             if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
                 return ShadowCommandVerification::Completed {
@@ -14984,6 +14988,31 @@ mod tests {
                 workspace.path(),
                 Some("npm run start"),
                 &workflow_condition,
+            )
+            .await;
+            assert!(supported);
+            assert_eq!(result.passed, expected_passed);
+            assert!(evidence.artifact_sha256.is_some());
+            assert!(result.detail.contains("browser"));
+        }
+
+        let screenshot_condition = SuccessCondition::ScreenshotMatches {
+            baseline: "tests/baseline.png".into(),
+            expected_baseline_sha256: "b".repeat(64),
+            url: "http://127.0.0.1:43123/visual".into(),
+            max_changed_basis_points: 100,
+            per_channel_threshold: 8,
+        };
+        for (fixture, expected_passed) in [
+            (FixtureShadowCommandResult::Pass, true),
+            (FixtureShadowCommandResult::Fail, false),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &screenshot_condition,
             )
             .await;
             assert!(supported);

@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
     path::{Component, Path},
     process::{Command, Stdio},
@@ -8,8 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chromiumoxide::{Browser, BrowserConfig, Element, Page};
+use chromiumoxide::{
+    Browser, BrowserConfig, Element, Page,
+    cdp::browser_protocol::{
+        emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat,
+    },
+    page::ScreenshotParams,
+};
 use futures_util::StreamExt;
+use image::{ImageFormat, ImageReader, Limits};
 use mcg_browser_contracts::{
     ACCESSIBILITY_AUDIT_SCRIPT, AccessibilityAudit, BrowserWorkflowDocument, BrowserWorkflowStep,
 };
@@ -17,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-const REQUEST_SCHEMA_VERSION: u16 = 7;
+const REQUEST_SCHEMA_VERSION: u16 = 8;
 const SETUP_FAILURE_EXIT_CODE: i32 = 125;
 const COMMAND_FAILURE_EXIT_CODE: i32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
@@ -31,6 +38,10 @@ const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
 const MAX_SELECTOR_BYTES: usize = 4 * 1024;
 const MAX_WORKFLOW_PATH_BYTES: usize = 4 * 1024;
 const MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
+const MAX_SCREENSHOT_PATH_BYTES: usize = 4 * 1024;
+const MAX_SCREENSHOT_BYTES: u64 = 64 * 1024 * 1024;
+const SCREENSHOT_VIEWPORT_WIDTH: u32 = 1_280;
+const SCREENSHOT_VIEWPORT_HEIGHT: u32 = 720;
 const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const MAX_RENDERED_DOM_BYTES: usize = 4 * 1024 * 1024;
 const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -76,6 +87,13 @@ enum RunnerProbe {
         name: String,
         workflow_path: String,
         expected_sha256: String,
+    },
+    ScreenshotMatches {
+        url: String,
+        baseline_path: String,
+        expected_baseline_sha256: String,
+        max_changed_basis_points: u16,
+        per_channel_threshold: u8,
     },
 }
 
@@ -195,6 +213,13 @@ fn execute_service_probe(
             browser: String,
             document: BrowserWorkflowDocument,
         },
+        ScreenshotMatches {
+            target: LoopbackHttpTarget,
+            browser: String,
+            baseline: Vec<u8>,
+            max_changed_basis_points: u16,
+            per_channel_threshold: u8,
+        },
     }
     let active = match probe {
         RunnerProbe::HttpStatus {
@@ -244,6 +269,22 @@ fn execute_service_probe(
                 document,
             }
         }
+        RunnerProbe::ScreenshotMatches {
+            url,
+            baseline_path,
+            expected_baseline_sha256,
+            max_changed_basis_points,
+            per_channel_threshold,
+        } => ActiveProbe::ScreenshotMatches {
+            target: LoopbackHttpTarget::parse(url)?,
+            browser: request
+                .browser_executable
+                .clone()
+                .ok_or("screenshot probe requires a browser")?,
+            baseline: load_bound_screenshot(workspace, baseline_path, expected_baseline_sha256)?,
+            max_changed_basis_points: *max_changed_basis_points,
+            per_channel_threshold: *per_channel_threshold,
+        },
     };
     let (service_host, port) = match &active {
         ActiveProbe::Tcp(target) => (target.service_host(), target.port()),
@@ -251,7 +292,8 @@ fn execute_service_probe(
         | ActiveProbe::PageRender { target, .. }
         | ActiveProbe::ElementExists { target, .. }
         | ActiveProbe::Accessibility { target, .. }
-        | ActiveProbe::BrowserWorkflow { target, .. } => (target.service_host(), target.port()),
+        | ActiveProbe::BrowserWorkflow { target, .. }
+        | ActiveProbe::ScreenshotMatches { target, .. } => (target.service_host(), target.port()),
     };
     let mut command = prepared_command(request, workspace)?;
     command
@@ -274,7 +316,7 @@ fn execute_service_probe(
             ActiveProbe::PageRender { target, browser } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, None, false, None)),
+                .map(|_| render_page(browser, workspace, target, None, false, None, None)),
             ActiveProbe::ElementExists {
                 target,
                 browser,
@@ -282,11 +324,21 @@ fn execute_service_probe(
             } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, Some(selector), false, None)),
+                .map(|_| {
+                    render_page(
+                        browser,
+                        workspace,
+                        target,
+                        Some(selector),
+                        false,
+                        None,
+                        None,
+                    )
+                }),
             ActiveProbe::Accessibility { target, browser } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, None, true, None)),
+                .map(|_| render_page(browser, workspace, target, None, true, None, None)),
             ActiveProbe::BrowserWorkflow {
                 target,
                 browser,
@@ -294,7 +346,41 @@ fn execute_service_probe(
             } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, None, false, Some(document))),
+                .map(|_| {
+                    render_page(
+                        browser,
+                        workspace,
+                        target,
+                        None,
+                        false,
+                        Some(document),
+                        None,
+                    )
+                }),
+            ActiveProbe::ScreenshotMatches {
+                target,
+                browser,
+                baseline,
+                max_changed_basis_points,
+                per_channel_threshold,
+            } => target
+                .request_status()
+                .filter(|status| (200..300).contains(status))
+                .map(|_| {
+                    render_page(
+                        browser,
+                        workspace,
+                        target,
+                        None,
+                        false,
+                        None,
+                        Some(ScreenshotComparison {
+                            baseline,
+                            max_changed_basis_points: *max_changed_basis_points,
+                            per_channel_threshold: *per_channel_threshold,
+                        }),
+                    )
+                }),
         };
         if let Some(passed) = passed {
             break if passed { 0 } else { COMMAND_FAILURE_EXIT_CODE };
@@ -314,6 +400,7 @@ fn execute_service_probe(
     Ok(disposition)
 }
 
+#[allow(clippy::too_many_lines)] // Keep every versioned runner-probe validation in one fail-closed boundary.
 fn validate_request(
     request: &RunnerRequest,
     enforce_sandbox_paths: bool,
@@ -384,6 +471,23 @@ fn validate_request(
                 validate_workflow_binding(name, workflow_path, expected_sha256)?;
                 if request.browser_executable.is_none() {
                     return Err("browser workflow probe requires a browser");
+                }
+            }
+            RunnerProbe::ScreenshotMatches {
+                url,
+                baseline_path,
+                expected_baseline_sha256,
+                max_changed_basis_points,
+                ..
+            } => {
+                LoopbackHttpTarget::parse(url)?;
+                validate_screenshot_binding(
+                    baseline_path,
+                    expected_baseline_sha256,
+                    *max_changed_basis_points,
+                )?;
+                if request.browser_executable.is_none() {
+                    return Err("screenshot probe requires a browser");
                 }
             }
         }
@@ -550,6 +654,76 @@ fn load_bound_workflow(
     Ok(document)
 }
 
+fn validate_screenshot_binding(
+    baseline_path: &str,
+    expected_sha256: &str,
+    max_changed_basis_points: u16,
+) -> Result<(), &'static str> {
+    let path = Path::new(baseline_path);
+    if baseline_path.is_empty()
+        || baseline_path.len() > MAX_SCREENSHOT_PATH_BYTES
+        || baseline_path.contains(['\\', ':', '\0'])
+        || baseline_path.chars().any(char::is_control)
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_)
+                    | Component::RootDir
+                    | Component::CurDir
+                    | Component::ParentDir
+            )
+        })
+        || expected_sha256.len() != 64
+        || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || max_changed_basis_points > 10_000
+    {
+        return Err("screenshot baseline binding is invalid");
+    }
+    Ok(())
+}
+
+fn load_bound_screenshot(
+    workspace: &Path,
+    baseline_path: &str,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, &'static str> {
+    validate_screenshot_binding(baseline_path, expected_sha256, 0)?;
+    let path = workspace.join(baseline_path);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| "inspect screenshot baseline")?;
+    if path_is_link_or_reparse(&path, &metadata)
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_SCREENSHOT_BYTES
+    {
+        return Err("screenshot baseline must be one bounded regular file");
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| "size")?);
+    fs::File::open(&path)
+        .map_err(|_| "open screenshot baseline")?
+        .take(MAX_SCREENSHOT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "read screenshot baseline")?;
+    if bytes.len() as u64 != metadata.len()
+        || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256)
+    {
+        return Err("screenshot baseline changed after binding");
+    }
+    decode_bounded_png(
+        &bytes,
+        SCREENSHOT_VIEWPORT_WIDTH,
+        SCREENSHOT_VIEWPORT_HEIGHT,
+    )?;
+    Ok(bytes)
+}
+
+#[derive(Clone, Copy)]
+struct ScreenshotComparison<'a> {
+    baseline: &'a [u8],
+    max_changed_basis_points: u16,
+    per_channel_threshold: u8,
+}
+
 fn render_page(
     browser: &str,
     workspace: &Path,
@@ -557,6 +731,7 @@ fn render_page(
     selector: Option<&str>,
     audit_accessibility: bool,
     workflow: Option<&BrowserWorkflowDocument>,
+    screenshot_comparison: Option<ScreenshotComparison<'_>>,
 ) -> bool {
     let profile = workspace.join(".mcg-browser-profile");
     if fs::create_dir(&profile).is_err() {
@@ -573,6 +748,7 @@ fn render_page(
                 selector,
                 audit_accessibility,
                 workflow,
+                screenshot_comparison,
             ))
         });
     let _ = fs::remove_dir_all(&profile);
@@ -587,11 +763,12 @@ async fn render_page_with_browser(
     selector: Option<&str>,
     audit_accessibility: bool,
     workflow: Option<&BrowserWorkflowDocument>,
+    screenshot_comparison: Option<ScreenshotComparison<'_>>,
 ) -> bool {
     let config = BrowserConfig::builder()
         .chrome_executable(executable)
         .user_data_dir(profile)
-        .window_size(1_280, 800)
+        .window_size(SCREENSHOT_VIEWPORT_WIDTH, SCREENSHOT_VIEWPORT_HEIGHT)
         .new_headless_mode()
         .no_sandbox()
         // Chrome launched as the Windows Sandbox System identity does not emit
@@ -619,6 +796,14 @@ async fn render_page_with_browser(
     let url = format!("http://{}{}", target.authority, target.request_target);
     let rendered = tokio::time::timeout(BROWSER_RENDER_TIMEOUT, async {
         let page = browser.new_page("about:blank").await.ok()?;
+        page.execute(SetDeviceMetricsOverrideParams::new(
+            SCREENSHOT_VIEWPORT_WIDTH,
+            SCREENSHOT_VIEWPORT_HEIGHT,
+            1.0,
+            false,
+        ))
+        .await
+        .ok()?;
         page.goto(&url).await.ok()?;
         if workflow.is_some() {
             page.evaluate(
@@ -679,12 +864,35 @@ async fn render_page_with_browser(
             .into_value()
             .ok()?;
         let bytes = page.content_bytes().await.ok()?;
+        let screenshot_matches = if let Some(comparison) = screenshot_comparison {
+            let actual = page
+                .screenshot(
+                    ScreenshotParams::builder()
+                        .format(CaptureScreenshotFormat::Png)
+                        .full_page(false)
+                        .build(),
+                )
+                .await
+                .ok()?;
+            compare_png_screenshots(
+                comparison.baseline,
+                &actual,
+                SCREENSHOT_VIEWPORT_WIDTH,
+                SCREENSHOT_VIEWPORT_HEIGHT,
+                comparison.max_changed_basis_points,
+                comparison.per_channel_threshold,
+            )
+            .ok()?
+        } else {
+            true
+        };
         (matches!(state.ready_state.as_str(), "interactive" | "complete")
             && state.body_present
             && state.width > 0
             && state.height > 0
             && bytes.len() <= MAX_RENDERED_DOM_BYTES
-            && rendered_dom_is_valid(&bytes))
+            && rendered_dom_is_valid(&bytes)
+            && screenshot_matches)
         .then_some(())
     })
     .await
@@ -693,6 +901,57 @@ async fn render_page_with_browser(
     let _ = tokio::time::timeout(BROWSER_SHUTDOWN_TIMEOUT, browser.wait()).await;
     handler_task.abort();
     rendered
+}
+
+fn compare_png_screenshots(
+    baseline: &[u8],
+    actual: &[u8],
+    max_width: u32,
+    max_height: u32,
+    max_changed_basis_points: u16,
+    per_channel_threshold: u8,
+) -> Result<bool, &'static str> {
+    let baseline = decode_bounded_png(baseline, max_width, max_height)?;
+    let actual = decode_bounded_png(actual, max_width, max_height)?;
+    if baseline.dimensions() != actual.dimensions() {
+        return Ok(false);
+    }
+    let total_pixels = u64::from(baseline.width()) * u64::from(baseline.height());
+    let changed_pixels = baseline
+        .pixels()
+        .zip(actual.pixels())
+        .filter(|(left, right)| {
+            left.0
+                .iter()
+                .zip(right.0.iter())
+                .any(|(left, right)| left.abs_diff(*right) > per_channel_threshold)
+        })
+        .count();
+    let changed_pixels = u64::try_from(changed_pixels).map_err(|_| "pixel count overflow")?;
+    Ok(total_pixels > 0
+        && changed_pixels.saturating_mul(10_000)
+            <= u64::from(max_changed_basis_points).saturating_mul(total_pixels))
+}
+
+fn decode_bounded_png(
+    bytes: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> Result<image::RgbaImage, &'static str> {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(max_width);
+    limits.max_image_height = Some(max_height);
+    limits.max_alloc = Some(
+        u64::from(max_width)
+            .saturating_mul(u64::from(max_height))
+            .saturating_mul(8),
+    );
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Png);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map(image::DynamicImage::into_rgba8)
+        .map_err(|_| "decode PNG")
 }
 
 async fn current_browser_url(page: &Page) -> Result<Url, ()> {
@@ -1395,6 +1654,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One contract table covers every browser probe variant.
     fn browser_contract_requires_exact_runtime_hydrated_body_and_bounded_selector() {
         assert!(rendered_dom_is_valid(
             b"<!doctype html><html><body><main>ready</main></body></html>"
@@ -1477,6 +1737,31 @@ mod tests {
             expected_sha256: "not-a-digest".into(),
         });
         assert!(validate_request(&request, true).is_err());
+
+        request.probe = Some(RunnerProbe::ScreenshotMatches {
+            url: "http://127.0.0.1:8080/visual".into(),
+            baseline_path: "tests/baseline.png".into(),
+            expected_baseline_sha256: "a".repeat(64),
+            max_changed_basis_points: 100,
+            per_channel_threshold: 8,
+        });
+        assert!(validate_request(&request, true).is_ok());
+        request.probe = Some(RunnerProbe::ScreenshotMatches {
+            url: "http://127.0.0.1:8080/visual".into(),
+            baseline_path: "../escape.png".into(),
+            expected_baseline_sha256: "a".repeat(64),
+            max_changed_basis_points: 100,
+            per_channel_threshold: 8,
+        });
+        assert!(validate_request(&request, true).is_err());
+        request.probe = Some(RunnerProbe::ScreenshotMatches {
+            url: "http://127.0.0.1:8080/visual".into(),
+            baseline_path: "tests/baseline.png".into(),
+            expected_baseline_sha256: "a".repeat(64),
+            max_changed_basis_points: 10_001,
+            per_channel_threshold: 8,
+        });
+        assert!(validate_request(&request, true).is_err());
     }
 
     #[test]
@@ -1524,6 +1809,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn screenshot_binding_revalidates_png_digest_and_pixel_tolerances() {
+        fn png(color: [u8; 4]) -> Vec<u8> {
+            let image = image::RgbaImage::from_pixel(4, 3, image::Rgba(color));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+                .expect("encode PNG");
+            bytes
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::create_dir(workspace.path().join("tests")).expect("baseline directory");
+        let baseline = png([20, 40, 60, 255]);
+        let digest = format!("{:x}", Sha256::digest(&baseline));
+        fs::write(workspace.path().join("tests/baseline.png"), &baseline).expect("baseline file");
+        assert_eq!(
+            load_bound_screenshot(workspace.path(), "tests/baseline.png", &digest)
+                .expect("bound baseline"),
+            baseline
+        );
+        assert!(
+            load_bound_screenshot(workspace.path(), "tests/baseline.png", &"0".repeat(64)).is_err()
+        );
+        assert!(compare_png_screenshots(&baseline, &baseline, 4, 3, 0, 0).expect("exact diff"));
+        let noisy = png([24, 40, 60, 255]);
+        assert!(compare_png_screenshots(&baseline, &noisy, 4, 3, 0, 8).expect("ignored noise"));
+        assert!(!compare_png_screenshots(&baseline, &noisy, 4, 3, 0, 0).expect("strict diff"));
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore = "requires MCG_BROWSER_EXECUTABLE and a real local Chromium runtime"]
@@ -1551,6 +1866,8 @@ while ($true) {{
   while (($line = $reader.ReadLine()) -ne '') {{ if ($null -eq $line) {{ break }} }}
   if ($requestLine -like 'GET /inaccessible *') {{
     $body = '<!doctype html><html><body><button></button></body></html>'
+  }} elseif ($requestLine -like 'GET /visual *') {{
+    $body = '<!doctype html><html><head><style>html,body{{margin:0;width:100%;height:100%;background:rgb(12,34,56)}}</style></head><body></body></html>'
   }} else {{
     $body = '<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"><input id="name" aria-label="Name"><button id="go">Go</button><p id="result">waiting</p></main><script>document.getElementById("go").addEventListener("click",()=>{{document.getElementById("result").textContent="Hello "+document.getElementById("name").value;}});</script></body></html>'
   }}
@@ -1690,6 +2007,48 @@ while ($true) {{
             ..request.clone()
         };
         assert!(execute_request(&workflow_mismatch_request, false).is_err());
+
+        let baseline = image::RgbaImage::from_pixel(
+            SCREENSHOT_VIEWPORT_WIDTH,
+            SCREENSHOT_VIEWPORT_HEIGHT,
+            image::Rgba([12, 34, 56, 255]),
+        );
+        let mut baseline_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(baseline)
+            .write_to(&mut Cursor::new(&mut baseline_bytes), ImageFormat::Png)
+            .expect("encode baseline");
+        let baseline_digest = format!("{:x}", Sha256::digest(&baseline_bytes));
+        fs::write(source.path().join("baseline.png"), &baseline_bytes).expect("baseline file");
+        let screenshot_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("screenshot-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::ScreenshotMatches {
+                url: format!("http://127.0.0.1:{port}/visual"),
+                baseline_path: "baseline.png".into(),
+                expected_baseline_sha256: baseline_digest,
+                max_changed_basis_points: 0,
+                per_channel_threshold: 0,
+            }),
+            ..request.clone()
+        };
+        assert_eq!(execute_request(&screenshot_request, false), Ok(0));
+        let mut changed_request = screenshot_request;
+        changed_request.workspace_root = destination_parent
+            .path()
+            .join("screenshot-failure-workspace")
+            .to_string_lossy()
+            .into_owned();
+        changed_request.probe = Some(RunnerProbe::ScreenshotMatches {
+            url: format!("http://127.0.0.1:{port}/visual"),
+            baseline_path: "baseline.png".into(),
+            expected_baseline_sha256: "0".repeat(64),
+            max_changed_basis_points: 0,
+            per_channel_threshold: 0,
+        });
+        assert!(execute_request(&changed_request, false).is_err());
 
         let inaccessible_request = RunnerRequest {
             workspace_root: destination_parent

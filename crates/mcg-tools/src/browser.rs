@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use chromiumoxide::{
     Browser, BrowserConfig, Element, Page,
     cdp::browser_protocol::{
+        emulation::SetDeviceMetricsOverrideParams,
         fetch::{ContinueRequestParams, EventRequestPaused, FailRequestParams},
         network::ErrorReason,
         page::CaptureScreenshotFormat,
@@ -189,6 +190,14 @@ impl BrowserExecutor {
                 .await
                 .map_err(|error| ToolError::Execution(format!("open browser page: {error}")))?,
         );
+        page.execute(SetDeviceMetricsOverrideParams::new(
+            viewport_width,
+            viewport_height,
+            1.0,
+            false,
+        ))
+        .await
+        .map_err(|error| ToolError::Execution(format!("set browser viewport: {error}")))?;
         let mut request_events =
             page.event_listener::<EventRequestPaused>()
                 .await
@@ -490,6 +499,14 @@ impl BrowserExecutor {
                 .await
                 .map_err(|error| ToolError::Execution(format!("open browser page: {error}")))?,
         );
+        page.execute(SetDeviceMetricsOverrideParams::new(
+            parameters.viewport_width,
+            parameters.viewport_height,
+            1.0,
+            false,
+        ))
+        .await
+        .map_err(|error| ToolError::Execution(format!("set browser viewport: {error}")))?;
         let mut request_events =
             page.event_listener::<EventRequestPaused>()
                 .await
