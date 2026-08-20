@@ -55,6 +55,8 @@ domain_id!(LeaseId);
 domain_id!(ArtifactId);
 domain_id!(ManagedProcessId);
 domain_id!(ProjectSnapshotId);
+domain_id!(ReviewedTopologyPlanId);
+domain_id!(ReviewedTopologyStepId);
 domain_id!(MemoryClaimId);
 domain_id!(MemoryTransferId);
 domain_id!(OrganizationId);

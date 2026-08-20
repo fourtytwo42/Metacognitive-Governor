@@ -143,6 +143,16 @@ closed without presenting partial executable-looking stages. The plan is visible
 in desktop simple/advanced modes and through `mcg project plan PROJECT_ID`, REST,
 MCP, and Tauri.
 
+Running a discovered command requires a separate owner review. In the desktop,
+choose an exact discovered command and stage, record why it should run, select
+**Review this plan**, and then **Run reviewed plan**. The immutable review pins
+the project fingerprint, topology digest, and structured executable arguments;
+fresh discovery and the ordinary policy/approval broker revalidate those pins
+before every step. Advanced CLI users can create the same contract with
+`mcg project reviewed PROJECT_ID create REQUEST.json`, then use `list`, `get`,
+`run`, or `cancel`. A crash after a process claim is reported as uncertain and is
+never automatically retried.
+
 Create a routine portable, secret-free backup from the desktop Settings workspace
 or with `mcg backup create`. Advanced mode or `mcg backup create
 --include-secrets` can instead include the exact provider/MCP credential catalog

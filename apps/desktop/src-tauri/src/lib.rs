@@ -18,7 +18,8 @@ use mcg_api::{
     OrganizationMutationResponse, PlatformSessionHistoryResponse, PlatformSessionListResponse,
     PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse,
     ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
-    ResolveApprovalRequest, RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    ResolveApprovalRequest, ReviewedTopologyPlan, ReviewedTopologyPlanListResponse,
+    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
     SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
     SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
     SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
@@ -44,9 +45,10 @@ use mcg_runtime::{
     MemoryClaimMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
     ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
-    RunReplayReport, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
-    SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
-    SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
+    ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
+    ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
+    SiteMutation, SshHostMutation, SshOperationMutation, SshWorkflowCreateRequest,
+    SshWorkflowMutation, SupervisionMutation,
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
@@ -1973,6 +1975,76 @@ async fn project_topology_plan(project_id: String) -> Result<ProjectTopologyPlan
     .await
 }
 
+#[tauri::command]
+async fn list_reviewed_topology_plans(
+    project_id: String,
+) -> Result<ReviewedTopologyPlanListResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/reviewed-topology-plans"),
+        "Reviewed topology plans",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_reviewed_topology_plan(
+    project_id: String,
+    request: ReviewedTopologyPlanCreateRequest,
+) -> Result<ReviewedTopologyPlanMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/reviewed-topology-plans"),
+        &request,
+        "Reviewed topology plan creation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_reviewed_topology_plan(
+    project_id: String,
+    plan_id: String,
+) -> Result<ReviewedTopologyPlan, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let plan_id = canonical_uuid(&plan_id, "Reviewed plan identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/reviewed-topology-plans/{plan_id}"),
+        "Reviewed topology plan",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn run_reviewed_topology_plan(
+    project_id: String,
+    plan_id: String,
+) -> Result<ReviewedTopologyPlanMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let plan_id = canonical_uuid(&plan_id, "Reviewed plan identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/reviewed-topology-plans/{plan_id}/run"),
+        &serde_json::json!({}),
+        "Reviewed topology plan execution",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_reviewed_topology_plan(
+    project_id: String,
+    plan_id: String,
+) -> Result<ReviewedTopologyPlanMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let plan_id = canonical_uuid(&plan_id, "Reviewed plan identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/reviewed-topology-plans/{plan_id}/cancel"),
+        &serde_json::json!({}),
+        "Reviewed topology plan cancellation",
+    )
+    .await
+}
+
 fn canonical_uuid(value: &str, label: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|_| format!("{label} must be a UUID"))
 }
@@ -2256,6 +2328,11 @@ pub fn run() {
             discover_project,
             list_projects,
             project_topology_plan,
+            list_reviewed_topology_plans,
+            create_reviewed_topology_plan,
+            get_reviewed_topology_plan,
+            run_reviewed_topology_plan,
+            cancel_reviewed_topology_plan,
             list_project_memory,
             create_project_memory,
             correct_project_memory,

@@ -11,6 +11,7 @@ import {
   createBackup,
   createEncryptedBackup,
   createProjectMemory,
+  createReviewedTopologyPlan,
   createOrganization,
   createSiteMonitor,
   createSshWorkflow,
@@ -48,6 +49,7 @@ import {
   listProjects,
   listProjectMemory,
   listProjectMemoryTransfers,
+  listReviewedTopologyPlans,
   projectTopologyPlan,
   listPlatformSessions,
   listSites,
@@ -107,6 +109,7 @@ import {
   pickProjectDirectory,
   type ProjectModel,
   type ProjectTopologyPlan,
+  type ReviewedTopologyPlan,
   type MemoryClaim,
   type MemoryClaimHistoryResponse,
   type MemoryLifecycleAction,
@@ -141,7 +144,9 @@ import {
   registerSshHost,
   runSshOperation,
   runSshWorkflow,
+  runReviewedTopologyPlan,
   cancelSshWorkflow,
+  cancelReviewedTopologyPlan,
   runDiagnostics,
   checkForUpdate,
   installUpdate,
@@ -448,6 +453,15 @@ export function App() {
   const [projects, setProjects] = useState<ProjectModel[]>([]);
   const [topologyPlan, setTopologyPlan] = useState<ProjectTopologyPlan | null>(null);
   const [topologyPlanError, setTopologyPlanError] = useState<string | null>(null);
+  const [reviewedTopologyPlans, setReviewedTopologyPlans] = useState<ReviewedTopologyPlan[]>([]);
+  const [reviewedTopologyPlanId, setReviewedTopologyPlanId] = useState(() => crypto.randomUUID());
+  const [reviewedTopologyStepId, setReviewedTopologyStepId] = useState(() => crypto.randomUUID());
+  const [reviewedTopologyCommand, setReviewedTopologyCommand] = useState("0");
+  const [reviewedTopologyStage, setReviewedTopologyStage] = useState("0");
+  const [reviewedTopologyReason, setReviewedTopologyReason] = useState("");
+  const [reviewedTopologyApprovals, setReviewedTopologyApprovals] = useState<Record<string, string | undefined>>({});
+  const [reviewedTopologyBusy, setReviewedTopologyBusy] = useState(false);
+  const [reviewedTopologyError, setReviewedTopologyError] = useState<string | null>(null);
   const [memoryClaims, setMemoryClaims] = useState<MemoryClaim[]>([]);
   const [memoryNamespace, setMemoryNamespace] = useState("project");
   const [memoryKey, setMemoryKey] = useState("");
@@ -725,6 +739,8 @@ export function App() {
     let active = true;
     setMemoryError(null);
     setTopologyPlanError(null);
+    setReviewedTopologyError(null);
+    setReviewedTopologyApprovals({});
     setMemoryHistory({});
     setMemoryTransferSource(null);
     setMemoryTransferPreview(null);
@@ -736,26 +752,34 @@ export function App() {
       setMemoryTransfers([]);
       setManagedMemory("");
       setTopologyPlan(null);
+      setReviewedTopologyPlans([]);
       return () => { active = false; };
     }
     setTopologyPlan(null);
     Promise.all([
       listProjectMemory(selectedProject.project_id),
       loadManagedProjectMemory(selectedProject.project_id),
-      listProjectMemoryTransfers(selectedProject.project_id)
+      listProjectMemoryTransfers(selectedProject.project_id),
+      listReviewedTopologyPlans(selectedProject.project_id)
     ])
-      .then(([claims, managed, transfers]) => {
+      .then(([claims, managed, transfers, reviewedPlans]) => {
         if (active) {
           setMemoryClaims(claims.claims);
           setManagedMemory(managed.markdown);
           setMemoryTransfers(transfers.transfers);
+          setReviewedTopologyPlans(reviewedPlans.plans);
         }
       })
       .catch((error) => {
         if (active) setMemoryError(errorMessage(error));
       });
     projectTopologyPlan(selectedProject.project_id)
-      .then((plan) => { if (active) setTopologyPlan(plan); })
+      .then((plan) => {
+        if (active) {
+          setTopologyPlan(plan);
+          setReviewedTopologyStage(String(plan.stages.at(-1)?.index ?? 0));
+        }
+      })
       .catch((error) => { if (active) setTopologyPlanError(errorMessage(error)); });
     return () => { active = false; };
   }, [selectedProject]);
@@ -1620,6 +1644,110 @@ export function App() {
       setProjectError(errorMessage(error));
     } finally {
       setTaskBusy(false);
+    }
+  }
+
+  function replaceReviewedTopologyPlan(plan: ReviewedTopologyPlan) {
+    setReviewedTopologyPlans((current) => [
+      plan,
+      ...current.filter((candidate) => candidate.id !== plan.id)
+    ]);
+  }
+
+  async function reviewTopologyExecution() {
+    if (!selectedProject || !topologyPlan || topologyPlan.status !== "ready") return;
+    const command = selectedProject.commands[Number(reviewedTopologyCommand)];
+    const stageIndex = Number(reviewedTopologyStage);
+    if (!command || !topologyPlan.stages.some((stage) => stage.index === stageIndex)) {
+      setReviewedTopologyError("Choose one discovered command and one available topology stage.");
+      return;
+    }
+    if (!reviewedTopologyReason.trim()) {
+      setReviewedTopologyError("Explain why this command should run for this reviewed plan.");
+      return;
+    }
+    setReviewedTopologyBusy(true);
+    setReviewedTopologyError(null);
+    try {
+      const projectName = selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1) ?? selectedProject.root;
+      const mutation = await createReviewedTopologyPlan(selectedProject.project_id, {
+        id: reviewedTopologyPlanId,
+        project_snapshot_id: topologyPlan.project_snapshot_id,
+        topology_sha256: topologyPlan.sha256,
+        display_name: `${command.name} · ${projectName}`,
+        reason: reviewedTopologyReason.trim(),
+        steps: [{
+          id: reviewedTopologyStepId,
+          stage_index: stageIndex,
+          name: `Run ${command.name}`,
+          command_name: command.name,
+          command: command.command,
+          timeout_seconds: 1800
+        }]
+      });
+      replaceReviewedTopologyPlan(mutation.plan);
+      setReviewedTopologyPlanId(crypto.randomUUID());
+      setReviewedTopologyStepId(crypto.randomUUID());
+      setReviewedTopologyReason("");
+    } catch (error) {
+      setReviewedTopologyError(errorMessage(error));
+    } finally {
+      setReviewedTopologyBusy(false);
+    }
+  }
+
+  async function executeReviewedTopologyPlan(planId: string) {
+    if (!selectedProject) return;
+    setReviewedTopologyBusy(true);
+    setReviewedTopologyError(null);
+    try {
+      const mutation = await runReviewedTopologyPlan(selectedProject.project_id, planId);
+      replaceReviewedTopologyPlan(mutation.plan);
+      setReviewedTopologyApprovals((current) => ({
+        ...current,
+        [planId]: mutation.approval_id ?? undefined
+      }));
+      if (mutation.approval_id) {
+        const response = await listApprovals().catch(() => null);
+        if (response) setApprovals(response.approvals);
+      }
+    } catch (error) {
+      setReviewedTopologyError(errorMessage(error));
+    } finally {
+      setReviewedTopologyBusy(false);
+    }
+  }
+
+  async function approveReviewedTopologyPlan(planId: string) {
+    const approvalId = reviewedTopologyApprovals[planId];
+    if (!approvalId) return;
+    setReviewedTopologyBusy(true);
+    setReviewedTopologyError(null);
+    try {
+      await approveRequest(approvalId);
+      setApprovals((current) => current.filter((approval) => approval.id !== approvalId));
+      setReviewedTopologyApprovals((current) => ({ ...current, [planId]: undefined }));
+    } catch (error) {
+      setReviewedTopologyError(errorMessage(error));
+      setReviewedTopologyBusy(false);
+      return;
+    }
+    setReviewedTopologyBusy(false);
+    await executeReviewedTopologyPlan(planId);
+  }
+
+  async function stopReviewedTopologyPlan(planId: string) {
+    if (!selectedProject) return;
+    setReviewedTopologyBusy(true);
+    setReviewedTopologyError(null);
+    try {
+      const mutation = await cancelReviewedTopologyPlan(selectedProject.project_id, planId);
+      replaceReviewedTopologyPlan(mutation.plan);
+      setReviewedTopologyApprovals((current) => ({ ...current, [planId]: undefined }));
+    } catch (error) {
+      setReviewedTopologyError(errorMessage(error));
+    } finally {
+      setReviewedTopologyBusy(false);
     }
   }
 
@@ -2653,6 +2781,42 @@ export function App() {
               {topologyPlanError ? <p className="error-message" role="alert">The topology plan could not be loaded: {topologyPlanError}</p> : !topologyPlan ? <p className="empty-state">Loading the current topology plan…</p> : topologyPlan.status === "empty" ? <p className="empty-state">No explicit deployment dependencies were discovered.</p> : topologyPlan.status === "blocked_by_cycle" ? <div className="error-message" role="alert">Dependency cycle detected. MCG will not present partial execution stages.{advanced && topologyPlan.unresolved_nodes.length > 0 && <small>{topologyPlan.unresolved_nodes.map((node) => node.label).join(", ")}</small>}</div> : <ol className="topology-plan" aria-label="Project topology plan">
                 {topologyPlan.stages.map((stage) => <li key={stage.index}><strong>Stage {stage.index + 1}</strong><ul>{stage.nodes.map((node) => <li key={node.id}>{node.label}{advanced && <small>{node.kind} · {node.source}</small>}</li>)}</ul></li>)}
               </ol>}
+              <div className="section-heading compact-heading">
+                <div>
+                  <h3>Reviewed execution</h3>
+                  <p className="muted">Review an exact discovered command first. Running it later still follows your autonomy and approval settings.</p>
+                </div>
+                <span className="count-badge">{reviewedTopologyPlans.length} plans</span>
+              </div>
+              {topologyPlan?.status === "ready" && selectedProject.commands.length > 0 ? <div className="memory-composer" aria-label="Review topology execution plan">
+                <label>Discovered command<select aria-label="Reviewed topology command" value={reviewedTopologyCommand} onChange={(event) => setReviewedTopologyCommand(event.target.value)}>
+                  {selectedProject.commands.map((command, index) => <option value={String(index)} key={`${command.name}-${command.command}-${index}`}>{command.name} · {command.command}</option>)}
+                </select></label>
+                <label>Run after stage<select aria-label="Reviewed topology stage" value={reviewedTopologyStage} onChange={(event) => setReviewedTopologyStage(event.target.value)}>
+                  {topologyPlan.stages.map((stage) => <option value={String(stage.index)} key={stage.index}>Stage {stage.index + 1} · {stage.nodes.map((node) => node.label).join(", ")}</option>)}
+                </select></label>
+                <label>Why should this run?<textarea aria-label="Reviewed topology reason" value={reviewedTopologyReason} onChange={(event) => setReviewedTopologyReason(event.target.value)} maxLength={1024} placeholder="Verify the project after its declared dependencies are ready." /></label>
+                {advanced && <><small>Snapshot <code>{topologyPlan.project_snapshot_id}</code></small><small>Topology SHA-256 <code>{topologyPlan.sha256}</code></small><small>Retry identity <code>{reviewedTopologyPlanId}</code></small></>}
+                <button className="primary" type="button" disabled={reviewedTopologyBusy || !reviewedTopologyReason.trim()} onClick={reviewTopologyExecution}>{reviewedTopologyBusy ? "Working…" : "Review this plan"}</button>
+              </div> : <p className="empty-state">A ready explicit topology and a manifest-discovered command are required before MCG can create an execution plan.</p>}
+              {reviewedTopologyError && <p className="error-message" role="alert">{reviewedTopologyError}</p>}
+              {reviewedTopologyPlans.length > 0 && <div className="memory-list" aria-label="Reviewed topology plans">
+                {reviewedTopologyPlans.map((plan) => <article className="memory-card reviewed-topology-card" key={plan.id}>
+                  <div>
+                    <strong>{plan.display_name}</strong>
+                    <span className={`task-state state-${plan.state}`}>{plan.state}</span>
+                    <p>{plan.reason}</p>
+                    <small>{plan.steps.length} command{plan.steps.length === 1 ? "" : "s"} · reviewed {new Date(plan.created_at).toLocaleString()}</small>
+                    {plan.steps.map((step) => <small key={step.id}><strong>{step.command}</strong> · stage {step.stage_index + 1} · {step.state}{step.detail ? ` · ${step.detail}` : ""}</small>)}
+                    {advanced && <><code>{plan.id}</code><small>Definition SHA-256 <code>{plan.definition_hash}</code></small><small>Snapshot <code>{plan.project_snapshot_id}</code> · topology <code>{plan.topology_sha256}</code></small>{plan.steps.flatMap((step) => step.log_artifact_sha256).map((digest) => <small key={digest}>Log artifact <code>{digest}</code></small>)}</>}
+                  </div>
+                  <div className="memory-actions">
+                    {(plan.state === "reviewed" || (plan.state === "waiting" && !reviewedTopologyApprovals[plan.id])) && <button className="primary" type="button" disabled={reviewedTopologyBusy} onClick={() => executeReviewedTopologyPlan(plan.id)}>{plan.state === "waiting" ? "Continue approval" : "Run reviewed plan"}</button>}
+                    {plan.state === "waiting" && reviewedTopologyApprovals[plan.id] && <button className="primary" type="button" disabled={reviewedTopologyBusy} onClick={() => approveReviewedTopologyPlan(plan.id)}>Approve and run</button>}
+                    {(["reviewed", "waiting"] as string[]).includes(plan.state) && <button className="secondary" type="button" disabled={reviewedTopologyBusy} onClick={() => stopReviewedTopologyPlan(plan.id)}>Cancel</button>}
+                  </div>
+                </article>)}
+              </div>}
               <div className="section-heading compact-heading">
                 <div>
                   <h3>What MCG remembers</h3>

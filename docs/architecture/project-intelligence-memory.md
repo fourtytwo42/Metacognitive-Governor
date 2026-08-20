@@ -126,11 +126,34 @@ relationships are coalesced. If the selected graph contains a cycle, the result
 is `blocked_by_cycle`, contains no partial stages, and retains the unresolved
 node identities for advanced diagnosis. An empty explicit dependency surface is
 reported as `empty`, not as a guessed plan. Results bind both the durable project
-identity and exact immutable snapshot identity.
+identity and exact immutable snapshot identity. Schema 2 also seals the
+canonical plan with a SHA-256 digest.
 
-This contract does not execute deployments or grant tool authority. A future
-execution workflow must separately pin a plan, request normal policy authority,
-and retain durable evidence rather than treating this read-only view as consent.
+This contract does not execute deployments or grant tool authority.
+
+## Separately reviewed topology execution
+
+Execution begins only when an owner creates a distinct immutable reviewed plan.
+The review pins the exact project snapshot and fingerprint, canonical topology
+digest, selected stage, and a structured executable/argument vector derived from
+an admitted manifest command. It also requires a caller-owned UUID, display name,
+and printable owner reason. Changed UUID reuse conflicts rather than silently
+changing authority.
+
+SQLite schema 33 stores the reviewed definition and step state with its ordinary
+state-change event in one transaction. Before review, before execution, and again
+before every step, the runtime performs fresh read-only discovery from disk and
+requires the stored fingerprint, semantic topology, and structured command to
+still match. A manifest changed without an explicit project refresh therefore
+fails closed.
+
+Every command uses the normal tool broker, autonomy policy, approval records,
+execution leases, audit, redaction, project-root confinement, timeout, and
+content-addressed log artifacts. The step is durably marked `executing` before
+the process is spawned. Terminal retries are observation-only. After a daemon
+crash, a claimed step becomes `uncertain`, its dependents are skipped, and no
+process is recreated automatically; a plan that was running but had not claimed
+a process returns to `waiting` and can be deliberately resumed.
 
 ## Structured and managed memory
 
@@ -187,6 +210,7 @@ The authenticated loopback API and CLI support:
 
 - project add/list/get/refresh/history;
 - stable read-only topology-plan inspection;
+- reviewed topology-plan create/list/get/run/cancel with exact retry identity;
 - target-aware bounded context assembly;
 - memory add/list/correct/history;
 - reinforcement, decay, and retraction;
@@ -229,6 +253,12 @@ cycle refusal with zero partial stages. Authenticated REST and MCP tests bind th
 result to the exact snapshot; CLI parsing, Tauri compilation, component tests,
 and Playwright cover the remaining consumer interfaces and simple/advanced
 provenance disclosure.
+
+Reviewed-execution fixtures prove exact-definition replay and changed-identity
+conflict, fresh on-disk manifest invalidation, normal Guided approval, one real
+structured command side effect, terminal observation-only replay, atomic
+pre-spawn claims, daemon-restart uncertainty with zero automatic process replay,
+and shared REST/MCP/CLI/Tauri/desktop contracts.
 
 Desktop component and Playwright journeys additionally prove that a consumer
 can record a plain-language fact in simple mode, reveal its provenance and

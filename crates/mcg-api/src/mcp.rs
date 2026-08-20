@@ -21,15 +21,16 @@ use mcg_agents::{
 use mcg_domain::{
     ExperimentId, MemoryClaimId, MemoryTransferId, OrganizationId, OrganizationImportId,
     OrganizationRevisionId, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInvocationId, ProjectId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState,
-    SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId, SshOperationKind,
-    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    PluginInvocationId, ProjectId, ProjectSnapshotId, ReviewedTopologyPlanId, RiskLevel, RunId,
+    ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
+    SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, SshWorkflowId, TaskBudget,
+    TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
-    AgentDispatchSpec, PlatformSessionRequest, SiteMonitorRequest, SiteRegistrationRequest,
-    SiteUpdateRequest, SshHostRegistrationRequest, SshWorkflowCreateRequest,
-    SshWorkflowStepRequest,
+    AgentDispatchSpec, PlatformSessionRequest, ReviewedTopologyPlanCreateRequest,
+    ReviewedTopologyStepRequest, SiteMonitorRequest, SiteRegistrationRequest, SiteUpdateRequest,
+    SshHostRegistrationRequest, SshWorkflowCreateRequest, SshWorkflowStepRequest,
 };
 use mcg_tools::PersistentBrowserMode;
 use serde::Deserialize;
@@ -770,6 +771,62 @@ fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             },
             "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_reviewed_topology_plans",
+            "title": "Inspect Reviewed MCG Topology Plans",
+            "description": "Read separately reviewed, snapshot-pinned project execution plans and their durable command evidence. This query never executes a command.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "plan_id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["project_id"],
+                "additionalProperties": false
+            },
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_reviewed_topology_plan_mutate",
+            "title": "Review or Run an MCG Topology Plan",
+            "description": "Create, run, or cancel a caller-identified plan pinned to the exact current snapshot, canonical topology digest, and manifest-discovered structured commands. Execution still passes through ordinary policy and approval controls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "run", "cancel"]},
+                    "project_id": {"type": "string", "format": "uuid"},
+                    "plan_id": {"type": "string", "format": "uuid"},
+                    "project_snapshot_id": {"type": "string", "format": "uuid"},
+                    "topology_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    "steps": {
+                        "type": "array", "minItems": 1, "maxItems": 128,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "format": "uuid"},
+                                "stage_index": {"type": "integer", "minimum": 0, "maximum": 65535},
+                                "name": {"type": "string", "minLength": 1, "maxLength": 160},
+                                "command_name": {"type": "string", "minLength": 1},
+                                "command": {"type": "string", "minLength": 1},
+                                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 7200, "default": 1800}
+                            },
+                            "required": ["id", "stage_index", "name", "command_name", "command"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["action", "project_id", "plan_id"],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
         }),
         json!({
             "name": "mcg_query_project",
@@ -1610,6 +1667,10 @@ async fn call_tool(
         "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
         "mcg_project_topology_plan" => project_topology_plan(state, &arguments),
+        "mcg_reviewed_topology_plans" => reviewed_topology_plans(state, &arguments),
+        "mcg_reviewed_topology_plan_mutate" => {
+            reviewed_topology_plan_mutate(state, &arguments).await
+        }
         "mcg_memory_search" => memory_search(state, &arguments),
         "mcg_project_memory_transfer_preview" => memory_transfer_preview(state, &arguments),
         "mcg_project_memory_transfers" => memory_transfers(state, &arguments),
@@ -3031,6 +3092,32 @@ struct SshWorkflowMutateArguments {
     task_id: Option<TaskId>,
     #[serde(default)]
     steps: Option<Vec<SshWorkflowStepRequest>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewedTopologyPlansArguments {
+    project_id: ProjectId,
+    #[serde(default)]
+    plan_id: Option<ReviewedTopologyPlanId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewedTopologyPlanMutateArguments {
+    action: String,
+    project_id: ProjectId,
+    plan_id: ReviewedTopologyPlanId,
+    #[serde(default)]
+    project_snapshot_id: Option<ProjectSnapshotId>,
+    #[serde(default)]
+    topology_sha256: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    steps: Option<Vec<ReviewedTopologyStepRequest>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4495,6 +4582,155 @@ fn project_topology_plan(
         Err(_) => Ok(tool_error(
             "runtime_error",
             "MCG could not derive the project topology plan",
+        )),
+    }
+}
+
+fn reviewed_topology_plans(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<ReviewedTopologyPlansArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "reviewed topology plan query arguments are invalid",
+        ));
+    };
+    if let Some(plan_id) = request.plan_id {
+        match state.runtime.reviewed_topology_plan(plan_id) {
+            Ok(Some(plan)) if plan.project_id == request.project_id => {
+                tool_success(Ok(json!({"plan": plan})))
+            }
+            Ok(_) => Ok(tool_error(
+                "reviewed_topology_plan_not_found",
+                "The requested reviewed topology plan is not known to MCG",
+            )),
+            Err(_) => Ok(tool_error(
+                "runtime_error",
+                "MCG could not read the reviewed topology plan",
+            )),
+        }
+    } else {
+        match state.runtime.reviewed_topology_plans(request.project_id) {
+            Ok(plans) => tool_success(Ok(json!({"plans": plans}))),
+            Err(error) if error.is_not_found() => Ok(tool_error(
+                "project_not_found",
+                "The requested project is not known to MCG",
+            )),
+            Err(_) => Ok(tool_error(
+                "runtime_error",
+                "MCG could not list reviewed topology plans",
+            )),
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // One strict parser keeps all mutation actions on one MCP boundary.
+async fn reviewed_topology_plan_mutate(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) = serde_json::from_value::<ReviewedTopologyPlanMutateArguments>(Value::Object(
+        arguments.clone(),
+    )) else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "reviewed topology plan mutation arguments are invalid",
+        ));
+    };
+    let result = match request.action.as_str() {
+        "create"
+            if request.project_snapshot_id.is_some()
+                && request.topology_sha256.is_some()
+                && request.display_name.is_some()
+                && request.reason.is_some()
+                && request.steps.is_some() =>
+        {
+            state.runtime.create_reviewed_topology_plan(
+                request.project_id,
+                &ReviewedTopologyPlanCreateRequest {
+                    id: request.plan_id,
+                    project_snapshot_id: request.project_snapshot_id.expect("checked"),
+                    topology_sha256: request.topology_sha256.unwrap_or_default(),
+                    display_name: request.display_name.unwrap_or_default(),
+                    reason: request.reason.unwrap_or_default(),
+                    steps: request.steps.unwrap_or_default(),
+                },
+            )
+        }
+        "run"
+            if request.project_snapshot_id.is_none()
+                && request.topology_sha256.is_none()
+                && request.display_name.is_none()
+                && request.reason.is_none()
+                && request.steps.is_none() =>
+        {
+            if state
+                .runtime
+                .reviewed_topology_plan(request.plan_id)
+                .map_err(|error| {
+                    RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+                })?
+                .is_none_or(|plan| plan.project_id != request.project_id)
+            {
+                return Ok(tool_error(
+                    "reviewed_topology_plan_not_found",
+                    "The requested reviewed topology plan is not known to MCG",
+                ));
+            }
+            state
+                .runtime
+                .run_reviewed_topology_plan(request.plan_id)
+                .await
+        }
+        "cancel"
+            if request.project_snapshot_id.is_none()
+                && request.topology_sha256.is_none()
+                && request.display_name.is_none()
+                && request.reason.is_none()
+                && request.steps.is_none() =>
+        {
+            if state
+                .runtime
+                .reviewed_topology_plan(request.plan_id)
+                .map_err(|error| {
+                    RpcFailure::new(StatusCode::OK, None, INTERNAL_ERROR, error.to_string())
+                })?
+                .is_none_or(|plan| plan.project_id != request.project_id)
+            {
+                return Ok(tool_error(
+                    "reviewed_topology_plan_not_found",
+                    "The requested reviewed topology plan is not known to MCG",
+                ));
+            }
+            state.runtime.cancel_reviewed_topology_plan(request.plan_id)
+        }
+        _ => {
+            return Ok(tool_error(
+                "invalid_arguments",
+                "Create requires snapshot, topology digest, name, reason, and steps; run/cancel accept only action and identities",
+            ));
+        }
+    };
+    match result {
+        Ok(mutation) => tool_success(Ok(json!(mutation))),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "reviewed_topology_plan_not_found",
+            "The requested project or reviewed topology plan is not known to MCG",
+        )),
+        Err(error) if error.is_conflict() => Ok(tool_error(
+            "conflict",
+            "The reviewed topology authority no longer matches the current project",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_arguments",
+            "The reviewed topology plan is invalid",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not mutate the reviewed topology plan",
         )),
     }
 }

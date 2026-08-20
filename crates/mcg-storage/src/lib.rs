@@ -27,6 +27,7 @@ mod mcp;
 mod platform;
 mod plugins;
 mod providers;
+mod reviewed_topology_plans;
 mod scheduler;
 mod settings;
 mod shadow_workspaces;
@@ -60,7 +61,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 32;
+pub const STORAGE_SCHEMA_VERSION: i64 = 33;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1173,6 +1174,29 @@ BEFORE DELETE ON project_memory_transfers BEGIN
 END;
 ";
 
+const MIGRATION_33: &str = r"
+CREATE TABLE IF NOT EXISTS reviewed_topology_plans (
+    plan_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    project_snapshot_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(project_snapshot_id) REFERENCES project_snapshots(snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS reviewed_topology_plans_project_time
+    ON reviewed_topology_plans(project_id, created_at, plan_id);
+CREATE INDEX IF NOT EXISTS reviewed_topology_plans_state_time
+    ON reviewed_topology_plans(state, updated_at, plan_id);
+CREATE TRIGGER IF NOT EXISTS reviewed_topology_plans_no_delete
+BEFORE DELETE ON reviewed_topology_plans BEGIN
+    SELECT RAISE(FAIL, 'reviewed topology plan history cannot be deleted');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1207,6 +1231,8 @@ pub enum StorageError {
     SshHostNotFound(mcg_domain::SshHostId),
     #[error("SSH workflow {0} was not found")]
     SshWorkflowNotFound(mcg_domain::SshWorkflowId),
+    #[error("reviewed topology plan {0} was not found")]
+    ReviewedTopologyPlanNotFound(mcg_domain::ReviewedTopologyPlanId),
     #[error("backup {0} was not found")]
     BackupNotFound(Uuid),
     #[error("plugin {0} was not found")]
@@ -1332,6 +1358,7 @@ impl SqliteEventStore {
             (30_i64, MIGRATION_30),
             (31_i64, MIGRATION_31),
             (32_i64, MIGRATION_32),
+            (33_i64, MIGRATION_33),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

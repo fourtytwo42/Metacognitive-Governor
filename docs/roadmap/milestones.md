@@ -158,6 +158,8 @@ Deliver:
 - Trusted native and capability-restricted WASI plugin systems.
 - Advanced project world model, provenance graph, organization inheritance,
   multi-host workflows, replay tooling, and advanced memory lifecycle.
+- Separately reviewed, snapshot- and digest-bound topology execution through the
+  ordinary policy broker with durable pre-spawn claims and fail-closed recovery.
 - Portable organization genomes, backup/restore bundles, and encrypted secret opt-in.
 
 Exit evidence: plugins fail closed, backups restore evolved organizations, and

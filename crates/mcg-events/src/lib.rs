@@ -29,6 +29,8 @@ pub enum EventKind {
     ToolRequested,
     ToolCompleted,
     ProjectDiscovered,
+    ReviewedTopologyPlanCreated,
+    ReviewedTopologyPlanStateChanged,
     MemoryClaimRecorded,
     MemoryClaimCorrected,
     MemoryClaimStateChanged,
@@ -82,6 +84,8 @@ impl EventKind {
             Self::ToolRequested => "tool_requested",
             Self::ToolCompleted => "tool_completed",
             Self::ProjectDiscovered => "project_discovered",
+            Self::ReviewedTopologyPlanCreated => "reviewed_topology_plan_created",
+            Self::ReviewedTopologyPlanStateChanged => "reviewed_topology_plan_state_changed",
             Self::MemoryClaimRecorded => "memory_claim_recorded",
             Self::MemoryClaimCorrected => "memory_claim_corrected",
             Self::MemoryClaimStateChanged => "memory_claim_state_changed",
@@ -147,6 +151,12 @@ impl EventKind {
             "tool_requested" | "ToolRequested" => Ok(Self::ToolRequested),
             "tool_completed" | "ToolCompleted" => Ok(Self::ToolCompleted),
             "project_discovered" | "ProjectDiscovered" => Ok(Self::ProjectDiscovered),
+            "reviewed_topology_plan_created" | "ReviewedTopologyPlanCreated" => {
+                Ok(Self::ReviewedTopologyPlanCreated)
+            }
+            "reviewed_topology_plan_state_changed" | "ReviewedTopologyPlanStateChanged" => {
+                Ok(Self::ReviewedTopologyPlanStateChanged)
+            }
             "memory_claim_recorded" | "MemoryClaimRecorded" => Ok(Self::MemoryClaimRecorded),
             "memory_claim_corrected" | "MemoryClaimCorrected" => Ok(Self::MemoryClaimCorrected),
             "memory_claim_state_changed" | "MemoryClaimStateChanged" => {

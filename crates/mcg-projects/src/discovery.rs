@@ -463,12 +463,38 @@ fn safe_package_script_name(name: &str) -> bool {
 }
 
 fn command(name: &str, value: &str, source: &str) -> ProjectCommand {
+    let parts = structured_command_parts(value);
+    let executable = parts.first().cloned().unwrap_or_default();
+    let arguments = parts.into_iter().skip(1).collect();
     ProjectCommand {
         name: name.into(),
         command: value.into(),
+        executable,
+        arguments,
         source: source.into(),
         confidence_basis: "declared project manifest".into(),
     }
+}
+
+fn structured_command_parts(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in value.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            value if value.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            value => current.push(value),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 fn preferred_js_runner(files: &[PathBuf]) -> &'static str {

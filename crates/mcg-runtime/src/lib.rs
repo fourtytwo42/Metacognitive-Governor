@@ -43,18 +43,18 @@ use mcg_domain::{
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
     PluginCapabilityScope, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
-    PluginInvocationState, PluginRevision, ProjectId, ProxyCallId, ProxyConversationId, RiskLevel,
-    RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION,
-    ScheduleDefinition, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteHealthState,
-    SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState, SshAuthentication, SshHost,
-    SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId, SshHostState, SshOperation,
-    SshOperationId, SshOperationKind, SshOperationState, SshWorkflow, SshWorkflowId,
-    SshWorkflowState, SshWorkflowStep, SshWorkflowStepId, SshWorkflowStepState,
-    SupervisionObservationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
-    ToolRequestId, WorkItemId,
+    PluginInvocationState, PluginRevision, ProjectId, ProxyCallId, ProxyConversationId,
+    ReviewedTopologyPlanId, ReviewedTopologyStepId, RiskLevel, RunId, SITE_SCHEMA_VERSION,
+    SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
+    ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck,
+    SiteHealthCheckId, SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId,
+    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
+    SshHostRevisionId, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    SshOperationState, SshWorkflow, SshWorkflowId, SshWorkflowState, SshWorkflowStep,
+    SshWorkflowStepId, SshWorkflowStepState, SupervisionObservationId, TaskBudget, TaskEnvelope,
+    TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -79,7 +79,9 @@ use mcg_projects::{
     ClaimProvenance, ContextAssembler, ContextAssembly, ContextCategory, ContextItem, MemoryClaim,
     MemoryError, MemoryLifecycle, MemoryLifecycleAction, MemoryState, ProjectDiscoverer,
     ProjectDiscoveryError, ProjectMemoryTransfer, ProjectModel, ProvenanceKind,
-    SnapshotInvalidation, prepare_project_memory_transfer, render_managed_memory,
+    REVIEWED_TOPOLOGY_PLAN_SCHEMA_VERSION, ReviewedTopologyPlan, ReviewedTopologyPlanState,
+    ReviewedTopologyStep, ReviewedTopologyStepState, SnapshotInvalidation, TopologyPlanStatus,
+    prepare_project_memory_transfer, render_managed_memory,
 };
 use mcg_providers::{
     BrowserAuthorizationConfig, DeviceAuthorizationConfig, MemoryProviderCredentialStore,
@@ -152,6 +154,7 @@ pub struct RuntimeStatus {
     pub recovered_site_deployments: u64,
     pub recovered_ssh_operations: u64,
     pub recovered_ssh_workflows: u64,
+    pub recovered_reviewed_topology_plans: u64,
     pub recovered_shadow_workspaces: u64,
     pub recovered_plugin_invocations: u64,
 }
@@ -494,6 +497,41 @@ pub struct ProjectMutation {
     pub project: ProjectModel,
     pub event: EventEnvelope,
     pub invalidation: Option<SnapshotInvalidationDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedTopologyStepRequest {
+    pub id: ReviewedTopologyStepId,
+    pub stage_index: u16,
+    pub name: String,
+    pub command_name: String,
+    pub command: String,
+    #[serde(default = "default_reviewed_topology_timeout")]
+    pub timeout_seconds: u64,
+}
+
+const fn default_reviewed_topology_timeout() -> u64 {
+    1_800
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedTopologyPlanCreateRequest {
+    pub id: ReviewedTopologyPlanId,
+    pub project_snapshot_id: mcg_domain::ProjectSnapshotId,
+    pub topology_sha256: String,
+    pub display_name: String,
+    pub reason: String,
+    pub steps: Vec<ReviewedTopologyStepRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewedTopologyPlanMutation {
+    pub plan: ReviewedTopologyPlan,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+    pub approval_id: Option<ApprovalId>,
+    #[serde(default)]
+    pub outcomes: Vec<ToolOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1331,6 +1369,7 @@ pub struct AppRuntime {
     recovered_site_deployments: u64,
     recovered_ssh_operations: u64,
     recovered_ssh_workflows: u64,
+    recovered_reviewed_topology_plans: u64,
     recovered_shadow_workspaces: u64,
     recovered_plugin_invocations: u64,
     platform_capabilities: PlatformCapabilitySnapshot,
@@ -1387,6 +1426,8 @@ impl AppRuntime {
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
         let (recovered_ssh_workflows, _) = store.recover_ssh_workflows(startup_now)?;
+        let (recovered_reviewed_topology_plans, _) =
+            store.recover_reviewed_topology_plans(startup_now)?;
         let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
         let recovered_plugin_invocations = store
             .recover_plugin_invocations(startup_now)?
@@ -1419,6 +1460,7 @@ impl AppRuntime {
             recovered_site_deployments,
             recovered_ssh_operations,
             recovered_ssh_workflows,
+            recovered_reviewed_topology_plans,
             recovered_shadow_workspaces,
             recovered_plugin_invocations,
             platform_capabilities,
@@ -1482,6 +1524,8 @@ impl AppRuntime {
         let recovered_site_deployments = store.recover_site_deployments(startup_now)?;
         let recovered_ssh_operations = store.recover_ssh_operations(startup_now)?;
         let (recovered_ssh_workflows, _) = store.recover_ssh_workflows(startup_now)?;
+        let (recovered_reviewed_topology_plans, _) =
+            store.recover_reviewed_topology_plans(startup_now)?;
         let recovered_shadow_workspaces = store.recover_shadow_workspaces(startup_now)?;
         let recovered_plugin_invocations = store
             .recover_plugin_invocations(startup_now)?
@@ -1516,6 +1560,7 @@ impl AppRuntime {
             recovered_site_deployments,
             recovered_ssh_operations,
             recovered_ssh_workflows,
+            recovered_reviewed_topology_plans,
             recovered_shadow_workspaces,
             recovered_plugin_invocations,
             platform_capabilities,
@@ -1546,6 +1591,7 @@ impl AppRuntime {
         recovered_site_deployments: u64,
         recovered_ssh_operations: u64,
         recovered_ssh_workflows: u64,
+        recovered_reviewed_topology_plans: u64,
         recovered_shadow_workspaces: u64,
         recovered_plugin_invocations: u64,
         platform_capabilities: PlatformCapabilitySnapshot,
@@ -1592,6 +1638,7 @@ impl AppRuntime {
             recovered_site_deployments,
             recovered_ssh_operations,
             recovered_ssh_workflows,
+            recovered_reviewed_topology_plans,
             recovered_shadow_workspaces,
             recovered_plugin_invocations,
             platform_capabilities,
@@ -1646,6 +1693,7 @@ impl AppRuntime {
             recovered_site_deployments: self.recovered_site_deployments,
             recovered_ssh_operations: self.recovered_ssh_operations,
             recovered_ssh_workflows: self.recovered_ssh_workflows,
+            recovered_reviewed_topology_plans: self.recovered_reviewed_topology_plans,
             recovered_shadow_workspaces: self.recovered_shadow_workspaces,
             recovered_plugin_invocations: self.recovered_plugin_invocations,
         }
@@ -3577,6 +3625,495 @@ impl AppRuntime {
         project_id: ProjectId,
     ) -> Result<Vec<ProjectModel>, RuntimeError> {
         Ok(self.store()?.project_history(project_id)?)
+    }
+
+    /// Creates a separately reviewed, immutable local execution plan pinned to
+    /// the exact current project snapshot, topology digest, and discovered commands.
+    /// Exact caller identity replay is observation-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity conflicts, fresh discovery no longer
+    /// matches the requested pins, validation fails, or storage cannot commit.
+    #[allow(clippy::too_many_lines)] // Validation keeps every execution-authority pin together.
+    pub fn create_reviewed_topology_plan(
+        &self,
+        project_id: ProjectId,
+        request: &ReviewedTopologyPlanCreateRequest,
+    ) -> Result<ReviewedTopologyPlanMutation, RuntimeError> {
+        if let Some(existing) = self.reviewed_topology_plan(request.id)? {
+            if existing.project_id == project_id
+                && reviewed_topology_request_matches(&existing, request)
+            {
+                return Ok(ReviewedTopologyPlanMutation {
+                    plan: existing,
+                    replayed: true,
+                    events: Vec::new(),
+                    approval_id: None,
+                    outcomes: Vec::new(),
+                });
+            }
+            return Err(StorageError::Conflict(format!(
+                "reviewed topology plan {} already exists with a different definition",
+                request.id
+            ))
+            .into());
+        }
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let topology = project.topology_plan();
+        let topology_sha256 = reviewed_topology_sha256(&topology)?;
+        if project.id != request.project_snapshot_id
+            || topology_sha256 != request.topology_sha256.to_ascii_lowercase()
+            || topology.status != TopologyPlanStatus::Ready
+        {
+            return Err(StorageError::Conflict(
+                "reviewed topology authority does not match the current ready snapshot".into(),
+            )
+            .into());
+        }
+        let mut steps = Vec::with_capacity(request.steps.len());
+        for requested in &request.steps {
+            if !topology
+                .stages
+                .iter()
+                .any(|stage| stage.index == requested.stage_index)
+            {
+                return Err(StorageError::InvalidData(format!(
+                    "reviewed step {} names an unavailable topology stage",
+                    requested.id
+                ))
+                .into());
+            }
+            let command = project
+                .commands
+                .iter()
+                .find(|command| {
+                    command.name == requested.command_name && command.command == requested.command
+                })
+                .ok_or_else(|| {
+                    StorageError::Conflict(format!(
+                        "reviewed step {} does not pin a current discovered command",
+                        requested.id
+                    ))
+                })?;
+            if command.executable.trim().is_empty() {
+                return Err(StorageError::InvalidData(
+                    "legacy project snapshots without structured commands cannot be executed; refresh the project first"
+                        .into(),
+                )
+                .into());
+            }
+            steps.push(ReviewedTopologyStep {
+                id: requested.id,
+                stage_index: requested.stage_index,
+                name: requested.name.trim().into(),
+                command_name: command.name.clone(),
+                command: command.command.clone(),
+                executable: command.executable.clone(),
+                arguments: command.arguments.clone(),
+                source: command.source.clone(),
+                timeout_seconds: requested.timeout_seconds,
+                state: ReviewedTopologyStepState::Pending,
+                detail: String::new(),
+                exit_code: None,
+                log_artifact_sha256: Vec::new(),
+            });
+        }
+        steps.sort_by_key(|step| (step.stage_index, step.id));
+        let now = Utc::now();
+        let definition_hash =
+            reviewed_topology_definition_hash(request, project_id, &project.fingerprint, &steps)?;
+        let plan = ReviewedTopologyPlan {
+            schema_version: REVIEWED_TOPOLOGY_PLAN_SCHEMA_VERSION,
+            id: request.id,
+            definition_hash,
+            project_id,
+            project_snapshot_id: project.id,
+            project_fingerprint: project.fingerprint,
+            topology_sha256,
+            display_name: request.display_name.trim().into(),
+            reason: request.reason.trim().into(),
+            state: ReviewedTopologyPlanState::Reviewed,
+            steps,
+            created_at: now,
+            updated_at: now,
+        };
+        self.revalidate_reviewed_topology_plan(&plan)?;
+        let (plan, created, events) = self.store()?.create_reviewed_topology_plan(&plan)?;
+        for event in &events {
+            let _ = self.event_sender.send(event.clone());
+        }
+        Ok(ReviewedTopologyPlanMutation {
+            plan,
+            replayed: !created,
+            events,
+            approval_id: None,
+            outcomes: Vec::new(),
+        })
+    }
+
+    /// Lists retained reviewed execution plans for one project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project is unknown or storage cannot be read.
+    pub fn reviewed_topology_plans(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ReviewedTopologyPlan>, RuntimeError> {
+        if self.project(project_id)?.is_none() {
+            return Err(StorageError::ProjectNotFound(project_id).into());
+        }
+        Ok(self.store()?.reviewed_topology_plans(project_id)?)
+    }
+
+    /// Loads one retained reviewed execution plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage cannot be read or decoded.
+    pub fn reviewed_topology_plan(
+        &self,
+        plan_id: ReviewedTopologyPlanId,
+    ) -> Result<Option<ReviewedTopologyPlan>, RuntimeError> {
+        Ok(self.store()?.reviewed_topology_plan(plan_id)?)
+    }
+
+    /// Advances dependency-ordered local steps through the ordinary policy,
+    /// approval, lease, redaction, artifact, and audit broker. Every process is
+    /// claimed durably before launch; exact terminal retries never execute again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is unknown, its pinned source changed, a
+    /// state transition fails, or the governed command cannot be processed.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_reviewed_topology_plan(
+        &self,
+        plan_id: ReviewedTopologyPlanId,
+    ) -> Result<ReviewedTopologyPlanMutation, RuntimeError> {
+        let mut plan = self
+            .reviewed_topology_plan(plan_id)?
+            .ok_or(StorageError::ReviewedTopologyPlanNotFound(plan_id))?;
+        if plan.state.is_terminal() {
+            return Ok(ReviewedTopologyPlanMutation {
+                plan,
+                replayed: true,
+                events: Vec::new(),
+                approval_id: None,
+                outcomes: Vec::new(),
+            });
+        }
+        self.revalidate_reviewed_topology_plan(&plan)?;
+        let mut events = Vec::new();
+        let mut outcomes = Vec::new();
+        if plan.state != ReviewedTopologyPlanState::Running {
+            let previous = plan.state;
+            plan.state = ReviewedTopologyPlanState::Running;
+            plan.updated_at = Utc::now();
+            events.push(self.commit_reviewed_topology_plan(previous, &plan)?);
+        }
+        loop {
+            plan = self
+                .reviewed_topology_plan(plan_id)?
+                .ok_or(StorageError::ReviewedTopologyPlanNotFound(plan_id))?;
+            if let Some(failed) = plan.steps.iter().find(|step| {
+                matches!(
+                    step.state,
+                    ReviewedTopologyStepState::Failed | ReviewedTopologyStepState::Uncertain
+                )
+            }) {
+                let uncertain = failed.state == ReviewedTopologyStepState::Uncertain;
+                for step in &mut plan.steps {
+                    if step.state == ReviewedTopologyStepState::Pending {
+                        step.state = ReviewedTopologyStepState::Skipped;
+                        step.detail = if uncertain {
+                            "not executed after uncertain predecessor".into()
+                        } else {
+                            "not executed after failed predecessor".into()
+                        };
+                    }
+                }
+                plan.state = if uncertain {
+                    ReviewedTopologyPlanState::Uncertain
+                } else {
+                    ReviewedTopologyPlanState::Failed
+                };
+                plan.updated_at = Utc::now();
+                events.push(
+                    self.commit_reviewed_topology_plan(ReviewedTopologyPlanState::Running, &plan)?,
+                );
+                return Ok(ReviewedTopologyPlanMutation {
+                    plan,
+                    replayed: false,
+                    events,
+                    approval_id: None,
+                    outcomes,
+                });
+            }
+            let Some(step) = plan
+                .steps
+                .iter()
+                .find(|step| step.state == ReviewedTopologyStepState::Pending)
+                .cloned()
+            else {
+                plan.state = ReviewedTopologyPlanState::Succeeded;
+                plan.updated_at = Utc::now();
+                events.push(
+                    self.commit_reviewed_topology_plan(ReviewedTopologyPlanState::Running, &plan)?,
+                );
+                return Ok(ReviewedTopologyPlanMutation {
+                    plan,
+                    replayed: false,
+                    events,
+                    approval_id: None,
+                    outcomes,
+                });
+            };
+            if plan.steps.iter().any(|candidate| {
+                candidate.stage_index < step.stage_index
+                    && candidate.state != ReviewedTopologyStepState::Succeeded
+            }) {
+                return Err(StorageError::InvalidData(
+                    "reviewed topology plan has a non-ready stage".into(),
+                )
+                .into());
+            }
+            if let Err(error) = self.revalidate_reviewed_topology_plan(&plan) {
+                for candidate in &mut plan.steps {
+                    if candidate.state == ReviewedTopologyStepState::Pending {
+                        candidate.state = ReviewedTopologyStepState::Skipped;
+                        candidate.detail = bounded_reviewed_topology_detail(&error.to_string());
+                    }
+                }
+                plan.state = ReviewedTopologyPlanState::Failed;
+                plan.updated_at = Utc::now();
+                events.push(
+                    self.commit_reviewed_topology_plan(ReviewedTopologyPlanState::Running, &plan)?,
+                );
+                return Ok(ReviewedTopologyPlanMutation {
+                    plan,
+                    replayed: false,
+                    events,
+                    approval_id: None,
+                    outcomes,
+                });
+            }
+            let project = self
+                .project(plan.project_id)?
+                .ok_or(StorageError::ProjectNotFound(plan.project_id))?;
+            let root = PathBuf::from(&project.root);
+            let options = ProcessOptions {
+                executable: step.executable.clone(),
+                argv: step.arguments.clone(),
+                cwd: project.root.clone(),
+                env: Vec::new(),
+                stdin: ProcessStream::Null,
+                stdin_data: None,
+                stdout: ProcessStream::Piped,
+                stderr: ProcessStream::Piped,
+            };
+            let mut request = ToolRequest::new(
+                reviewed_topology_authority_task_id(plan.id),
+                format!(
+                    "Run reviewed project command '{}' from {} at topology stage {}",
+                    step.command_name, step.source, step.stage_index
+                ),
+                ToolRequestKind::ProcessExec {
+                    options: options.clone(),
+                },
+            );
+            request.id = reviewed_topology_tool_request_id(plan.id, step.id);
+            request.timeout_seconds = step.timeout_seconds;
+            let artifacts_path = self.config.data_directory.join("artifacts");
+            fs::create_dir_all(&artifacts_path)?;
+            let executor = ReviewedTopologyExecutor {
+                store: self.store.clone(),
+                process: Arc::new(
+                    ProcessExecutor::new([root.clone()], Arc::new(RejectingCredentialResolver))
+                        .map_err(runtime_tool_error)?,
+                ),
+                artifacts: Arc::new(
+                    ArtifactStore::open(&artifacts_path).map_err(runtime_tool_error)?,
+                ),
+                plan_id: plan.id,
+                step_id: step.id,
+                event_sender: self.event_sender.clone(),
+            };
+            let mut capabilities = CapabilityPolicy::project(&root);
+            let executable = platform_process_executable(&step.executable);
+            if !capabilities
+                .allowed_executables
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&executable))
+            {
+                capabilities.allowed_executables.push(executable);
+            }
+            let control = self.tool_control();
+            let broker = ToolBroker::new(
+                executor,
+                control.clone(),
+                control.clone(),
+                BrokerControls {
+                    preset: self.user_settings().autonomy,
+                    constitution: OwnerConstitution::secure_defaults(),
+                    capabilities,
+                    leases: Arc::new(control),
+                    redactor: OutputRedactor::default(),
+                },
+            );
+            match broker.execute(&request).await {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(ToolError::ApprovalRequired { approval_id, .. }) => {
+                    plan = self
+                        .reviewed_topology_plan(plan_id)?
+                        .ok_or(StorageError::ReviewedTopologyPlanNotFound(plan_id))?;
+                    plan.state = ReviewedTopologyPlanState::Waiting;
+                    plan.updated_at = Utc::now();
+                    events.push(self.commit_reviewed_topology_plan(
+                        ReviewedTopologyPlanState::Running,
+                        &plan,
+                    )?);
+                    return Ok(ReviewedTopologyPlanMutation {
+                        plan,
+                        replayed: false,
+                        events,
+                        approval_id: Some(approval_id),
+                        outcomes,
+                    });
+                }
+                Err(error) => {
+                    plan = self
+                        .reviewed_topology_plan(plan_id)?
+                        .ok_or(StorageError::ReviewedTopologyPlanNotFound(plan_id))?;
+                    if plan.steps.iter().all(|candidate| {
+                        candidate.id != step.id
+                            || candidate.state == ReviewedTopologyStepState::Pending
+                    }) {
+                        for candidate in &mut plan.steps {
+                            if candidate.state == ReviewedTopologyStepState::Pending {
+                                candidate.state = ReviewedTopologyStepState::Skipped;
+                                candidate.detail =
+                                    bounded_reviewed_topology_detail(&error.to_string());
+                            }
+                        }
+                        plan.state = ReviewedTopologyPlanState::Failed;
+                        plan.updated_at = Utc::now();
+                        events.push(self.commit_reviewed_topology_plan(
+                            ReviewedTopologyPlanState::Running,
+                            &plan,
+                        )?);
+                        return Ok(ReviewedTopologyPlanMutation {
+                            plan,
+                            replayed: false,
+                            events,
+                            approval_id: None,
+                            outcomes,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cancels a plan only while no claimed local process may still be running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is unknown, a process is already claimed,
+    /// or the atomic cancellation transition fails.
+    pub fn cancel_reviewed_topology_plan(
+        &self,
+        plan_id: ReviewedTopologyPlanId,
+    ) -> Result<ReviewedTopologyPlanMutation, RuntimeError> {
+        let mut plan = self
+            .reviewed_topology_plan(plan_id)?
+            .ok_or(StorageError::ReviewedTopologyPlanNotFound(plan_id))?;
+        if plan.state.is_terminal() {
+            return Ok(ReviewedTopologyPlanMutation {
+                plan,
+                replayed: true,
+                events: Vec::new(),
+                approval_id: None,
+                outcomes: Vec::new(),
+            });
+        }
+        if plan
+            .steps
+            .iter()
+            .any(|step| step.state == ReviewedTopologyStepState::Executing)
+        {
+            return Err(StorageError::Conflict(
+                "cannot cancel while a reviewed command may still be executing".into(),
+            )
+            .into());
+        }
+        let previous = plan.state;
+        for step in &mut plan.steps {
+            if step.state == ReviewedTopologyStepState::Pending {
+                step.state = ReviewedTopologyStepState::Skipped;
+                step.detail = "plan cancelled by owner".into();
+            }
+        }
+        plan.state = ReviewedTopologyPlanState::Cancelled;
+        plan.updated_at = Utc::now();
+        let event = self.commit_reviewed_topology_plan(previous, &plan)?;
+        Ok(ReviewedTopologyPlanMutation {
+            plan,
+            replayed: false,
+            events: vec![event],
+            approval_id: None,
+            outcomes: Vec::new(),
+        })
+    }
+
+    fn revalidate_reviewed_topology_plan(
+        &self,
+        plan: &ReviewedTopologyPlan,
+    ) -> Result<(), RuntimeError> {
+        let project = self
+            .project(plan.project_id)?
+            .ok_or(StorageError::ProjectNotFound(plan.project_id))?;
+        let observed = ProjectDiscoverer::discover(Path::new(&project.root), plan.project_id)?;
+        let stored_topology = project.topology_plan();
+        let observed_topology = observed.topology_plan();
+        if project.id != plan.project_snapshot_id
+            || project.fingerprint != plan.project_fingerprint
+            || observed.fingerprint != plan.project_fingerprint
+            || reviewed_topology_sha256(&stored_topology)? != plan.topology_sha256
+            || observed_topology.status != stored_topology.status
+            || observed_topology.stages != stored_topology.stages
+            || observed_topology.unresolved_nodes != stored_topology.unresolved_nodes
+            || plan.steps.iter().any(|step| {
+                !observed.commands.iter().any(|command| {
+                    command.name == step.command_name
+                        && command.command == step.command
+                        && command.executable == step.executable
+                        && command.arguments == step.arguments
+                        && command.source == step.source
+                })
+            })
+        {
+            return Err(StorageError::Conflict(
+                "project snapshot, topology, or discovered commands changed after review".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn commit_reviewed_topology_plan(
+        &self,
+        expected_state: ReviewedTopologyPlanState,
+        plan: &ReviewedTopologyPlan,
+    ) -> Result<EventEnvelope, RuntimeError> {
+        let (_, event) = self
+            .store()?
+            .update_reviewed_topology_plan(expected_state, plan)?;
+        let _ = self.event_sender.send(event.clone());
+        Ok(event)
     }
 
     /// Records an immutable candidate organization revision without activating it.
@@ -10098,6 +10635,113 @@ fn site_authority_task_id(site_id: SiteId) -> TaskId {
     TaskId::from_stable_bytes(stable_authority_bytes("mcg:site-authority:v1", site_id))
 }
 
+fn reviewed_topology_authority_task_id(plan_id: ReviewedTopologyPlanId) -> TaskId {
+    let digest = Sha256::digest(format!("mcg:reviewed-topology-plan:v1:{plan_id}"));
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    TaskId::from_stable_bytes(bytes)
+}
+
+fn reviewed_topology_tool_request_id(
+    plan_id: ReviewedTopologyPlanId,
+    step_id: ReviewedTopologyStepId,
+) -> ToolRequestId {
+    let digest = Sha256::digest(format!(
+        "mcg:reviewed-topology-plan-step:v1:{plan_id}:{step_id}"
+    ));
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    ToolRequestId::from_stable_bytes(bytes)
+}
+
+fn reviewed_topology_sha256(
+    topology: &mcg_projects::ProjectTopologyPlan,
+) -> Result<String, RuntimeError> {
+    if topology.sha256.len() != 64
+        || !topology
+            .sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(StorageError::InvalidData("project topology digest is invalid".into()).into());
+    }
+    Ok(topology.sha256.to_ascii_lowercase())
+}
+
+fn reviewed_topology_definition_hash(
+    request: &ReviewedTopologyPlanCreateRequest,
+    project_id: ProjectId,
+    project_fingerprint: &str,
+    steps: &[ReviewedTopologyStep],
+) -> Result<String, RuntimeError> {
+    let definitions = steps
+        .iter()
+        .map(|step| {
+            (
+                step.id,
+                step.stage_index,
+                step.name.as_str(),
+                step.command_name.as_str(),
+                step.command.as_str(),
+                step.executable.as_str(),
+                step.arguments.as_slice(),
+                step.source.as_str(),
+                step.timeout_seconds,
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                REVIEWED_TOPOLOGY_PLAN_SCHEMA_VERSION,
+                request.id,
+                project_id,
+                request.project_snapshot_id,
+                project_fingerprint,
+                request.topology_sha256.to_ascii_lowercase(),
+                request.display_name.trim(),
+                request.reason.trim(),
+                definitions,
+            ))
+            .map_err(StorageError::from)?,
+        )
+    ))
+}
+
+fn reviewed_topology_request_matches(
+    plan: &ReviewedTopologyPlan,
+    request: &ReviewedTopologyPlanCreateRequest,
+) -> bool {
+    let mut requested = request.steps.clone();
+    requested.sort_by_key(|step| (step.stage_index, step.id));
+    plan.project_snapshot_id == request.project_snapshot_id
+        && plan.topology_sha256 == request.topology_sha256.to_ascii_lowercase()
+        && plan.display_name == request.display_name.trim()
+        && plan.reason == request.reason.trim()
+        && plan.steps.len() == requested.len()
+        && plan.steps.iter().zip(requested).all(|(stored, requested)| {
+            stored.id == requested.id
+                && stored.stage_index == requested.stage_index
+                && stored.name == requested.name.trim()
+                && stored.command_name == requested.command_name
+                && stored.command == requested.command
+                && stored.timeout_seconds == requested.timeout_seconds
+        })
+}
+
+fn bounded_reviewed_topology_detail(value: &str) -> String {
+    const MAXIMUM: usize = 4_096;
+    if value.len() <= MAXIMUM {
+        return value.into();
+    }
+    let mut end = MAXIMUM;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].into()
+}
+
 fn site_health_tool_request_id(check_id: SiteHealthCheckId) -> ToolRequestId {
     ToolRequestId::from_stable_bytes(stable_authority_bytes(
         "mcg:site-health-request:v1",
@@ -10960,6 +11604,119 @@ fn settled_site_deployment_replay(
                 deployment.detail
             ))
             .into())
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ReviewedTopologyExecutor {
+    store: Arc<Mutex<SqliteEventStore>>,
+    process: Arc<ProcessExecutor>,
+    artifacts: Arc<ArtifactStore>,
+    plan_id: ReviewedTopologyPlanId,
+    step_id: ReviewedTopologyStepId,
+    event_sender: broadcast::Sender<EventEnvelope>,
+}
+
+impl ReviewedTopologyExecutor {
+    fn store(&self) -> Result<MutexGuard<'_, SqliteEventStore>, ToolError> {
+        self.store
+            .lock()
+            .map_err(|_| ToolError::Execution("runtime storage lock was poisoned".into()))
+    }
+
+    fn commit(&self, plan: &ReviewedTopologyPlan) -> Result<(), ToolError> {
+        let (_, event) = self
+            .store()?
+            .update_reviewed_topology_plan(ReviewedTopologyPlanState::Running, plan)
+            .map_err(tool_storage_error)?;
+        let _ = self.event_sender.send(event);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ReviewedTopologyExecutor {
+    async fn execute(
+        &self,
+        execution_id: ToolExecutionId,
+        request: &ToolRequest,
+    ) -> Result<ToolOutcome, ToolError> {
+        let ToolRequestKind::ProcessExec { options } = &request.kind else {
+            return Err(ToolError::Invalid(
+                "reviewed topology executor received a different tool kind".into(),
+            ));
+        };
+        let mut plan = self
+            .store()?
+            .reviewed_topology_plan(self.plan_id)
+            .map_err(tool_storage_error)?
+            .ok_or_else(|| ToolError::Invalid("reviewed topology plan was not found".into()))?;
+        if plan.state != ReviewedTopologyPlanState::Running {
+            return Err(ToolError::Denied(
+                "reviewed topology plan is not running".into(),
+            ));
+        }
+        let step = plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == self.step_id)
+            .ok_or_else(|| ToolError::Invalid("reviewed topology step was not found".into()))?;
+        if step.state != ReviewedTopologyStepState::Pending
+            || step.executable != options.executable
+            || step.arguments != options.argv
+            || !options.env.is_empty()
+            || !matches!(options.stdin, ProcessStream::Null)
+        {
+            return Err(ToolError::Denied(
+                "reviewed command changed after authority was issued".into(),
+            ));
+        }
+        step.state = ReviewedTopologyStepState::Executing;
+        plan.updated_at = Utc::now();
+        self.commit(&plan)?;
+
+        let execution = self.process.execute(execution_id, request).await;
+        let mut plan = self
+            .store()?
+            .reviewed_topology_plan(self.plan_id)
+            .map_err(tool_storage_error)?
+            .ok_or_else(|| ToolError::Invalid("reviewed topology plan was not found".into()))?;
+        let step = plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == self.step_id)
+            .ok_or_else(|| ToolError::Invalid("reviewed topology step was not found".into()))?;
+        if step.state != ReviewedTopologyStepState::Executing {
+            return Err(ToolError::Denied(
+                "reviewed topology step lost its executing claim".into(),
+            ));
+        }
+        match execution {
+            Ok(mut outcome) => {
+                let log = capture_site_process_log(self.artifacts.as_ref(), &outcome)?;
+                if let Some(log) = log {
+                    step.log_artifact_sha256.push(log.sha256.clone());
+                    outcome.artifacts.push(log);
+                }
+                step.exit_code = outcome.exit_code;
+                step.detail = bounded_reviewed_topology_detail(&outcome.summary);
+                step.state = if outcome.status == ToolOutcomeStatus::Succeeded {
+                    ReviewedTopologyStepState::Succeeded
+                } else {
+                    ReviewedTopologyStepState::Failed
+                };
+                plan.updated_at = Utc::now();
+                self.commit(&plan)?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                step.state = ReviewedTopologyStepState::Failed;
+                step.detail = bounded_reviewed_topology_detail(&error.to_string());
+                plan.updated_at = Utc::now();
+                self.commit(&plan)?;
+                Err(error)
+            }
         }
     }
 }
@@ -17152,5 +17909,206 @@ mod tests {
                 .iter()
                 .any(|event| event.kind == mcg_events::EventKind::AgentTurnFailed)
         );
+    }
+
+    fn reviewed_topology_fixture(root: &Path) {
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='reviewed-topology-fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .expect("manifest");
+        fs::write(
+            root.join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"reviewed-topology-fixture\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("lockfile");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn writes_once_per_real_execution() {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true).append(true).open("execution-count.txt").unwrap();
+        file.write_all(b"x").unwrap();
+    }
+}
+"#,
+        )
+        .expect("source");
+        fs::write(
+            root.join("compose.yaml"),
+            "services:\n  database:\n    image: postgres\n  api:\n    image: fixture\n    depends_on:\n      - database\n",
+        )
+        .expect("topology");
+    }
+
+    fn reviewed_topology_request(project: &ProjectModel) -> ReviewedTopologyPlanCreateRequest {
+        let topology = project.topology_plan();
+        let command = project
+            .commands
+            .iter()
+            .find(|command| command.name == "test" && command.command == "cargo test")
+            .expect("cargo test command");
+        ReviewedTopologyPlanCreateRequest {
+            id: ReviewedTopologyPlanId::new(),
+            project_snapshot_id: project.id,
+            topology_sha256: reviewed_topology_sha256(&topology).expect("topology digest"),
+            display_name: "Reviewed fixture test".into(),
+            reason: "prove reviewed snapshot-pinned execution".into(),
+            steps: vec![ReviewedTopologyStepRequest {
+                id: ReviewedTopologyStepId::new(),
+                stage_index: topology.stages.last().expect("stage").index,
+                name: "Run declared tests".into(),
+                command_name: command.name.clone(),
+                command: command.command.clone(),
+                timeout_seconds: 300,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewed_topology_execution_requires_policy_and_replays_without_process() {
+        let root = tempfile::tempdir().expect("project root");
+        reviewed_topology_fixture(root.path());
+        let config = AppConfig {
+            autonomy: AutonomyPreset::Guided,
+            ..AppConfig::default()
+        };
+        let runtime = AppRuntime::open_in_memory(config, TEST_TOKEN.into()).expect("runtime");
+        let project_id = ProjectId::new();
+        let project = runtime
+            .discover_project(root.path(), project_id)
+            .expect("discover")
+            .project;
+        let request = reviewed_topology_request(&project);
+        let created = runtime
+            .create_reviewed_topology_plan(project_id, &request)
+            .expect("review");
+        assert_eq!(created.plan.state, ReviewedTopologyPlanState::Reviewed);
+        assert!(
+            runtime
+                .create_reviewed_topology_plan(project_id, &request)
+                .expect("review replay")
+                .replayed
+        );
+
+        let waiting = runtime
+            .run_reviewed_topology_plan(request.id)
+            .await
+            .expect("approval boundary");
+        assert_eq!(waiting.plan.state, ReviewedTopologyPlanState::Waiting);
+        assert!(!root.path().join("execution-count.txt").exists());
+        let pending = runtime
+            .approvals(Some(ApprovalState::Pending))
+            .expect("approvals");
+        assert_eq!(pending.len(), 1);
+        runtime
+            .resolve_approval(&ApprovalResolution {
+                approval_id: pending[0].id,
+                state: ApprovalState::Approved,
+                resolved_by: "fixture owner".into(),
+                reason: Some("execute exact reviewed manifest command".into()),
+                resolved_at: Utc::now(),
+            })
+            .expect("approve");
+        let completed = runtime
+            .run_reviewed_topology_plan(request.id)
+            .await
+            .expect("run");
+        assert_eq!(completed.plan.state, ReviewedTopologyPlanState::Succeeded);
+        assert_eq!(
+            completed.plan.steps[0].state,
+            ReviewedTopologyStepState::Succeeded
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("execution-count.txt")).expect("marker"),
+            "x"
+        );
+        assert!(
+            runtime
+                .run_reviewed_topology_plan(request.id)
+                .await
+                .expect("terminal replay")
+                .replayed
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("execution-count.txt")).expect("marker"),
+            "x"
+        );
+
+        let stale_root = tempfile::tempdir().expect("stale project root");
+        reviewed_topology_fixture(stale_root.path());
+        let stale_project_id = ProjectId::new();
+        let current = runtime
+            .discover_project(stale_root.path(), stale_project_id)
+            .expect("stale project")
+            .project;
+        let stale_request = reviewed_topology_request(&current);
+        runtime
+            .create_reviewed_topology_plan(stale_project_id, &stale_request)
+            .expect("stale candidate");
+        fs::write(
+            stale_root.path().join("Cargo.toml"),
+            "[package]\nname='reviewed-topology-fixture'\nversion='0.0.1'\nedition='2024'\n",
+        )
+        .expect("change manifest");
+        assert!(matches!(
+            runtime.run_reviewed_topology_plan(stale_request.id).await,
+            Err(RuntimeError::Storage(StorageError::Conflict(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reviewed_topology_restart_marks_claimed_process_uncertain() {
+        let data = tempfile::tempdir().expect("data");
+        let root = tempfile::tempdir().expect("project root");
+        reviewed_topology_fixture(root.path());
+        let config = AppConfig::default().with_data_directory(data.path());
+        let project_id = ProjectId::new();
+        let plan_id = {
+            let runtime = AppRuntime::open(config.clone()).expect("runtime");
+            let project = runtime
+                .discover_project(root.path(), project_id)
+                .expect("discover")
+                .project;
+            let request = reviewed_topology_request(&project);
+            let mut plan = runtime
+                .create_reviewed_topology_plan(project_id, &request)
+                .expect("review")
+                .plan;
+            plan.state = ReviewedTopologyPlanState::Running;
+            plan.updated_at = Utc::now();
+            runtime
+                .store()
+                .expect("store")
+                .update_reviewed_topology_plan(ReviewedTopologyPlanState::Reviewed, &plan)
+                .expect("start");
+            plan.steps[0].state = ReviewedTopologyStepState::Executing;
+            plan.updated_at = Utc::now();
+            runtime
+                .store()
+                .expect("store")
+                .update_reviewed_topology_plan(ReviewedTopologyPlanState::Running, &plan)
+                .expect("claim");
+            request.id
+        };
+        let recovered = AppRuntime::open(config).expect("reopen");
+        let plan = recovered
+            .reviewed_topology_plan(plan_id)
+            .expect("load")
+            .expect("plan");
+        assert_eq!(plan.state, ReviewedTopologyPlanState::Uncertain);
+        assert_eq!(plan.steps[0].state, ReviewedTopologyStepState::Uncertain);
+        assert!(
+            recovered
+                .run_reviewed_topology_plan(plan_id)
+                .await
+                .expect("terminal replay")
+                .replayed
+        );
+        assert!(!root.path().join("execution-count.txt").exists());
     }
 }

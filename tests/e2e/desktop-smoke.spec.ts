@@ -48,7 +48,7 @@ test.beforeEach(async ({ page }) => {
       repository: { is_git: true, branch: "main", head: "abc", dirty: false, recent_commits: [] },
       languages: ["TypeScript"], build_systems: ["npm"], test_systems: ["vitest"], package_managers: ["pnpm"],
       services: ["web"], ci_systems: [], important_directories: ["src"],
-      commands: [{ name: "test", command: "pnpm test", source: "package.json", confidence_basis: "manifest" }],
+      commands: [{ name: "test", command: "pnpm test", executable: "pnpm", arguments: ["test"], source: "package.json", confidence_basis: "manifest" }],
       instructions: { conflicts: [] },
       world: {
         nodes: [{ id: "service:web", kind: "service", label: "web", source: "package.json" }],
@@ -81,6 +81,8 @@ test.beforeEach(async ({ page }) => {
     let organizations = [baseOrganization];
     let memoryClaims: any[] = [];
     let sshWorkflows: any[] = [];
+    let reviewedPlans: any[] = [];
+    let reviewedRunCount = 0;
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -103,8 +105,11 @@ test.beforeEach(async ({ page }) => {
           }
           if (command === "compare_organizations") return { equivalent: true, left_sha256: portableOrganization.content_sha256, right_sha256: portableOrganization.content_sha256, sections_changed: [], roles_added: [], roles_removed: [], roles_changed: [], relationships_added: [], relationships_removed: [] };
           if (command === "list_project_memory") return { claims: memoryClaims };
+          if (command === "list_project_memory_transfers") return { transfers: [] };
+          if (command === "list_reviewed_topology_plans") return { plans: reviewedPlans };
           if (command === "project_topology_plan") return {
-            schema_version: 1,
+            schema_version: 2,
+            sha256: "b".repeat(64),
             project_id: project.project_id,
             project_snapshot_id: project.id,
             status: "ready",
@@ -114,6 +119,40 @@ test.beforeEach(async ({ page }) => {
             ],
             unresolved_nodes: []
           };
+          if (command === "create_reviewed_topology_plan") {
+            const step = args.request.steps[0];
+            const plan = {
+              schema_version: 1,
+              id: args.request.id,
+              definition_hash: "c".repeat(64),
+              project_id: project.project_id,
+              project_snapshot_id: project.id,
+              project_fingerprint: project.fingerprint,
+              topology_sha256: args.request.topology_sha256,
+              display_name: args.request.display_name,
+              reason: args.request.reason,
+              state: "reviewed",
+              steps: [{ ...step, executable: "pnpm", arguments: ["test"], source: "package.json", state: "pending", detail: "", log_artifact_sha256: [] }],
+              created_at: now,
+              updated_at: now
+            };
+            reviewedPlans = [plan];
+            return { plan, replayed: false, events: [], outcomes: [] };
+          }
+          if (command === "run_reviewed_topology_plan") {
+            reviewedRunCount += 1;
+            const waiting = reviewedRunCount === 1;
+            const plan = {
+              ...reviewedPlans[0],
+              state: waiting ? "waiting" : "succeeded",
+              steps: reviewedPlans[0].steps.map((step: any) => waiting ? step : { ...step, state: "succeeded", detail: "process completed" })
+            };
+            reviewedPlans = [plan];
+            return { plan, replayed: false, events: [], outcomes: [], approval_id: waiting ? "00000000-0000-4000-8000-000000000534" : undefined };
+          }
+          if (command === "cancel_reviewed_topology_plan") return { plan: { ...reviewedPlans[0], state: "cancelled" }, replayed: false, events: [], outcomes: [] };
+          if (command === "list_approvals") return { approvals: [] };
+          if (command === "resolve_approval") return {};
           if (command === "managed_project_memory") return { markdown: `# Managed Project Memory\n\n${memoryClaims.map((claim) => `- ${claim.key}: ${claim.value}`).join("\n")}` };
           if (command === "create_project_memory") {
             const claim = { schema_version: 1, id: "00000000-0000-4000-8000-000000000243", project_id: project.project_id, state: "new", observed_at: now, correction_count: 0, usefulness_count: 0, ...args.request };
@@ -347,6 +386,21 @@ test("consumer manages provenance-bearing project memory and inspects the world 
   await intelligence.getByRole("button", { name: "History" }).click();
   await expect(intelligence.locator(".memory-history")).toContainText("working");
   await expect(intelligence.locator(".managed-memory")).toContainText("package_manager: pnpm");
+});
+
+test("consumer reviews, approves, and runs an exact topology command", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("button", { name: "Use project" }).click();
+  const intelligence = page.getByLabel("Project intelligence and memory");
+  await intelligence.getByLabel("Reviewed topology reason").fill("Run the reviewed project tests");
+  await intelligence.getByRole("button", { name: "Review this plan" }).click();
+  await expect(intelligence.getByLabel("Reviewed topology plans")).toContainText("Run the reviewed project tests");
+  await intelligence.getByRole("button", { name: "Run reviewed plan" }).click();
+  await expect(intelligence.getByRole("button", { name: "Approve and run" })).toBeVisible();
+  await intelligence.getByRole("button", { name: "Approve and run" }).click();
+  await expect(intelligence.getByText("succeeded", { exact: true })).toBeVisible();
+  await expect(intelligence.getByText(/process completed/)).toBeVisible();
 });
 
 test("consumer duplicates and inspects a portable organization without exposing local authority", async ({ page }) => {

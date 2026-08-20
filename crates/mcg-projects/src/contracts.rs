@@ -1,13 +1,17 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use mcg_domain::{MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId};
+use mcg_domain::{
+    MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId, ReviewedTopologyPlanId,
+    ReviewedTopologyStepId,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PROJECT_MODEL_SCHEMA_VERSION: u16 = 1;
 pub const MEMORY_CLAIM_SCHEMA_VERSION: u16 = 1;
 pub const MEMORY_TRANSFER_SCHEMA_VERSION: u16 = 1;
-pub const TOPOLOGY_PLAN_SCHEMA_VERSION: u16 = 1;
+pub const TOPOLOGY_PLAN_SCHEMA_VERSION: u16 = 2;
+pub const REVIEWED_TOPOLOGY_PLAN_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectModel {
@@ -51,6 +55,10 @@ pub struct RecentCommit {
 pub struct ProjectCommand {
     pub name: String,
     pub command: String,
+    #[serde(default)]
+    pub executable: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
     pub source: String,
     pub confidence_basis: String,
 }
@@ -148,6 +156,7 @@ pub struct WorldRelationship {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectTopologyPlan {
     pub schema_version: u16,
+    pub sha256: String,
     pub project_id: ProjectId,
     pub project_snapshot_id: ProjectSnapshotId,
     pub status: TopologyPlanStatus,
@@ -175,6 +184,75 @@ pub struct TopologyPlanNode {
     pub kind: WorldNodeKind,
     pub label: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewedTopologyPlanState {
+    Reviewed,
+    Running,
+    Waiting,
+    Succeeded,
+    Failed,
+    Uncertain,
+    Cancelled,
+}
+
+impl ReviewedTopologyPlanState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Uncertain | Self::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewedTopologyStepState {
+    Pending,
+    Executing,
+    Succeeded,
+    Failed,
+    Uncertain,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedTopologyStep {
+    pub id: ReviewedTopologyStepId,
+    pub stage_index: u16,
+    pub name: String,
+    pub command_name: String,
+    pub command: String,
+    pub executable: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    pub source: String,
+    pub timeout_seconds: u64,
+    pub state: ReviewedTopologyStepState,
+    pub detail: String,
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub log_artifact_sha256: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedTopologyPlan {
+    pub schema_version: u16,
+    pub id: ReviewedTopologyPlanId,
+    pub definition_hash: String,
+    pub project_id: ProjectId,
+    pub project_snapshot_id: ProjectSnapshotId,
+    pub project_fingerprint: String,
+    pub topology_sha256: String,
+    pub display_name: String,
+    pub reason: String,
+    pub state: ReviewedTopologyPlanState,
+    pub steps: Vec<ReviewedTopologyStep>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -35,8 +35,8 @@ use mcg_domain::{
     MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
     OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent,
     PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallation,
-    PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId, RiskLevel, RunId,
-    SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId,
+    RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
     ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
     SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor, SiteRevision,
@@ -47,11 +47,11 @@ use mcg_domain::{
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
 use mcg_plugin_trust::PluginSignatureProof;
-pub use mcg_projects::ProjectTopologyPlan;
 use mcg_projects::{
     ClaimProvenance, ContextAssembly, ContextItem, MemoryClaim, MemoryLifecycleAction,
     ProjectMemoryTransfer, ProjectModel,
 };
+pub use mcg_projects::{ProjectTopologyPlan, ReviewedTopologyPlan};
 use mcg_providers::{
     ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderCredential,
     ProviderModelCatalog,
@@ -64,7 +64,8 @@ use mcg_runtime::{
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation,
     PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
-    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation, RunReplayReport, RuntimeError,
+    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport, RuntimeError,
     RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
     SiteMonitorMutation, SiteMonitorRequest, SiteMutation, SiteRegistrationRequest,
     SiteUpdateRequest, SshHostMutation, SshHostRegistrationRequest, SshHostUpdateRequest,
@@ -155,6 +156,11 @@ pub struct TaskMutationResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskListResponse {
     pub tasks: Vec<TaskEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedTopologyPlanListResponse {
+    pub plans: Vec<ReviewedTopologyPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1302,6 +1308,22 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/projects/{project_id}/topology-plan",
             get(project_topology_plan),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/reviewed-topology-plans",
+            get(list_reviewed_topology_plans).post(create_reviewed_topology_plan),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/reviewed-topology-plans/{plan_id}",
+            get(get_reviewed_topology_plan),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/reviewed-topology-plans/{plan_id}/run",
+            post(run_reviewed_topology_plan),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/reviewed-topology-plans/{plan_id}/cancel",
+            post(cancel_reviewed_topology_plan),
         )
         .route(
             "/api/v1/projects/{project_id}/context",
@@ -4532,6 +4554,99 @@ async fn project_topology_plan(
         .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))
 }
 
+async fn list_reviewed_topology_plans(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ReviewedTopologyPlanListResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .reviewed_topology_plans(project_id)
+        .map(|plans| Json(ReviewedTopologyPlanListResponse { plans }))
+        .map_err(map_runtime_error)
+}
+
+async fn create_reviewed_topology_plan(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<ReviewedTopologyPlanCreateRequest>,
+) -> Result<(StatusCode, Json<ReviewedTopologyPlanMutation>), ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .create_reviewed_topology_plan(project_id, &request)
+        .map(|mutation| {
+            let status = if mutation.replayed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            (status, Json(mutation))
+        })
+        .map_err(map_runtime_error)
+}
+
+async fn get_reviewed_topology_plan(
+    State(state): State<ApiState>,
+    Path((project_id, plan_id)): Path<(String, String)>,
+) -> Result<Json<ReviewedTopologyPlan>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let plan_id = parse_reviewed_topology_plan_id(&plan_id)?;
+    state
+        .runtime
+        .reviewed_topology_plan(plan_id)?
+        .filter(|plan| plan.project_id == project_id)
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::not_found(format!("reviewed topology plan {plan_id} was not found"))
+        })
+}
+
+async fn run_reviewed_topology_plan(
+    State(state): State<ApiState>,
+    Path((project_id, plan_id)): Path<(String, String)>,
+) -> Result<Json<ReviewedTopologyPlanMutation>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let plan_id = parse_reviewed_topology_plan_id(&plan_id)?;
+    if state
+        .runtime
+        .reviewed_topology_plan(plan_id)?
+        .is_none_or(|plan| plan.project_id != project_id)
+    {
+        return Err(ApiError::not_found(format!(
+            "reviewed topology plan {plan_id} was not found"
+        )));
+    }
+    state
+        .runtime
+        .run_reviewed_topology_plan(plan_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn cancel_reviewed_topology_plan(
+    State(state): State<ApiState>,
+    Path((project_id, plan_id)): Path<(String, String)>,
+) -> Result<Json<ReviewedTopologyPlanMutation>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let plan_id = parse_reviewed_topology_plan_id(&plan_id)?;
+    if state
+        .runtime
+        .reviewed_topology_plan(plan_id)?
+        .is_none_or(|plan| plan.project_id != project_id)
+    {
+        return Err(ApiError::not_found(format!(
+            "reviewed topology plan {plan_id} was not found"
+        )));
+    }
+    state
+        .runtime
+        .cancel_reviewed_topology_plan(plan_id)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 async fn create_memory_claim(
     State(state): State<ApiState>,
     Path(project_id): Path<String>,
@@ -4854,6 +4969,12 @@ fn parse_project_id(value: &str) -> Result<ProjectId, ApiError> {
     value
         .parse()
         .map_err(|_| ApiError::bad_request("project id must be a UUID"))
+}
+
+fn parse_reviewed_topology_plan_id(value: &str) -> Result<ReviewedTopologyPlanId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("reviewed topology plan id must be a UUID"))
 }
 
 fn parse_memory_claim_id(value: &str) -> Result<MemoryClaimId, ApiError> {
@@ -5397,6 +5518,8 @@ mod tests {
         let discovered = vec![mcg_projects::ProjectCommand {
             name: "check:config".into(),
             command: "npm run check:config".into(),
+            executable: "npm".into(),
+            arguments: vec!["run".into(), "check:config".into()],
             source: "package.json".into(),
             confidence_basis: "declared script".into(),
         }];
@@ -7640,6 +7763,8 @@ form.addEventListener('submit', (event) => {
                 "mcg_project_memory_transfer",
                 "mcg_project_context",
                 "mcg_project_topology_plan",
+                "mcg_reviewed_topology_plans",
+                "mcg_reviewed_topology_plan_mutate",
                 "mcg_query_project",
                 "mcg_query_organization",
                 "mcg_import_organization",
@@ -13354,6 +13479,163 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("missing-project response");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One integration fixture proves REST/MCP identity parity end to end.
+    async fn reviewed_topology_plans_are_authenticated_pinned_and_shared_with_mcp() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(
+            project_root.path().join("Cargo.toml"),
+            "[package]\nname='reviewed-api-fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .expect("Cargo fixture");
+        std::fs::write(
+            project_root.path().join("compose.yaml"),
+            "services:\n  database:\n    image: postgres\n  api:\n    image: fixture\n    depends_on:\n      - database\n",
+        )
+        .expect("Compose fixture");
+        let app = router(test_runtime());
+        let discovered = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&DiscoverProjectRequest {
+                            root: project_root.path().to_string_lossy().into_owned(),
+                            project_id: None,
+                        })
+                        .expect("body"),
+                    ))
+                    .expect("discover request"),
+            )
+            .await
+            .expect("discover");
+        let project: ProjectMutation =
+            serde_json::from_value(response_json(discovered).await).expect("project");
+        let topology_path = format!(
+            "/api/v1/projects/{}/topology-plan",
+            project.project.project_id
+        );
+        let topology: ProjectTopologyPlan = serde_json::from_value(
+            response_json(
+                app.clone()
+                    .oneshot(
+                        authorized(Request::get(topology_path))
+                            .body(Body::empty())
+                            .expect("topology request"),
+                    )
+                    .await
+                    .expect("topology"),
+            )
+            .await,
+        )
+        .expect("topology plan");
+        assert_eq!(topology.sha256.len(), 64);
+        let command = project
+            .project
+            .commands
+            .iter()
+            .find(|command| command.command == "cargo test")
+            .expect("command");
+        let plan_id = ReviewedTopologyPlanId::new();
+        let request = ReviewedTopologyPlanCreateRequest {
+            id: plan_id,
+            project_snapshot_id: project.project.id,
+            topology_sha256: topology.sha256.clone(),
+            display_name: "REST reviewed tests".into(),
+            reason: "exercise the authenticated review boundary".into(),
+            steps: vec![mcg_runtime::ReviewedTopologyStepRequest {
+                id: mcg_domain::ReviewedTopologyStepId::new(),
+                stage_index: topology.stages.last().expect("stage").index,
+                name: "Run tests".into(),
+                command_name: command.name.clone(),
+                command: command.command.clone(),
+                timeout_seconds: 300,
+            }],
+        };
+        let base = format!(
+            "/api/v1/projects/{}/reviewed-topology-plans",
+            project.project.project_id
+        );
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post(&base)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).expect("request")))
+                    .expect("unauthorized request"),
+            )
+            .await
+            .expect("unauthorized");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let create = || {
+            authorized(Request::post(&base))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).expect("request")))
+                .expect("create request")
+        };
+        let created = app.clone().oneshot(create()).await.expect("created");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: ReviewedTopologyPlanMutation =
+            serde_json::from_value(response_json(created).await).expect("created plan");
+        assert_eq!(
+            created.plan.state,
+            mcg_projects::ReviewedTopologyPlanState::Reviewed
+        );
+        assert_eq!(created.plan.project_snapshot_id, project.project.id);
+        assert_eq!(created.plan.steps[0].executable, "cargo");
+        let replay = app.clone().oneshot(create()).await.expect("replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: ReviewedTopologyPlanMutation =
+            serde_json::from_value(response_json(replay).await).expect("replay plan");
+        assert!(replay.replayed);
+
+        let listed: ReviewedTopologyPlanListResponse = serde_json::from_value(
+            response_json(
+                app.clone()
+                    .oneshot(
+                        authorized(Request::get(&base))
+                            .body(Body::empty())
+                            .expect("list request"),
+                    )
+                    .await
+                    .expect("list"),
+            )
+            .await,
+        )
+        .expect("list response");
+        assert_eq!(listed.plans, vec![created.plan.clone()]);
+
+        let queried = mcp_tool_response(
+            app.clone(),
+            950,
+            "mcg_reviewed_topology_plans",
+            serde_json::json!({"project_id": project.project.project_id, "plan_id": plan_id}),
+        )
+        .await;
+        assert_eq!(
+            queried.pointer("/result/structuredContent/plan/id"),
+            Some(&serde_json::json!(plan_id)),
+            "{queried:#}"
+        );
+        let cancelled = mcp_tool_response(
+            app,
+            951,
+            "mcg_reviewed_topology_plan_mutate",
+            serde_json::json!({
+                "action": "cancel",
+                "project_id": project.project.project_id,
+                "plan_id": plan_id
+            }),
+        )
+        .await;
+        assert_eq!(
+            cancelled.pointer("/result/structuredContent/plan/state"),
+            Some(&serde_json::json!("cancelled")),
+            "{cancelled:#}"
+        );
     }
 
     #[tokio::test]

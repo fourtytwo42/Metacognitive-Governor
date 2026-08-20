@@ -32,9 +32,9 @@ use mcg_api::{
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
     ProjectMemoryTransferListResponse, ProviderListResponse, ResolveApprovalRequest,
-    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
-    SetScheduleStateRequest, ShadowExecutionListResponse, ShutdownResponse,
+    ReviewedTopologyPlanListResponse, RunSshOperationRequest, ScheduleHistoryResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
+    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse, ShutdownResponse,
     SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
     SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
     SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
@@ -49,11 +49,11 @@ use mcg_domain::{
     NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
     PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
     PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
-    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId, RunId,
-    ScheduleId, ScheduleState, ScheduleTrigger, SchedulerNotification, SchedulerNotificationId,
-    Site, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId,
-    SiteMonitor, SiteState, SshHost, SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId,
-    TaskState, WorkItemId,
+    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
+    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
+    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -73,9 +73,10 @@ use mcg_runtime::{
     OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
     ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
-    RunReplayReport, RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation,
-    SiteMonitorMutation, SiteMutation, SshHostMutation, SshOperationMutation,
-    SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
+    ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
+    RuntimeStatus, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation, SiteMutation,
+    SshHostMutation, SshOperationMutation, SshWorkflowCreateRequest, SshWorkflowMutation,
+    SupervisionMutation,
 };
 use mcg_storage::{
     BackupPassphrase, restore_backup_bundle, restore_encrypted_backup_bundle, verify_backup_bundle,
@@ -1166,6 +1167,12 @@ enum ProjectCommand {
     History { id: String },
     /// Derive stable stages from explicit project-topology dependencies.
     Plan { id: String },
+    /// Review, inspect, run, or cancel snapshot-pinned topology execution plans.
+    Reviewed {
+        project_id: String,
+        #[command(subcommand)]
+        command: ReviewedTopologyCommand,
+    },
     /// Assemble bounded project context from current facts and memory.
     Context {
         id: String,
@@ -1180,6 +1187,20 @@ enum ProjectCommand {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewedTopologyCommand {
+    /// Create a reviewed plan from a JSON request file.
+    Create { file: PathBuf },
+    /// List retained reviewed plans for the project.
+    List,
+    /// Read one retained reviewed plan.
+    Get { plan_id: String },
+    /// Run dependency-ready commands through normal policy and approval controls.
+    Run { plan_id: String },
+    /// Cancel a plan while no command may still be executing.
+    Cancel { plan_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -5100,6 +5121,19 @@ async fn run_project(
                 .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        ProjectCommand::Reviewed {
+            project_id,
+            command,
+        } => {
+            run_reviewed_topology(
+                client,
+                host,
+                token,
+                ProjectId::from_str(&project_id)?,
+                command,
+            )
+            .await?;
+        }
         ProjectCommand::Context {
             id,
             token_budget,
@@ -5133,6 +5167,80 @@ async fn run_project(
                 command,
             )
             .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_reviewed_topology(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_id: ProjectId,
+    command: ReviewedTopologyCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let base = format!("{host}/api/v1/projects/{project_id}/reviewed-topology-plans");
+    match command {
+        ReviewedTopologyCommand::Create { file } => {
+            let request: ReviewedTopologyPlanCreateRequest =
+                serde_json::from_slice(&std::fs::read(file)?)?;
+            let mutation: ReviewedTopologyPlanMutation = client
+                .post(&base)
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&mutation)?);
+        }
+        ReviewedTopologyCommand::List => {
+            let response: ReviewedTopologyPlanListResponse = client
+                .get(&base)
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        ReviewedTopologyCommand::Get { plan_id } => {
+            let plan_id = ReviewedTopologyPlanId::from_str(&plan_id)?;
+            let response: mcg_projects::ReviewedTopologyPlan = client
+                .get(format!("{base}/{plan_id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        ReviewedTopologyCommand::Run { plan_id } => {
+            let plan_id = ReviewedTopologyPlanId::from_str(&plan_id)?;
+            let mutation: ReviewedTopologyPlanMutation = client
+                .post(format!("{base}/{plan_id}/run"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&mutation)?);
+        }
+        ReviewedTopologyCommand::Cancel { plan_id } => {
+            let plan_id = ReviewedTopologyPlanId::from_str(&plan_id)?;
+            let mutation: ReviewedTopologyPlanMutation = client
+                .post(format!("{base}/{plan_id}/cancel"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&mutation)?);
         }
     }
     Ok(())
@@ -5598,6 +5706,46 @@ mod tests {
             history.command.expect("command"),
             Command::Organization {
                 command: OrganizationCommand::History { json: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn reviewed_topology_commands_keep_review_and_execution_separate() {
+        let create = Cli::try_parse_from([
+            "mcg",
+            "project",
+            "reviewed",
+            "00000000-0000-0000-0000-000000000001",
+            "create",
+            "reviewed-plan.json",
+        ])
+        .expect("reviewed plan create");
+        assert!(matches!(
+            create.command.expect("command"),
+            Command::Project {
+                command: ProjectCommand::Reviewed {
+                    command: ReviewedTopologyCommand::Create { .. },
+                    ..
+                }
+            }
+        ));
+        let run = Cli::try_parse_from([
+            "mcg",
+            "project",
+            "reviewed",
+            "00000000-0000-0000-0000-000000000001",
+            "run",
+            "00000000-0000-0000-0000-000000000002",
+        ])
+        .expect("reviewed plan run");
+        assert!(matches!(
+            run.command.expect("command"),
+            Command::Project {
+                command: ProjectCommand::Reviewed {
+                    command: ReviewedTopologyCommand::Run { .. },
+                    ..
+                }
             }
         ));
     }

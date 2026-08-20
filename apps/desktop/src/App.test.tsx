@@ -38,6 +38,10 @@ const client = vi.hoisted(() => ({
   discoverProject: vi.fn(),
   listProjects: vi.fn(),
   projectTopologyPlan: vi.fn(),
+  listReviewedTopologyPlans: vi.fn(),
+  createReviewedTopologyPlan: vi.fn(),
+  runReviewedTopologyPlan: vi.fn(),
+  cancelReviewedTopologyPlan: vi.fn(),
   listProjectMemory: vi.fn(),
   createProjectMemory: vi.fn(),
   correctProjectMemory: vi.fn(),
@@ -153,6 +157,10 @@ vi.mock("./desktop-client", () => ({
   discoverProject: client.discoverProject,
   listProjects: client.listProjects,
   projectTopologyPlan: client.projectTopologyPlan,
+  listReviewedTopologyPlans: client.listReviewedTopologyPlans,
+  createReviewedTopologyPlan: client.createReviewedTopologyPlan,
+  runReviewedTopologyPlan: client.runReviewedTopologyPlan,
+  cancelReviewedTopologyPlan: client.cancelReviewedTopologyPlan,
   listProjectMemory: client.listProjectMemory,
   createProjectMemory: client.createProjectMemory,
   correctProjectMemory: client.correctProjectMemory,
@@ -271,6 +279,10 @@ beforeEach(() => {
   client.discoverProject.mockReset();
   client.listProjects.mockReset();
   client.projectTopologyPlan.mockReset();
+  client.listReviewedTopologyPlans.mockReset();
+  client.createReviewedTopologyPlan.mockReset();
+  client.runReviewedTopologyPlan.mockReset();
+  client.cancelReviewedTopologyPlan.mockReset();
   client.listProjectMemory.mockReset();
   client.createProjectMemory.mockReset();
   client.correctProjectMemory.mockReset();
@@ -361,13 +373,15 @@ beforeEach(() => {
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listProjects.mockResolvedValue({ projects: [] });
   client.projectTopologyPlan.mockResolvedValue({
-    schema_version: 1,
+    schema_version: 2,
+    sha256: "0".repeat(64),
     project_id: "00000000-0000-4000-8000-000000000000",
     project_snapshot_id: "00000000-0000-4000-8000-000000000000",
     status: "empty",
     stages: [],
     unresolved_nodes: []
   });
+  client.listReviewedTopologyPlans.mockResolvedValue({ plans: [] });
   client.listProjectMemory.mockResolvedValue({ claims: [] });
   client.listProjectMemoryTransfers.mockResolvedValue({ transfers: [] });
   client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n" });
@@ -1826,7 +1840,7 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
     services: ["web"],
     ci_systems: [],
     important_directories: ["src"],
-    commands: [{ name: "test", command: "pnpm test", source: "package.json", confidence_basis: "manifest" }],
+    commands: [{ name: "test", command: "pnpm test", executable: "pnpm", arguments: ["test"], source: "package.json", confidence_basis: "manifest" }],
     instructions: { conflicts: [] },
     world: {
       nodes: [{ id: "service:web", kind: "service", label: "web", source: "package.json" }],
@@ -1858,7 +1872,8 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   client.correctProjectMemory.mockResolvedValue({ claim: { ...claim, id: "00000000-0000-4000-8000-000000000513", value: "pnpm 10", state: "working" }, previous: claim, event: { sequence: 3, kind: "memory_claim_corrected", occurred_at: claim.observed_at } });
   client.loadProjectMemoryHistory.mockResolvedValue({ claims: [claim] });
   client.projectTopologyPlan.mockResolvedValue({
-    schema_version: 1,
+    schema_version: 2,
+    sha256: "a".repeat(64),
     project_id: project.project_id,
     project_snapshot_id: project.id,
     status: "ready",
@@ -1905,6 +1920,82 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   await waitFor(() => expect(client.transitionProjectMemory).toHaveBeenCalledWith(project.project_id, claim.id, "reinforce"));
   fireEvent.click(within(intelligence).getByRole("button", { name: "History" }));
   await waitFor(() => expect(intelligence.querySelector(".memory-history")).toHaveTextContent("new"));
+});
+
+test("simple mode separately reviews and policy-runs a snapshot-pinned topology command", async () => {
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000530",
+    project_id: "00000000-0000-4000-8000-000000000531",
+    root: "C:\\Projects\\reviewed",
+    fingerprint: "f".repeat(64),
+    observed_at: "2026-08-20T12:00:00Z",
+    repository: { is_git: true, branch: "main", head: "abc", dirty: false, recent_commits: [] },
+    languages: ["Rust"], build_systems: ["Cargo"], test_systems: ["cargo test"],
+    package_managers: ["Cargo"], services: ["api"], ci_systems: [], important_directories: ["src"],
+    commands: [{ name: "test", command: "cargo test", executable: "cargo", arguments: ["test"], source: "Cargo.toml", confidence_basis: "declared project manifest" }],
+    instructions: { conflicts: [] },
+    world: { nodes: [{ id: "service:api", kind: "service", label: "api", source: "compose.yaml" }], relationships: [] },
+    watched_inputs: {}
+  };
+  const topology = {
+    schema_version: 2,
+    sha256: "b".repeat(64),
+    project_id: project.project_id,
+    project_snapshot_id: project.id,
+    status: "ready",
+    stages: [{ index: 0, nodes: [{ id: "service:api", kind: "service", label: "api", source: "compose.yaml" }] }],
+    unresolved_nodes: []
+  };
+  const reviewed = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000532",
+    definition_hash: "c".repeat(64),
+    project_id: project.project_id,
+    project_snapshot_id: project.id,
+    project_fingerprint: project.fingerprint,
+    topology_sha256: topology.sha256,
+    display_name: "test · reviewed",
+    reason: "Verify the reviewed project",
+    state: "reviewed",
+    steps: [{
+      id: "00000000-0000-4000-8000-000000000533", stage_index: 0, name: "Run test",
+      command_name: "test", command: "cargo test", executable: "cargo", arguments: ["test"],
+      source: "Cargo.toml", timeout_seconds: 1800, state: "pending", detail: "", log_artifact_sha256: []
+    }],
+    created_at: "2026-08-20T12:01:00Z",
+    updated_at: "2026-08-20T12:01:00Z"
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.projectTopologyPlan.mockResolvedValue(topology);
+  client.createReviewedTopologyPlan.mockImplementation(async (_projectId, request) => ({
+    plan: { ...reviewed, id: request.id, steps: [{ ...reviewed.steps[0], id: request.steps[0].id }], reason: request.reason },
+    replayed: false, events: [], outcomes: []
+  }));
+  let runCount = 0;
+  client.runReviewedTopologyPlan.mockImplementation(async (_projectId, planId) => {
+    runCount += 1;
+    return runCount === 1
+      ? { plan: { ...reviewed, id: planId, state: "waiting" }, replayed: false, events: [], approval_id: "00000000-0000-4000-8000-000000000534", outcomes: [] }
+      : { plan: { ...reviewed, id: planId, state: "succeeded", steps: [{ ...reviewed.steps[0], state: "succeeded", detail: "process completed" }] }, replayed: false, events: [], outcomes: [] };
+  });
+  client.approveRequest.mockResolvedValue({});
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  const intelligence = await screen.findByLabelText("Project intelligence and memory");
+  fireEvent.change(within(intelligence).getByLabelText("Reviewed topology reason"), { target: { value: "Verify the reviewed project" } });
+  fireEvent.click(within(intelligence).getByRole("button", { name: "Review this plan" }));
+  await waitFor(() => expect(client.createReviewedTopologyPlan).toHaveBeenCalledWith(project.project_id, expect.objectContaining({
+    project_snapshot_id: project.id,
+    topology_sha256: topology.sha256,
+    reason: "Verify the reviewed project",
+    steps: [expect.objectContaining({ command_name: "test", command: "cargo test", stage_index: 0 })]
+  })));
+  fireEvent.click(await within(intelligence).findByRole("button", { name: "Run reviewed plan" }));
+  fireEvent.click(await within(intelligence).findByRole("button", { name: "Approve and run" }));
+  await waitFor(() => expect(client.approveRequest).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000534"));
+  expect(await within(intelligence).findByText("succeeded")).toBeInTheDocument();
 });
 
 test("simple mode reviews and transfers one durable fact to an explicitly chosen project", async () => {

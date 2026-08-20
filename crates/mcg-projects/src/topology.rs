@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use sha2::{Digest, Sha256};
+
 use crate::{
     ProjectModel, ProjectTopologyPlan, TOPOLOGY_PLAN_SCHEMA_VERSION, TopologyPlanNode,
     TopologyPlanStage, TopologyPlanStatus,
@@ -71,14 +73,15 @@ impl ProjectModel {
                     .filter_map(|id| nodes.get(id).copied())
                     .map(TopologyPlanNode::from)
                     .collect();
-                return ProjectTopologyPlan {
+                return seal_plan(ProjectTopologyPlan {
                     schema_version: TOPOLOGY_PLAN_SCHEMA_VERSION,
+                    sha256: String::new(),
                     project_id: self.project_id,
                     project_snapshot_id: self.id,
                     status: TopologyPlanStatus::BlockedByCycle,
                     stages: Vec::new(),
                     unresolved_nodes,
-                };
+                });
             }
             let stage_nodes = ready
                 .iter()
@@ -103,26 +106,28 @@ impl ProjectModel {
                 }
             }
         }
-        ProjectTopologyPlan {
+        seal_plan(ProjectTopologyPlan {
             schema_version: TOPOLOGY_PLAN_SCHEMA_VERSION,
+            sha256: String::new(),
             project_id: self.project_id,
             project_snapshot_id: self.id,
             status: TopologyPlanStatus::Ready,
             stages,
             unresolved_nodes: Vec::new(),
-        }
+        })
     }
 }
 
 fn empty_plan(project: &ProjectModel) -> ProjectTopologyPlan {
-    ProjectTopologyPlan {
+    seal_plan(ProjectTopologyPlan {
         schema_version: TOPOLOGY_PLAN_SCHEMA_VERSION,
+        sha256: String::new(),
         project_id: project.project_id,
         project_snapshot_id: project.id,
         status: TopologyPlanStatus::Empty,
         stages: Vec::new(),
         unresolved_nodes: Vec::new(),
-    }
+    })
 }
 
 fn blocked_plan(
@@ -130,8 +135,9 @@ fn blocked_plan(
     remaining: &BTreeSet<&str>,
     nodes: &BTreeMap<&str, &crate::WorldNode>,
 ) -> ProjectTopologyPlan {
-    ProjectTopologyPlan {
+    seal_plan(ProjectTopologyPlan {
         schema_version: TOPOLOGY_PLAN_SCHEMA_VERSION,
+        sha256: String::new(),
         project_id: project.project_id,
         project_snapshot_id: project.id,
         status: TopologyPlanStatus::BlockedByCycle,
@@ -141,7 +147,21 @@ fn blocked_plan(
             .filter_map(|id| nodes.get(id).copied())
             .map(TopologyPlanNode::from)
             .collect(),
-    }
+    })
+}
+
+fn seal_plan(mut plan: ProjectTopologyPlan) -> ProjectTopologyPlan {
+    let bytes = serde_json::to_vec(&(
+        plan.schema_version,
+        plan.project_id,
+        plan.project_snapshot_id,
+        plan.status,
+        &plan.stages,
+        &plan.unresolved_nodes,
+    ))
+    .expect("topology plan contracts are serializable");
+    plan.sha256 = format!("{:x}", Sha256::digest(bytes));
+    plan
 }
 
 impl From<&crate::WorldNode> for TopologyPlanNode {
@@ -237,6 +257,8 @@ mod tests {
         let first = project.topology_plan();
         let second = project.topology_plan();
         assert_eq!(first, second);
+        assert_eq!(first.sha256.len(), 64);
+        assert!(first.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first.status, TopologyPlanStatus::Ready);
         assert_eq!(
             first

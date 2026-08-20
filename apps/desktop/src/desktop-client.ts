@@ -524,7 +524,7 @@ export interface ProjectModel {
   services: string[];
   ci_systems: string[];
   important_directories: string[];
-  commands: Array<{ name: string; command: string; source: string; confidence_basis: string }>;
+  commands: Array<{ name: string; command: string; executable: string; arguments: string[]; source: string; confidence_basis: string }>;
   instructions: { conflicts: unknown[] };
   existing_memory?: string;
   world: {
@@ -549,6 +549,7 @@ export interface ProjectListResponse {
 
 export interface ProjectTopologyPlan {
   schema_version: number;
+  sha256: string;
   project_id: string;
   project_snapshot_id: string;
   status: "ready" | "empty" | "blocked_by_cycle";
@@ -568,6 +569,69 @@ export interface ProjectTopologyPlan {
     source: string;
   }>;
 }
+
+export type ReviewedTopologyPlanState = "reviewed" | "running" | "waiting" | "succeeded" | "failed" | "uncertain" | "cancelled";
+export type ReviewedTopologyStepState = "pending" | "executing" | "succeeded" | "failed" | "uncertain" | "skipped";
+
+export interface ReviewedTopologyStep {
+  id: string;
+  stage_index: number;
+  name: string;
+  command_name: string;
+  command: string;
+  executable: string;
+  arguments: string[];
+  source: string;
+  timeout_seconds: number;
+  state: ReviewedTopologyStepState;
+  detail: string;
+  exit_code?: number;
+  log_artifact_sha256: string[];
+}
+
+export interface ReviewedTopologyPlan {
+  schema_version: number;
+  id: string;
+  definition_hash: string;
+  project_id: string;
+  project_snapshot_id: string;
+  project_fingerprint: string;
+  topology_sha256: string;
+  display_name: string;
+  reason: string;
+  state: ReviewedTopologyPlanState;
+  steps: ReviewedTopologyStep[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewedTopologyStepRequest {
+  id: string;
+  stage_index: number;
+  name: string;
+  command_name: string;
+  command: string;
+  timeout_seconds: number;
+}
+
+export interface ReviewedTopologyPlanCreateRequest {
+  id: string;
+  project_snapshot_id: string;
+  topology_sha256: string;
+  display_name: string;
+  reason: string;
+  steps: ReviewedTopologyStepRequest[];
+}
+
+export interface ReviewedTopologyPlanMutation {
+  plan: ReviewedTopologyPlan;
+  replayed: boolean;
+  events: Array<{ sequence: number; kind: string; occurred_at: string }>;
+  approval_id?: string;
+  outcomes: unknown[];
+}
+
+export interface ReviewedTopologyPlanListResponse { plans: ReviewedTopologyPlan[]; }
 
 export type MemoryState = "new" | "working" | "durable" | "decaying" | "superseded" | "retracted";
 export type MemoryLifecycleAction = "reinforce" | "decay" | "retract";
@@ -1336,6 +1400,29 @@ export function listProjects(): Promise<ProjectListResponse> {
 
 export function projectTopologyPlan(projectId: string): Promise<ProjectTopologyPlan> {
   return invoke("project_topology_plan", { projectId });
+}
+
+export function listReviewedTopologyPlans(projectId: string): Promise<ReviewedTopologyPlanListResponse> {
+  return invoke("list_reviewed_topology_plans", { projectId });
+}
+
+export function createReviewedTopologyPlan(
+  projectId: string,
+  request: ReviewedTopologyPlanCreateRequest
+): Promise<ReviewedTopologyPlanMutation> {
+  return invoke("create_reviewed_topology_plan", { projectId, request });
+}
+
+export function getReviewedTopologyPlan(projectId: string, planId: string): Promise<ReviewedTopologyPlan> {
+  return invoke("get_reviewed_topology_plan", { projectId, planId });
+}
+
+export function runReviewedTopologyPlan(projectId: string, planId: string): Promise<ReviewedTopologyPlanMutation> {
+  return invoke("run_reviewed_topology_plan", { projectId, planId });
+}
+
+export function cancelReviewedTopologyPlan(projectId: string, planId: string): Promise<ReviewedTopologyPlanMutation> {
+  return invoke("cancel_reviewed_topology_plan", { projectId, planId });
 }
 
 export function listProjectMemory(projectId: string): Promise<MemoryClaimListResponse> {
