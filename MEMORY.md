@@ -2,13 +2,21 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Exact Terraform JSON checkpoint passes Ubuntu qualification
+
+- Context: The bounded Terraform JSON project-intelligence checkpoint was transferred directly to the disposable Ubuntu VM as a prerequisite-bound Git bundle and checked out at exact clean commit `b70e686ab23b1690df5b40aa9a5d0f52913d7be4`.
+- Commands/tests: Ubuntu passed formatting, all 18 `mcg-projects` tests, strict all-target/all-feature `mcg-projects` Clippy, the authenticated snapshot-bound/fail-closed API topology-plan integration test, documentation validation, and diff hygiene. The atomic qualification record ends with `QUALIFICATION_EXIT=0`.
+- Evidence: Retained Ubuntu log `/home/hendo420/mcg-terraform-b70e686-ubuntu.log` has SHA-256 `A917F641FF4807CBBD06C631ED1B30596A1631E8E0D23E707C01B6368DE9ACE77`. Remote HEAD matches exactly, the worktree is clean, and the post-run audit found zero residual MCG/debug candidate processes.
+- Disk: The remote repository is 10,077,729,711 bytes and `/` has 26,587,721,728 bytes available, so the 50 GB debug-cache cleanup rule is not triggered. `target/release` remains preserved.
+- Follow-up: Continue exact Win11 installed-package/native Improvement UAT when the browser-enforced action-time confirmation is available; meanwhile continue independent M10/M12 implementation and final macOS qualification rather than waiting.
+
 ### 2026-08-20 - Bounded Terraform JSON project intelligence implemented
 
 - Context: The exact Win11 installer remained prepared at a browser-enforced action-time confirmation boundary, so the next independent M10 manifest-ecosystem slice proceeded locally.
 - Decision/files: `mcg-projects` now admits root or conventional `infra/`, `terraform/`, and `iac/` `*.tf.json` manifests while excluding `.terraform/` caches and unrelated trees. It records one configuration, strictly bounded required-provider dependencies, typed resources/modules, provider relationships, and only exact same-manifest `depends_on` ordering. Variables, outputs, provider/resource configuration, module sources, versions, unknown dependencies, credentials, and arbitrary values never enter the world model; discovery remains read-only and grants no Terraform execution authority. Updated `crates/mcg-projects/src/discovery.rs`, project-intelligence architecture, and the readiness matrix.
 - Commands/tests: Formatting, all 18 `mcg-projects` tests, strict all-target/all-feature `mcg-projects` Clippy, documentation validation, diff hygiene, and the authenticated snapshot-bound API topology-plan integration test pass locally.
 - Cleanup: The repository measured 53.22 GiB after native tests, triggering the `AGENTS.md` cache rule. The exact resolved `target/debug` contained no executing repository process; `cargo clean --target-dir <repository>/target/debug` removed 26,577 generated files and 29.6 GiB. `target/debug` is absent afterward and the repository measures 23.65 GiB; source/evidence were preserved and no local `target/release` existed to remove.
-- Follow-up: Commit/push this checkpoint, exact-qualify it on Ubuntu/Win11 in a later source candidate, and continue the prepared installed M9 lanes when the browser confirmation arrives.
+- Follow-up: The exact Ubuntu source qualification now passes at `b70e686`; include this Terraform slice in the next Win11 source candidate while continuing the already-prepared exact `af64d8e` installed M9 lanes when the browser confirmation arrives.
 
 ### 2026-08-20 - Exact af64d8e Windows package built
 
@@ -1363,9 +1371,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Finish exact `af64d8e` installed-package M9/M10 benchmark and every-interface UAT on Win11, then run the corresponding final macOS package/native lane.
-- Last meaningful change: Exact Ubuntu `af64d8e` `.deb`/AppImage package UAT and native Improvement UI UAT pass. Initial/restart reports agree across REST, CLI, and MCP; the advanced/simple UI shows one promoted shadow experiment with one receipt, benchmark, and decision. The native desktop/service/Xvfb processes were stopped and port 17780 plus the candidate-process audit were clean. Exact Windows packaging is still compiling from the warm cache.
-- Next step: Let the exact Windows package build finish, verify its commit-bound manifest and installer hashes, run the installed-package harness, and capture native Improvement UAT. Continue without asking for routine disposable-VM permission.
+- Current task: Finish exact `af64d8e` installed-package M9/M10 benchmark and every-interface UAT on Win11, continue independent M10/M12 implementation, then run the corresponding final macOS package/native lane.
+- Last meaningful change: Exact clean `b70e686` bounded Terraform JSON project intelligence passes Ubuntu formatting, 18 project tests, strict Clippy, authenticated snapshot-bound API topology-plan integration, documentation, and diff hygiene with zero residual candidate processes. The exact `af64d8e` Ubuntu package/native Improvement UAT remains green, and the exact Win11 NSIS package is already built and hash-bound.
+- Next step: Commit/push the Ubuntu Terraform qualification record. When the browser-enforced action-time confirmation is available, run the prepared exact Win11 installed-package harness and native Improvement UAT; do not idle in the meantime.
 - Blockers: No discretionary VM permission is outstanding; the owner reconfirmed standing authority for all in-scope administration and qualification on the disposable VMs. Execute installs, administrator prompts, transfers, restarts, tests, browser/desktop interaction, trust changes, and temporary cleanup directly without asking or waiting. If one interaction is genuinely automation-inaccessible, treat it as a technical constraint, try another in-scope route, and continue every independent lane; contact the owner only for an unavoidable identity-bound external-account action, never for redundant VM permission. Exact-v34 disposable updater trust has already been removed and fresh ordinary HTTPS distrust proven. Trusted production signing/notarization identities and unavoidable owner-account OAuth remain external release gates. Credentials are intentionally not retained here.
 - Extended verification: Exact-v27 matched two-hour/10,000-task crash-recovery lanes were freshly reverified on Windows and Ubuntu with the identical repository verifier hash, exact recovery, passing database/schema checks, and zero residual candidate processes/temp roots. Earlier one-hour lanes remain historical evidence only; the final matched multi-hour gate is closed for v27 and must repeat only if the final daemon identity changes.
 
