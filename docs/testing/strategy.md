@@ -131,7 +131,10 @@ unreachable origins, response artifact capture, capability confinement, and audi
 TCP-listener fixtures cover exact typed endpoint parsing, credential/path/query
 rejection, capability confinement, successful and refused bounded handshakes,
 artifact-free evidence, terminal replay, and same-sandbox loopback-only benchmark
-profiles on Linux and Windows.
+profiles on Linux and Windows. Runtime assessment tests additionally require the
+automatic experiment evaluator to admit `PortListening` at the shared isolated
+service boundary, bind the returned transcript to the exact condition, and derive
+pass/fail without accepting a mismatched or backend-supplied verdict.
 Rendered-page success uses a real Chromium fixture; an HTTP body is not a render
 substitute. The fixture requires JavaScript-mutated DOM/title evidence, HTML and PNG
 artifacts, exact-origin GET/HEAD confinement, and blocked cross-origin/mutating

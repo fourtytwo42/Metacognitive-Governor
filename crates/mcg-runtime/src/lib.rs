@@ -12366,7 +12366,9 @@ async fn verify_isolated_service_condition(
 ) -> (ConditionResult, EvaluationEvidence, bool) {
     if !matches!(
         condition,
-        SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+        SuccessCondition::HttpResponds { .. }
+            | SuccessCondition::ServiceHealthy { .. }
+            | SuccessCondition::PortListening { .. }
     ) {
         return (
             ConditionResult {
@@ -12450,9 +12452,9 @@ async fn verify_isolated_service_condition(
                     condition: condition.clone(),
                     passed: condition_passed,
                     detail: if condition_passed {
-                        "The baseline-bound service passed its loopback probe inside one qualified operating-system shadow sandbox."
+                        "The baseline-bound service passed its loopback HTTP/TCP probe inside one qualified operating-system shadow sandbox."
                     } else {
-                        "The baseline-bound service failed its loopback probe inside one qualified operating-system shadow sandbox."
+                        "The baseline-bound service failed its loopback HTTP/TCP probe inside one qualified operating-system shadow sandbox."
                     }
                     .into(),
                 },
@@ -12460,7 +12462,7 @@ async fn verify_isolated_service_condition(
                     method: "isolated_service_sandbox".into(),
                     artifact_sha256: Some(transcript.sha256),
                     event_sequence: None,
-                    detail: "Service startup and the bounded loopback HTTP probe shared the same network-isolated sandbox; no host-network fallback was permitted.".into(),
+                    detail: "Service startup and the bounded loopback HTTP/TCP probe shared the same network-isolated sandbox; no host-network fallback was permitted.".into(),
                 },
                 true,
             )
@@ -13630,7 +13632,9 @@ mod tests {
             assert!(!service_command.trim().is_empty());
             assert!(matches!(
                 condition,
-                SuccessCondition::HttpResponds { .. } | SuccessCondition::ServiceHealthy { .. }
+                SuccessCondition::HttpResponds { .. }
+                    | SuccessCondition::ServiceHealthy { .. }
+                    | SuccessCondition::PortListening { .. }
             ));
             if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
                 return ShadowCommandVerification::Completed {
@@ -14861,6 +14865,27 @@ mod tests {
             assert_eq!(supported, expected_supported);
             assert_eq!(result.passed, expected_passed);
             assert_eq!(evidence.artifact_sha256.is_some(), expected_artifact);
+        }
+
+        let tcp_condition = SuccessCondition::PortListening {
+            endpoint: "tcp://127.0.0.1:43123".into(),
+        };
+        for (fixture, expected_passed) in [
+            (FixtureShadowCommandResult::Pass, true),
+            (FixtureShadowCommandResult::Fail, false),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &tcp_condition,
+            )
+            .await;
+            assert!(supported);
+            assert_eq!(result.passed, expected_passed);
+            assert!(evidence.artifact_sha256.is_some());
+            assert!(result.detail.contains("HTTP/TCP"));
         }
     }
 
