@@ -3905,6 +3905,8 @@ name = "mcg-updater"
 version = "0.1.0"
 dependencies = [
  "mcg-config",
+ "object",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

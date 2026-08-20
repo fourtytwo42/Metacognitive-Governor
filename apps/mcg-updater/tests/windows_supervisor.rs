@@ -11,6 +11,36 @@ use mcg_updater::{WindowsUpdateOutcome, stage_verified_windows_installer};
 use uuid::Uuid;
 
 #[test]
+fn real_pe_version_mismatch_is_rejected_before_staging() {
+    let temporary = tempfile::tempdir().unwrap();
+    let install = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(&install).unwrap();
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    let installer = fs::read(
+        std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("curl.exe"),
+    )
+    .unwrap();
+    let actual = mcg_updater::windows_installer_product_version(&installer).unwrap();
+    assert_ne!(actual, "0.0.0");
+
+    let error = stage_verified_windows_installer(
+        &data,
+        &install,
+        Uuid::new_v4(),
+        1,
+        "0.0.0",
+        &installer,
+        b"packaged supervisor",
+    )
+    .unwrap_err();
+    assert!(error.contains("does not match the reviewed update version"));
+    assert!(!data.exists());
+}
+
+#[test]
 fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     let temporary = tempfile::tempdir().unwrap();
     let install = temporary.path().join("install");
@@ -32,12 +62,15 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
         .spawn()
         .unwrap();
     let request_id = Uuid::new_v4();
+    let installer = fs::read(system32.join("curl.exe")).unwrap();
+    let expected_version = mcg_updater::windows_installer_product_version(&installer).unwrap();
     let staged = stage_verified_windows_installer(
         &data,
         &install,
         request_id,
         desktop_process.id(),
-        &fs::read(system32.join("cmd.exe")).unwrap(),
+        &expected_version,
+        &installer,
         &fs::read(&supervisor).unwrap(),
     )
     .unwrap();

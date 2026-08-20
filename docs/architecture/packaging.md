@@ -247,12 +247,16 @@ graceful daemon shutdown, waits for the loopback authority to disappear, install
 the verified artifact, and restarts. Tauri's Windows updater implementation launches
 NSIS and immediately terminates the desktop, so MCG does not rely on the unreachable
 post-launch error branch there. It stages the already signature-verified raw NSIS
-artifact plus a digest-bound schema-2 request and an exact copy of the packaged
+artifact plus a digest-bound schema-3 request and an exact copy of the packaged
 supervisor under the private data directory. It launches that private copy so the
 installer can replace every installed payload, including `mcg-updater.exe`, without
 locking its own destination. The staged supervisor verifies its own name and digest,
 the unchanged adjacent packaged supervisor, the canonical install root, the request,
-installer name, directory boundaries, and originating packaged desktop PID;
+installer name, directory boundaries, and originating packaged desktop PID. Before
+backup or shutdown, MCG reads every PE version resource from the exact verified NSIS
+bytes, requires one consistent canonical-semver `ProductVersion`, and requires it to
+equal the signed manifest version the owner reviewed. Schema 3 binds that expected
+and observed version pair to the staged installer digest and rejects a mismatch;
 waits for the desktop to exit; invokes fixed passive `/UPDATE` arguments; and waits
 for the real installer status. An adjacent packaged cleanup helper waits for the
 staged supervisor to exit and removes only that exact UUID-bound private copy.

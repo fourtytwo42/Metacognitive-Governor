@@ -198,6 +198,10 @@ step before invoking installation with a fresh backup identity. Native tests rej
 missing/HTTP/credential-bearing/fragmented endpoints, malformed minisign keys,
 noncanonical SemVer review identities, and stale/wrong-version/credential-bearing/
 database-free pre-update backups.
+Windows updater tests also parse real PE resources without executing the payload,
+require every `ProductVersion` to be identical canonical SemVer, bind the reviewed
+and observed values into staged-request schema 3, and prove a mismatch creates no
+private staging directory or installer process.
 The owner-machine `npm run test:updater-signing` lane generates a disposable Tauri
 key, signs an artifact, verifies the exact Tauri envelope, proves byte tampering is
 rejected, validates preflight with the generated trust root, and removes all private
@@ -241,6 +245,10 @@ disposable key, then require the valid signature/candidate pair to verify and th
 decoy signature/candidate pair to fail. The generated matrix has strictly ordered
 baseline, valid, and changed versions plus exact no-update, bad-signature, corrupt,
 and unavailable feeds; output reuse and invalid ordering fail closed.
+The changed-version lane is accepted only when the signed manifest version and the
+verified Windows installer's embedded `ProductVersion` are identical. A feed that
+advertises a different version for otherwise valid signed installer bytes must fail
+before backup, daemon shutdown, staging, or installer execution.
 The Windows matrix uses `scripts/windows-updater-uat.ps1` to make scenario changes
 atomic, retain immutable secret-free snapshots, and inject only reversible backup or
 install-directory DACL failures. Its fixture runs under Windows PowerShell 5.1 and

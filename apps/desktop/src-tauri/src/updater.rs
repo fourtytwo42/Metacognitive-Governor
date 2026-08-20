@@ -366,6 +366,7 @@ fn restart_service_after_failed_install() -> String {
 fn launch_windows_update_supervisor(
     app: &AppHandle,
     request_id: Uuid,
+    expected_version: &str,
     installer: &[u8],
 ) -> Result<(), String> {
     let config = mcg_config::AppConfig::default();
@@ -389,6 +390,7 @@ fn launch_windows_update_supervisor(
         parent,
         request_id,
         std::process::id(),
+        expected_version,
         installer,
         &supervisor_bytes,
     )?;
@@ -437,6 +439,15 @@ pub(crate) async fn install_update(
     let bytes = update.download(|_, _| {}, || {}).await.map_err(|error| {
         format!("The signed update could not be downloaded and verified: {error}")
     })?;
+    #[cfg(windows)]
+    {
+        let product_version = mcg_updater::windows_installer_product_version(&bytes)?;
+        if product_version != expected_version {
+            return Err(format!(
+                "The signed Windows installer version {product_version} does not match the reviewed update version {expected_version}."
+            ));
+        }
+    }
     create_and_verify_backup(backup_id).await?;
     if let Err(error) = stop_local_service().await {
         let recovery = restart_service_after_failed_install();
@@ -444,7 +455,7 @@ pub(crate) async fn install_update(
     }
     #[cfg(windows)]
     {
-        launch_windows_update_supervisor(&app, backup_id, &bytes)
+        launch_windows_update_supervisor(&app, backup_id, &expected_version, &bytes)
     }
     #[cfg(not(windows))]
     {
