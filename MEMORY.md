@@ -1267,7 +1267,7 @@ Durable project context lives here. Update this file whenever information should
 - Files: `apps/mcg-updater/src/lib.rs`, `scripts/prepare-updater-uat-source.mjs`, `docs/architecture/packaging.md`, `docs/roadmap/production-readiness.md`.
 - Commands/tests: The complete Ubuntu `scripts/verify.sh` passes from an isolated target: strict workspace Clippy, all Rust/unit/integration/restart tests, 84 API tests, 17 project/topology tests, 60 storage tests, 48 runtime tests, live GPU45, real Chromium, updater signing/source/workspace/soak verifiers, documentation and packaging, 37 Vitest tests, TypeScript/production frontend, native Tauri build, and 9/9 Playwright journeys. The secret-free 52,818-byte terminal log SHA-256 is `5306EA2AB465EA32140140471314522A8325704B5D3DBB4BD530B05DD8CB3E5F`; qualification tree is `C5E267058727FABBCCB77255E193498AE34F3939`.
 - Cleanup: With zero processes rooted in the exact target, the disposable Ubuntu target (27,052,510,361 apparent bytes), 218,492,424-byte staged source tree, and 1,502,863-byte transfer archive were removed and absence verified. No GitHub-hosted compute ran.
-- Follow-up: Commit and push this portability/qualification checkpoint. The exact `7221ab6` Win11 schema-3 bundle remains the immediate M9 gate after browser action-time transfer confirmation.
+- Result: The portability and exact Ubuntu qualification checkpoint is pushed as `ef37542` on `codex/v34-updater-version-binding`; local HEAD and the private origin match. The exact `7221ab6` Win11 schema-3 bundle remains the immediate M9 gate after browser action-time transfer confirmation.
 
 ## Active Handoff
 
