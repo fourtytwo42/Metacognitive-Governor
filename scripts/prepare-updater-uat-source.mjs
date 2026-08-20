@@ -65,6 +65,23 @@ function run(command, arguments_, options = {}) {
   return result.stdout;
 }
 
+function archiveListing(archive, verbose) {
+  const result = spawnSync("tar", [verbose ? "-tvzf" : "-tzf", archive], {
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const lines = (result.stdout ?? "").split(/\r?\n/u).filter(Boolean);
+  if (result.status !== 0) {
+    if (verbose && lines.some((line) => line[0] !== "-" && line[0] !== "d")) {
+      fail("archive entry has an unsafe type");
+    }
+    const detail = `${result.stderr ?? ""}\n${result.stdout ?? ""}`.trim().slice(0, 4_000);
+    fail(`tar rejected the archive listing with status ${result.status}: ${detail}`);
+  }
+  return lines;
+}
+
 async function regularFile(value, label, maximum) {
   if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
     fail(`${label} must be an absolute path`);
@@ -83,8 +100,8 @@ async function sha256(file) {
 }
 
 function archiveEntries(archive) {
-  const names = run("tar", ["-tzf", archive]).split(/\r?\n/u).filter(Boolean);
-  const verbose = run("tar", ["-tvzf", archive]).split(/\r?\n/u).filter(Boolean);
+  const verbose = archiveListing(archive, true);
+  const names = archiveListing(archive, false);
   if (names.length === 0 || names.length > MAX_ARCHIVE_ENTRIES || verbose.length !== names.length) {
     fail("archive entry count is invalid");
   }

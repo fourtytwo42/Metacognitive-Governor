@@ -166,6 +166,9 @@ creates one baseline or candidate build tree from the same sealed source boundar
 It accepts only a bounded regular archive containing regular canonical relative paths,
 rejects duplicates, traversal, links, special files, missing release inputs, existing
 destinations, and noncanonical semantic versions, then checks the extracted tree again.
+Archive listing is inspected before extraction; if a platform `tar` rejects a malformed
+header while exposing an unsafe entry type, MCG normalizes that result to the same bounded
+unsafe-type refusal instead of leaking platform-specific parser behavior.
 The helper updates the single Cargo workspace version and every root/desktop npm,
 lockfile, and Tauri version surface; regenerates and rechecks Cargo metadata offline;
 requires every workspace package to converge on the requested version; normalizes the

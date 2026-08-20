@@ -201,6 +201,7 @@ pub fn run_staged_windows_update(request_path: &Path) -> Result<WindowsUpdateOut
 pub fn recover_packaged_desktop_after_supervisor_error(request_path: &Path) -> Result<(), String> {
     #[cfg(not(windows))]
     {
+        let _ = request_path;
         Err("Windows update recovery is available only on Windows.".into())
     }
     #[cfg(windows)]
@@ -298,6 +299,7 @@ fn run_staged_windows_update_inner(request_path: &Path) -> Result<WindowsUpdateO
     Ok(outcome)
 }
 
+#[cfg(any(windows, test))]
 fn validate_request(request: &WindowsUpdateRequest) -> Result<(), String> {
     if request.schema_version != REQUEST_SCHEMA
         || request.desktop_pid == 0
