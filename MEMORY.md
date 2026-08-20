@@ -2,6 +2,12 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Exact af64d8e Windows package built
+
+- Context: The installed experiment lifecycle verifier and baseline-aware consumer CLI assertions required a fresh exact Win11 package before installed-package and native UI UAT.
+- Result: Win11 built the release/NSIS package successfully in 10m14s from clean source commit `af64d8eedeef332467cd029d82555ec35114bb47`. `target/release/bundle/nsis/MCG_0.1.0_x64-setup.exe` is 24,236,504 bytes with SHA-256 `EF78851C676F68D656402683965419D32439579C38F55BC7260DE3B53DF859DD`; `target/release/release-manifest.json` is 390 bytes with SHA-256 `8023C7CD0B15839181BA7312AC429542234339AD6A16B93D80863149DF0FD56B`. The manifest independently records schema 1, version 0.1.0, the exact source commit, `source_dirty: false`, and the identical installer size/hash.
+- Follow-up: Run `scripts/test-windows-installer.ps1` against this exact installer, retain experiment initial/restart reports, then perform native Improvement UI UAT and verify zero residual processes/listeners.
+
 ### 2026-08-20 - Installed experiment lifecycle verifier passes local restart qualification
 
 - Context: M9 had deep source coverage and every REST/CLI/MCP experiment surface, but package UAT only enumerated the MCP catalog and did not execute a representative measured-improvement lifecycle or re-open its evidence after restart.
