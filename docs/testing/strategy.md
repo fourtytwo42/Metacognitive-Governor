@@ -289,6 +289,14 @@ passphrase or local token bytes occur in the encrypted container, requests an
 authenticated graceful stop, requires absent WAL/SHM sidecars, rejects one wrong
 passphrase, restores with redirected bounded input, preserves the local token and
 rollback database, and reopens the restored daemon consistently.
+Before the backup boundary, `scripts/test-installed-experiments.py` drives one
+measured improvement lifecycle through the installed REST, CLI, and MCP surfaces.
+It records an inactive candidate and supervision observation, requires a shadow
+receipt to retain `evaluation_only` authority, records one paired benchmark,
+promotes only through an evidence-linked decision, proves mutation replay is
+idempotent, and requires every surface to recover the same promoted revision and
+immutable history after daemon restart. The Windows, Linux, and macOS package UAT
+harnesses all invoke the same verifier and retain separate initial/restart reports.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected

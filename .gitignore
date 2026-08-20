@@ -11,6 +11,8 @@
 /playwright-report/
 /test-results/
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 **/src-tauri/gen/
 **/src-tauri/binaries/
 

@@ -18,7 +18,7 @@ dmg="${2:-$repository_root/target/release/bundle/dmg/MCG_0.1.0_${bundle_arch}.dm
 
 [[ -d "$source_app" ]] || { echo "Missing app bundle: $source_app" >&2; exit 1; }
 [[ -f "$dmg" ]] || { echo "Missing disk image: $dmg" >&2; exit 1; }
-for command in codesign curl ditto hdiutil lsof node open pgrep plutil screencapture sips spctl xcrun; do
+for command in codesign curl ditto hdiutil lsof node open pgrep plutil python3 screencapture sips spctl xcrun; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 
@@ -207,6 +207,11 @@ wait_for_health "$service_port"
 cli=("$installed_app/Contents/MacOS/mcg" --host "http://127.0.0.1:$service_port" --token-file "$service_data/local-auth-token")
 env HOME="$uat_home" "${cli[@]}" status --json >"$uat_root/status.json"
 env HOME="$uat_home" "${cli[@]}" doctor --json >"$uat_root/doctor.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-experiments.py" \
+  --mode exercise --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" \
+  --state "$uat_root/experiment-state.json" --output "$uat_root/experiments.json"
 env HOME="$uat_home" "${cli[@]}" backup create --json >"$uat_root/backup.json"
 
 node --input-type=module - "http://127.0.0.1:$service_port/mcp" "$service_data/local-auth-token" "$uat_root/mcp.json" <<'NODE'
@@ -238,7 +243,9 @@ const discovered = await call({jsonrpc: "2.0", id: 1, method: "server/discover",
 if (discovered.result.supportedVersions[0] !== "2026-07-28") throw new Error("MCP version mismatch");
 const tools = await call({jsonrpc: "2.0", id: 2, method: "tools/list", params: {}});
 const names = tools.result.tools.map((tool) => tool.name);
-if (!names.includes("mcg_run_task") || !names.includes("mcg_system_status")) throw new Error("MCP tool catalog incomplete");
+for (const name of ["mcg_run_task", "mcg_system_status", "mcg_experiments_inspect", "mcg_experiments_mutate"]) {
+  if (!names.includes(name)) throw new Error(`MCP tool catalog missing ${name}`);
+}
 writeFileSync(outputPath, JSON.stringify({supportedVersion: "2026-07-28", toolCount: names.length}));
 NODE
 
@@ -250,6 +257,11 @@ restarted_service_pid=$!
 background_pids+=("$restarted_service_pid")
 wait_for_health "$service_port"
 env HOME="$uat_home" "${cli[@]}" status --json >"$uat_root/restarted-status.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-experiments.py" \
+  --mode verify --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" \
+  --state "$uat_root/experiment-state.json" --output "$uat_root/experiments-restart.json"
 stop_process "$restarted_service_pid"
 background_pids=()
 

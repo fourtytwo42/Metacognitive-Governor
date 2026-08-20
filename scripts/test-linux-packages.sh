@@ -469,6 +469,10 @@ background_pids+=("$installed_service_pid")
 wait_for_health "$installed_port"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg status --json >"$uat_root/status.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg doctor --json >"$uat_root/doctor.json"
+runuser -u "$uat_user" -- python3 "$repository_root/scripts/test-installed-experiments.py" \
+  --mode exercise --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --state "$uat_root/experiment-state.json" --output "$uat_root/experiments.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg backup create --json >"$uat_root/backup.json"
 encrypted_backup_id="00000000-0000-4000-8000-00000000b002"
 encrypted_bundle="$installed_data/backups/$encrypted_backup_id.mcgb"
@@ -523,7 +527,12 @@ assert discovered["result"]["supportedVersions"] == ["2026-07-28"]
 assert discovered["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "metacognitive-governor"
 tools = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
 names = [tool["name"] for tool in tools["result"]["tools"]]
-assert "mcg_run_task" in names and "mcg_system_status" in names
+assert {
+    "mcg_run_task",
+    "mcg_system_status",
+    "mcg_experiments_inspect",
+    "mcg_experiments_mutate",
+}.issubset(names)
 pathlib.Path(output_path).write_text(
     json.dumps({"supportedVersion": "2026-07-28", "toolCount": len(names)}),
     encoding="utf-8",
@@ -554,6 +563,10 @@ restarted_service_pid=$!
 background_pids+=("$restarted_service_pid")
 wait_for_health "$installed_port"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg status --json >"$uat_root/restarted-status.json"
+runuser -u "$uat_user" -- python3 "$repository_root/scripts/test-installed-experiments.py" \
+  --mode verify --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --state "$uat_root/experiment-state.json" --output "$uat_root/experiments-restart.json"
 stop_tree "$restarted_service_pid"
 background_pids=()
 

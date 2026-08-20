@@ -339,6 +339,13 @@ try {
     $doctor = ($doctorOutput -join [Environment]::NewLine) | ConvertFrom-Json
     if ($doctor.schema_version -ne 1 -or $doctor.service -ne "mcg-daemon") { throw "Installed CLI doctor returned an invalid report." }
     $doctor | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $uatRoot "doctor.json") -Encoding UTF8
+    $python = (Get-Command python.exe -ErrorAction Stop).Source
+    $experimentVerifier = Join-Path $PSScriptRoot "test-installed-experiments.py"
+    $experimentState = Join-Path $uatRoot "experiment-state.json"
+    & $python $experimentVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --state $experimentState `
+        --output (Join-Path $uatRoot "experiments.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed experiment lifecycle verification failed." }
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
@@ -396,7 +403,10 @@ try {
     if ($discovered.result.supportedVersions[0] -ne "2026-07-28") { throw "Installed MCP discovery version mismatch." }
     $mcpTools = Invoke-Mcp 2 "tools/list"
     $toolNames = @($mcpTools.result.tools | ForEach-Object { $_.name })
-    if ($toolNames -notcontains "mcg_run_task" -or $toolNames -notcontains "mcg_system_status") { throw "Installed MCP tool catalog is incomplete." }
+    if ($toolNames -notcontains "mcg_run_task" -or $toolNames -notcontains "mcg_system_status" `
+        -or $toolNames -notcontains "mcg_experiments_inspect" -or $toolNames -notcontains "mcg_experiments_mutate") {
+        throw "Installed MCP tool catalog is incomplete."
+    }
     @{ supportedVersion = "2026-07-28"; toolCount = $toolNames.Count } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $uatRoot "mcp.json") -Encoding UTF8
     $tokenBeforeRestore = [IO.File]::ReadAllBytes($tokenFile)
     $null = Stop-UatDaemonGracefully $daemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "graceful-stop.json")
@@ -427,6 +437,10 @@ try {
     $restartHealth = Wait-ForHealth $servicePort (Join-Path $uatRoot "restarted-health.json")
     $restartStatus = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile status 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI failed after daemon restart: $restartStatus" }
+    & $python $experimentVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --state $experimentState `
+        --output (Join-Path $uatRoot "experiments-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed experiment history did not survive daemon restart." }
     $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 
