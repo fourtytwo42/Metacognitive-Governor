@@ -2515,7 +2515,7 @@ http.createServer((request, response) => {
         assert_eq!(service_hits.load(Ordering::SeqCst), 0);
         host_service.abort();
         eprintln!(
-            "qualified same-sandbox Windows Node service pass/fail with zero host-network hits"
+            "qualified same-sandbox Windows Node HTTP/TCP service pass/fail with zero host-network hits"
         );
     }
 
@@ -2849,7 +2849,7 @@ http.createServer((request, response) => {
                 assert_eq!(service_hits.load(Ordering::SeqCst), 0);
                 host_service.abort();
                 eprintln!(
-                    "qualified same-sandbox Node service pass/fail with zero host-network hits"
+                    "qualified same-sandbox Node HTTP/TCP service pass/fail with zero host-network hits"
                 );
             }
         }
