@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Exact-current Windows complete verifier passes
+
+- Context: The same exact-current source boundary that passed the complete Ubuntu verifier was run through the complete Windows owner-machine verifier from clean commit `a4a965898b0a36c1d60369a655e9528ebfa8c73c` using an external disposable Cargo target.
+- Commands/tests: `scripts/verify.ps1` passed strict workspace Clippy, all Rust/unit/integration/doc/live GPU45/live SSH/restart tests, real Chromium isolation, four updater unit tests plus both real Windows supervisor tests, documentation/packaging/signing/updater UAT/source/workspace/soak-evidence contracts, 37/37 Vitest tests, TypeScript, the production web build, native Tauri debug build, and 9/9 Playwright journeys.
+- Evidence: Secret-free log `tmp/verify-windows-a4a9658.log` is 93,366 bytes / 1,930 lines with SHA-256 `66A11F512A0FCD7AA3C6191BDD12C89FA797AB74A07DB667684C192526CFA8EE`. HEAD and private origin matched exactly and the worktree was clean before bookkeeping.
+- Cleanup: Zero processes executed beneath `C:\Users\hendo420\AppData\Local\Temp\mcg-windows-a4a9658-target`; the exact 32,856,988,868-byte disposable target was removed and absence verified. Repository source, release output, and evidence were preserved. No GitHub-hosted compute ran.
+- Result: The exact-current complete source verifier is green on both Windows and Ubuntu. M10's previous same-current-Windows source-verifier gap is closed; representative installed-package real-project UAT and the remaining product slices are still open.
+- Follow-up: Run the separately prepared schema-3 Node/HTTP/TCP Windows Sandbox qualification bundle on Win11 after the browser's required action-time private-transfer confirmation, then continue representative installed-package M9/M10 UAT.
+
 ### 2026-08-19 - GitHub checkpoint policy
 
 - Context: The owner wants private GitHub kept current enough to prevent local work loss and provide reliable rollback points, while GitHub-hosted builds and paid automation remain prohibited.
@@ -1272,8 +1281,8 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Run the exact-current Win11 schema-3 Node/HTTP/TCP Windows Sandbox isolation boundary, then continue M9/M10 release qualification.
-- Last meaningful change: Exact-current Ubuntu complete verification now passes after fixing a Linux strict-Clippy boundary in the Windows updater and normalizing GNU-tar unsafe-entry rejection. The current M9 Win11 qualification bundle remains `tmp/mcg-schema3-win11-7221ab6.zip`, SHA-256 `AC0F8F450D52C68C0AB056AB5AFF719E846FC1D5C857443B55A66C3345F9C055`.
+- Current task: Run the exact-current Win11 schema-3 Node/HTTP/TCP Windows Sandbox isolation boundary, then continue representative installed-package M9/M10 UAT.
+- Last meaningful change: Exact-current complete source verification now passes on both Ubuntu and Windows. Windows evidence is `tmp/verify-windows-a4a9658.log`, SHA-256 `66A11F512A0FCD7AA3C6191BDD12C89FA797AB74A07DB667684C192526CFA8EE`; its 32,856,988,868-byte external build target was removed. The current M9 Win11 qualification bundle remains `tmp/mcg-schema3-win11-7221ab6.zip`, SHA-256 `AC0F8F450D52C68C0AB056AB5AFF719E846FC1D5C857443B55A66C3345F9C055`.
 - Next step: After browser action-time confirmation for transmitting the private source bundle, transfer/hash-verify/run only the `7221ab6` Win11 Sandbox bundle and require zero residual sessions/processes/staging; retrieve secret-free results before the separately confirmed staging deletion.
 - Blockers: No discretionary VM permission is outstanding; the owner reconfirmed standing authority for routine administration and qualification on all disposable VMs. The disposable certificate expires on 2026-08-20 at 11:32:26Z and must remain only through this matrix, then be removed by exact identity and fresh HTTPS distrust proven. Platform/browser-enforced confirmation may still require owner action if automation cannot satisfy it. Trusted production signing/notarization identities and owner-present Ubuntu/macOS browser OAuth remain external release gates. Credentials are intentionally not retained here.
 - Extended verification: Exact-v27 matched two-hour/10,000-task crash-recovery lanes were freshly reverified on Windows and Ubuntu with the identical repository verifier hash, exact recovery, passing database/schema checks, and zero residual candidate processes/temp roots. Earlier one-hour lanes remain historical evidence only; the final matched multi-hour gate is closed for v27 and must repeat only if the final daemon identity changes.
