@@ -31,6 +31,11 @@ StatefulSet, DaemonSet, Job, and CronJob workloads; init and application images;
 image-derived databases; selector-matched Service endpoints; and HTTP(S)
 Ingress routes. Arbitrary YAML is not interpreted as Kubernetes configuration,
 and Secret documents and secret-like labels never enter the graph.
+Helm `Chart.yaml` files in the project root or conventional `helm/`, `charts/`,
+`deploy/helm/`, and `manifests/helm/` chart directories contribute deployment
+nodes, chart dependencies, and dependency-derived database edges. Discovery
+deliberately does not parse Helm templates, `values.yaml`, dependency repository
+URLs, or condition/value fields; those surfaces may contain templates or secrets.
 Package `homepage` contributes only a credential-free HTTP(S) origin. Every node
 and relationship retains its manifest source and uses a content-stable identity;
 the desktop resolves those identities back to consumer-readable labels.

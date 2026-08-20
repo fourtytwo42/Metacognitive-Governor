@@ -555,6 +555,7 @@ fn is_manifest(path: &str) -> bool {
     ) || path.starts_with(".github/workflows/")
         || is_openapi_manifest(path)
         || is_kubernetes_manifest(path)
+        || is_helm_chart(path)
 }
 
 fn fingerprint(inputs: &BTreeMap<String, String>) -> String {
@@ -669,6 +670,14 @@ fn discover_services(root: &Path, files: &[PathBuf]) -> Vec<String> {
         .any(|path| is_kubernetes_manifest(&relative(root, path)))
     {
         services.push("Kubernetes".into());
+        services.sort();
+        services.dedup();
+    }
+    if files
+        .iter()
+        .any(|path| is_helm_chart(&relative(root, path)))
+    {
+        services.push("Helm".into());
         services.sort();
         services.dedup();
     }
@@ -788,6 +797,7 @@ fn world_model(
     add_manifest_dependencies(root, files, &mut graph)?;
     add_compose_facts(root, files, &mut graph)?;
     add_kubernetes_facts(root, files, &mut graph)?;
+    add_helm_facts(root, files, &mut graph)?;
     add_openapi_facts(root, files, &mut graph)?;
     add_deployment_facts(root, files, &mut graph);
     Ok(graph.finish())
@@ -1597,6 +1607,100 @@ fn valid_kubernetes_host(value: &str) -> bool {
     valid_kubernetes_name(value) && value.contains('.')
 }
 
+fn add_helm_facts(
+    root: &Path,
+    files: &[PathBuf],
+    graph: &mut WorldGraph,
+) -> Result<(), ProjectDiscoveryError> {
+    for path in files
+        .iter()
+        .filter(|path| is_helm_chart(&relative(root, path)))
+    {
+        let source = relative(root, path);
+        let documents = YamlLoader::load_from_str(&read_bounded_manifest(path)?)
+            .map_err(|error| ProjectDiscoveryError::Yaml(error.to_string()))?;
+        let Some(document) = documents.first() else {
+            continue;
+        };
+        let api_version = yaml_field(document, "apiVersion").and_then(Yaml::as_str);
+        if !matches!(api_version, Some("v1" | "v2")) {
+            continue;
+        }
+        let Some(name) = yaml_field(document, "name")
+            .and_then(Yaml::as_str)
+            .filter(|name| valid_helm_name(name))
+        else {
+            continue;
+        };
+        let chart_source = format!("{source}#name");
+        let chart_id = graph.add_node(
+            WorldNodeKind::Deployment,
+            &format!("Helm chart {name}"),
+            &chart_source,
+        );
+        graph.add_relationship("repository", "deploys_to", &chart_id, &chart_source);
+
+        let Some(dependencies) = yaml_field(document, "dependencies").and_then(Yaml::as_vec) else {
+            continue;
+        };
+        for dependency in dependencies.iter().take(MAX_MANIFEST_ITEMS) {
+            let Some(dependency_name) = yaml_field(dependency, "name")
+                .and_then(Yaml::as_str)
+                .filter(|name| valid_helm_name(name))
+            else {
+                continue;
+            };
+            let dependency_source = format!("{source}#dependencies.{dependency_name}");
+            let dependency_id = graph.add_node(
+                WorldNodeKind::Dependency,
+                dependency_name,
+                &dependency_source,
+            );
+            graph.add_relationship(&chart_id, "depends_on", &dependency_id, &dependency_source);
+            if let Some(database) = database_kind(dependency_name) {
+                let database_id = graph.add_node(
+                    WorldNodeKind::Database,
+                    &format!("{dependency_name} ({database})"),
+                    &dependency_source,
+                );
+                graph.add_relationship(
+                    &chart_id,
+                    "uses_database",
+                    &database_id,
+                    &dependency_source,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_helm_chart(path: &str) -> bool {
+    let segments = path.split('/').collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        ["Chart.yaml"]
+            | ["helm" | "charts", _, "Chart.yaml"]
+            | ["deploy" | "manifests", "helm", _, "Chart.yaml"]
+    )
+}
+
+fn valid_helm_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 53
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
 fn add_openapi_facts(
     root: &Path,
     files: &[PathBuf],
@@ -2086,6 +2190,100 @@ stringData:
     }
 
     #[test]
+    fn helm_chart_topology_is_bounded_stable_and_ignores_sensitive_values() {
+        let root = tempdir().expect("root");
+        let chart_root = root.path().join("deploy/helm/storefront");
+        fs::create_dir_all(&chart_root).expect("Helm chart directory");
+        fs::write(
+            chart_root.join("Chart.yaml"),
+            r"apiVersion: v2
+name: storefront
+version: 1.2.3
+appVersion: 7.0.0
+dependencies:
+  - name: postgresql
+    version: 15.5.0
+    repository: https://charts.example.test/private
+  - name: redis
+    version: 20.1.0
+  - name: external-secrets
+    version: 1.0.0
+",
+        )
+        .expect("Helm chart manifest");
+        fs::write(
+            chart_root.join("values.yaml"),
+            "databasePassword: never-retain-this\napiToken: also-secret\n",
+        )
+        .expect("sensitive values fixture");
+        let vendored = root.path().join("vendor/charts/unrelated");
+        fs::create_dir_all(&vendored).expect("unrelated chart directory");
+        fs::write(
+            vendored.join("Chart.yaml"),
+            "apiVersion: v2\nname: unrelated\nversion: 1.0.0\n",
+        )
+        .expect("unrelated chart");
+
+        let project_id = ProjectId::new();
+        let first = ProjectDiscoverer::discover(root.path(), project_id).expect("discover");
+        let second = ProjectDiscoverer::discover(root.path(), project_id).expect("rediscover");
+        assert_eq!(first.world, second.world);
+        assert!(first.services.contains(&"Helm".to_owned()));
+        assert!(
+            first
+                .watched_inputs
+                .contains_key("deploy/helm/storefront/Chart.yaml")
+        );
+        assert!(
+            !first
+                .watched_inputs
+                .contains_key("deploy/helm/storefront/values.yaml")
+        );
+        assert!(
+            !first
+                .watched_inputs
+                .contains_key("vendor/charts/unrelated/Chart.yaml")
+        );
+
+        let node_id = |kind, label: &str| {
+            first
+                .world
+                .nodes
+                .iter()
+                .find(|node| node.kind == kind && node.label == label)
+                .map(|node| node.id.clone())
+                .expect("world node")
+        };
+        let chart = node_id(WorldNodeKind::Deployment, "Helm chart storefront");
+        let postgresql = node_id(WorldNodeKind::Dependency, "postgresql");
+        let redis = node_id(WorldNodeKind::Dependency, "redis");
+        let external_secrets = node_id(WorldNodeKind::Dependency, "external-secrets");
+        let database = node_id(WorldNodeKind::Database, "postgresql (PostgreSQL)");
+        for (from, relation, to) in [
+            ("repository", "deploys_to", chart.as_str()),
+            (chart.as_str(), "depends_on", postgresql.as_str()),
+            (chart.as_str(), "depends_on", redis.as_str()),
+            (chart.as_str(), "depends_on", external_secrets.as_str()),
+            (chart.as_str(), "uses_database", database.as_str()),
+        ] {
+            assert!(
+                first.world.relationships.iter().any(|edge| {
+                    edge.from == from && edge.relation == relation && edge.to == to
+                })
+            );
+        }
+        let retained = serde_json::to_string(&first.world).expect("serialize world model");
+        for forbidden in [
+            "never-retain-this",
+            "also-secret",
+            "charts.example.test",
+            "unrelated",
+        ] {
+            assert!(!retained.contains(forbidden), "retained {forbidden}");
+        }
+    }
+
+    #[test]
     fn oversized_or_malformed_topology_manifests_fail_before_unbounded_parsing() {
         let oversized = tempdir().expect("oversized root");
         fs::write(
@@ -2118,6 +2316,17 @@ stringData:
         .expect("malformed Kubernetes manifest");
         assert!(matches!(
             ProjectDiscoverer::discover(malformed_kubernetes.path(), ProjectId::new()),
+            Err(ProjectDiscoveryError::Yaml(_))
+        ));
+
+        let malformed_helm = tempdir().expect("malformed Helm root");
+        fs::write(
+            malformed_helm.path().join("Chart.yaml"),
+            "apiVersion: v2\nname: [unterminated",
+        )
+        .expect("malformed Helm chart");
+        assert!(matches!(
+            ProjectDiscoverer::discover(malformed_helm.path(), ProjectId::new()),
             Err(ProjectDiscoveryError::Yaml(_))
         ));
     }
