@@ -138,8 +138,8 @@ source to an unmapped disposable workspace, clears the command environment,
 executes a direct argument vector as `System`, and normalizes objective failure
 separately from setup failure. Recognized Node-family commands may add exactly
 one bounded read-only distribution mapping at `C:\mcg-toolchain`; request schema
-5 binds that exact internal root plus an optional typed probe. `PageRenders` and
-`ElementExists` may
+6 binds that exact internal root plus an optional typed probe. `PageRenders`,
+`ElementExists`, and `Accessibility` may
 also add one independently bounded, read-only Chromium distribution at
 `C:\mcg-browser`. The runner prepends only the toolchain to its otherwise fixed
 system `PATH`. Windows `.cmd` launch normalization covers the Node package
@@ -159,8 +159,8 @@ interpreted exit/timeout disposition. Because the Store CLI accepts one
 POSIX `--` argument tail, MCG selects only two compile-time runner command lines
 (probe or request); the untrusted objective executable and argument array remain
 inside the bounded JSON request and never enter that CLI string.
-`HttpResponds`, `ServiceHealthy`, `PortListening`, `PageRenders`, and
-`ElementExists` automatic assessment additionally require
+`HttpResponds`, `ServiceHealthy`, `PortListening`, `PageRenders`,
+`ElementExists`, and `Accessibility` automatic assessment additionally require
 the source evaluation to contain exactly one passing identical condition and a
 retained completed consumer-evaluation checkpoint whose run matches that source
 evaluation. The checkpoint selects the exact immutable project snapshot; MCG
@@ -171,21 +171,25 @@ exact loopback with an explicit nonzero port; TCP additionally rejects paths,
 queries, and fragments. Service startup and its bounded probe run in the same
 network-isolated OS sandbox: Linux uses fixed system curl for HTTP or Bash's
 connect-only TCP facility inside the bubblewrap namespace, while Windows runner
-schema 5 performs the loopback HTTP request or TCP handshake inside the disposable
-Sandbox VM. For `PageRenders` and `ElementExists`, both platforms map the bounded browser distribution
-read-only and invoke the package-adjacent schema-5 runner inside the sandbox. The
+schema 6 performs the loopback HTTP request or TCP handshake inside the disposable
+Sandbox VM. For `PageRenders`, `ElementExists`, and `Accessibility`, both platforms map the bounded browser distribution
+read-only and invoke the package-adjacent schema-6 runner inside the sandbox. The
 runner first requires an exact loopback 2xx response, then drives Chromium through
 its DevTools protocol under fixed launch, request, render, DOM-size, viewport,
 profile, and shutdown bounds. It requires an interactive or complete document
 with a body and nonzero layout and removes the disposable profile before returning.
 `ElementExists` additionally validates one bounded nonempty CSS selector and
 requires Chromium to return at least one matching element after navigation.
+`Accessibility` evaluates the same versioned, dependency-light audit contract as
+the governed consumer browser and requires its language, title, landmark, image,
+control-name, interactive-name, duplicate-ID, heading-order, and tabindex
+invariants to pass after rendering.
 Expected status is exact for `HttpResponds`, 200-299 for
 `ServiceHealthy`, and a completed no-payload handshake for `PortListening`;
 startup timeout, early process exit, mismatch/refusal, malformed evidence, or
 sandbox loss fails closed. There is no host-network or host-process fallback.
-Page-render and element-existence conditions are now supported at this boundary;
-accessibility, workflow, and screenshot conditions remain inconclusive until their
+Page-render, element-existence, and accessibility conditions are now supported at
+this boundary; workflow and screenshot conditions remain inconclusive until their
 objective-specific browser evidence is placed inside the same boundary.
 The paired
 baseline/candidate reports are themselves content-addressed, the benchmark

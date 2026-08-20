@@ -3570,6 +3570,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcg-browser-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mcg-cli"
 version = "0.1.0"
 dependencies = [
@@ -3837,6 +3845,7 @@ version = "0.1.0"
 dependencies = [
  "chromiumoxide",
  "futures-util",
+ "mcg-browser-contracts",
  "serde",
  "serde_json",
  "tempfile",
@@ -3887,6 +3896,7 @@ dependencies = [
  "enigo",
  "futures-util",
  "image 0.25.10",
+ "mcg-browser-contracts",
  "mcg-config",
  "mcg-domain",
  "mcg-policy",

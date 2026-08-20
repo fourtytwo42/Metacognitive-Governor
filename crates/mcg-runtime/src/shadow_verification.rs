@@ -133,6 +133,9 @@ enum ShadowServiceProbe {
     PageRender {
         url: String,
     },
+    Accessibility {
+        url: String,
+    },
     ElementExists {
         url: String,
         selector: String,
@@ -144,9 +147,10 @@ impl ShadowServiceProbe {
     fn endpoint(&self) -> &str {
         match self {
             Self::Tcp { endpoint } => endpoint,
-            Self::Http { url, .. } | Self::PageRender { url } | Self::ElementExists { url, .. } => {
-                url
-            }
+            Self::Http { url, .. }
+            | Self::PageRender { url }
+            | Self::Accessibility { url }
+            | Self::ElementExists { url, .. } => url,
         }
     }
 
@@ -155,7 +159,10 @@ impl ShadowServiceProbe {
             Self::Http {
                 expected_status, ..
             } => *expected_status,
-            Self::Tcp { .. } | Self::PageRender { .. } | Self::ElementExists { .. } => None,
+            Self::Tcp { .. }
+            | Self::PageRender { .. }
+            | Self::Accessibility { .. }
+            | Self::ElementExists { .. } => None,
         }
     }
 
@@ -164,6 +171,7 @@ impl ShadowServiceProbe {
             Self::Http { .. } => "http",
             Self::Tcp { .. } => "tcp",
             Self::PageRender { .. } => "page_render",
+            Self::Accessibility { .. } => "accessibility",
             Self::ElementExists { .. } => "element_exists",
         }
     }
@@ -172,7 +180,10 @@ impl ShadowServiceProbe {
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 impl ShadowServiceProbe {
     const fn requires_browser(&self) -> bool {
-        matches!(self, Self::PageRender { .. } | Self::ElementExists { .. })
+        matches!(
+            self,
+            Self::PageRender { .. } | Self::Accessibility { .. } | Self::ElementExists { .. }
+        )
     }
 }
 
@@ -372,9 +383,9 @@ impl LinuxBubblewrapVerifier {
         let probe_program_available = match probe {
             ShadowServiceProbe::Tcp { .. } => Path::new("/bin/bash").is_file(),
             ShadowServiceProbe::Http { .. } => Path::new("/usr/bin/curl").is_file(),
-            ShadowServiceProbe::PageRender { .. } | ShadowServiceProbe::ElementExists { .. } => {
-                true
-            }
+            ShadowServiceProbe::PageRender { .. }
+            | ShadowServiceProbe::Accessibility { .. }
+            | ShadowServiceProbe::ElementExists { .. } => true,
         };
         let sleep_available = probe.requires_browser() || Path::new("/usr/bin/sleep").is_file();
         if !probe_program_available || !sleep_available {
@@ -779,6 +790,9 @@ enum WindowsRunnerProbe<'a> {
     PageRender {
         url: &'a str,
     },
+    Accessibility {
+        url: &'a str,
+    },
     ElementExists {
         url: &'a str,
         selector: &'a str,
@@ -812,7 +826,7 @@ impl WindowsSandboxHarness {
                 ToolError::Execution(format!("copy Windows Sandbox runner: {error}"))
             })?;
             let request = WindowsRunnerRequest {
-                schema_version: 5,
+                schema_version: 6,
                 source_root: r"C:\mcg-source",
                 workspace_root: r"C:\mcg-workspace",
                 executable,
@@ -833,6 +847,9 @@ impl WindowsSandboxHarness {
                     }
                     ShadowServiceProbe::PageRender { url } => {
                         WindowsRunnerProbe::PageRender { url }
+                    }
+                    ShadowServiceProbe::Accessibility { url } => {
+                        WindowsRunnerProbe::Accessibility { url }
                     }
                     ShadowServiceProbe::ElementExists { url, selector } => {
                         WindowsRunnerProbe::ElementExists { url, selector }
@@ -1134,12 +1151,12 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
         SuccessCondition::HttpResponds { url, status } => (url, Some(*status), "http"),
         SuccessCondition::ServiceHealthy { endpoint } => (endpoint, None, "http"),
         SuccessCondition::PortListening { endpoint } => (endpoint, None, "tcp"),
-        SuccessCondition::PageRenders { url } | SuccessCondition::ElementExists { url, .. } => {
-            (url, None, "http")
-        }
+        SuccessCondition::PageRenders { url }
+        | SuccessCondition::Accessibility { url }
+        | SuccessCondition::ElementExists { url, .. } => (url, None, "http"),
         _ => {
             return Err(ToolError::Invalid(
-                "shadow service verifier requires an HTTP, service-health, TCP-port, page-render, or element condition".into(),
+                "shadow service verifier requires an HTTP, service-health, TCP-port, page-render, accessibility, or element condition".into(),
             ));
         }
     };
@@ -1188,6 +1205,8 @@ fn shadow_service_probe(condition: &SuccessCondition) -> Result<ShadowServicePro
         })
     } else if matches!(condition, SuccessCondition::PageRenders { .. }) {
         Ok(ShadowServiceProbe::PageRender { url: value.clone() })
+    } else if matches!(condition, SuccessCondition::Accessibility { .. }) {
+        Ok(ShadowServiceProbe::Accessibility { url: value.clone() })
     } else if scheme == "tcp" {
         Ok(ShadowServiceProbe::Tcp {
             endpoint: value.clone(),
@@ -1930,6 +1949,7 @@ struct LinuxRunnerRequest<'a> {
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum LinuxRunnerProbe<'a> {
     PageRender { url: &'a str },
+    Accessibility { url: &'a str },
     ElementExists { url: &'a str, selector: &'a str },
 }
 
@@ -1950,6 +1970,7 @@ impl LinuxRunnerRequestFile {
     ) -> Result<Self, ToolError> {
         let probe = match probe {
             ShadowServiceProbe::PageRender { url } => LinuxRunnerProbe::PageRender { url },
+            ShadowServiceProbe::Accessibility { url } => LinuxRunnerProbe::Accessibility { url },
             ShadowServiceProbe::ElementExists { url, selector } => {
                 LinuxRunnerProbe::ElementExists { url, selector }
             }
@@ -1964,7 +1985,7 @@ impl LinuxRunnerRequestFile {
             .ok_or_else(|| ToolError::Invalid("shadow workspace has no parent".into()))?;
         let path = parent.join(format!(".mcg-shadow-request-{}.json", Uuid::new_v4()));
         let request = LinuxRunnerRequest {
-            schema_version: 5,
+            schema_version: 6,
             source_root: "/mcg-source",
             workspace_root: "/tmp/mcg-workspace",
             executable,
@@ -2335,6 +2356,13 @@ mod tests {
             })
             .expect("exact loopback page URL"),
             ShadowServiceProbe::PageRender { .. }
+        ));
+        assert!(matches!(
+            shadow_service_probe(&SuccessCondition::Accessibility {
+                url: "http://127.0.0.1:43123/app".into(),
+            })
+            .expect("exact loopback accessibility URL"),
+            ShadowServiceProbe::Accessibility { .. }
         ));
         assert!(matches!(
             shadow_service_probe(&SuccessCondition::ElementExists {
@@ -2754,7 +2782,7 @@ mod tests {
         let request: serde_json::Value =
             serde_json::from_slice(&fs::read(harness.path.join("request.json")).expect("request"))
                 .expect("request JSON");
-        assert_eq!(request["schema_version"], 5);
+        assert_eq!(request["schema_version"], 6);
         assert_eq!(request["source_root"], r"C:\mcg-source");
         assert_eq!(request["workspace_root"], r"C:\mcg-workspace");
         assert_eq!(request["executable"], "npm.cmd");
@@ -2838,6 +2866,31 @@ mod tests {
         assert_eq!(
             element_request["probe"]["selector"],
             "main#app[data-state='ready']"
+        );
+
+        let accessibility_probe = ShadowServiceProbe::Accessibility {
+            url: "http://127.0.0.1:43123/app".into(),
+        };
+        let accessibility_harness = WindowsSandboxHarness::create(
+            &workspace,
+            &runner,
+            "npm.cmd",
+            &["run".into(), "start".into()],
+            None,
+            Some(&browser),
+            Some(&accessibility_probe),
+        )
+        .expect("accessibility harness");
+        let accessibility_request: serde_json::Value = serde_json::from_slice(
+            &fs::read(accessibility_harness.path.join("request.json"))
+                .expect("accessibility request"),
+        )
+        .expect("accessibility request JSON");
+        assert_eq!(accessibility_request["schema_version"], 6);
+        assert_eq!(accessibility_request["probe"]["kind"], "accessibility");
+        assert_eq!(
+            accessibility_request["probe"]["url"],
+            accessibility_probe.endpoint()
         );
     }
 
@@ -3034,7 +3087,10 @@ http.createServer((request, response) => {
     response.end();
   } else if (request.url === '/app') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
-    response.end('<!doctype html><html><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+    response.end('<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+  } else if (request.url === '/inaccessible') {
+    response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+    response.end('<!doctype html><html><body><button></button></body></html>');
   } else {
     response.writeHead(404);
     response.end();
@@ -3135,6 +3191,32 @@ http.createServer((request, response) => {
                     .expect("element service transcript");
                 let record: ShadowCommandTranscript =
                     serde_json::from_slice(&bytes).expect("element service record");
+                assert_eq!(record.exit_code, Some(expected_exit_code));
+                assert!(!record.timed_out);
+                assert_no_windows_sandbox_sessions(verifier, workspace).await;
+            }
+            for (path, expected_exit_code) in [("app", 0), ("inaccessible", 1)] {
+                let accessibility_condition = SuccessCondition::Accessibility {
+                    url: format!("http://{address}/{path}"),
+                };
+                let ShadowCommandVerification::Completed { transcript } = verifier
+                    .verify_service(
+                        workspace,
+                        "node server.js",
+                        &accessibility_condition,
+                        artifacts,
+                    )
+                    .await
+                else {
+                    panic!(
+                        "same-sandbox Windows accessibility probe must produce measured evidence"
+                    );
+                };
+                let bytes = artifacts
+                    .read_verified_reference(&transcript, 1024 * 1024)
+                    .expect("accessibility service transcript");
+                let record: ShadowCommandTranscript =
+                    serde_json::from_slice(&bytes).expect("accessibility service record");
                 assert_eq!(record.exit_code, Some(expected_exit_code));
                 assert!(!record.timed_out);
                 assert_no_windows_sandbox_sessions(verifier, workspace).await;
@@ -3406,7 +3488,10 @@ http.createServer((request, response) => {
     response.end();
   } else if (request.url === '/app') {
     response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
-    response.end('<!doctype html><html><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+    response.end('<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>');
+  } else if (request.url === '/inaccessible') {
+    response.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+    response.end('<!doctype html><html><body><button></button></body></html>');
   } else {
     response.writeHead(404);
     response.end();
@@ -3497,6 +3582,31 @@ http.createServer((request, response) => {
                             .expect("element service transcript");
                         let record: ShadowCommandTranscript =
                             serde_json::from_slice(&bytes).expect("element service record");
+                        assert_eq!(record.exit_code, Some(expected_exit_code));
+                        assert!(!record.timed_out);
+                    }
+                    for (path, expected_exit_code) in [("app", 0), ("inaccessible", 1)] {
+                        let accessibility_condition = SuccessCondition::Accessibility {
+                            url: format!("http://{address}/{path}"),
+                        };
+                        let ShadowCommandVerification::Completed { transcript } = verifier
+                            .verify_service(
+                                workspace.path(),
+                                "node server.js",
+                                &accessibility_condition,
+                                &artifacts,
+                            )
+                            .await
+                        else {
+                            panic!(
+                                "same-sandbox accessibility probe must produce measured evidence"
+                            );
+                        };
+                        let bytes = artifacts
+                            .read_verified_reference(&transcript, 1024 * 1024)
+                            .expect("accessibility service transcript");
+                        let record: ShadowCommandTranscript =
+                            serde_json::from_slice(&bytes).expect("accessibility service record");
                         assert_eq!(record.exit_code, Some(expected_exit_code));
                         assert!(!record.timed_out);
                     }

@@ -7461,6 +7461,7 @@ impl AppRuntime {
                         | SuccessCondition::ServiceHealthy { .. }
                         | SuccessCondition::PortListening { .. }
                         | SuccessCondition::PageRenders { .. }
+                        | SuccessCondition::Accessibility { .. }
                         | SuccessCondition::ElementExists { .. }
                 ) {
                     let command = self
@@ -12372,6 +12373,7 @@ async fn verify_isolated_service_condition(
             | SuccessCondition::ServiceHealthy { .. }
             | SuccessCondition::PortListening { .. }
             | SuccessCondition::PageRenders { .. }
+            | SuccessCondition::Accessibility { .. }
             | SuccessCondition::ElementExists { .. }
     ) {
         return (
@@ -12526,6 +12528,7 @@ fn isolated_evaluation_regressions(
                     | SuccessCondition::ServiceHealthy { .. }
                     | SuccessCondition::PortListening { .. }
                     | SuccessCondition::PageRenders { .. }
+                    | SuccessCondition::Accessibility { .. }
                     | SuccessCondition::ElementExists { .. }
             ) {
                 "candidate failed an isolated service objective".into()
@@ -13642,6 +13645,7 @@ mod tests {
                     | SuccessCondition::ServiceHealthy { .. }
                     | SuccessCondition::PortListening { .. }
                     | SuccessCondition::PageRenders { .. }
+                    | SuccessCondition::Accessibility { .. }
                     | SuccessCondition::ElementExists { .. }
             ));
             if matches!(self.0, FixtureShadowCommandResult::InvalidEvidence) {
@@ -14932,6 +14936,27 @@ mod tests {
                 workspace.path(),
                 Some("npm run start"),
                 &element_condition,
+            )
+            .await;
+            assert!(supported);
+            assert_eq!(result.passed, expected_passed);
+            assert!(evidence.artifact_sha256.is_some());
+            assert!(result.detail.contains("browser"));
+        }
+
+        let accessibility_condition = SuccessCondition::Accessibility {
+            url: "http://127.0.0.1:43123/app".into(),
+        };
+        for (fixture, expected_passed) in [
+            (FixtureShadowCommandResult::Pass, true),
+            (FixtureShadowCommandResult::Fail, false),
+        ] {
+            let (result, evidence, supported) = verify_isolated_service_condition(
+                &FixtureShadowCommandVerifier(fixture),
+                &artifacts,
+                workspace.path(),
+                Some("npm run start"),
+                &accessibility_condition,
             )
             .await;
             assert!(supported);

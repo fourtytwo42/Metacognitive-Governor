@@ -10,9 +10,10 @@ use std::{
 
 use chromiumoxide::{Browser, BrowserConfig};
 use futures_util::StreamExt;
+use mcg_browser_contracts::{ACCESSIBILITY_AUDIT_SCRIPT, AccessibilityAudit};
 use serde::{Deserialize, Serialize};
 
-const REQUEST_SCHEMA_VERSION: u16 = 5;
+const REQUEST_SCHEMA_VERSION: u16 = 6;
 const SETUP_FAILURE_EXIT_CODE: i32 = 125;
 const COMMAND_FAILURE_EXIT_CODE: i32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
@@ -61,6 +62,9 @@ enum RunnerProbe {
     ElementExists {
         url: String,
         selector: String,
+    },
+    Accessibility {
+        url: String,
     },
 }
 
@@ -138,6 +142,7 @@ fn prepared_command(request: &RunnerRequest, workspace: &Path) -> Result<Command
     Ok(command)
 }
 
+#[allow(clippy::too_many_lines)] // Keep every typed probe adjacent to the one service lifecycle.
 fn execute_service_probe(
     request: &RunnerRequest,
     workspace: &Path,
@@ -157,6 +162,10 @@ fn execute_service_probe(
             target: LoopbackHttpTarget,
             browser: String,
             selector: String,
+        },
+        Accessibility {
+            target: LoopbackHttpTarget,
+            browser: String,
         },
     }
     let active = match probe {
@@ -185,12 +194,20 @@ fn execute_service_probe(
                 .ok_or("element probe requires a browser")?,
             selector: selector.clone(),
         },
+        RunnerProbe::Accessibility { url } => ActiveProbe::Accessibility {
+            target: LoopbackHttpTarget::parse(url)?,
+            browser: request
+                .browser_executable
+                .clone()
+                .ok_or("accessibility probe requires a browser")?,
+        },
     };
     let (service_host, port) = match &active {
         ActiveProbe::Tcp(target) => (target.service_host(), target.port()),
         ActiveProbe::Http { target, .. }
         | ActiveProbe::PageRender { target, .. }
-        | ActiveProbe::ElementExists { target, .. } => (target.service_host(), target.port()),
+        | ActiveProbe::ElementExists { target, .. }
+        | ActiveProbe::Accessibility { target, .. } => (target.service_host(), target.port()),
     };
     let mut command = prepared_command(request, workspace)?;
     command
@@ -213,7 +230,7 @@ fn execute_service_probe(
             ActiveProbe::PageRender { target, browser } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, None)),
+                .map(|_| render_page(browser, workspace, target, None, false)),
             ActiveProbe::ElementExists {
                 target,
                 browser,
@@ -221,7 +238,11 @@ fn execute_service_probe(
             } => target
                 .request_status()
                 .filter(|status| (200..300).contains(status))
-                .map(|_| render_page(browser, workspace, target, Some(selector))),
+                .map(|_| render_page(browser, workspace, target, Some(selector), false)),
+            ActiveProbe::Accessibility { target, browser } => target
+                .request_status()
+                .filter(|status| (200..300).contains(status))
+                .map(|_| render_page(browser, workspace, target, None, true)),
         };
         if let Some(passed) = passed {
             break if passed { 0 } else { COMMAND_FAILURE_EXIT_CODE };
@@ -295,6 +316,12 @@ fn validate_request(
                 validate_selector(selector)?;
                 if request.browser_executable.is_none() {
                     return Err("element probe requires a browser");
+                }
+            }
+            RunnerProbe::Accessibility { url } => {
+                LoopbackHttpTarget::parse(url)?;
+                if request.browser_executable.is_none() {
+                    return Err("accessibility probe requires a browser");
                 }
             }
         }
@@ -397,6 +424,7 @@ fn render_page(
     workspace: &Path,
     target: &LoopbackHttpTarget,
     selector: Option<&str>,
+    audit_accessibility: bool,
 ) -> bool {
     let profile = workspace.join(".mcg-browser-profile");
     if fs::create_dir(&profile).is_err() {
@@ -407,7 +435,11 @@ fn render_page(
         .build()
         .is_ok_and(|runtime| {
             runtime.block_on(render_page_with_browser(
-                browser, &profile, target, selector,
+                browser,
+                &profile,
+                target,
+                selector,
+                audit_accessibility,
             ))
         });
     let _ = fs::remove_dir_all(&profile);
@@ -419,6 +451,7 @@ async fn render_page_with_browser(
     profile: &Path,
     target: &LoopbackHttpTarget,
     selector: Option<&str>,
+    audit_accessibility: bool,
 ) -> bool {
     let config = BrowserConfig::builder()
         .chrome_executable(executable)
@@ -460,6 +493,17 @@ async fn render_page_with_browser(
         if let Some(selector) = selector {
             let found = page.find_elements(selector).await.ok()?;
             if found.is_empty() {
+                return None;
+            }
+        }
+        if audit_accessibility {
+            let audit: AccessibilityAudit = page
+                .evaluate(ACCESSIBILITY_AUDIT_SCRIPT)
+                .await
+                .ok()?
+                .into_value()
+                .ok()?;
+            if !audit.passed() {
                 return None;
             }
         }
@@ -1143,11 +1187,16 @@ mod tests {
             selector: "x".repeat(MAX_SELECTOR_BYTES + 1),
         });
         assert!(validate_request(&request, true).is_err());
+        request.probe = Some(RunnerProbe::Accessibility {
+            url: "http://127.0.0.1:8080/".into(),
+        });
+        assert!(validate_request(&request, true).is_ok());
     }
 
     #[cfg(windows)]
     #[test]
     #[ignore = "requires MCG_BROWSER_EXECUTABLE and a real local Chromium runtime"]
+    #[allow(clippy::too_many_lines)] // One real service proves all browser probe dispositions.
     fn real_browser_renders_page_beside_service() {
         let browser = std::env::var_os("MCG_BROWSER_EXECUTABLE")
             .map(std::path::PathBuf::from)
@@ -1167,8 +1216,13 @@ while ($true) {{
   $client = $listener.AcceptTcpClient()
   $stream = $client.GetStream()
   $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+  $requestLine = $reader.ReadLine()
   while (($line = $reader.ReadLine()) -ne '') {{ if ($null -eq $line) {{ break }} }}
-  $body = '<!doctype html><html><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>'
+  if ($requestLine -like 'GET /inaccessible *') {{
+    $body = '<!doctype html><html><body><button></button></body></html>'
+  }} else {{
+    $body = '<!doctype html><html lang="en"><head><title>Ready</title></head><body><main id="app"></main><script>document.getElementById("app").textContent="hydrated";</script></body></html>'
+  }}
   $bytes = [Text.Encoding]::UTF8.GetBytes($body)
   $header = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n")
   $stream.Write($header, 0, $header.Length)
@@ -1229,10 +1283,39 @@ while ($true) {{
                 url: format!("http://127.0.0.1:{port}/"),
                 selector: "#missing".into(),
             }),
-            ..request
+            ..request.clone()
         };
         assert_eq!(
             execute_request(&missing_request, false),
+            Ok(COMMAND_FAILURE_EXIT_CODE)
+        );
+
+        let accessibility_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("accessibility-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::Accessibility {
+                url: format!("http://127.0.0.1:{port}/"),
+            }),
+            ..request.clone()
+        };
+        assert_eq!(execute_request(&accessibility_request, false), Ok(0));
+
+        let inaccessible_request = RunnerRequest {
+            workspace_root: destination_parent
+                .path()
+                .join("inaccessible-workspace")
+                .to_string_lossy()
+                .into_owned(),
+            probe: Some(RunnerProbe::Accessibility {
+                url: format!("http://127.0.0.1:{port}/inaccessible"),
+            }),
+            ..request
+        };
+        assert_eq!(
+            execute_request(&inaccessible_request, false),
             Ok(COMMAND_FAILURE_EXIT_CODE)
         );
     }

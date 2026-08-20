@@ -13,6 +13,7 @@ chrono.workspace = true
 chromiumoxide.workspace = true
 enigo.workspace = true
 mcg-config = { path = "../mcg-config" }
+mcg-browser-contracts.workspace = true
 mcg-domain = { path = "../mcg-domain" }
 mcg-policy = { path = "../mcg-policy" }
 futures-util.workspace = true

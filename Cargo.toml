@@ -9,6 +9,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/mcg-api",
     "crates/mcg-agents",
+    "crates/mcg-browser-contracts",
     "crates/mcg-config",
     "crates/mcg-domain",
     "crates/mcg-events",
@@ -31,6 +32,7 @@ default-members = [
     "apps/mcg-updater",
     "crates/mcg-api",
     "crates/mcg-agents",
+    "crates/mcg-browser-contracts",
     "crates/mcg-config",
     "crates/mcg-domain",
     "crates/mcg-events",
@@ -60,6 +62,7 @@ base64 = "0.22.1"
 cap-std = "4.0.2"
 chrono = { version = "0.4.42", features = ["serde"] }
 chromiumoxide = "0.9.1"
+mcg-browser-contracts = { path = "crates/mcg-browser-contracts" }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.6", features = ["derive"] }
 enigo = "0.6.1"

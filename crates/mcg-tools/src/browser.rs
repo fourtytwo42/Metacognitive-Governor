@@ -21,8 +21,11 @@ use chromiumoxide::{
 use chrono::Utc;
 use futures_util::StreamExt;
 use image::{ImageFormat, ImageReader, Limits};
+use mcg_browser_contracts::{
+    ACCESSIBILITY_AUDIT_SCHEMA_VERSION, ACCESSIBILITY_AUDIT_SCRIPT, AccessibilityAudit,
+};
 use mcg_domain::ToolExecutionId;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -61,51 +64,6 @@ struct RenderState {
     height: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AccessibilityAudit {
-    schema_version: u16,
-    document_language_present: bool,
-    non_empty_title: bool,
-    main_landmarks: u32,
-    images_missing_alt: u32,
-    controls_without_name: u32,
-    interactive_without_name: u32,
-    duplicate_ids: u32,
-    heading_order_violations: u32,
-    positive_tabindex: u32,
-}
-
-impl AccessibilityAudit {
-    fn passed(&self) -> bool {
-        self.schema_version == 1
-            && self.document_language_present
-            && self.non_empty_title
-            && self.main_landmarks == 1
-            && self.images_missing_alt == 0
-            && self.controls_without_name == 0
-            && self.interactive_without_name == 0
-            && self.duplicate_ids == 0
-            && self.heading_order_violations == 0
-            && self.positive_tabindex == 0
-    }
-
-    fn detail(&self) -> String {
-        format!(
-            "language={}; title={}; main_landmarks={}; images_missing_alt={}; controls_without_name={}; interactive_without_name={}; duplicate_ids={}; heading_order_violations={}; positive_tabindex={}",
-            self.document_language_present,
-            self.non_empty_title,
-            self.main_landmarks,
-            self.images_missing_alt,
-            self.controls_without_name,
-            self.interactive_without_name,
-            self.duplicate_ids,
-            self.heading_order_violations,
-            self.positive_tabindex
-        )
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InteractionTarget {
@@ -117,61 +75,6 @@ struct InteractionTarget {
     form_target: Option<String>,
     form_method: Option<String>,
 }
-
-const ACCESSIBILITY_AUDIT_SCRIPT: &str = r#"
-(() => {
-  const text = (element) => (element?.textContent || '').trim();
-  const labelledBy = (element) => (element.getAttribute('aria-labelledby') || '')
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((id) => text(document.getElementById(id)))
-    .join(' ')
-    .trim();
-  const hasName = (element) => Boolean(
-    (element.getAttribute('aria-label') || '').trim()
-    || labelledBy(element)
-    || text(element)
-    || (element.getAttribute('alt') || '').trim()
-    || (element.getAttribute('title') || '').trim()
-    || (element.getAttribute('value') || '').trim()
-  );
-  const controlsWithoutName = Array.from(
-    document.querySelectorAll("input:not([type='hidden']), select, textarea")
-  ).filter((element) => {
-    const labels = Array.from(element.labels || []).some((label) => text(label));
-    return !labels && !hasName(element);
-  }).length;
-  const interactiveWithoutName = Array.from(
-    document.querySelectorAll("button, a[href], [role='button'], [role='link']")
-  ).filter((element) => !hasName(element)).length;
-  const ids = new Set();
-  let duplicateIds = 0;
-  for (const element of document.querySelectorAll('[id]')) {
-    if (!element.id) continue;
-    if (ids.has(element.id)) duplicateIds += 1;
-    ids.add(element.id);
-  }
-  let previousHeading = 0;
-  let headingOrderViolations = 0;
-  for (const heading of document.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
-    const level = Number(heading.tagName.slice(1));
-    if (previousHeading && level > previousHeading + 1) headingOrderViolations += 1;
-    previousHeading = level;
-  }
-  return {
-    schemaVersion: 1,
-    documentLanguagePresent: Boolean((document.documentElement.lang || '').trim()),
-    nonEmptyTitle: Boolean((document.title || '').trim()),
-    mainLandmarks: document.querySelectorAll('main, [role="main"]').length,
-    imagesMissingAlt: document.querySelectorAll('img:not([alt])').length,
-    controlsWithoutName,
-    interactiveWithoutName,
-    duplicateIds,
-    headingOrderViolations,
-    positiveTabindex: document.querySelectorAll('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])').length
-  };
-})()
-"#;
 
 impl BrowserExecutor {
     /// Creates an ephemeral browser renderer. An omitted executable uses the
@@ -468,7 +371,7 @@ impl BrowserExecutor {
                     .map_err(|error| {
                         ToolError::Execution(format!("decode accessibility evidence: {error}"))
                     })?;
-                if audit.schema_version != 1 {
+                if audit.schema_version != ACCESSIBILITY_AUDIT_SCHEMA_VERSION {
                     return Err(ToolError::Execution(
                         "browser returned an unsupported accessibility evidence schema".into(),
                     ));
