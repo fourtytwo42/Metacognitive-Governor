@@ -66,7 +66,7 @@ if (JSON.stringify(developmentConfig.plugins?.updater) !== JSON.stringify({ endp
   throw new Error("The base Tauri config must provide a valid inert updater object so unsigned packages start without update authority.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility, macosNativeAccessibility] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
@@ -99,18 +99,24 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("apps/mcg-updater/src/lib.rs"),
   read("scripts/test-windows-installer.ps1"),
   read("scripts/test-linux-packages.sh"),
+  read("scripts/test-macos-packages.sh"),
   read("scripts/test-installed-native-accessibility-windows.ps1"),
-  read("scripts/test-installed-native-accessibility-linux.py")
+  read("scripts/test-installed-native-accessibility-linux.py"),
+  read("scripts/test-installed-native-accessibility-macos.swift")
 ]);
 for (const [harness, verifier, label] of [
   [windowsPackageHarness, "test-installed-native-accessibility-windows.ps1", "Windows package harness"],
-  [linuxPackageHarness, "test-installed-native-accessibility-linux.py", "Linux package harness"]
+  [linuxPackageHarness, "test-installed-native-accessibility-linux.py", "Linux package harness"],
+  [macosPackageHarness, "test-installed-native-accessibility-macos.swift", "macOS package harness"]
 ]) requireText(harness, verifier, label);
 for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
   requireText(windowsNativeAccessibility, invariant, "Windows native accessibility verifier");
 }
 for (const invariant of ["AT-SPI", "password text", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
   requireText(linuxNativeAccessibility, invariant, "Linux native accessibility verifier");
+}
+for (const invariant of ["AXIsProcessTrusted", "kAXSecureTextFieldSubrole", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
+  requireText(macosNativeAccessibility, invariant, "macOS native accessibility verifier");
 }
 for (const invariant of ["mkdtemp", '"signer"', '"generate"', '"sign"', "TAURI_SIGNING_PRIVATE_KEY_PATH", "finally", "rm(resolvedTemporaryRoot"]) {
   requireText(updaterSigningTest, invariant, "ephemeral updater signing qualification");
@@ -227,7 +233,7 @@ for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "sc
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
-for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_BIND_ADDRESS", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
+for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_BIND_ADDRESS", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--force-renderer-accessibility", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
@@ -235,7 +241,7 @@ for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-ru
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
 const macosPackageUat = await read("scripts/test-macos-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "npm", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS", "Refusing to replace external capture request", "pwd -P", "protocolVersion", "screencapture", "remove_installed_app"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "test-installed-native-accessibility-macos.swift", "NATIVE_ACCESSIBILITY_REPORT", "xcrun swift", "npm", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS", "Refusing to replace external capture request", "pwd -P", "protocolVersion", "screencapture", "remove_installed_app"]) {
   requireText(macosPackageUat, invariant, "macOS package UAT");
 }
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");

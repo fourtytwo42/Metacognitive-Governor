@@ -264,6 +264,7 @@ New-Item -ItemType Directory -Path $uatRoot, $isolatedLocalAppData, $serviceData
 $previousLocalAppData = $env:LOCALAPPDATA
 $previousDataDir = $env:MCG_DATA_DIR
 $previousBindAddress = $env:MCG_BIND_ADDRESS
+$previousWebView2Arguments = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
 $daemon = $null
 $restartedDaemon = $null
 $desktop = $null
@@ -555,6 +556,10 @@ try {
         }
         $env:MCG_DATA_DIR = $guiDataRoot
         $env:MCG_BIND_ADDRESS = "127.0.0.1:$guiPort"
+        # Chromium enables its complete native accessibility tree when assistive
+        # technology is active. Force that same mode for deterministic headless
+        # UI Automation qualification without changing the installed payload.
+        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--force-renderer-accessibility"
         $desktop = Start-Process -FilePath (Join-Path $installRoot "mcg-desktop.exe") -PassThru
         $guiHealth = Wait-ForHealth $guiPort (Join-Path $uatRoot "gui-health.json")
         for ($attempt = 0; $attempt -lt 100; $attempt++) {
@@ -668,4 +673,5 @@ try {
     $env:LOCALAPPDATA = $previousLocalAppData
     if ($null -eq $previousDataDir) { Remove-Item Env:MCG_DATA_DIR -ErrorAction SilentlyContinue } else { $env:MCG_DATA_DIR = $previousDataDir }
     if ($null -eq $previousBindAddress) { Remove-Item Env:MCG_BIND_ADDRESS -ErrorAction SilentlyContinue } else { $env:MCG_BIND_ADDRESS = $previousBindAddress }
+    if ($null -eq $previousWebView2Arguments) { Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue } else { $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $previousWebView2Arguments }
 }

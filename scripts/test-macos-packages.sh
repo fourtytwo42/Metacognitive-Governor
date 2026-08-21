@@ -7,6 +7,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+native_accessibility_verifier="$repository_root/scripts/test-installed-native-accessibility-macos.swift"
 source_app="${1:-$repository_root/target/release/bundle/macos/MCG.app}"
 external_capture_request="${MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST:-}"
 external_capture_timeout_seconds="${MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS:-600}"
@@ -25,6 +26,7 @@ dmg="${2:-$repository_root/target/release/bundle/dmg/MCG_0.1.0_${bundle_arch}.dm
 
 [[ -d "$source_app" ]] || { echo "Missing app bundle: $source_app" >&2; exit 1; }
 [[ -f "$dmg" ]] || { echo "Missing disk image: $dmg" >&2; exit 1; }
+[[ -f "$native_accessibility_verifier" ]] || { echo "Missing macOS native accessibility verifier: $native_accessibility_verifier" >&2; exit 1; }
 for command in codesign curl ditto hdiutil lsof node npm open pgrep plutil python3 screencapture sips spctl xcrun; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
@@ -384,6 +386,7 @@ pixel_height="$(sips -g pixelHeight "$uat_root/desktop.png" | awk '/pixelHeight:
   echo "Packaged desktop screenshot dimensions are invalid." >&2
   exit 1
 }
+xcrun swift "$native_accessibility_verifier" "$desktop_pid" "$uat_root/desktop-native-accessibility.json"
 stop_process "$desktop_pid"
 stop_process "$desktop_service_pid"
 background_pids=()
@@ -408,6 +411,7 @@ MOUNTED_SIGNATURE=$mounted_signature
 INSTALLED_SIGNATURE=$installed_signature
 SERVICE_HEALTH_PORT=$service_port
 MCP_REPORT=$uat_root/mcp.json
+NATIVE_ACCESSIBILITY_REPORT=$uat_root/desktop-native-accessibility.json
 PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
 PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
 REAL_PROJECT_REPORT=$uat_root/real-project.json

@@ -112,12 +112,26 @@ if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "MCG did not expose a 
 
 [void][McgNativeWindow]::SetForegroundWindow($process.MainWindowHandle)
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-$snapshots = Get-Snapshots $root
 if ($root.Current.Name -ne "MCG") { throw "The native window has no stable MCG accessible name." }
+
+# The first UIA query activates Chromium's accessibility provider. Poll the
+# resulting native tree so renderer startup cannot turn this into a timing-only
+# failure.
+$deadline = Get-Deadline
+do {
+    $snapshots = Get-Snapshots $root
+    if (($snapshots | Where-Object Type -eq "Document") `
+        -and ($snapshots | Where-Object Name -eq "Primary navigation") `
+        -and ($snapshots | Where-Object Name -eq "Settings")) {
+        break
+    }
+    Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt $deadline)
 if (-not ($snapshots | Where-Object Type -eq "Document")) { throw "UI Automation did not expose the web document." }
 if (-not ($snapshots | Where-Object Name -eq "Primary navigation")) { throw "UI Automation did not expose Primary navigation." }
 if (-not ($snapshots | Where-Object Name -eq "Settings")) { throw "UI Automation did not expose Settings." }
 
+$deadline = Get-Deadline
 $required = @{
     Goal = Find-Element $root @("Goal") @("Edit") $deadline
     OpenFolder = Find-Element $root @("Open folder") @("Button") $deadline
