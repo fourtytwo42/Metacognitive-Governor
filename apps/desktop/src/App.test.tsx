@@ -1199,7 +1199,10 @@ test("platform reservation stays truthful and reuses identity after an uncertain
   const panel = screen.getByRole("region", { name: "Computer and browser sessions" });
   await within(panel).findByText("browser automation");
   fireEvent.change(within(panel).getByLabelText("Name"), { target: { value: session.display_name } });
-  fireEvent.change(within(panel).getByLabelText("Allowed sites (required before starting)"), { target: { value: "https://example.com" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
+  expect(await within(panel).findByRole("alert")).toHaveTextContent("Add at least one allowed site");
+  expect(client.requestPlatformSession).not.toHaveBeenCalled();
+  fireEvent.change(within(panel).getByLabelText("Allowed sites (required)"), { target: { value: "https://example.com" } });
   fireEvent.click(within(panel).getByRole("button", { name: "Reserve session" }));
   expect(await within(panel).findByRole("alert")).toHaveTextContent("response lost");
   const firstId = client.requestPlatformSession.mock.calls[0][0].session_id;

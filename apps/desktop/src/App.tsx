@@ -1962,6 +1962,11 @@ export function App() {
       setPlatformError("Name the session so it is easy to recognize.");
       return;
     }
+    const allowedOrigins = platformOrigins.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    if (platformKind === "browser" && allowedOrigins.length === 0) {
+      setPlatformError("Add at least one allowed site before reserving a browser session.");
+      return;
+    }
     const regionValues = Object.values(platformComputerRegion);
     const regionRequested = platformKind === "computer_use" && regionValues.some((value) => value.trim() !== "");
     const parsedRegion = regionValues.map((value) => Number(value));
@@ -1993,7 +1998,7 @@ export function App() {
         project_id: selectedProject?.project_id,
         display_name: platformName.trim(),
         allowed_origins: platformKind === "browser"
-          ? platformOrigins.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+          ? allowedOrigins
           : [],
         computer_capabilities: platformKind === "computer_use"
           ? (platformComputerScreenOnly ? ["screen_read"] : ["screen_read", "mouse", "keyboard"])
@@ -3457,7 +3462,7 @@ export function App() {
                 <input value={platformName} onChange={(event) => setPlatformName(event.target.value)} placeholder="Research checkout options" />
               </label>
               {platformKind === "browser" && <label>
-                Allowed sites {advanced ? "(one origin per line)" : "(required before starting)"}
+                Allowed sites {advanced ? "(required, one origin per line)" : "(required)"}
                 <textarea value={platformOrigins} onChange={(event) => setPlatformOrigins(event.target.value)} placeholder="https://example.com" />
               </label>}
               {platformKind === "computer_use" && advanced && <label className="checkbox-row">

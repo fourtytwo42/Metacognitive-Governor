@@ -5438,6 +5438,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercises authentication, validation, retry, conflict, close, and immutable history as one contract.
     async fn platform_contract_is_authenticated_idempotent_and_history_preserving() {
         let runtime = test_runtime();
         let app = router(runtime.clone());
@@ -5483,6 +5484,21 @@ mod tests {
                 .body(Body::from(body.to_string()))
                 .expect("request")
         };
+        let mut empty_origin_body = create_body.clone();
+        empty_origin_body["session_id"] = serde_json::json!(PlatformSessionId::new());
+        empty_origin_body["allowed_origins"] = serde_json::json!([]);
+        let empty_origin = app
+            .clone()
+            .oneshot(create(&empty_origin_body))
+            .await
+            .expect("empty origin create");
+        assert_eq!(empty_origin.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response_json(empty_origin)
+                .await
+                .to_string()
+                .contains("at least one allowed origin")
+        );
         let first = app
             .clone()
             .oneshot(create(&create_body))

@@ -558,10 +558,13 @@ fn validate_new_session(session: &PlatformSession) -> Result<(), StorageError> {
     }
     match session.kind {
         PlatformSessionKind::Browser
-            if !session.computer_capabilities.is_empty() || session.computer_target.is_some() =>
+            if session.allowed_origins.is_empty()
+                || !session.computer_capabilities.is_empty()
+                || session.computer_target.is_some() =>
         {
             return Err(StorageError::InvalidData(
-                "browser sessions cannot contain computer-use grants".into(),
+                "browser sessions require at least one allowed origin and cannot contain computer-use grants"
+                    .into(),
             ));
         }
         PlatformSessionKind::ComputerUse
@@ -871,6 +874,12 @@ mod tests {
         ];
         assert!(matches!(
             store.create_platform_session(&duplicate_origin, "request"),
+            Err(StorageError::InvalidData(_))
+        ));
+        let mut empty_origin = session(now);
+        empty_origin.allowed_origins.clear();
+        assert!(matches!(
+            store.create_platform_session(&empty_origin, "request"),
             Err(StorageError::InvalidData(_))
         ));
     }
