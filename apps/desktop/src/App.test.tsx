@@ -492,16 +492,21 @@ beforeEach(() => {
 });
 
 async function enableAdvancedMode() {
-  const button = screen.getByRole("button", { name: "Advanced mode" });
+  const button = await screen.findByRole("button", { name: "Use advanced mode", pressed: false });
   await waitFor(() => expect(button).toBeEnabled());
   fireEvent.click(button);
-  await screen.findByRole("button", { name: "Simple mode" });
+  await waitFor(() => expect(document.querySelector(".app-shell.advanced-mode")).toBeInTheDocument());
 }
 
 async function enableSimpleMode() {
-  const button = screen.getByRole("button", { name: "Simple mode" });
+  const button = await screen.findByRole("button", { name: "Use simple mode", pressed: true });
   fireEvent.click(button);
-  await screen.findByRole("button", { name: "Advanced mode" });
+  await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
+}
+
+function openProjects() {
+  fireEvent.click(screen.getByRole("button", { name: "File" }));
+  fireEvent.click(within(document.querySelector(".desktop-menu-popover.open") as HTMLElement).getByRole("button", { name: /Manage projects/ }));
 }
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {
@@ -1617,13 +1622,13 @@ test("advanced mode reveals runtime details", async () => {
 test("mode persistence restores keyboard focus after the temporarily disabled control returns", async () => {
   render(<App />);
 
-  const advanced = await screen.findByRole("button", { name: "Advanced mode" });
+  const advanced = await screen.findByRole("button", { name: "Use advanced mode", pressed: false });
   await waitFor(() => expect(advanced).toBeEnabled());
   advanced.focus();
   expect(advanced).toHaveFocus();
   fireEvent.click(advanced);
 
-  const simple = await screen.findByRole("button", { name: "Simple mode" });
+  const simple = await screen.findByRole("button", { name: "Use simple mode", pressed: true });
   await waitFor(() => expect(simple).toBeEnabled());
   await waitFor(() => expect(simple).toHaveFocus());
 });
@@ -1645,17 +1650,70 @@ test("OpenAI subscription browser login is the clear default and confirms connec
   });
   render(<App />);
 
-  expect(screen.getByText(/No CLI pairing code\./)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Continue with OpenAI" }));
-  expect(await screen.findByText("Finish signing in with OpenAI in your browser, then return here.")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Open sign-in page" })).toBeInTheDocument();
-  expect(screen.queryByText("Code:", { exact: false })).not.toBeInTheDocument();
+  const providerPanel = document.querySelector("#providers") as HTMLElement;
+  expect(within(providerPanel).getByText(/No CLI pairing code\./)).toBeInTheDocument();
+  fireEvent.click(within(providerPanel).getByRole("button", { name: "Continue with OpenAI" }));
+  expect(await within(providerPanel).findByText("Finish signing in with OpenAI in your browser, then return here.")).toBeInTheDocument();
+  expect(within(providerPanel).getByRole("button", { name: "Open sign-in page" })).toBeInTheDocument();
+  expect(within(providerPanel).queryByText("Code:", { exact: false })).not.toBeInTheDocument();
   expect(client.start).toHaveBeenCalledWith("browser");
   expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/oauth/authorize");
 
-  fireEvent.click(screen.getByRole("button", { name: "Finish connection" }));
-  expect(await screen.findByText("OpenAI Subscription connected")).toBeInTheDocument();
+  fireEvent.click(within(providerPanel).getByRole("button", { name: "Finish connection" }));
+  expect(await within(providerPanel).findByText("OpenAI Subscription connected")).toBeInTheDocument();
   expect(client.complete).toHaveBeenCalledWith("fixture-session");
+});
+
+test("account menu stays compact and logs out only ChatGPT OAuth connections", async () => {
+  const oauth = {
+    contract_version: 1,
+    id: "openai-subscription",
+    display_name: "OpenAI Subscription",
+    kind: "open_ai",
+    base_url: "https://chatgpt.com/backend-api/codex",
+    auth_mode: "chat_gpt_browser_oauth"
+  };
+  const api = {
+    contract_version: 1,
+    id: "openai-api",
+    display_name: "OpenAI API",
+    kind: "open_ai",
+    base_url: "https://api.openai.com/v1",
+    auth_mode: "api_key"
+  };
+  client.listProviders.mockResolvedValue({ providers: [
+    { connection: oauth, catalog: { connection_id: oauth.id, models: [], discovered_at: "2026-08-21T00:00:00Z" } },
+    { connection: api, catalog: { connection_id: api.id, models: [], discovered_at: "2026-08-21T00:00:00Z" } }
+  ] });
+  client.disconnectProvider.mockResolvedValue(undefined);
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /OpenAI account/ }));
+  const menu = screen.getByLabelText("Owner menu");
+  expect(within(menu).getByRole("button", { name: /Usage/ })).toBeInTheDocument();
+  expect(within(menu).getByRole("button", { name: /Settings/ })).toBeInTheDocument();
+  expect(within(menu).queryByText("Show pet")).not.toBeInTheDocument();
+  expect(within(menu).queryByText("Invite a friend")).not.toBeInTheDocument();
+  fireEvent.click(within(menu).getByRole("button", { name: "Log out" }));
+
+  await waitFor(() => expect(client.disconnectProvider).toHaveBeenCalledWith(oauth.id));
+  expect(client.disconnectProvider).not.toHaveBeenCalledWith(api.id);
+  expect(await screen.findByRole("button", { name: /Local owner/ })).toBeInTheDocument();
+});
+
+test("Settings follows the grouped Codex navigation and filters sections", async () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+
+  const navigation = screen.getByRole("navigation", { name: "Settings sections" });
+  expect(within(navigation).getByText("Personal")).toBeInTheDocument();
+  expect(within(navigation).getByText("Integrations")).toBeInTheDocument();
+  expect(within(navigation).getByText("Coding")).toBeInTheDocument();
+  expect(within(navigation).queryByText("Pets")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox", { name: "Search settings" }), { target: { value: "archived" } });
+  expect(within(navigation).getByRole("button", { name: "Archived chats" })).toBeInTheDocument();
+  expect(within(navigation).queryByRole("button", { name: "General" })).not.toBeInTheDocument();
 });
 
 test("advanced mode keeps device-code login an explicit headless fallback", async () => {
@@ -1739,7 +1797,7 @@ test("provider disconnect confirms intent and removes the connection from the co
   await waitFor(() => expect(client.disconnectProvider).toHaveBeenCalledWith(connection.id));
   expect(confirm).toHaveBeenCalledWith(expect.stringContaining("protected credentials"));
   expect(screen.queryByRole("heading", { name: connection.display_name })).not.toBeInTheDocument();
-  expect(screen.getByText("OpenAI Subscription disconnected")).toBeInTheDocument();
+  expect(within(document.querySelector("#providers") as HTMLElement).getByText("OpenAI Subscription disconnected")).toBeInTheDocument();
   confirm.mockRestore();
 });
 
@@ -1760,7 +1818,7 @@ test("provider workspace shows durable privacy-preserving proxy usage", async ()
   render(<App />);
 
   expect(await screen.findByRole("heading", { name: "120 tokens" })).toBeInTheDocument();
-  expect(screen.getByText(/2 conversations/)).toHaveTextContent("$0.012345 known cost");
+  expect(within(document.querySelector("#providers") as HTMLElement).getByText(/2 conversations/)).toHaveTextContent("$0.012345 known cost");
   expect(screen.getByText(/not prompts or generated text/)).toBeInTheDocument();
   expect(screen.queryByLabelText("Proxy conversations")).not.toBeInTheDocument();
 
@@ -2158,7 +2216,7 @@ test("Ctrl+O registers a global folder without creating a project", async () => 
 
   fireEvent.click(screen.getByRole("button", { name: "File" }));
   expect(screen.getByRole("button", { name: /Add global folder.*Ctrl\+O/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
+  expect(within(document.querySelector(".desktop-menu-popover.open") as HTMLElement).getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
   expect(within(screen.getByLabelText("Global folders")).getByRole("button", { name: "Add global folder" })).toBeInTheDocument();
   fireEvent.keyDown(window, { key: "o", ctrlKey: true });
 
@@ -2187,8 +2245,7 @@ test("rediscovering a known Windows folder preserves its durable project identit
   client.discoverProject.mockResolvedValue({ project: { ...project, root: selectedRoot } });
   render(<App />);
 
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
-  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: "Projects" }));
+  openProjects();
   fireEvent.click(await screen.findByRole("button", { name: "Add project folder" }));
 
   await waitFor(() => expect(client.discoverProject).toHaveBeenCalledWith(selectedRoot, project.project_id));
@@ -2457,8 +2514,7 @@ test("project discovery errors remain visible on the Projects screen", async () 
   client.discoverProject.mockRejectedValue(new Error("Project discovery failed (405 Method Not Allowed)"));
   render(<App />);
 
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
-  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: "Projects" }));
+  openProjects();
   fireEvent.click(screen.getByRole("button", { name: "Add project folder" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Project discovery failed (405 Method Not Allowed)");

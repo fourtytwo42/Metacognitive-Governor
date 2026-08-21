@@ -263,13 +263,23 @@ async function openOwnerMenu(page: import("@playwright/test").Page) {
 }
 
 async function openOwnerSurface(page: import("@playwright/test").Page, name: string) {
-  const menu = await openOwnerMenu(page);
-  await menu.getByRole("button", { name, exact: true }).click();
+  if (name === "Settings" || name === "Usage") {
+    const menu = await openOwnerMenu(page);
+    await menu.getByRole("button", { name: new RegExp(`^${name}`) }).click();
+    return;
+  }
+  const surface = ({ Projects: "projects", Providers: "providers", SSH: "ssh", Improvement: "improvement" } as Record<string, string>)[name];
+  if (!surface) throw new Error(`Unknown test surface ${name}`);
+  await page.evaluate((target) => {
+    window.history.pushState(null, "", `#${target}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, surface);
 }
 
 async function enableAdvancedMode(page: import("@playwright/test").Page) {
-  const menu = await openOwnerMenu(page);
-  await menu.getByRole("button", { name: "Advanced mode" }).click();
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("button", { name: "Use advanced mode" }).click();
 }
 
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
@@ -296,9 +306,11 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await simpleSites.getByRole("button", { name: "New site" }).click();
   await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Build a website/);
   await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "Import", exact: true }).click();
   const globalFolders = page.getByLabel("Global folders");
   await expect(globalFolders.getByRole("button", { name: "Add global folder" })).toBeVisible();
   await expect(globalFolders).toContainText("does not create a project");
+  await page.getByRole("button", { name: "Configuration", exact: true }).click();
   const updates = page.getByLabel("Application updates");
   await expect(updates.getByText(/Updates are unavailable in this build/)).toBeVisible();
   await expect(updates.getByText(/never accept an unsigned fallback/)).toBeVisible();
@@ -326,8 +338,7 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByLabel("Provider type")).toHaveValue("open_ai_compatible");
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
 
-  const ownerMenu = await openOwnerMenu(page);
-  await ownerMenu.getByRole("button", { name: "Simple mode" }).click();
+  await page.getByRole("button", { name: "Use simple mode" }).click();
   await page.getByRole("link", { name: "Scheduled", exact: true }).click();
   await expect(scheduler.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
   await expect(scheduler.getByRole("button", { name: "Set up in chat" })).toBeVisible();
@@ -397,6 +408,30 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
   await expect(page.locator(".owner-menu")).toBeVisible();
 });
 
+test("account menu and Settings follow the compact Codex information architecture", async ({ page }) => {
+  await page.goto("/");
+  const menu = await openOwnerMenu(page);
+  await expect(menu.getByRole("button", { name: /^Usage/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: /^Settings/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "Sign in with ChatGPT" })).toBeVisible();
+  await expect(menu.getByText("Show pet")).toHaveCount(0);
+  await expect(menu.getByText("Invite a friend")).toHaveCount(0);
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+,");
+  await expect(page.getByRole("textbox", { name: "Search settings" })).toBeVisible();
+  const settings = page.getByRole("navigation", { name: "Settings sections" });
+  await expect(settings.getByRole("button", { name: "General" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Account" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Plugins" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Archived chats" })).toBeVisible();
+  await expect(settings.getByText("Pets")).toHaveCount(0);
+
+  await page.getByRole("textbox", { name: "Search settings" }).fill("account");
+  await expect(settings.getByRole("button", { name: "Account" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "General" })).toHaveCount(0);
+});
+
 test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {
   await page.setViewportSize({ width: 720, height: 900 });
   await page.goto("/");
@@ -404,7 +439,8 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   const owner = page.getByRole("button", { name: /Local owner/ });
   await expect(owner).toBeVisible();
   await owner.click();
-  const mode = page.getByRole("button", { name: "Advanced mode" });
+  await openOwnerSurface(page, "Settings");
+  const mode = page.getByRole("button", { name: "Use advanced mode" });
   await expect(mode).toBeVisible();
   const box = await mode.boundingBox();
   expect(box).not.toBeNull();

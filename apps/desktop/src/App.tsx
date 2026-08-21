@@ -271,6 +271,7 @@ function freshPlatformSessionId(): string {
 type CodeReviewScope = "branch" | "uncommitted" | "commit" | "custom";
 type ScheduleFilter = "all" | "enabled" | "paused" | "completed";
 type PluginDirectoryTab = "openai" | "workspace" | "personal" | "installed";
+type SettingsTab = "general" | "import" | "profile" | "appearance" | "voice" | "configuration" | "personalization" | "shortcuts" | "usage" | "account" | "plugins" | "browser" | "computer" | "hooks" | "connections" | "git" | "environments" | "worktrees" | "archived";
 
 const SCHEDULE_FILTERS: Array<[ScheduleFilter, string]> = [
   ["all", "All"],
@@ -433,6 +434,8 @@ export function App() {
   const [chatSearch, setChatSearch] = useState("");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [settingsSearch, setSettingsSearch] = useState("");
   const [desktopMenu, setDesktopMenu] = useState<string | null>(null);
   const [pinnedTaskIds, setPinnedTaskIds] = useState<string[]>(() => {
     try {
@@ -707,6 +710,18 @@ export function App() {
     return () => window.removeEventListener("keydown", addFolderShortcut);
   }, [globalFolderBusy]);
 
+  useEffect(() => {
+    const openSettingsShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key === ",") {
+        event.preventDefault();
+        setSettingsTab("general");
+        navigateSurface("settings");
+      }
+    };
+    window.addEventListener("keydown", openSettingsShortcut);
+    return () => window.removeEventListener("keydown", openSettingsShortcut);
+  }, []);
+
   function navigateSurface(surface: string, addHistory = true) {
     setActiveSurface(surface);
     setOwnerMenuOpen(false);
@@ -868,7 +883,14 @@ export function App() {
       });
     listProviders()
       .then((response) => {
-        if (active) setProviders(response.providers);
+        if (active) {
+          setProviders(response.providers);
+          const subscription = response.providers.find(({ connection }) =>
+            connection.kind === "open_ai"
+            && (connection.auth_mode === "chat_gpt_browser_oauth" || connection.auth_mode === "chat_gpt_device_code")
+          );
+          if (subscription) setProviderStatus(`${subscription.connection.display_name} connected`);
+        }
       })
       .catch((error) => {
         if (active) setProviderError(errorMessage(error));
@@ -1308,6 +1330,31 @@ export function App() {
     } catch (error) {
       setProviderError(errorMessage(error));
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logOutOfOpenAi() {
+    const oauthConnections = providers.filter(({ connection }) =>
+      connection.kind === "open_ai"
+      && (connection.auth_mode === "chat_gpt_browser_oauth" || connection.auth_mode === "chat_gpt_device_code")
+    );
+    if (oauthConnections.length === 0) return;
+    setBusy(true);
+    setProviderError(null);
+    const disconnected = new Set<string>();
+    try {
+      for (const item of oauthConnections) {
+        await disconnectProvider(item.connection.id);
+        disconnected.add(item.connection.id);
+      }
+      setProviderStatus("Signed out of ChatGPT subscription");
+      setOwnerMenuOpen(false);
+    } catch (error) {
+      setProviderError(errorMessage(error));
+      setProviderStatus("Sign out failed");
+    } finally {
+      if (disconnected.size > 0) setProviders((current) => current.filter(({ connection }) => !disconnected.has(connection.id)));
       setBusy(false);
     }
   }
@@ -3046,6 +3093,31 @@ export function App() {
     if (pluginDirectoryTab === "workspace") return plugin.active_revision.source.kind === "registry";
     return false;
   });
+  const openAiOAuthConnections = providers.filter(({ connection }) =>
+    connection.kind === "open_ai"
+    && (connection.auth_mode === "chat_gpt_browser_oauth" || connection.auth_mode === "chat_gpt_device_code")
+  );
+  const signedInWithOpenAi = openAiOAuthConnections.length > 0;
+  const settingsGroups: Array<{ label: string; items: Array<{ id: SettingsTab; label: string; glyph: string }> }> = [
+    { label: "Personal", items: [
+      { id: "general", label: "General", glyph: "⚙" }, { id: "import", label: "Import", glyph: "⇩" },
+      { id: "profile", label: "Profile", glyph: "◎" }, { id: "appearance", label: "Appearance", glyph: "☼" },
+      { id: "voice", label: "Voice", glyph: "♩" }, { id: "configuration", label: "Configuration", glyph: "⬡" },
+      { id: "personalization", label: "Personalization", glyph: "◴" }, { id: "shortcuts", label: "Keyboard shortcuts", glyph: "⌨" },
+      { id: "usage", label: "Usage & billing", glyph: "◔" }, { id: "account", label: "Account", glyph: "◉" }
+    ] },
+    { label: "Integrations", items: [
+      { id: "plugins", label: "Plugins", glyph: "◉" }, { id: "browser", label: "Browser", glyph: "▣" },
+      { id: "computer", label: "Computer use", glyph: "⌁" }
+    ] },
+    { label: "Coding", items: [
+      { id: "hooks", label: "Hooks", glyph: "⌘" }, { id: "connections", label: "Connections", glyph: "◎" },
+      { id: "git", label: "Git", glyph: "⑂" }, { id: "environments", label: "Environments", glyph: "▭" },
+      { id: "worktrees", label: "Worktrees", glyph: "⇆" }
+    ] },
+    { label: "Archived", items: [{ id: "archived", label: "Archived chats", glyph: "▤" }] }
+  ];
+  const normalizedSettingsSearch = settingsSearch.trim().toLocaleLowerCase();
   const activeSurfaceTitle = activeSurface === "tasks"
     ? "New chat"
     : activeSurface === "threads"
@@ -3098,10 +3170,14 @@ export function App() {
           })}{matchingTasks.filter((task) => !task.project_id).length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{matchingTasks.filter((task) => !task.project_id).map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>}</section>
         </div>
         <div className="sidebar-account-area">
-          <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><span className="owner-avatar" aria-hidden="true">M</span><span><strong>Local owner</strong><small>MCG workspace</small></span><span aria-hidden="true">⋯</span></button>
+          <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><span><strong>{signedInWithOpenAi ? "OpenAI account" : "Local owner"}</strong><small>{signedInWithOpenAi ? "ChatGPT subscription" : "Not signed in"}</small></span><span aria-hidden="true">⋯</span></button>
           <div className={`owner-menu${ownerMenuOpen ? " open" : ""}`} aria-label="Owner menu">
-            {[(["providers", "Providers"]), (["mcp", "Tools"]), (["platform", "Computer & browser"]), (["ssh", "SSH"]), (["improvement", "Improvement"]), (["projects", "Projects"]), (["settings", "Settings"])].map(([surface, label]) => <button type="button" onClick={() => navigateSurface(surface)} key={surface}>{label}</button>)}
-            <button ref={modeButtonRef} className="mode-button" type="button" aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={toggleAdvancedMode}>{advanced ? "Simple mode" : "Advanced mode"}</button>
+            <div className="owner-menu-identity"><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><span><strong>{signedInWithOpenAi ? "OpenAI account" : "Local owner"}</strong><small>{signedInWithOpenAi ? "Signed in with ChatGPT" : "MCG workspace"}</small></span></div>
+            <button type="button" aria-label="Usage" onClick={() => { setSettingsTab("usage"); navigateSurface("settings"); }}><span aria-hidden="true">◔</span><span>Usage</span><small>{proxyUsage ? `${proxyUsage.usage.total_tokens.toLocaleString()} tokens` : "View"}</small></button>
+            <button type="button" aria-label="Settings" onClick={() => { setSettingsTab("general"); navigateSurface("settings"); }}><span aria-hidden="true">⚙</span><span>Settings</span><small>Ctrl+,</small></button>
+            {signedInWithOpenAi
+              ? <button className="owner-menu-session" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}><span aria-hidden="true">↪</span><span>{busy ? "Logging out…" : "Log out"}</span></button>
+              : <button className="owner-menu-session" type="button" disabled={busy || Boolean(login)} onClick={() => { setOwnerMenuOpen(false); setSettingsTab("account"); navigateSurface("settings"); void startLogin("browser"); }}><span aria-hidden="true">↪</span><span>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</span></button>}
           </div>
         </div>
       </aside>
@@ -4694,16 +4770,24 @@ export function App() {
           </>}
         </section>
 
-        <section className="panel" id="settings" aria-labelledby="settings-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">OWNER CONTROLS</p>
-              <h2 id="settings-heading">Settings</h2>
-              <p className="muted">Choose how independently MCG may act. Changes are durable and apply to new authority decisions.</p>
-            </div>
-            {userSettings && <span className="count-badge">Revision {userSettings.revision}</span>}
-          </div>
-          {userSettings ? <div className="provider-setup" aria-label="Owner settings">
+        <section className="panel settings-page" id="settings" aria-label="Settings">
+          <button className="settings-back" type="button" onClick={() => navigateSurface("tasks")}><span aria-hidden="true">←</span> Back to app</button>
+          <label className="settings-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search settings</span><input aria-label="Search settings" value={settingsSearch} onChange={(event) => setSettingsSearch(event.target.value)} placeholder="Search settings…" /></label>
+          <div className="settings-layout">
+            <nav className="settings-nav" aria-label="Settings sections">
+              {settingsGroups.map((group) => {
+                const items = group.items.filter((item) => !normalizedSettingsSearch || item.label.toLocaleLowerCase().includes(normalizedSettingsSearch));
+                return items.length > 0 && <section key={group.label}><h3>{group.label}</h3>{items.map((item) => <button className={settingsTab === item.id ? "active" : ""} type="button" aria-current={settingsTab === item.id ? "page" : undefined} onClick={() => setSettingsTab(item.id)} key={item.id}><span aria-hidden="true">{item.glyph}</span>{item.label}</button>)}</section>;
+              })}
+              {settingsGroups.every((group) => group.items.every((item) => normalizedSettingsSearch && !item.label.toLocaleLowerCase().includes(normalizedSettingsSearch))) && <p className="settings-no-results">No settings found.</p>}
+            </nav>
+            <div className="settings-content" data-settings-tab={settingsTab}>
+              <div className="settings-pane" data-settings-pane="general">
+                <div className="section-heading">
+                  <div><h2 id="settings-heading">General</h2><p className="muted">Choose how MCG works by default.</p></div>
+                  {userSettings && <span className="count-badge">Revision {userSettings.revision}</span>}
+                </div>
+                {userSettings ? <div className="provider-setup" aria-label="Owner settings">
             <label>
               Autonomy
               <select
@@ -4721,6 +4805,10 @@ export function App() {
               {userSettings.autonomy === "balanced" && "Act independently for low-risk work and ask for higher-risk actions."}
               {userSettings.autonomy === "autonomous" && "Act independently within the owner constitution and capability limits."}
             </p>
+            <div className="settings-mode-row">
+              <span><strong>Interface mode</strong><small>Simple mode keeps everyday choices compact. Advanced mode reveals exact runtime controls and evidence.</small></span>
+              <button ref={modeButtonRef} className="secondary" type="button" aria-pressed={advanced} disabled={settingsBusy} onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button>
+            </div>
             {advanced && <label className="check-row">
               <input
                 type="checkbox"
@@ -4749,7 +4837,10 @@ export function App() {
                 </li>)}
               </ul>
             </div>}
-          </div> : <p className="empty-state">Loading durable settings…</p>}
+                </div> : <p className="empty-state">Loading durable settings…</p>}
+              </div>
+              <div className="settings-pane" data-settings-pane="import">
+                <div className="section-heading"><div><h2>Import</h2><p className="muted">Add folders available to every chat and manage portable backups.</p></div></div>
           <div className="provider-connections global-folder-settings" aria-label="Global folders">
             <div className="section-heading compact-heading">
               <div>
@@ -4763,6 +4854,9 @@ export function App() {
             </ul>}
             {globalFolderError && <p className="error-message" role="alert">{globalFolderError}</p>}
           </div>
+              </div>
+              <div className="settings-pane" data-settings-pane="configuration">
+                <div className="section-heading"><div><h2>Configuration</h2><p className="muted">Updates, diagnostics, and durable application details.</p></div></div>
           <div className="provider-connections" aria-label="Application updates">
             <div className="section-heading compact-heading">
               <div>
@@ -4839,6 +4933,8 @@ export function App() {
             </div>}
             {!diagnostics && !diagnosticsError && <p className="empty-state">Diagnostics have not been run in this session.</p>}
           </div>
+              </div>
+              <div className="settings-pane" data-settings-pane="import">
           <div className="provider-connections" aria-label="Portable backups">
             <div className="section-heading compact-heading">
               <div>
@@ -4872,6 +4968,29 @@ export function App() {
               <button className="secondary" type="button" disabled={backupBusy || backupPassphrase.length < 12} onClick={makeEncryptedBackup}>Create encrypted backup</button>
             </div>}
             <p className="form-note">Restore is intentionally offline: stop the daemon, then run <code>mcg backup restore PATH --confirm</code>. Add <code>--restore-secrets</code> only for an encrypted credential backup. MCG retains the previous database for rollback.</p>
+          </div>
+              </div>
+
+              <div className="settings-pane settings-summary-pane" data-settings-pane="profile"><h2>Profile</h2><div className="settings-card"><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><div><strong>{signedInWithOpenAi ? "OpenAI account" : "Local owner"}</strong><p>{signedInWithOpenAi ? "Your ChatGPT subscription is connected to MCG." : "Sign in with ChatGPT to use your OpenAI subscription."}</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Manage account</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="appearance"><h2>Appearance</h2><div className="settings-card"><div><strong>Theme</strong><p>MCG currently uses its Codex-aligned dark theme. System and light themes will be added here when their visual qualification is complete.</p></div><span className="count-badge">Dark</span></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="voice"><h2>Voice</h2><div className="settings-card"><div><strong>Voice input</strong><p>Voice controls are not configured in this build. MCG will not claim microphone access until the governed voice interface is available.</p></div></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="personalization"><h2>Personalization</h2><div className="settings-card"><div><strong>How MCG works with you</strong><p>Autonomy and shadow-model preferences are durable owner controls.</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>Open general settings</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="shortcuts"><h2>Keyboard shortcuts</h2><dl className="shortcut-list"><div><dt>Open Settings</dt><dd><kbd>Ctrl</kbd> + <kbd>,</kbd></dd></div><div><dt>Add a global folder</dt><dd><kbd>Ctrl</kbd> + <kbd>O</kbd></dd></div></dl></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="usage"><h2>Usage &amp; billing</h2><div className="settings-card"><div><strong>{proxyUsage ? `${proxyUsage.usage.total_tokens.toLocaleString()} tokens recorded` : "Usage is loading"}</strong><p>{proxyUsage ? `${proxyUsage.call_count.toLocaleString()} calls across ${proxyUsage.conversation_count.toLocaleString()} conversations. Known API cost: $${proxyUsage.known_actual_cost_usd.toFixed(6)}.` : "MCG keeps credential-free local usage totals."}</p><small>ChatGPT subscription usage is governed by OpenAI and is not converted into API charges here. API-key providers remain separately billed.</small></div><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Provider details</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="account"><h2>Account</h2><div className="settings-card account-card"><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><div><strong>{signedInWithOpenAi ? "Signed in with ChatGPT" : "Connect your OpenAI subscription"}</strong><p>{signedInWithOpenAi ? "MCG uses the explicit ChatGPT OAuth connection for subscription access." : "A browser window will open for OpenAI sign-in and return authorization to MCG."}</p><small>Subscription OAuth never silently falls back to API-key billing.</small></div>{signedInWithOpenAi ? <button className="secondary" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}>{busy ? "Logging out…" : "Log out"}</button> : <button className="primary" type="button" disabled={busy || Boolean(login)} onClick={() => void startLogin("browser")}>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</button>}</div>
+                {login && <div className="oauth-card" role="status"><p>Finish signing in with OpenAI in your browser, then return here.</p><button className="link-button" type="button" onClick={() => openVerification(login.verification_url)}>Open sign-in page</button><div className="composer-actions"><button className="secondary" type="button" disabled={busy} onClick={cancelLogin}>Cancel</button><button className="primary" type="button" disabled={busy} onClick={finishLogin}>{busy ? "Checking…" : "Finish connection"}</button></div></div>}
+                <p className="provider-state" role="status">{providerStatus}</p>{providerError && <p className="error-message" role="alert">{providerError}</p>}
+              </div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="plugins"><h2>Plugins</h2><div className="settings-card"><div><strong>Plugin directory and access</strong><p>Browse installed, workspace, personal, and OpenAI plugin sources. Review access before activation.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("plugins")}>Open Plugins</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="browser"><h2>Browser</h2><div className="settings-card"><div><strong>Governed browser sessions</strong><p>Review browser authority, boundaries, and active sessions.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("platform")}>Open Browser settings</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="computer"><h2>Computer use</h2><div className="settings-card"><div><strong>Governed computer access</strong><p>Review explicit input authority and current computer sessions.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("platform")}>Open Computer use</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="hooks"><h2>Hooks</h2><div className="settings-card"><div><strong>No hooks configured</strong><p>Hook management will appear here when the typed, governed hook runtime is implemented.</p></div></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="connections"><h2>Connections</h2><div className="settings-card"><div><strong>Providers and tools</strong><p>Manage model providers, ChatGPT subscription access, MCP servers, and remote hosts.</p></div><div className="settings-card-actions"><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Providers</button><button className="secondary" type="button" onClick={() => navigateSurface("mcp")}>Tools</button><button className="secondary" type="button" onClick={() => navigateSurface("ssh")}>SSH</button></div></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="git"><h2>Git</h2><div className="settings-card"><div><strong>Repository workflows</strong><p>Projects retain repository identity; pull-request review is currently local and read-only.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("pull-requests")}>Open reviews</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="environments"><h2>Environments</h2><div className="settings-card"><div><strong>Project environments</strong><p>Environment details are derived from each attached project. Exact runtime controls remain in Advanced mode.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("projects")}>Manage projects</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="worktrees"><h2>Worktrees</h2><div className="settings-card"><div><strong>Isolated worktrees</strong><p>Automated isolated worktree management is not yet exposed as a consumer control.</p></div></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="archived"><h2>Archived chats</h2><div className="settings-card"><div><strong>No archived chats</strong><p>Archived chat storage and restore controls will appear here when that durable lifecycle is implemented.</p></div></div></div>
+            </div>
           </div>
         </section>
       </main>
