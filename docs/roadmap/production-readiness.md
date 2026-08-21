@@ -37,7 +37,7 @@ hosting only.
 | M11 — Consumer release | Partial | Owner-built Windows NSIS, Linux `.deb`/AppImage, and macOS app/DMG packaging plus clean-machine install/repair/uninstall/backup UAT, diagnostics, and recovery harnesses exist. Exact v27 passes complete canonical verification on Ubuntu and Win11, full Win11 NSIS install/repair/restart/CLI/doctor/backup/MCP/GUI/uninstall/data-retention UAT, and matched two-hour/10,000-task Windows/Ubuntu optimized-daemon soaks with verifier-bound exact identities, forced-crash recovery, database/schema checks, and zero residual candidate processes. Exact v27 Linux signed-AppImage UAT additionally passes shutdown-timeout and real ENOSPC rollback with baseline preservation, verified backups, authenticated recovery, zero temporary/zombie residue, and exact disposable-CA teardown. The corrected exact-v34 Windows updater binds the reviewed signed-feed version to the embedded installer `ProductVersion`; its real installed UI lanes pass changed-version, no-update, corrupt-response, unavailable-feed, bad-signature, backup-write failure, native installer failure/recovery, valid signed update/relaunch/migration, and offline rollback to the sealed `0.1.0` baseline while preserving durable state, verified secret-free backups, registration/process/listener invariants, and zero staged residue. Exact-subject/thumbprint/DER CA teardown leaves zero trust matches; the still-live feed passes explicit pinned-CA health while ordinary system trust fails `SEC_E_UNTRUSTED_ROOT`. | Trusted signing identities, Windows/Linux signing policy, macOS Developer ID notarization/stapling, owner-controlled updater publication, malware/reputation checks, final matched upgrade candidates, and final OAuth/accessibility/privacy UAT remain. |
 | M12 — Long-term roadmap | Partial | The first cross-project learning control is implemented as an explicit owner-reviewed, source-digest-bound, one-claim transfer. Schema 32 commits the copied target claim, immutable transfer evidence, and event atomically; caller-owned IDs replay safely after restart; occupied targets and changed/stale evidence fail closed. Read-only review, mutation, and history span REST, CLI, MCP, Tauri, and simple/advanced desktop, with core/API/component tests. Exact Windows, Ubuntu, and matched macOS package qualification now passes, including encrypted restore, daemon restart, cross-interface replay, and immutable inbound/outbound history. Signed organization sharing now has a first-class schema-34 trust/review/import vertical; existing experiments, ensembles, Sites, and typed SSH remain foundations for later slices. | Native macOS memory/sharing interaction and signed-final-candidate repetition remain open. Ambient or automatic cross-project learning intentionally remains absent. Distributed execution beyond typed SSH, fleet management, predictive intervention, long-term operational workflows, and an Android capability-profile application still require first-class vertical implementation and threat-model/benchmark evidence. |
 
-The first two shared installed real-project gates are now implemented. The website
+Three shared installed real-project gates are now implemented. The website
 gate in `scripts/test-installed-real-project.py` passes the complete existing
 manifest-qualified Windows NSIS, Ubuntu `.deb`/AppImage, and macOS app/DMG lanes.
 It proves a seeded website regression fails before work, three governed writes
@@ -54,9 +54,18 @@ and daemon restart. It now also passes the complete existing manifest-qualified
 Windows NSIS, Ubuntu `.deb`/AppImage, and macOS app/DMG lanes with byte-identical
 exercise, restart, and runtime reports on all three platforms. Compact secret-free
 evidence is retained under `qualification-evidence/20260820-installed-real-project/`
-and `qualification-evidence/20260820-installed-real-api-project/`. These two
-representative projects strengthen, but do not close, the several-project and
-signed-final-candidate requirements.
+and `qualification-evidence/20260820-installed-real-api-project/`. The third gate
+in `scripts/test-installed-real-fullstack-project.py` builds HomeBase Inventory:
+five governed files provide an accessible browser UI, bounded loopback service,
+atomic disk persistence, generated regression test, and independent evaluation.
+Real Chromium mutates the service through the UI; exact API state, files, audit,
+runtime behavior, and provider-free replay survive both application and MCG daemon
+restart. It passes the complete existing Windows NSIS, Ubuntu `.deb`/AppImage, and
+macOS app/DMG lanes, with compact evidence under
+`qualification-evidence/20260821-installed-real-fullstack-project/`. These three
+representative projects close the initial several-project breadth checkpoint, but
+do not replace broader native workflow/accessibility/privacy UAT or the required
+repeat on signed final candidates.
 
 ## Immediate dependency order
 

@@ -1,0 +1,1 @@
+{"browser_quick_add_passed": true, "invalid_input_failed_closed": true, "listener_teardown_passed": true, "loopback_only": true, "oversized_body_failed_closed": true, "persistent_after_app_restart": true, "schema_version": 1, "transcript_sha256": "4667470f8fa5d72ba818c3274d7669ada245752aeee90c7ea23c0bf5fd633445", "unknown_route_failed_closed": true, "viewport": [1280, 720]}

@@ -1,0 +1,1 @@
+{"audit_unchanged": true, "browser_quick_add_passed": true, "daemon_restart_survived": true, "files_unchanged": true, "generated_regression_passed": true, "mode": "verify", "persistent_after_app_restart": true, "provider_required_for_replay": false, "runtime_behavior_unchanged": true, "schema_version": 1, "token_excluded": true}
