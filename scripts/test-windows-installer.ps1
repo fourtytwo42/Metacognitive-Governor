@@ -1,9 +1,23 @@
 param(
     [string]$InstallerPath,
-    [switch]$SkipDesktop
+    [switch]$SkipDesktop,
+    [string]$PythonPath,
+    [string]$NodeBinPath
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($NodeBinPath) {
+    $resolvedNodeBin = [IO.Path]::GetFullPath($NodeBinPath)
+    if (-not (Test-Path -LiteralPath $resolvedNodeBin -PathType Container) `
+        -or -not (Test-Path -LiteralPath (Join-Path $resolvedNodeBin "node.exe") -PathType Leaf) `
+        -or -not (Test-Path -LiteralPath (Join-Path $resolvedNodeBin "npm.cmd") -PathType Leaf)) {
+        throw "NodeBinPath must contain node.exe and npm.cmd: $resolvedNodeBin"
+    }
+    $env:PATH = $resolvedNodeBin + [IO.Path]::PathSeparator + $env:PATH
+} elseif (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
+    throw "Windows package UAT requires npm on PATH or an explicit -NodeBinPath."
+}
 
 function Stop-UatProcess([Diagnostics.Process]$Process) {
     if ($null -ne $Process) {
@@ -350,13 +364,28 @@ try {
     $doctor = ($doctorOutput -join [Environment]::NewLine) | ConvertFrom-Json
     if ($doctor.schema_version -ne 1 -or $doctor.service -ne "mcg-daemon") { throw "Installed CLI doctor returned an invalid report." }
     $doctor | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $uatRoot "doctor.json") -Encoding UTF8
-    $python = (Get-Command python.exe -ErrorAction Stop).Source
+    if ($PythonPath) {
+        $python = [IO.Path]::GetFullPath($PythonPath)
+        if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            throw "PythonPath is not a regular file: $python"
+        }
+    } else {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+    }
     $experimentVerifier = Join-Path $PSScriptRoot "test-installed-experiments.py"
     $experimentState = Join-Path $uatRoot "experiment-state.json"
     & $python $experimentVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
         --token-file $tokenFile --cli $cli --state $experimentState `
         --output (Join-Path $uatRoot "experiments.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed experiment lifecycle verification failed." }
+    $providerSuccessVerifier = Join-Path $PSScriptRoot "test-installed-provider-success.py"
+    $providerSuccessProject = Join-Path $uatRoot "provider-success-project"
+    $providerSuccessState = Join-Path $uatRoot "provider-success-state.json"
+    $providerSuccessReport = Join-Path $uatRoot "provider-success.json"
+    & $python $providerSuccessVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $providerSuccessProject `
+        --state $providerSuccessState --output $providerSuccessReport
+    if ($LASTEXITCODE -ne 0) { throw "Installed provider-backed consumer success verification failed." }
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
@@ -452,6 +481,10 @@ try {
         --token-file $tokenFile --cli $cli --state $experimentState `
         --output (Join-Path $uatRoot "experiments-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed experiment history did not survive daemon restart." }
+    & $python $providerSuccessVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $providerSuccessProject `
+        --state $providerSuccessState --output (Join-Path $uatRoot "provider-success-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed provider-backed consumer evidence did not survive daemon restart." }
     $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 
@@ -524,6 +557,8 @@ try {
         ConsumerCliReport = Join-Path $uatRoot "consumer-cli.json"
         ConsumerCliTaskCount = $consumerCli.task_count
         ConsumerCliProjectCount = $consumerCli.project_count
+        ProviderSuccessReport = $providerSuccessReport
+        ProviderSuccessRestartReport = Join-Path $uatRoot "provider-success-restart.json"
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }

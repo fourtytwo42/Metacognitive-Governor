@@ -213,15 +213,15 @@ for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "sc
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
-for (const invariant of ["InstallerPath", "MCG_BIND_ADDRESS", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
+for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_BIND_ADDRESS", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "Bubblewrap-GPL-2.0-or-later.txt", "bubblewrap-v0.11.2.tar.gz", "metacognitive-governor-unpriv-bwrap", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "Bubblewrap-GPL-2.0-or-later.txt", "bubblewrap-v0.11.2.tar.gz", "metacognitive-governor-unpriv-bwrap", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
 const macosPackageUat = await read("scripts/test-macos-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST", "Refusing to replace external capture request", "pwd -P", "protocolVersion", "screencapture", "remove_installed_app"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST", "Refusing to replace external capture request", "pwd -P", "protocolVersion", "screencapture", "remove_installed_app"]) {
   requireText(macosPackageUat, invariant, "macOS package UAT");
 }
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");
@@ -255,6 +255,10 @@ await access(path.join(root, "scripts/test-macos-packages.sh"), constants.R_OK);
 const installedExperimentUat = await read("scripts/test-installed-experiments.py");
 for (const invariant of ["evaluation_only", "mcg_experiments_inspect", "mcg_experiments_mutate", "awaiting-decision", "shadowAuthority", "benchmarkCount", "decisionCount", "os.replace"]) {
   requireText(installedExperimentUat, invariant, "installed experiment UAT");
+}
+const installedProviderSuccessUat = await read("scripts/test-installed-provider-success.py");
+for (const invariant of ["127.0.0.1", "installed provider-backed result", "independent_evaluation_passed", "governed_project_command_per_task", "replay_side_effect_free", "provider-success-restart-replay", "token_excluded", "private_context_excluded"]) {
+  requireText(installedProviderSuccessUat, invariant, "installed provider success UAT");
 }
 
 console.log("Windows, Linux, and macOS installer, sidecar, data-retention, and license packaging contracts are valid.");

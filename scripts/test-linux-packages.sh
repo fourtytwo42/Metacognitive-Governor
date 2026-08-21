@@ -21,7 +21,7 @@ deb="$(realpath -- "$deb")"
 appimage="$(realpath -- "$appimage")"
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
-for command in apparmor_parser apparmor_status curl dpkg dpkg-deb find identify import pgrep python3 runuser script ss stat xdotool Xvfb; do
+for command in apparmor_parser apparmor_status curl dpkg dpkg-deb find identify import npm pgrep python3 runuser script ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 
@@ -482,6 +482,16 @@ runuser -u "$uat_user" -- python3 "$repository_root/scripts/test-installed-exper
   --mode exercise --host "http://127.0.0.1:$installed_port" \
   --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
   --state "$uat_root/experiment-state.json" --output "$uat_root/experiments.json"
+provider_success_project="$uat_root/provider-success-project"
+mkdir -p "$provider_success_project"
+chown -R "$uat_user":"$(id -gn "$uat_user")" "$provider_success_project"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-provider-success.py" \
+  --mode exercise --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --project "$provider_success_project" --state "$uat_root/provider-success-state.json" \
+  --output "$uat_root/provider-success.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg backup create --json >"$uat_root/backup.json"
 encrypted_backup_id="00000000-0000-4000-8000-00000000b002"
 encrypted_bundle="$installed_data/backups/$encrypted_backup_id.mcgb"
@@ -576,6 +586,13 @@ runuser -u "$uat_user" -- python3 "$repository_root/scripts/test-installed-exper
   --mode verify --host "http://127.0.0.1:$installed_port" \
   --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
   --state "$uat_root/experiment-state.json" --output "$uat_root/experiments-restart.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-provider-success.py" \
+  --mode verify --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --project "$provider_success_project" --state "$uat_root/provider-success-state.json" \
+  --output "$uat_root/provider-success-restart.json"
 stop_tree "$restarted_service_pid"
 background_pids=()
 
@@ -682,6 +699,8 @@ DEB_PACKAGE=$package_name
 INSTALLED_HEALTH_PORT=$installed_port
 MCP_REPORT=$uat_root/mcp.json
 CONSUMER_CLI_REPORT=$uat_root/installed-consumer-cli.json
+PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
+PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
 INSTALLED_SCREENSHOT=$uat_root/installed.png
 APPIMAGE_SCREENSHOT=$uat_root/appimage.png
 DATA_RETAINED=true

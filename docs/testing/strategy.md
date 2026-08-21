@@ -297,6 +297,14 @@ promotes only through an evidence-linked decision, proves mutation replay is
 idempotent, and requires every surface to recover the same promoted revision and
 immutable history after daemon restart. The Windows, Linux, and macOS package UAT
 harnesses all invoke the same verifier and retain separate initial/restart reports.
+`scripts/test-installed-provider-success.py` then owns a credential-free loopback
+OpenAI-compatible fixture and drives human, JSON, and NDJSON work through the actual
+installed CLI. Each task must complete, retain a passing independent evaluation,
+and record a successful `process.exec` completion for the discovered project test.
+The fixture is disconnected before daemon restart; the second phase requires the
+same task, evaluator, audit, and deterministic side-effect-free replay evidence with
+no provider available. Windows, Linux, and macOS package harnesses share this gate,
+and captured streams must exclude the bearer token and private piped context.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected

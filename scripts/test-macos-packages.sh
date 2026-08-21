@@ -212,6 +212,13 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-experiment
   --token-file "$service_data/local-auth-token" \
   --cli "$installed_app/Contents/MacOS/mcg" \
   --state "$uat_root/experiment-state.json" --output "$uat_root/experiments.json"
+provider_success_project="$uat_root/provider-success-project"
+mkdir -p "$provider_success_project"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-provider-success.py" \
+  --mode exercise --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" --project "$provider_success_project" \
+  --state "$uat_root/provider-success-state.json" --output "$uat_root/provider-success.json"
 env HOME="$uat_home" "${cli[@]}" backup create --json >"$uat_root/backup.json"
 
 node --input-type=module - "http://127.0.0.1:$service_port/mcp" "$service_data/local-auth-token" "$uat_root/mcp.json" <<'NODE'
@@ -262,6 +269,12 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-experiment
   --token-file "$service_data/local-auth-token" \
   --cli "$installed_app/Contents/MacOS/mcg" \
   --state "$uat_root/experiment-state.json" --output "$uat_root/experiments-restart.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-provider-success.py" \
+  --mode verify --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" --project "$provider_success_project" \
+  --state "$uat_root/provider-success-state.json" \
+  --output "$uat_root/provider-success-restart.json"
 stop_process "$restarted_service_pid"
 background_pids=()
 
@@ -327,6 +340,8 @@ MOUNTED_SIGNATURE=$mounted_signature
 INSTALLED_SIGNATURE=$installed_signature
 SERVICE_HEALTH_PORT=$service_port
 MCP_REPORT=$uat_root/mcp.json
+PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
+PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
 DESKTOP_SCREENSHOT=$uat_root/desktop.png
 EXTERNAL_CAPTURE_REQUEST=${external_capture_request:-none}
 DATA_RETAINED=true
