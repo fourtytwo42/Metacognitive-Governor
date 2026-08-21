@@ -1,0 +1,26 @@
+{
+  "approval_required_and_resolved": true,
+  "cli_transcript_sha256": [
+    "0f16772b083b211943783a397d1edce062e08076af98df4f439608979ceca377",
+    "6ff1c21ebbe8424383c774cdae3e9699fe6f55363f2936252ad5822d3c6553fd",
+    "9bd93a7aa6d404e14eea72485cdcbc5fba2bbc1a65311d80a1e88966cc4069d2",
+    "aeb4aa83be40a5a505f2755eaea01add98cc495e7caec1762bc34275d47cd8dc"
+  ],
+  "command_executions": 1,
+  "phase": "exercise",
+  "plan_digest": "5db97cf23ac2aeb4bdb3145f761f6e187afc6cb828cff4f84b89cd8719882f11",
+  "private_path_persisted": false,
+  "rest_query_mcp_agree": true,
+  "review_replay_observation_only": true,
+  "schema_version": 1,
+  "settings_restored": true,
+  "stale_authority_rejected": true,
+  "step_log_artifact_sha256": [
+    "7f2c637d26ad160a6ae2ef07fabc067b42d608e572f98299152c3704baf5451e"
+  ],
+  "terminal_replay_observation_only": true,
+  "topology_schema_version": 2,
+  "topology_sha256": "918f6df4a1db442f78fca454b960644ce281bc1866fd2b23744bd65f9de531da",
+  "topology_stage_count": 3,
+  "world_dependency_count": 2
+}

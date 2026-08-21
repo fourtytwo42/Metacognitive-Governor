@@ -1,0 +1,20 @@
+{
+  "cli_transcript_sha256": [
+    "24b4e45b1b132ce5699ceee8acff09e9dba8f42dd997740cc66d923e00b7cbcb",
+    "8105147f371c0a0b8177d9d83d1f8215d9b49be37860e7daa26b0620669c941c"
+  ],
+  "command_executions": 1,
+  "daemon_restart_verified": true,
+  "phase": "verify",
+  "plan_digest": "5d9df7bc089e3e93b9a37c07627005b6a315b2734daac672fef844272c7a4773",
+  "private_path_persisted": false,
+  "rest_cli_mcp_agree": true,
+  "schema_version": 1,
+  "settings_restored": true,
+  "stale_authority_rejected": true,
+  "step_log_artifact_sha256": [
+    "7f2c637d26ad160a6ae2ef07fabc067b42d608e572f98299152c3704baf5451e"
+  ],
+  "terminal_replay_observation_only": true,
+  "topology_sha256": "2a4346dd8cc829c2c8cbb5b23135f277a065eb028f90943c980c6eba84c3ea26"
+}
