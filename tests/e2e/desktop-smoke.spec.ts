@@ -257,7 +257,9 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
-  await expect(page.getByText("System details are hidden in simple mode.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What would you like to build?" })).toBeVisible();
+  await expect(page.locator("#projects")).toBeHidden();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
   const updates = page.getByLabel("Application updates");
   await expect(updates.getByText(/Updates are unavailable in this build/)).toBeVisible();
   await expect(updates.getByText(/never accept an unsigned fallback/)).toBeVisible();
@@ -286,6 +288,7 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
 
   await page.getByRole("button", { name: "Simple mode" }).click();
+  await page.getByRole("link", { name: "Scheduler", exact: true }).click();
   await expect(scheduler.getByLabel("Repeat")).toHaveValue("3600");
 });
 
@@ -353,6 +356,24 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
 });
 
+test("workspace navigation always opens a surface at its top", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("button", { name: "Use project" }).click();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.getByRole("link", { name: "Tasks", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Tasks" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => Math.round(window.scrollY))).toBe(0);
+
+  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  await expect(page.locator("#projects")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
+  await expect.poll(() => page.evaluate(() => Math.round(window.scrollY))).toBe(0);
+  await expect(page.getByRole("link", { name: "Projects", exact: true })).toHaveAttribute("aria-current", "page");
+});
+
 test("scaled 1280x800 Windows layout keeps browser OAuth reachable", async ({ page }) => {
   await page.setViewportSize({ width: 853, height: 533 });
   await page.goto("/");
@@ -374,6 +395,7 @@ test("scaled 1280x800 Windows layout keeps browser OAuth reachable", async ({ pa
 
 test("plugin permission review gates enablement and invocation", async ({ page }) => {
   await page.goto("/");
+  await page.getByRole("link", { name: "Plugins", exact: true }).click();
 
   const plugins = page.getByRole("region", { name: "Plugins" });
   await expect(plugins.getByRole("heading", { name: "Weather helper" })).toBeVisible();
@@ -390,6 +412,7 @@ test("plugin permission review gates enablement and invocation", async ({ page }
 
 test("consumer composes and runs a revision-pinned multi-host workflow", async ({ page }) => {
   await page.goto("/");
+  await page.getByRole("link", { name: "SSH", exact: true }).click();
   const workflows = page.getByRole("region", { name: "SSH workflows" });
   await workflows.getByLabel("Workflow name").fill("Build and test remotely");
   await workflows.getByRole("checkbox", { name: /Linux builder/ }).check();
@@ -448,6 +471,7 @@ test("consumer reviews, approves, and runs an exact topology command", async ({ 
 test("consumer duplicates and inspects a portable organization without exposing local authority", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
+  await page.getByRole("link", { name: "Improvement", exact: true }).click();
   const improvement = page.getByRole("region", { name: "Measured improvement" });
   const organizations = improvement.getByLabel("Agent organizations");
   await expect(organizations.locator("strong", { hasText: "Consumer team" })).toBeVisible();
@@ -468,6 +492,7 @@ test("consumer duplicates and inspects a portable organization without exposing 
 
 test("consumer verifies a signed organization before a separate reasoned import", async ({ page }) => {
   await page.goto("/");
+  await page.getByRole("link", { name: "Improvement", exact: true }).click();
   const sharing = page.getByLabel("Signed organization sharing");
   await sharing.getByLabel("Signed organization package").fill(JSON.stringify({
     schema_version: 1,

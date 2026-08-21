@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import {
   approveRequest,
@@ -407,6 +407,7 @@ function TaskEvidence({
 
 export function App() {
   const modeButtonRef = useRef<HTMLButtonElement>(null);
+  const [activeSurface, setActiveSurface] = useState("tasks");
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
@@ -611,6 +612,39 @@ export function App() {
   const [experimentEvidence, setExperimentEvidence] = useState<Record<string, { shadow: number; benchmarks: number; decisions: number }>>({});
   const [experimentBusy, setExperimentBusy] = useState(false);
   const [experimentError, setExperimentError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const previousScrollRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+    return () => {
+      window.history.scrollRestoration = previousScrollRestoration;
+    };
+  }, []);
+
+  function openSurface(event: MouseEvent<HTMLAnchorElement>, surface: string) {
+    event.preventDefault();
+    setActiveSurface(surface);
+    window.history.replaceState(null, "", `#${surface}`);
+    window.requestAnimationFrame(() => {
+      const target = surface === "tasks"
+        ? document.querySelector<HTMLElement>(".workspace")
+        : surface === "threads"
+          ? document.querySelector<HTMLElement>(".task-panel")
+        : document.getElementById(surface);
+      if (target) {
+        const headerOffset = advanced
+          ? (document.querySelector<HTMLElement>(".topbar")?.offsetHeight ?? 0) + 18
+          : 0;
+        const top = advanced
+          ? Math.max(0, target.getBoundingClientRect().top + window.scrollY - headerOffset)
+          : 0;
+        window.scrollTo({ top, left: 0, behavior: "instant" });
+      } else {
+        window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+      }
+    });
+  }
 
   useEffect(() => {
     let active = true;
@@ -2768,25 +2802,41 @@ export function App() {
   );
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${advanced ? "advanced-mode" : "simple-mode"}`}
+      data-active-surface={activeSurface}
+    >
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand" aria-label="MetaCognitive Governor">
           <span className="brand-mark">M</span>
           <span>MCG</span>
         </div>
-        <nav>
-          <a className="nav-item active" href="#tasks">Tasks</a>
-          <a className="nav-item" href="#projects">Projects</a>
-          <a className="nav-item" href="#threads">Threads</a>
-          <a className="nav-item" href="#scheduler">Scheduler</a>
-          <a className="nav-item" href="#improvement">Improvement</a>
-          <a className="nav-item" href="#sites">Sites</a>
-          <a className="nav-item" href="#ssh">SSH</a>
-          <a className="nav-item" href="#platform">Computer & browser</a>
-          <a className="nav-item" href="#providers">Providers</a>
-          <a className="nav-item" href="#mcp">Tools</a>
-          <a className="nav-item" href="#plugins">Plugins</a>
-          <a className="nav-item" href="#settings">Settings</a>
+        <nav aria-label="Workspace pages">
+          {[
+            ["tasks", "Tasks"],
+            ["projects", "Projects"],
+            ["threads", "Threads"],
+            ["scheduler", "Scheduler"],
+            ["improvement", "Improvement"],
+            ["sites", "Sites"],
+            ["ssh", "SSH"],
+            ["platform", "Computer & browser"],
+            ["providers", "Providers"],
+            ["mcp", "Tools"],
+            ["plugins", "Plugins"],
+            ["settings", "Settings"]
+          ].map(([surface, label]) => (
+            <a
+              className={`nav-item${activeSurface === surface ? " active" : ""}`}
+              href={`#${surface}`}
+              aria-current={activeSurface === surface ? "page" : undefined}
+              onClick={(event) => openSurface(event, surface)}
+              key={surface}
+            >
+              <span className="nav-glyph" aria-hidden="true" />
+              {label}
+            </a>
+          ))}
         </nav>
         <button
           ref={modeButtonRef}
@@ -2804,7 +2854,8 @@ export function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">METACOGNITIVE GOVERNOR</p>
-            <h1>Your AI workspace</h1>
+            <h1>{activeSurface === "tasks" ? "Your AI workspace" : activeSurface === "threads" ? "Task history" : activeSurface === "mcp" ? "Tools" : activeSurface === "ssh" ? "SSH" : activeSurface.charAt(0).toUpperCase() + activeSurface.slice(1)}</h1>
+            <p className="topbar-subtitle">Build, review, and run work with a local AI team.</p>
           </div>
           <span
             className={`status-pill${localService && !localService.ready ? " status-error" : ""}`}
@@ -2818,7 +2869,7 @@ export function App() {
         <section className="hero-card">
           <div>
             <p className="eyebrow">NEW TASK</p>
-            <h2>What would you like MCG to do?</h2>
+            <h2>What would you like to build?</h2>
             <p className="muted">
               Open a folder or describe a goal. MCG will choose the smallest useful
               organization, work within your permissions, and verify the result.

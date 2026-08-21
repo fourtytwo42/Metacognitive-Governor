@@ -300,3 +300,168 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
+
+/* Consumer shell: neutral, quiet, and progressively disclosed like a modern AI workspace. */
+:root {
+  color: #e7e7e7;
+  background: #151515;
+  --mcg-bg: #151515;
+  --mcg-sidebar: #1d1d1d;
+  --mcg-surface: #1f1f1f;
+  --mcg-surface-raised: #282828;
+  --mcg-border: #353535;
+  --mcg-muted: #a5a5a5;
+  --mcg-accent: #f07a32;
+}
+
+html { background: var(--mcg-bg); scroll-behavior: auto; }
+body { background: var(--mcg-bg); }
+.app-shell { grid-template-columns: 256px minmax(0, 1fr); background: var(--mcg-bg); }
+.sidebar {
+  gap: 20px;
+  padding: 22px 14px 18px;
+  border-right-color: var(--mcg-border);
+  background: var(--mcg-sidebar);
+}
+.brand { padding: 0 10px 10px; color: #f2f2f2; font-size: 1.05rem; letter-spacing: -.01em; }
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  color: #111;
+  background: #f0f0f0;
+  font-size: .88rem;
+}
+.sidebar nav { gap: 3px; }
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 8px;
+  color: #b8b8b8;
+  font-size: .9rem;
+}
+.nav-item:hover, .nav-item.active {
+  border: 0;
+  color: #f2f2f2;
+  background: #303030;
+}
+.nav-glyph {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  opacity: .78;
+}
+.nav-item.active .nav-glyph { background: currentColor; box-shadow: inset 0 0 0 3px #303030; }
+.mode-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: auto;
+  border-color: #404040;
+  border-radius: 9px;
+  color: #d0d0d0;
+  background: #252525;
+}
+.mode-button:hover { background: #303030; }
+.workspace {
+  min-width: 0;
+  padding: 0 clamp(24px, 5vw, 72px) 64px;
+  background: var(--mcg-bg);
+}
+.topbar {
+  position: sticky;
+  z-index: 10;
+  top: 0;
+  min-height: 72px;
+  margin: 0 calc(clamp(24px, 5vw, 72px) * -1) 38px;
+  padding: 13px clamp(24px, 5vw, 72px);
+  border-bottom: 1px solid var(--mcg-border);
+  background: #151515f2;
+  backdrop-filter: blur(16px);
+}
+.topbar h1 { font-size: 1.05rem; font-weight: 650; letter-spacing: -.01em; }
+.topbar .eyebrow { display: none; }
+.topbar-subtitle { margin: 3px 0 0; color: #888; font-size: .76rem; }
+.status-pill { border-color: #3b3b3b; border-radius: 999px; color: #bdbdbd; background: #202020; }
+.status-pill i { background: #72b88b; }
+.eyebrow { color: #929292; letter-spacing: .11em; }
+.muted, .form-note, .provider-state { color: var(--mcg-muted); }
+.hero-card, .panel {
+  border-color: var(--mcg-border);
+  border-radius: 14px;
+  background: var(--mcg-surface);
+  box-shadow: none;
+}
+.simple-mode .hero-card {
+  width: min(100%, 900px);
+  margin: 10vh auto 0;
+  padding: clamp(24px, 4vw, 42px);
+  grid-template-columns: 1fr;
+  gap: 24px;
+  border: 0;
+  background: transparent;
+}
+.simple-mode .workspace > section { display: none; }
+.simple-mode[data-active-surface="tasks"] .workspace > .hero-card,
+.simple-mode[data-active-surface="tasks"] .workspace > .task-panel,
+.simple-mode[data-active-surface="threads"] .workspace > .task-panel,
+.simple-mode[data-active-surface="projects"] .workspace > #projects,
+.simple-mode[data-active-surface="improvement"] .workspace > #improvement,
+.simple-mode[data-active-surface="sites"] .workspace > #sites,
+.simple-mode[data-active-surface="ssh"] .workspace > #ssh,
+.simple-mode[data-active-surface="platform"] .workspace > #platform,
+.simple-mode[data-active-surface="scheduler"] .workspace > #scheduler,
+.simple-mode[data-active-surface="providers"] .workspace > #providers,
+.simple-mode[data-active-surface="mcp"] .workspace > #mcp,
+.simple-mode[data-active-surface="plugins"] .workspace > #plugins,
+.simple-mode[data-active-surface="settings"] .workspace > #settings { display: grid; }
+.simple-mode[data-active-surface="threads"] .task-panel { margin-top: 18px; }
+.simple-mode #projects { grid-template-columns: minmax(0, 1fr); }
+.simple-mode #projects > .runtime-panel { display: none; }
+.simple-mode .hero-card > div:first-child { text-align: center; }
+.simple-mode .hero-card h2 { margin-bottom: 8px; font-size: clamp(1.65rem, 3vw, 2.25rem); }
+.simple-mode .hero-card .muted { margin-right: auto; margin-left: auto; }
+.simple-mode .composer {
+  padding: 14px;
+  border: 1px solid #414141;
+  border-radius: 20px;
+  background: var(--mcg-surface-raised);
+  box-shadow: 0 12px 38px #0004;
+}
+.simple-mode .composer > label[for="goal"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.simple-mode .composer > textarea {
+  min-height: 96px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.simple-mode .composer-actions { align-items: center; }
+.simple-mode .composer-actions .primary { border-radius: 999px; }
+.primary, .secondary, input, select, textarea, .count-badge {
+  border-color: #414141;
+  border-radius: 8px;
+}
+.primary { border-color: #ececec; color: #171717; background: #ececec; }
+.primary:hover { background: #fff; }
+.secondary { color: #d2d2d2; background: #272727; }
+.secondary:hover { background: #333; }
+input, select, textarea, .oauth-card, .provider-setup, .advanced-fields { background: #191919; border-color: #3b3b3b; }
+input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 0 3px #ffffff12; }
+.task-card, .project-card, .memory-card, .provider-card, .connection-card, .plugin-card,
+.schedule-card, .scheduler-notification { border-color: #383838; border-radius: 10px; background: #1b1b1b; }
+.task-state, .status-chip { border-radius: 999px; }
+.state-active, .link-button, .device-login summary, .advanced-details summary { color: #dba270; }
+.panel, .grid, .provider-panel, .mcp-panel, .scheduler-panel, .plugin-panel { scroll-margin-top: 92px; }
+
+@media (max-width: 1100px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .sidebar { background: var(--mcg-sidebar); }
+  .simple-mode .hero-card { margin-top: 2vh; }
+}
