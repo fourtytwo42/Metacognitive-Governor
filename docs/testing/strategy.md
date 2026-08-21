@@ -313,6 +313,13 @@ requires a changed caller-owned-ID retry to fail closed. After restore and daemo
 restart it requires exactly one copied target claim plus one immutable inbound and
 outbound transfer record. Windows, Linux, and macOS package harnesses invoke the
 same verifier and retain secret-free initial/restart summaries.
+`scripts/test-installed-interface-success.py` then uses one credential-free
+loopback provider to cross the remaining installed service interfaces directly:
+REST project discovery, buffered and streaming Responses, Chat Completions, and a
+complete MCP consumer task with independent evaluation and exact replay. The
+provider is removed before restore/restart; the second phase requires content-free
+proxy conversation history and provider-free MCP replay to retain the same terminal
+task, run, and evaluation. All package harnesses invoke this shared gate.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected

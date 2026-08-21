@@ -224,6 +224,11 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-memory-tra
   --token-file "$service_data/local-auth-token" \
   --cli "$installed_app/Contents/MacOS/mcg" --workspace "$uat_root" \
   --state "$uat_root/memory-transfer-state.json" --output "$uat_root/memory-transfer.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-interface-success.py" \
+  --mode exercise --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" --workspace "$uat_root" \
+  --state "$uat_root/interface-success-state.json" \
+  --output "$uat_root/interface-success.json"
 env HOME="$uat_home" "${cli[@]}" backup create --json >"$uat_root/backup.json"
 
 node --input-type=module - "http://127.0.0.1:$service_port/mcp" "$service_data/local-auth-token" "$uat_root/mcp.json" <<'NODE'
@@ -286,6 +291,11 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-memory-tra
   --cli "$installed_app/Contents/MacOS/mcg" --workspace "$uat_root" \
   --state "$uat_root/memory-transfer-state.json" \
   --output "$uat_root/memory-transfer-restart.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-interface-success.py" \
+  --mode verify --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" --workspace "$uat_root" \
+  --state "$uat_root/interface-success-state.json" \
+  --output "$uat_root/interface-success-restart.json"
 stop_process "$restarted_service_pid"
 background_pids=()
 

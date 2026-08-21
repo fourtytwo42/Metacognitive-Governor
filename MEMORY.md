@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Installed multi-interface success gate passes local restart qualification
+
+- Context: Installed Windows/Linux provider-backed success was previously CLI-led; direct OpenAI-compatible and complete MCP success remained an explicit M6 package gate while macOS exposes no CRD host display or SSH endpoint.
+- Decision/files: Add `scripts/test-installed-interface-success.py` to all package harnesses before encrypted backup and after restore/restart. One credential-free loopback provider drives direct REST project discovery, buffered and streaming Responses, Chat Completions, and a complete MCP consumer task with independent evaluation, query, and exact replay. The provider is then removed; restart verification requires content-free proxy history and provider-free MCP replay. Packaging/testing documents and invariants require the gate.
+- Commands/tests: A real current local daemon exercise uses exactly five provider calls and passes all surfaces; forced daemon restart passes the provider-free verification. Python compile, PowerShell parse, Git Bash syntax, packaging/docs validation, and diff hygiene pass; the local process, listener, and credential-bearing fixture root were removed.
+- Result: The shared multi-interface verifier is locally functional and ready for complete Windows/Linux package qualification.
+- Follow-up: Commit/push, exact-stage the checkpoint on both VMs, run complete package lanes, retain secret-free evidence, clean temporary state, then add the same gate to the pending matched macOS package lane.
+
 ### 2026-08-20 - Installed memory-transfer gate passes Windows and Ubuntu packages
 
 - Context: The final macOS package lane remains technically unavailable: Chrome Remote Desktop accepts the connection but advertises `Waiting for host displays…`; this is not an approval wait. The previously known macOS SSH endpoint is also unreachable.
