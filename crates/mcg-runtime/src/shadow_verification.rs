@@ -17,15 +17,16 @@ use mcg_agents::SuccessCondition;
 use mcg_domain::{TaskId, ToolExecutionId};
 #[cfg(any(target_os = "windows", test))]
 use mcg_tools::ToolOutcome;
-use mcg_tools::{ArtifactReference, ArtifactStore, BrowserWorkflowDocument};
+use mcg_tools::{ArtifactReference, ArtifactStore};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use mcg_tools::{
-    ProcessExecutor, ProcessOptions, ProcessStream, RejectingCredentialResolver, ToolError,
-    ToolExecutor, ToolRequest, ToolRequestKind,
+    BrowserWorkflowDocument, ProcessExecutor, ProcessOptions, ProcessStream,
+    RejectingCredentialResolver, ToolError, ToolExecutor, ToolRequest, ToolRequestKind,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use sha2::{Digest, Sha256};
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use url::{Host, Url};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use uuid::Uuid;

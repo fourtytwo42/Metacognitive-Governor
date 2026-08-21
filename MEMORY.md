@@ -2,6 +2,13 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-21 - macOS release build warnings removed
+
+- Context: The exact `c1881f2` macOS package build passed but emitted unused-import warnings because Linux/Windows-only shadow browser types were imported unconditionally on macOS.
+- Decision/files: Gate `BrowserWorkflowDocument`, `Host`, and `Url` with the same Linux/Windows/test configuration as their use sites in `crates/mcg-runtime/src/shadow_verification.rs`.
+- Commands/tests: Windows `cargo fmt --check` and strict all-target/all-feature `mcg-runtime` Clippy pass. A macOS release-profile `cargo check -p mcg-runtime --lib --release --quiet` passes with no warning output; the disposable Mac source mirror was restored to exact clean `c1881f2` afterward.
+- Follow-up: Include this source correction in the next package build and repeat the representative final-candidate gates; the already-qualified `c1881f2` package remains valid for the completed accessibility checkpoint because the change is configuration-only imports.
+
 ### 2026-08-21 - Native accessibility and credential privacy pass all three OS bridges
 
 - Context: Browser axe/keyboard tests cannot prove that installed Tauri/WebView packages expose usable operating-system accessibility trees or protect a credential through those trees.
