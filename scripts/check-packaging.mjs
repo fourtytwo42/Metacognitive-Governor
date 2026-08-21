@@ -140,7 +140,7 @@ for (const invariant of ["generateKeyPairSync", "ed25519", "private_signing_key_
 for (const invariant of ["mkdtemp", '"signer"', '"generate"', '"sign"', "TAURI_SIGNING_PRIVATE_KEY_PATH", "finally", "rm(resolvedTemporaryRoot"]) {
   requireText(updaterSigningTest, invariant, "ephemeral updater signing qualification");
 }
-for (const invariant of ["Microsoft Defender Antivirus", "-DisableRemediation", "ClamAV", "--infected", "signatures must be no more than 72 hours old", "source commit does not match repository HEAD", "Release artifact SHA-256 mismatch", "Refusing to replace existing release scan evidence", "macOS public-release reputation is enforced by the notarization, stapling, and Gatekeeper package lane"]) {
+for (const invariant of ["Microsoft Defender Antivirus", "-DisableRemediation", "ClamAV", "--infected", "signatures must be no more than 72 hours old", "source commit does not match repository HEAD", "Release artifact SHA-256 mismatch", "Refusing to replace existing release scan evidence", "await link(temporary, output)", "macOS public-release reputation is enforced by the notarization, stapling, and Gatekeeper package lane"]) {
   requireText(releaseArtifactScanner, invariant, "release artifact malware scanner");
 }
 for (const invariant of ["mcg-release-scan-", "Qualification Scanner", "must not disclose absolute paths", "unsafe path", "SHA-256 mismatch", "fixture detection", "Refusing to replace existing release scan evidence"]) {

@@ -3,10 +3,10 @@ import { spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
 import {
   lstat,
+  link,
   readFile,
   readdir,
   realpath,
-  rename,
   stat,
   unlink,
   writeFile,
@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_ARTIFACTS = 32;
+const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_SCANNER_OUTPUT_BYTES = 64 * 1024;
 const SCAN_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_SIGNATURE_AGE_SECONDS = 72 * 60 * 60;
@@ -144,15 +145,15 @@ async function createLinuxClamAvScanner(now = new Date()) {
     .filter((entry) => entry.isFile() && /\.(?:cvd|cld)$/u.test(entry.name))
     .map((entry) => path.join(databaseRoot, entry.name));
   if (databases.length === 0) fail("ClamAV has no installed signature databases.");
-  let newestDatabaseMs = 0;
+  let oldestDatabaseMs = Number.POSITIVE_INFINITY;
   for (const database of databases) {
     const metadata = await lstat(database);
     if (!metadata.isFile() || metadata.isSymbolicLink() || ![0, databaseRootEntry.uid].includes(metadata.uid) || (metadata.mode & 0o022) !== 0) {
       fail("ClamAV signature databases must be protected files owned by root or the signature-directory service account.");
     }
-    newestDatabaseMs = Math.max(newestDatabaseMs, metadata.mtimeMs);
+    oldestDatabaseMs = Math.min(oldestDatabaseMs, metadata.mtimeMs);
   }
-  const signatureAgeSeconds = Math.floor((now.getTime() - newestDatabaseMs) / 1000);
+  const signatureAgeSeconds = Math.floor((now.getTime() - oldestDatabaseMs) / 1000);
   if (!Number.isFinite(signatureAgeSeconds) || signatureAgeSeconds < 0 || signatureAgeSeconds > MAX_SIGNATURE_AGE_SECONDS) {
     fail("ClamAV signatures must be no more than 72 hours old.");
   }
@@ -209,7 +210,9 @@ export async function verifyManifestArtifacts(rootArgument, manifestArgument) {
     }
     if (seen.has(relative)) fail(`Release artifact path is duplicated: ${relative}`);
     seen.add(relative);
-    if (!Number.isSafeInteger(entry.size_bytes) || entry.size_bytes < 1) fail(`Release artifact ${relative} has an invalid size.`);
+    if (!Number.isSafeInteger(entry.size_bytes) || entry.size_bytes < 1 || entry.size_bytes > MAX_ARTIFACT_BYTES) {
+      fail(`Release artifact ${relative} has an invalid size.`);
+    }
     if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(entry.sha256)) fail(`Release artifact ${relative} has an invalid SHA-256.`);
     const absolute = path.resolve(root, ...relative.split("/"));
     if (!isInside(root, absolute)) fail(`Release artifact escapes the repository: ${relative}`);
@@ -235,7 +238,17 @@ export async function verifyManifestArtifacts(rootArgument, manifestArgument) {
 
 export async function qualifyReleaseArtifacts({ root, manifestPath, outputPath, scanner, platform, scannedAt = new Date() }) {
   const verified = await verifyManifestArtifacts(root, manifestPath);
-  const scannerMetadata = requireObject(scanner?.metadata, "scanner metadata");
+  const rawScannerMetadata = requireObject(scanner?.metadata, "scanner metadata");
+  const allowedMetadata = new Set(["name", "engine_version", "signatures_version", "engine_and_signatures", "signatures_age_seconds"]);
+  for (const key of Object.keys(rawScannerMetadata)) if (!allowedMetadata.has(key)) fail(`Unsupported scanner metadata field: ${key}`);
+  const scannerMetadata = { name: requireString(rawScannerMetadata.name, "scanner name", 128) };
+  for (const key of ["engine_version", "signatures_version", "engine_and_signatures"]) {
+    if (key in rawScannerMetadata) scannerMetadata[key] = requireString(rawScannerMetadata[key], `scanner ${key}`, 512);
+  }
+  if (!Number.isSafeInteger(rawScannerMetadata.signatures_age_seconds) || rawScannerMetadata.signatures_age_seconds < 0 || rawScannerMetadata.signatures_age_seconds > MAX_SIGNATURE_AGE_SECONDS) {
+    fail("Scanner signature age is invalid or stale.");
+  }
+  scannerMetadata.signatures_age_seconds = rawScannerMetadata.signatures_age_seconds;
   if (typeof scanner?.scan !== "function") fail("scanner must provide a scan function.");
   const output = path.resolve(outputPath);
   if (!isInside(verified.root, output)) fail("Release scan evidence must be written inside the repository root.");
@@ -263,7 +276,8 @@ export async function qualifyReleaseArtifacts({ root, manifestPath, outputPath, 
   const temporary = `${output}.tmp-${process.pid}`;
   await writeFile(temporary, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   try {
-    await rename(temporary, output);
+    await link(temporary, output);
+    await unlink(temporary);
   } catch (error) {
     await unlink(temporary).catch(() => {});
     throw error;

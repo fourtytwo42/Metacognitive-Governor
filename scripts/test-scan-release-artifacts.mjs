@@ -79,7 +79,7 @@ try {
       manifestPath,
       outputPath,
       platform: "qualification",
-      scanner: { metadata: { name: "Qualification Scanner" }, async scan() {} },
+      scanner: { metadata: { name: "Qualification Scanner", signatures_age_seconds: 0 }, async scan() {} },
     }),
     /Refusing to replace existing release scan evidence/u,
   );
@@ -108,7 +108,7 @@ try {
       outputPath: infectedOutput,
       platform: "qualification",
       scanner: {
-        metadata: { name: "Qualification Scanner" },
+        metadata: { name: "Qualification Scanner", signatures_age_seconds: 0 },
         async scan() { throw new Error("fixture detection"); },
       },
     }),
