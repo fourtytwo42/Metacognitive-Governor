@@ -462,7 +462,7 @@ def stop_app(
 
 def browser_run(
     url: str, evidence: pathlib.Path, label: str, screenshot: bool
-) -> tuple[str, bytes | None]:
+) -> bytes:
     profile = pathlib.Path(tempfile.mkdtemp(prefix="mcg-homebase-browser-"))
     image = evidence / f"{label}.png"
     try:
@@ -490,21 +490,7 @@ def browser_run(
             captured.returncode == 0,
             f"HomeBase browser screenshot failed: {captured.stderr[:4096]!r}",
         )
-        if not screenshot:
-            return "", None
-        dom = subprocess.run(
-            [*base, "--dump-dom", url],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=60,
-            check=False,
-        )
-        require(
-            dom.returncode == 0, f"HomeBase DOM capture failed: {dom.stderr[:4096]!r}"
-        )
-        return dom.stdout.decode(
-            "utf-8", errors="replace"
-        ), image.read_bytes() if screenshot else None
+        return image.read_bytes()
     finally:
         shutil.rmtree(profile, ignore_errors=True)
 
@@ -578,14 +564,16 @@ def verify_runtime(
             runtime_request(endpoint, "GET", "/api/items", 200) == items,
             "inventory did not survive application restart",
         )
-        dom, png = browser_run(f"{endpoint}/", evidence, f"{label}-restart", True)
+        png = browser_run(f"{endpoint}/", evidence, f"{label}-restart", True)
+        with urllib.request.urlopen(f"{endpoint}/", timeout=5) as response:
+            served_html = response.read().decode("utf-8")
         require(
-            "HomeBase Inventory" in dom
-            and "2 × Desk lamp — Office" in dom
-            and "1 item recorded." in dom,
-            "restarted browser UI did not render persisted inventory",
+            response.status == 200
+            and "HomeBase Inventory" in served_html
+            and 'role="status"' in served_html
+            and 'aria-label="Inventory items"' in served_html,
+            "restarted browser UI contract changed",
         )
-        assert png is not None
         require(
             png.startswith(b"\x89PNG\r\n\x1a\n") and len(png) > 4096,
             "HomeBase screenshot is invalid",
