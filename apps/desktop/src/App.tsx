@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   approveRequest,
@@ -429,6 +431,7 @@ function TaskEvidence({
 export function App() {
   const modeButtonRef = useRef<HTMLButtonElement>(null);
   const goalInputRef = useRef<HTMLTextAreaElement>(null);
+  const chatSearchRef = useRef<HTMLInputElement>(null);
   const [activeSurface, setActiveSurface] = useState("tasks");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatSearch, setChatSearch] = useState("");
@@ -437,6 +440,9 @@ export function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [settingsSearch, setSettingsSearch] = useState("");
   const [desktopMenu, setDesktopMenu] = useState<string | null>(null);
+  const [pinnedSummaryOpen, setPinnedSummaryOpen] = useState(true);
+  const [projectTreeOpen, setProjectTreeOpen] = useState(true);
+  const [zoomLevel, setZoomLevel] = useState(1);
   const [pinnedTaskIds, setPinnedTaskIds] = useState<string[]>(() => {
     try {
       const stored = window.localStorage.getItem("mcg.pinned-task-ids");
@@ -700,27 +706,69 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const addFolderShortcut = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLocaleLowerCase() === "o") {
+    const handleAppShortcut = (event: KeyboardEvent) => {
+      const command = event.ctrlKey || event.metaKey;
+      const key = event.key.toLocaleLowerCase();
+      if (event.key === "Escape") {
+        setDesktopMenu(null);
+        return;
+      }
+      if (event.key === "F11") {
+        event.preventDefault();
+        void toggleFullScreen();
+        return;
+      }
+      if (!command || event.altKey) return;
+      if (key === "o") {
         event.preventDefault();
         if (!globalFolderBusy) void addGlobalFolder();
-      }
-    };
-    window.addEventListener("keydown", addFolderShortcut);
-    return () => window.removeEventListener("keydown", addFolderShortcut);
-  }, [globalFolderBusy]);
-
-  useEffect(() => {
-    const openSettingsShortcut = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key === ",") {
+      } else if (key === "n" && !event.shiftKey) {
         event.preventDefault();
-        setSettingsTab("general");
-        navigateSurface("settings");
+        startNewChat();
+      } else if (key === "b" && !event.shiftKey) {
+        event.preventDefault();
+        setSidebarOpen((current) => !current);
+      } else if (key === "e" && event.shiftKey) {
+        event.preventDefault();
+        setProjectTreeOpen((current) => !current);
+      } else if (key === "f") {
+        event.preventDefault();
+        setSidebarOpen(true);
+        window.requestAnimationFrame(() => chatSearchRef.current?.focus());
+      } else if (event.key === ",") {
+        event.preventDefault();
+        openSettings("general");
+      } else if (event.key === "/") {
+        event.preventDefault();
+        openSettings("shortcuts");
+      } else if (key === "w") {
+        event.preventDefault();
+        void closeCurrentWindow();
+      } else if (key === "q") {
+        event.preventDefault();
+        void closeCurrentWindow(true);
+      } else if (event.key === "[") {
+        event.preventDefault();
+        if (event.shiftKey) openAdjacentChat(-1);
+        else window.history.back();
+      } else if (event.key === "]") {
+        event.preventDefault();
+        if (event.shiftKey) openAdjacentChat(1);
+        else window.history.forward();
+      } else if (key === "0") {
+        event.preventDefault();
+        setAppZoom(1);
+      } else if (key === "-" || key === "_") {
+        event.preventDefault();
+        setAppZoom(zoomLevel - 0.1);
+      } else if (key === "+" || key === "=") {
+        event.preventDefault();
+        setAppZoom(zoomLevel + 0.1);
       }
     };
-    window.addEventListener("keydown", openSettingsShortcut);
-    return () => window.removeEventListener("keydown", openSettingsShortcut);
-  }, []);
+    window.addEventListener("keydown", handleAppShortcut);
+    return () => window.removeEventListener("keydown", handleAppShortcut);
+  }, [globalFolderBusy, selectedChatId, tasks, zoomLevel]);
 
   function navigateSurface(surface: string, addHistory = true) {
     setActiveSurface(surface);
@@ -745,6 +793,67 @@ export function App() {
         window.scrollTo({ top: 0, left: 0, behavior: "instant" });
       }
     });
+  }
+
+  function openSettings(tab: SettingsTab) {
+    setSettingsTab(tab);
+    navigateSurface("settings");
+  }
+
+  function openAdjacentChat(offset: -1 | 1) {
+    if (tasks.length === 0) return;
+    const current = selectedChatId ? tasks.findIndex((task) => task.id === selectedChatId) : -1;
+    const next = current < 0
+      ? (offset > 0 ? 0 : tasks.length - 1)
+      : (current + offset + tasks.length) % tasks.length;
+    openChat(tasks[next].id);
+  }
+
+  function runEditCommand(command: "undo" | "redo" | "cut" | "copy" | "paste" | "delete" | "selectAll") {
+    document.execCommand(command);
+    setDesktopMenu(null);
+  }
+
+  function setAppZoom(next: number) {
+    const bounded = Math.min(2, Math.max(0.5, Math.round(next * 10) / 10));
+    setZoomLevel(bounded);
+    document.body.style.zoom = String(bounded);
+    setDesktopMenu(null);
+  }
+
+  async function openNewWindow() {
+    setDesktopMenu(null);
+    if (!("__TAURI_INTERNALS__" in window)) {
+      window.open(window.location.href, "_blank", "noopener,noreferrer");
+      return;
+    }
+    new WebviewWindow(`mcg-${Date.now()}`, {
+      url: window.location.href,
+      title: "MCG",
+      width: Math.max(960, window.innerWidth),
+      height: Math.max(700, window.innerHeight)
+    });
+  }
+
+  async function closeCurrentWindow(force = false) {
+    setDesktopMenu(null);
+    if (!("__TAURI_INTERNALS__" in window)) {
+      window.close();
+      return;
+    }
+    if (force) await getCurrentWindow().destroy();
+    else await getCurrentWindow().close();
+  }
+
+  async function toggleFullScreen() {
+    setDesktopMenu(null);
+    if ("__TAURI_INTERNALS__" in window) {
+      const currentWindow = getCurrentWindow();
+      await currentWindow.setFullscreen(!(await currentWindow.isFullscreen()));
+      return;
+    }
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
   }
 
   function openSurface(event: MouseEvent<HTMLAnchorElement>, surface: string) {
@@ -3139,11 +3248,73 @@ export function App() {
         <div className="desktop-menu-list">
           {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
             <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
-            <div className={`desktop-menu-popover${desktopMenu === menu ? " open" : ""}`}>
-              {menu === "File" && <><button type="button" onClick={() => startNewChat()}>New chat</button><button type="button" disabled={globalFolderBusy} onClick={addGlobalFolder}>Add global folder… <span className="menu-shortcut">Ctrl+O</span></button><button type="button" onClick={() => navigateSurface("projects")}>Manage projects</button></>}
-              {menu === "Edit" && <button type="button" onClick={() => goalInputRef.current?.focus()}>Focus composer</button>}
-              {menu === "View" && <><button type="button" onClick={() => setSidebarOpen((current) => !current)}>{sidebarOpen ? "Hide sidebar" : "Show sidebar"}</button><button type="button" onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button></>}
-              {menu === "Help" && <><button type="button" onClick={() => navigateSurface("settings")}>Diagnostics</button><button type="button" onClick={() => navigateSurface("settings")}>About MCG</button></>}
+            <div className={`desktop-menu-popover desktop-menu-${menu.toLocaleLowerCase()}${desktopMenu === menu ? " open" : ""}`} aria-label={`${menu} menu`}>
+              {menu === "File" && <>
+                <button type="button" onClick={() => void openNewWindow()}><span>New Window</span></button>
+                <button type="button" onClick={() => startNewChat()}><span>New Chat</span><span className="menu-shortcut">Ctrl+N</span></button>
+                <button type="button" disabled title="Temporary chats are not available yet"><span>New Temporary Chat</span><span className="menu-shortcut">Ctrl+Shift+N</span></button>
+                <hr />
+                <button type="button" disabled={globalFolderBusy} onClick={() => void addGlobalFolder()}><span>{globalFolderBusy ? "Opening Folder…" : "Open Folder…"}</span><span className="menu-shortcut">Ctrl+O</span></button>
+                <hr />
+                <button type="button" onClick={() => void closeCurrentWindow()}><span>Close</span><span className="menu-shortcut">Ctrl+W</span></button>
+                <hr />
+                <button type="button" disabled={!signedInWithOpenAi || busy} title={signedInWithOpenAi ? undefined : "No OpenAI subscription session is connected"} onClick={() => void logOutOfOpenAi()}><span>Log Out</span></button>
+                <button type="button" onClick={() => void closeCurrentWindow(true)}><span>Quit MCG</span><span className="menu-shortcut">Ctrl+Q</span></button>
+              </>}
+              {menu === "Edit" && <>
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("undo")}><span>Undo</span><span className="menu-shortcut">Ctrl+Z</span></button>
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("redo")}><span>Redo</span><span className="menu-shortcut">Ctrl+Y</span></button>
+                <hr />
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("cut")}><span>Cut</span><span className="menu-shortcut">Ctrl+X</span></button>
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("copy")}><span>Copy</span><span className="menu-shortcut">Ctrl+C</span></button>
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("paste")}><span>Paste</span><span className="menu-shortcut">Ctrl+V</span></button>
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("delete")}><span>Delete</span></button>
+                <hr />
+                <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("selectAll")}><span>Select All</span><span className="menu-shortcut">Ctrl+A</span></button>
+                <hr />
+                <button type="button" onClick={() => openSettings("general")}><span>Settings…</span><span className="menu-shortcut">Ctrl+,</span></button>
+              </>}
+              {menu === "View" && <>
+                <button type="button" onClick={() => { setSidebarOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle Sidebar</span><span className="menu-shortcut">Ctrl+B</span></button>
+                <button type="button" disabled title="The bottom panel is not available yet"><span>Toggle Bottom Panel</span><span className="menu-shortcut">Ctrl+J</span></button>
+                <button type="button" onClick={() => { setPinnedSummaryOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle Pinned Summary</span></button>
+                <button type="button" disabled title="The integrated terminal is not available yet"><span>Open Terminal</span><span className="menu-shortcut">Ctrl+`</span></button>
+                <button type="button" onClick={() => { setProjectTreeOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle File Tree</span><span className="menu-shortcut">Ctrl+Shift+E</span></button>
+                <button type="button" disabled title="The review panel is not available yet"><span>Toggle Review Panel</span><span className="menu-shortcut">Alt+Ctrl+B</span></button>
+                <hr />
+                <div className="desktop-menu-submenu">
+                  <button type="button" aria-haspopup="menu"><span>Browser</span><span className="menu-arrow" aria-hidden="true">›</span></button>
+                  <div role="menu" aria-label="Browser submenu"><button type="button" role="menuitem" onClick={() => openSettings("browser")}><span>Browser Settings</span></button><button type="button" role="menuitem" onClick={() => navigateSurface("platform")}><span>Open Browser Workspace</span></button></div>
+                </div>
+                <hr />
+                <button type="button" onClick={() => { setSidebarOpen(true); setDesktopMenu(null); window.requestAnimationFrame(() => chatSearchRef.current?.focus()); }}><span>Find</span><span className="menu-shortcut">Ctrl+F</span></button>
+                <hr />
+                <button type="button" disabled={tasks.length === 0} onClick={() => openAdjacentChat(-1)}><span>Previous Chat</span><span className="menu-shortcut">Ctrl+Shift+[</span></button>
+                <button type="button" disabled={tasks.length === 0} onClick={() => openAdjacentChat(1)}><span>Next Chat</span><span className="menu-shortcut">Ctrl+Shift+]</span></button>
+                <button type="button" onClick={() => { setDesktopMenu(null); window.history.back(); }}><span>Back</span><span className="menu-shortcut">Ctrl+[</span></button>
+                <button type="button" onClick={() => { setDesktopMenu(null); window.history.forward(); }}><span>Forward</span><span className="menu-shortcut">Ctrl+]</span></button>
+                <hr />
+                <button type="button" onClick={() => setAppZoom(zoomLevel + 0.1)}><span>Zoom In</span><span className="menu-shortcut">Ctrl+Shift+=</span></button>
+                <button type="button" onClick={() => setAppZoom(zoomLevel - 0.1)}><span>Zoom Out</span><span className="menu-shortcut">Ctrl+-</span></button>
+                <button type="button" onClick={() => setAppZoom(1)}><span>Actual Size</span><span className="menu-shortcut">Ctrl+0</span></button>
+                <hr />
+                <button type="button" onClick={() => void toggleFullScreen()}><span>Toggle Full Screen</span><span className="menu-shortcut">F11</span></button>
+              </>}
+              {menu === "Help" && <>
+                <button type="button" disabled title="MCG documentation is being prepared"><span>Documentation</span></button>
+                <button type="button" onClick={() => openSettings("shortcuts")}><span>Keyboard Shortcuts</span><span className="menu-shortcut">Ctrl+/</span></button>
+                <button type="button" disabled title="Release notes are not available yet"><span>What's New</span></button>
+                <hr />
+                <button type="button" onClick={() => openSettings("configuration")}><span>Troubleshooting</span></button>
+                <button type="button" onClick={() => openSettings("configuration")}><span>System Status</span></button>
+                <button type="button" disabled title="A feedback destination is not configured"><span>Send Feedback</span></button>
+                <hr />
+                <button type="button" onClick={() => navigateSurface("threads")}><span>Task Manager</span></button>
+                <button type="button" disabled title="Performance tracing is not available yet"><span>Start Performance Trace</span></button>
+                <hr />
+                <button type="button" disabled={updateBusy} onClick={() => { openSettings("configuration"); void checkUpdates(); }}><span>{updateBusy ? "Checking for Updates…" : "Check for Updates…"}</span></button>
+                <button type="button" onClick={() => openSettings("configuration")}><span>About MCG</span></button>
+              </>}
             </div>
           </div>)}
         </div>
@@ -3155,19 +3326,19 @@ export function App() {
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="sidebar-heading">
           <div className="brand" aria-label="MetaCognitive Governor"><span>MCG</span></div>
-          <label className="chat-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search chats</span><input aria-label="Search chats" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search" /></label>
+          <label className="chat-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search chats</span><input ref={chatSearchRef} aria-label="Search chats" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search" /></label>
         </div>
         <nav className="sidebar-shortcuts" aria-label="Workspace pages">
           <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={() => startNewChat()}><span className="shortcut-glyph" aria-hidden="true">✎</span>New chat</button>
           {[(["pull-requests", "Pull requests", "⑂"]), (["sites", "Sites", "▦"]), (["scheduler", "Scheduled", "◷"]), (["plugins", "Plugins", "◉"])].map(([surface, label, glyph]) => <a className={`nav-item${activeSurface === surface ? " active" : ""}`} href={`#${surface}`} aria-current={activeSurface === surface ? "page" : undefined} onClick={(event) => openSurface(event, surface)} key={surface}><span className="shortcut-glyph" aria-hidden="true">{glyph}</span>{label}</a>)}
         </nav>
         <div className="sidebar-library">
-          <section className="sidebar-section" aria-label="Pinned chats"><h2>Pinned</h2>{pinnedTasks.length === 0 ? <p>No pinned chats</p> : pinnedTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</section>
-          <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No projects</p>}{projects.map((project) => {
+          {pinnedSummaryOpen && <section className="sidebar-section" aria-label="Pinned chats"><h2>Pinned</h2>{pinnedTasks.length === 0 ? <p>No pinned chats</p> : pinnedTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</section>}
+          {projectTreeOpen && <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No projects</p>}{projects.map((project) => {
             const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
             const projectTasks = matchingTasks.filter((task) => task.project_id === project.project_id);
             return <div className="project-tree-item" key={project.project_id}><div className="project-tree-heading"><button className="project-tree-name" type="button" onClick={() => startNewChat(project)}><span aria-hidden="true">▱</span>{name}</button><button className="project-new-chat" type="button" aria-label={`New chat in ${name}`} title={`New chat in ${name}`} onClick={() => startNewChat(project)}><span aria-hidden="true">＋</span></button></div>{projectTasks.length === 0 ? <p>No chats</p> : projectTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>;
-          })}{matchingTasks.filter((task) => !task.project_id).length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{matchingTasks.filter((task) => !task.project_id).map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>}</section>
+          })}{matchingTasks.filter((task) => !task.project_id).length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{matchingTasks.filter((task) => !task.project_id).map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>}</section>}
         </div>
         <div className="sidebar-account-area">
           <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><span><strong>{signedInWithOpenAi ? "OpenAI account" : "Local owner"}</strong><small>{signedInWithOpenAi ? "ChatGPT subscription" : "Not signed in"}</small></span><span aria-hidden="true">⋯</span></button>
@@ -4975,7 +5146,7 @@ export function App() {
               <div className="settings-pane settings-summary-pane" data-settings-pane="appearance"><h2>Appearance</h2><div className="settings-card"><div><strong>Theme</strong><p>MCG currently uses its Codex-aligned dark theme. System and light themes will be added here when their visual qualification is complete.</p></div><span className="count-badge">Dark</span></div></div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="voice"><h2>Voice</h2><div className="settings-card"><div><strong>Voice input</strong><p>Voice controls are not configured in this build. MCG will not claim microphone access until the governed voice interface is available.</p></div></div></div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="personalization"><h2>Personalization</h2><div className="settings-card"><div><strong>How MCG works with you</strong><p>Autonomy and shadow-model preferences are durable owner controls.</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>Open general settings</button></div></div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="shortcuts"><h2>Keyboard shortcuts</h2><dl className="shortcut-list"><div><dt>Open Settings</dt><dd><kbd>Ctrl</kbd> + <kbd>,</kbd></dd></div><div><dt>Add a global folder</dt><dd><kbd>Ctrl</kbd> + <kbd>O</kbd></dd></div></dl></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="shortcuts"><h2>Keyboard shortcuts</h2><dl className="shortcut-list"><div><dt>New chat</dt><dd><kbd>Ctrl</kbd> + <kbd>N</kbd></dd></div><div><dt>Open Settings</dt><dd><kbd>Ctrl</kbd> + <kbd>,</kbd></dd></div><div><dt>Open a global folder</dt><dd><kbd>Ctrl</kbd> + <kbd>O</kbd></dd></div><div><dt>Find a chat</dt><dd><kbd>Ctrl</kbd> + <kbd>F</kbd></dd></div><div><dt>Toggle sidebar</dt><dd><kbd>Ctrl</kbd> + <kbd>B</kbd></dd></div><div><dt>Toggle project file tree</dt><dd><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd></dd></div><div><dt>Previous or next chat</dt><dd><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd></dd></div></dl></div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="usage"><h2>Usage &amp; billing</h2><div className="settings-card"><div><strong>{proxyUsage ? `${proxyUsage.usage.total_tokens.toLocaleString()} tokens recorded` : "Usage is loading"}</strong><p>{proxyUsage ? `${proxyUsage.call_count.toLocaleString()} calls across ${proxyUsage.conversation_count.toLocaleString()} conversations. Known API cost: $${proxyUsage.known_actual_cost_usd.toFixed(6)}.` : "MCG keeps credential-free local usage totals."}</p><small>ChatGPT subscription usage is governed by OpenAI and is not converted into API charges here. API-key providers remain separately billed.</small></div><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Provider details</button></div></div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="account"><h2>Account</h2><div className="settings-card account-card"><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><div><strong>{signedInWithOpenAi ? "Signed in with ChatGPT" : "Connect your OpenAI subscription"}</strong><p>{signedInWithOpenAi ? "MCG uses the explicit ChatGPT OAuth connection for subscription access." : "A browser window will open for OpenAI sign-in and return authorization to MCG."}</p><small>Subscription OAuth never silently falls back to API-key billing.</small></div>{signedInWithOpenAi ? <button className="secondary" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}>{busy ? "Logging out…" : "Log out"}</button> : <button className="primary" type="button" disabled={busy || Boolean(login)} onClick={() => void startLogin("browser")}>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</button>}</div>
                 {login && <div className="oauth-card" role="status"><p>Finish signing in with OpenAI in your browser, then return here.</p><button className="link-button" type="button" onClick={() => openVerification(login.verification_url)}>Open sign-in page</button><div className="composer-actions"><button className="secondary" type="button" disabled={busy} onClick={cancelLogin}>Cancel</button><button className="primary" type="button" disabled={busy} onClick={finishLogin}>{busy ? "Checking…" : "Finish connection"}</button></div></div>}

@@ -504,11 +504,6 @@ async function enableSimpleMode() {
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
 }
 
-function openProjects() {
-  fireEvent.click(screen.getByRole("button", { name: "File" }));
-  fireEvent.click(within(document.querySelector(".desktop-menu-popover.open") as HTMLElement).getByRole("button", { name: /Manage projects/ }));
-}
-
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {
   const project = {
     schema_version: 1,
@@ -2215,8 +2210,7 @@ test("Ctrl+O registers a global folder without creating a project", async () => 
   render(<App />);
 
   fireEvent.click(screen.getByRole("button", { name: "File" }));
-  expect(screen.getByRole("button", { name: /Add global folder.*Ctrl\+O/ })).toBeInTheDocument();
-  expect(within(document.querySelector(".desktop-menu-popover.open") as HTMLElement).getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Open Folder.*Ctrl\+O/ })).toBeInTheDocument();
   expect(within(screen.getByLabelText("Global folders")).getByRole("button", { name: "Add global folder" })).toBeInTheDocument();
   fireEvent.keyDown(window, { key: "o", ctrlKey: true });
 
@@ -2228,6 +2222,36 @@ test("Ctrl+O registers a global folder without creating a project", async () => 
 
   fireEvent.click(within(screen.getByLabelText("Global folders")).getByRole("button", { name: "Remove" }));
   expect(within(screen.getByLabelText("Global folders")).getByText("No global folders added.")).toBeInTheDocument();
+});
+
+test("desktop menus follow the Codex command structure with MCG branding", async () => {
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "File" }));
+  let menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
+  expect(menu.getByRole("button", { name: "New Window" })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: /New Chat.*Ctrl\+N/ })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: /New Temporary Chat/ })).toBeDisabled();
+  expect(menu.getByRole("button", { name: /Open Folder.*Ctrl\+O/ })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: /Quit MCG.*Ctrl\+Q/ })).toBeInTheDocument();
+  expect(menu.queryByText(/ChatGPT/)).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
+  expect(menu.getByRole("button", { name: /Undo.*Ctrl\+Z/ })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: /Settings.*Ctrl\+,/ })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "View" }));
+  menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
+  expect(menu.getByRole("button", { name: /Toggle Sidebar.*Ctrl\+B/ })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: /Open Terminal/ })).toBeDisabled();
+  expect(menu.getByRole("button", { name: /Toggle Full Screen.*F11/ })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Help" }));
+  menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
+  expect(menu.getByRole("button", { name: /Keyboard Shortcuts.*Ctrl\+\// })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: "About MCG" })).toBeInTheDocument();
+  expect(menu.queryByText(/About ChatGPT/)).not.toBeInTheDocument();
 });
 
 test("rediscovering a known Windows folder preserves its durable project identity", async () => {
@@ -2245,8 +2269,7 @@ test("rediscovering a known Windows folder preserves its durable project identit
   client.discoverProject.mockResolvedValue({ project: { ...project, root: selectedRoot } });
   render(<App />);
 
-  openProjects();
-  fireEvent.click(await screen.findByRole("button", { name: "Add project folder" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open folder" }));
 
   await waitFor(() => expect(client.discoverProject).toHaveBeenCalledWith(selectedRoot, project.project_id));
 });
@@ -2514,8 +2537,7 @@ test("project discovery errors remain visible on the Projects screen", async () 
   client.discoverProject.mockRejectedValue(new Error("Project discovery failed (405 Method Not Allowed)"));
   render(<App />);
 
-  openProjects();
-  fireEvent.click(screen.getByRole("button", { name: "Add project folder" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Project discovery failed (405 Method Not Allowed)");
 });

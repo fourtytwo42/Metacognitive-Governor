@@ -408,6 +408,39 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
   await expect(page.locator(".owner-menu")).toBeVisible();
 });
 
+test("desktop menus mirror Codex commands without ChatGPT product branding", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "File", exact: true }).click();
+  let menu = page.getByLabel("File menu");
+  await expect(menu.getByRole("button", { name: /New Chat.*Ctrl\+N/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: /Open Folder.*Ctrl\+O/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: /New Temporary Chat/ })).toBeDisabled();
+  await expect(menu.getByRole("button", { name: /Quit MCG.*Ctrl\+Q/ })).toBeVisible();
+  await expect(menu.getByText("Quit ChatGPT")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  menu = page.getByLabel("Edit menu");
+  await expect(menu.getByRole("button", { name: /Undo.*Ctrl\+Z/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: /Settings.*Ctrl\+,/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "View", exact: true }).click();
+  menu = page.getByLabel("View menu");
+  await expect(menu.getByRole("button", { name: /Toggle Sidebar.*Ctrl\+B/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "Open Terminal Ctrl+`" })).toBeDisabled();
+  await expect(menu.getByRole("button", { name: /Toggle Full Screen.*F11/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Help", exact: true }).click();
+  menu = page.getByLabel("Help menu");
+  await expect(menu.getByRole("button", { name: /Keyboard Shortcuts.*Ctrl\+\// })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "About MCG" })).toBeVisible();
+  await expect(menu.getByText("About ChatGPT")).toHaveCount(0);
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+F");
+  await expect(page.getByRole("textbox", { name: "Search chats" })).toBeFocused();
+});
+
 test("account menu and Settings follow the compact Codex information architecture", async ({ page }) => {
   await page.goto("/");
   const menu = await openOwnerMenu(page);
