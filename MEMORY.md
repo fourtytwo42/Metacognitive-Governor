@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Installed memory-transfer gate passes local restart qualification
+
+- Context: The final macOS package lane remains technically unavailable: Chrome Remote Desktop accepts the connection but advertises `Waiting for host displays…`; this is not an approval wait. The previously known macOS SSH endpoint is also unreachable.
+- Decision/files: Add `scripts/test-installed-memory-transfer.py` to the Windows, Linux, and macOS package harnesses before encrypted backup and after restore/restart. The gate creates two projects, promotes one source claim to durable, binds an explicit transfer to the preview digest, crosses CLI and MCP, rejects a changed replay, and requires one target claim plus one inbound/outbound history record after restart. Packaging invariants and `docs/testing/strategy.md` require it.
+- Commands/tests: Current daemon/CLI build passes. A real local daemon exercise and forced-restart verification pass; Python compile, PowerShell parse, Git Bash syntax for both shell harnesses, packaging validation, and diff hygiene pass.
+- Result: The shared installed-memory-transfer verifier is functionally green locally and ready for complete installed Windows/Linux qualification. No credentials were retained.
+- Follow-up: Commit/push the checkpoint, run the complete package lanes on Win11 and Ubuntu, then transfer the exact final bundle and run the same gate on macOS after that VM exposes a display or SSH endpoint.
+
 ### 2026-08-20 - Final macOS package lane prepared at remote-desktop boundary
 
 - Context: The shared installed-provider success gate next needs the final macOS installed/native lane. Chrome Remote Desktop confirms `macOS-VM` is online and staged at its PIN prompt, while the former temporary SSH endpoint at `192.168.50.158` no longer responds.

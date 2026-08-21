@@ -386,6 +386,13 @@ try {
         --token-file $tokenFile --cli $cli --project $providerSuccessProject `
         --state $providerSuccessState --output $providerSuccessReport
     if ($LASTEXITCODE -ne 0) { throw "Installed provider-backed consumer success verification failed." }
+    $memoryTransferVerifier = Join-Path $PSScriptRoot "test-installed-memory-transfer.py"
+    $memoryTransferState = Join-Path $uatRoot "memory-transfer-state.json"
+    $memoryTransferReport = Join-Path $uatRoot "memory-transfer.json"
+    & $python $memoryTransferVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --workspace $uatRoot `
+        --state $memoryTransferState --output $memoryTransferReport
+    if ($LASTEXITCODE -ne 0) { throw "Installed cross-project memory transfer verification failed." }
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
@@ -485,6 +492,10 @@ try {
         --token-file $tokenFile --cli $cli --project $providerSuccessProject `
         --state $providerSuccessState --output (Join-Path $uatRoot "provider-success-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed provider-backed consumer evidence did not survive daemon restart." }
+    & $python $memoryTransferVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --workspace $uatRoot `
+        --state $memoryTransferState --output (Join-Path $uatRoot "memory-transfer-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed cross-project memory transfer did not survive daemon restart." }
     $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 
@@ -559,6 +570,8 @@ try {
         ConsumerCliProjectCount = $consumerCli.project_count
         ProviderSuccessReport = $providerSuccessReport
         ProviderSuccessRestartReport = Join-Path $uatRoot "provider-success-restart.json"
+        MemoryTransferReport = $memoryTransferReport
+        MemoryTransferRestartReport = Join-Path $uatRoot "memory-transfer-restart.json"
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }

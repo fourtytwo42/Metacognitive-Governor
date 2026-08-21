@@ -492,6 +492,13 @@ runuser -u "$uat_user" -- env \
   --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
   --project "$provider_success_project" --state "$uat_root/provider-success-state.json" \
   --output "$uat_root/provider-success.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-memory-transfer.py" \
+  --mode exercise --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --workspace "$uat_root" --state "$uat_root/memory-transfer-state.json" \
+  --output "$uat_root/memory-transfer.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg backup create --json >"$uat_root/backup.json"
 encrypted_backup_id="00000000-0000-4000-8000-00000000b002"
 encrypted_bundle="$installed_data/backups/$encrypted_backup_id.mcgb"
@@ -593,6 +600,13 @@ runuser -u "$uat_user" -- env \
   --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
   --project "$provider_success_project" --state "$uat_root/provider-success-state.json" \
   --output "$uat_root/provider-success-restart.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-memory-transfer.py" \
+  --mode verify --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --workspace "$uat_root" --state "$uat_root/memory-transfer-state.json" \
+  --output "$uat_root/memory-transfer-restart.json"
 stop_tree "$restarted_service_pid"
 background_pids=()
 

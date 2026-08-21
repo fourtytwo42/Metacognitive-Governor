@@ -305,6 +305,14 @@ The fixture is disconnected before daemon restart; the second phase requires the
 same task, evaluator, audit, and deterministic side-effect-free replay evidence with
 no provider available. Windows, Linux, and macOS package harnesses share this gate,
 and captured streams must exclude the bearer token and private piped context.
+`scripts/test-installed-memory-transfer.py` adds an explicit cross-project learning
+gate before the same encrypted-backup boundary. It promotes one source claim to
+durable state, binds review to the canonical preview digest, creates the transfer
+through the installed CLI, replays it through MCP without another event, and
+requires a changed caller-owned-ID retry to fail closed. After restore and daemon
+restart it requires exactly one copied target claim plus one immutable inbound and
+outbound transfer record. Windows, Linux, and macOS package harnesses invoke the
+same verifier and retain secret-free initial/restart summaries.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected
