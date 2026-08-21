@@ -553,6 +553,28 @@ body { background: var(--mcg-bg); }
 .simple-mode #projects { grid-template-columns: minmax(0, 1fr); }
 .simple-mode #projects > .runtime-panel { display: none; }
 .pull-request-panel { margin-top: 18px; }
+.code-review-layout { display: grid; gap: 22px; }
+.code-review-start-card {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.4fr) repeat(2, minmax(160px, .7fr)) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 22px;
+  border: 1px solid #383838;
+  border-radius: 14px;
+  background: #1b1b1b;
+}
+.code-review-intro { align-self: center; }
+.code-review-intro h3, .code-review-intro p { margin: 0; }
+.code-review-intro p { margin-top: 6px; color: #aaa; line-height: 1.5; }
+.code-review-start-card label { display: grid; gap: 7px; color: #bdbdbd; font-size: .82rem; }
+.code-review-custom { grid-column: 2 / span 2; }
+.code-review-custom textarea { min-height: 70px; }
+.read-only-note { display: inline-flex; margin-top: 12px; color: #9ecfb8; font-size: .82rem; }
+.code-review-library { display: grid; gap: 10px; }
+.governed-approvals { display: grid; gap: 14px; margin-top: 26px; padding-top: 24px; border-top: 1px solid #303030; }
+.governed-approvals .section-heading { margin-bottom: 0; }
+.integration-note { margin: 22px 0 0; color: #8e8e8e; font-size: .82rem; line-height: 1.5; }
 .simple-mode .hero-card > div:first-child { text-align: center; }
 .simple-mode .hero-card h2 { margin-bottom: 8px; font-size: clamp(1.65rem, 3vw, 2.25rem); }
 .simple-mode .hero-card .muted { margin-right: auto; margin-left: auto; }
@@ -595,10 +617,13 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
   .sidebar nav { grid-column: auto; display: grid; overflow: visible; }
   .mode-button { grid-column: auto; grid-row: auto; margin: 4px 0 0; justify-self: stretch; white-space: normal; }
   .simple-mode .hero-card { margin-top: 2vh; }
+  .code-review-start-card { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .code-review-intro, .code-review-custom { grid-column: 1 / -1; }
 }
 
 @media (max-width: 700px) {
-  .site-start-card, .site-library-card { grid-template-columns: 1fr; align-items: stretch; }
+  .site-start-card, .site-library-card, .code-review-start-card { grid-template-columns: 1fr; align-items: stretch; }
+  .code-review-custom { grid-column: auto; }
   .site-preview { width: 100%; height: 92px; }
   .site-library-actions { justify-content: stretch; }
   .site-library-actions > * { flex: 1; }

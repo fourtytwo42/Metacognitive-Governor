@@ -278,6 +278,15 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "What would you like to build?" })).toBeVisible();
   await expect(page.locator("#projects")).toBeHidden();
+  await page.getByRole("link", { name: "Pull requests", exact: true }).click();
+  const pullRequests = page.getByRole("region", { name: "Pull requests" });
+  await expect(pullRequests.getByRole("heading", { name: "Pull requests" })).toBeVisible();
+  await expect(pullRequests.getByText("Review is read-only. It will not modify files.")).toBeVisible();
+  await expect(pullRequests.getByRole("heading", { name: "Governed approvals" })).toHaveCount(0);
+  await pullRequests.getByLabel("Repository").selectOption({ index: 1 });
+  await pullRequests.getByLabel("Review scope").selectOption("uncommitted");
+  await pullRequests.getByRole("button", { name: "Start review" }).click();
+  await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Do not modify the working tree during the review/);
   await page.getByRole("link", { name: "Sites", exact: true }).click();
   const simpleSites = page.getByRole("region", { name: "Sites" });
   await expect(simpleSites.getByRole("heading", { name: "Sites" })).toBeVisible();

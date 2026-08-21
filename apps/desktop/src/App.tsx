@@ -268,6 +268,10 @@ function freshPlatformSessionId(): string {
   return crypto.randomUUID();
 }
 
+type CodeReviewScope = "branch" | "uncommitted" | "commit" | "custom";
+
+const CODE_REVIEW_GOAL_PREFIX = "Review code changes";
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -498,6 +502,10 @@ export function App() {
   const [taskMaxCost, setTaskMaxCost] = useState("");
   const [taskBusy, setTaskBusy] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
+  const [codeReviewScope, setCodeReviewScope] = useState<CodeReviewScope>("branch");
+  const [codeReviewBase, setCodeReviewBase] = useState("main");
+  const [codeReviewInstructions, setCodeReviewInstructions] = useState("");
+  const [codeReviewError, setCodeReviewError] = useState<string | null>(null);
   const [taskLaunch, setTaskLaunch] = useState<Record<string, string>>({});
   const [taskHistory, setTaskHistory] = useState<Record<string, TaskEventsResponse | undefined>>({});
   const [taskAudit, setTaskAudit] = useState<Record<string, ToolAuditResponse | undefined>>({});
@@ -724,6 +732,30 @@ export function App() {
     setTaskConstraints("");
     setTaskSuccess("");
     setTaskError(null);
+    navigateSurface("tasks");
+    window.requestAnimationFrame(() => goalInputRef.current?.focus());
+  }
+
+  function startCodeReview() {
+    if (!selectedProject?.repository.is_git) {
+      setCodeReviewError("Choose a project backed by a Git repository before starting a review.");
+      return;
+    }
+    const projectName = selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1) ?? selectedProject.root;
+    const branch = selectedProject.repository.branch ?? "the current branch";
+    const scope = codeReviewScope === "branch"
+      ? `the changes on ${branch} compared with ${codeReviewBase.trim() || "the base branch"}`
+      : codeReviewScope === "uncommitted"
+        ? "all staged, unstaged, and untracked changes"
+        : codeReviewScope === "commit"
+          ? `the current commit${selectedProject.repository.head ? ` ${selectedProject.repository.head}` : ""}`
+          : codeReviewInstructions.trim() || "the code changes I describe next";
+    setSelectedChatId(null);
+    setTaskGoal(`${CODE_REVIEW_GOAL_PREFIX} in ${projectName}: review ${scope}. Prioritize correctness, regressions, security, missing tests, and repository instructions. Report concise, actionable findings with file and line references, ordered by severity. Do not modify the working tree during the review.`);
+    setTaskConstraints("");
+    setTaskSuccess("");
+    setTaskError(null);
+    setCodeReviewError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
   }
@@ -3118,10 +3150,71 @@ export function App() {
 
         <section className="panel pull-request-panel" id="pull-requests" aria-label="Pull requests">
           <div className="section-heading">
-            <div><p className="eyebrow">REVIEW</p><h2>Pull requests</h2><p className="muted">Review work that needs an owner decision before it can continue.</p></div>
-            <span className="count-badge">{tasks.filter((task) => task.state === "waiting_for_approval").length} awaiting review</span>
+            <div>
+              <p className="eyebrow">CODE REVIEW</p>
+              <h2>Pull requests</h2>
+              <p className="muted">Review a branch, local changes, or a commit without changing the repository.</p>
+            </div>
+            <span className="count-badge">{tasks.filter((task) => task.goal.startsWith(CODE_REVIEW_GOAL_PREFIX)).length} reviews</span>
           </div>
-          {tasks.filter((task) => task.state === "waiting_for_approval").length === 0 ? <p className="empty-state">No pull requests or approval reviews need your attention.</p> : <div className="task-list">{tasks.filter((task) => task.state === "waiting_for_approval").map((task) => <article className="task-card" key={task.id}><div className="task-card-main"><span className="task-state state-waiting_for_approval">review</span><h3>{task.goal}</h3><small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "General workspace"}</small></div><button className="secondary" type="button" onClick={() => openChat(task.id)}>Open chat</button></article>)}</div>}
+          <div className="code-review-layout">
+            <div className="code-review-start-card">
+              <div className="code-review-intro">
+                <h3>Review code changes</h3>
+                <p>Get prioritized, line-specific findings before deciding what to fix, stage, commit, or push.</p>
+                <span className="read-only-note">Review is read-only. It will not modify files.</span>
+              </div>
+              <label>
+                <span>Repository</span>
+                <select value={selectedProject?.repository.is_git ? selectedProject.project_id : ""} onChange={(event) => {
+                  setSelectedProject(projects.find((project) => project.project_id === event.target.value) ?? null);
+                  setCodeReviewError(null);
+                }}>
+                  <option value="">Choose a Git project</option>
+                  {projects.filter((project) => project.repository.is_git).map((project) => <option key={project.project_id} value={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Review scope</span>
+                <select value={codeReviewScope} onChange={(event) => setCodeReviewScope(event.target.value as CodeReviewScope)}>
+                  <option value="branch">Branch changes</option>
+                  <option value="uncommitted">Uncommitted changes</option>
+                  <option value="commit">Current commit</option>
+                  <option value="custom">Custom review</option>
+                </select>
+              </label>
+              {codeReviewScope === "branch" && <label>
+                <span>Base branch</span>
+                <input value={codeReviewBase} onChange={(event) => setCodeReviewBase(event.target.value)} placeholder="main" />
+              </label>}
+              {codeReviewScope === "custom" && <label className="code-review-custom">
+                <span>What should be reviewed?</span>
+                <textarea value={codeReviewInstructions} onChange={(event) => setCodeReviewInstructions(event.target.value)} placeholder="Describe the range and any review focus" />
+              </label>}
+              <button className="primary" type="button" disabled={!selectedProject?.repository.is_git} onClick={startCodeReview}>Start review</button>
+            </div>
+            {codeReviewError && <p className="error-message" role="alert">{codeReviewError}</p>}
+            <div className="code-review-library" aria-label="Code reviews">
+              {tasks.filter((task) => task.goal.startsWith(CODE_REVIEW_GOAL_PREFIX)).length === 0
+                ? <div className="site-empty-state"><strong>No code reviews yet</strong><span>Choose a Git project and review scope to begin.</span></div>
+                : tasks.filter((task) => task.goal.startsWith(CODE_REVIEW_GOAL_PREFIX)).map((task) => <article className="task-card" key={task.id}>
+                  <div className="task-card-main">
+                    <span className={`task-state state-${task.state}`}>{task.state.replaceAll("_", " ")}</span>
+                    <h3>{task.goal}</h3>
+                    <small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "Repository unavailable"}</small>
+                  </div>
+                  <button className="secondary" type="button" onClick={() => openChat(task.id)}>Open review</button>
+                </article>)}
+            </div>
+          </div>
+          {advanced && <div className="governed-approvals" aria-label="Governed approvals">
+            <div className="section-heading">
+              <div><p className="eyebrow">ADVANCED</p><h3>Governed approvals</h3><p className="muted">Runtime permission requests are separate from pull-request reviews.</p></div>
+              <span className="count-badge">{tasks.filter((task) => task.state === "waiting_for_approval").length} pending</span>
+            </div>
+            {tasks.filter((task) => task.state === "waiting_for_approval").length === 0 ? <p className="empty-state">No runtime approvals need attention.</p> : <div className="task-list">{tasks.filter((task) => task.state === "waiting_for_approval").map((task) => <article className="task-card" key={task.id}><div className="task-card-main"><span className="task-state state-waiting_for_approval">permission</span><h3>{task.goal}</h3><small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "General workspace"}</small></div><button className="secondary" type="button" onClick={() => openChat(task.id)}>Open chat</button></article>)}</div>}
+          </div>}
+          <p className="integration-note">GitHub pull request titles, comments, checks, and changed-file sync will appear here after the GitHub integration is connected. Local Git review works now.</p>
         </section>
 
         <section className="grid" id="projects">

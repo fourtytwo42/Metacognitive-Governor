@@ -1111,6 +1111,67 @@ test("simple Sites starts a project-aware website chat without exposing deployme
   expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Build a website");
 });
 
+test("simple Pull requests starts a read-only repository review instead of exposing runtime approvals", async () => {
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000701",
+    project_id: "00000000-0000-4000-8000-000000000702",
+    root: "C:\\Projects\\review-me",
+    fingerprint: "fixture",
+    observed_at: "2026-08-21T00:00:00Z",
+    repository: { is_git: true, branch: "feature/review", head: "abc123", dirty: true, recent_commits: [] },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    package_managers: ["npm"],
+    services: [],
+    ci_systems: [],
+    important_directories: [],
+    commands: [],
+    instructions: { conflicts: [] },
+    world: { nodes: [], relationships: [] },
+    watched_inputs: {}
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  render(<App />);
+
+  const panel = await screen.findByRole("region", { name: "Pull requests" });
+  expect(within(panel).getByText("Review is read-only. It will not modify files.")).toBeVisible();
+  expect(within(panel).queryByRole("heading", { name: "Governed approvals" })).not.toBeInTheDocument();
+  fireEvent.change(within(panel).getByLabelText("Repository"), { target: { value: project.project_id } });
+  fireEvent.change(within(panel).getByLabelText("Review scope"), { target: { value: "uncommitted" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Start review" }));
+
+  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  const goal = (screen.getByLabelText("Goal") as HTMLTextAreaElement).value;
+  expect(goal).toContain("Review code changes in review-me");
+  expect(goal).toContain("all staged, unstaged, and untracked changes");
+  expect(goal).toContain("Do not modify the working tree during the review");
+});
+
+test("advanced Pull requests separates governed approvals from code review", async () => {
+  const waitingTask = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000711",
+    goal: "Install a requested dependency",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "waiting_for_approval",
+    created_at: "2026-08-21T00:00:00Z",
+    updated_at: "2026-08-21T00:00:00Z"
+  };
+  client.listTasks.mockResolvedValue({ tasks: [waitingTask] });
+  render(<App />);
+  await enableAdvancedMode();
+
+  const panel = await screen.findByRole("region", { name: "Pull requests" });
+  expect(within(panel).getByRole("heading", { name: "Governed approvals" })).toBeVisible();
+  expect(within(panel).getByText("Runtime permission requests are separate from pull-request reviews.")).toBeVisible();
+  expect(within(panel).getByText("Install a requested dependency")).toBeVisible();
+});
+
 test("advanced Sites registers a selected project and records governed health", async () => {
   const project = {
     id: "00000000-0000-4000-8000-000000000121",
@@ -1840,7 +1901,7 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
   });
   render(<App />);
 
-  await screen.findByRole("option", { name: "sample" });
+  await waitFor(() => expect(within(screen.getByLabelText("Project")).getByRole("option", { name: "sample" })).toBeInTheDocument());
   fireEvent.change(screen.getByLabelText("Project"), {
     target: { value: project.project_id }
   });
