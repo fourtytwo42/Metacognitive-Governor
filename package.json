@@ -26,6 +26,7 @@
     "verify:release-soak-evidence": "node scripts/verify-release-soak-evidence.mjs",
     "scan:release-artifacts": "node scripts/scan-release-artifacts.mjs",
     "build": "npm run build --workspace @mcg/desktop",
+    "build:portable:windows": "pwsh -NoProfile -File scripts/build-portable-windows.ps1",
     "dev": "npm run dev --workspace @mcg/desktop",
     "test:e2e": "playwright test"
   },

@@ -74,6 +74,17 @@ npm run build
 npm run test:e2e
 ```
 
+Build the complete no-install Windows owner-UAT folder with:
+
+```powershell
+npm run build:portable:windows
+```
+
+This command prepares the release sidecars and runs Tauri's production build
+before assembling `target/portable/MCG-Portable-Windows-x64`. Do not substitute
+`cargo build -p mcg-desktop`: a raw Cargo build can retain Tauri's development
+URL instead of embedding the production frontend.
+
 Run the daemon and CLI in separate terminals:
 
 ```powershell
