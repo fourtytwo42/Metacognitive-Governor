@@ -1,0 +1,19 @@
+hdiutil: verify: checksum of "target/release/bundle/dmg/MCG_0.1.0_x64.dmg" is VALID
+./scripts/test-macos-packages.sh: line 43:  9398 Terminated: 15          env HOME="$uat_home" MCG_DATA_DIR="$gui_data" MCG_BIND_ADDRESS="127.0.0.1:$gui_port" "$installed_app/Contents/MacOS/mcg-desktop" > "$uat_root/desktop.log" 2>&1
+macOS package UAT passed.
+UAT_ROOT=/private/var/folders/7t/dppp5wl168x0th9wp5zz14zh0000gn/T/mcg-macos-package-uat-r0m7Kt
+SOURCE_SIGNATURE=unsigned
+MOUNTED_SIGNATURE=unsigned
+INSTALLED_SIGNATURE=unsigned
+SERVICE_HEALTH_PORT=17779
+MCP_REPORT=/private/var/folders/7t/dppp5wl168x0th9wp5zz14zh0000gn/T/mcg-macos-package-uat-r0m7Kt/mcp.json
+PROVIDER_SUCCESS_REPORT=/private/var/folders/7t/dppp5wl168x0th9wp5zz14zh0000gn/T/mcg-macos-package-uat-r0m7Kt/provider-success.json
+PROVIDER_SUCCESS_RESTART_REPORT=/private/var/folders/7t/dppp5wl168x0th9wp5zz14zh0000gn/T/mcg-macos-package-uat-r0m7Kt/provider-success-restart.json
+DESKTOP_SCREENSHOT=/private/var/folders/7t/dppp5wl168x0th9wp5zz14zh0000gn/T/mcg-macos-package-uat-r0m7Kt/desktop.png
+EXTERNAL_CAPTURE_REQUEST=/Users/hendo42/mcg-current-27fa6e5-capture.request
+DATA_RETAINED=true
+REPAIR_PRESERVED_DATA=true
+REINSTALL_PRESERVED_DATA=true
+APPLICATION_REMOVED=true
+PLUGIN_RUNNERS_QUALIFIED=true
+NOTARIZATION_REQUIRED=0

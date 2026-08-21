@@ -1,0 +1,17 @@
+{
+  "benchmarkCount": 1,
+  "decisionCount": 1,
+  "experimentId": "7445229e-ba84-4a91-9d36-f2bcea2d2e51",
+  "mode": "shadow",
+  "organizationId": "e9db0c9e-08d6-4c1f-a23a-72a38f4b8350",
+  "schemaVersion": 1,
+  "shadowAuthority": "evaluation_only",
+  "shadowReceiptCount": 1,
+  "state": "promoted",
+  "surfaces": [
+    "rest",
+    "cli",
+    "mcp"
+  ],
+  "verified": true
+}

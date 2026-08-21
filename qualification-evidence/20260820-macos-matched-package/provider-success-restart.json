@@ -1,0 +1,1 @@
+{"mode": "verify", "provider_required_for_replay": false, "restart_audit_consistent": true, "restart_evaluation_passed": true, "restart_replay_side_effect_free": true, "restart_runs_completed": 3, "restart_tasks_completed": 3, "schema_version": 1, "token_excluded": true}
