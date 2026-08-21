@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "mode": "exercise",
+  "publisher_trusted_via_cli": true,
+  "signed_reviewed_via_rest": true,
+  "imported_via_rest": true,
+  "exact_import_replay_observation_only": true,
+  "rejected_via_mcp": true,
+  "tampered_package_rejected": true,
+  "publisher_revoked_via_cli": true,
+  "revoked_review_mutation_free": true,
+  "private_signing_key_persisted": false,
+  "package_sha256": "6ecc05d2a4604204840229ea1a7449fe0ae5b3dc88c8a3064b27907a0906bae9"
+}

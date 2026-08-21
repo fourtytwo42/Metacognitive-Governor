@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mode": "verify",
+  "publisher_revocation_survived_restart": true,
+  "imported_review_survived_restart": true,
+  "rejected_review_survived_restart": true,
+  "imported_organization_survived_restart": true,
+  "post_restart_import_replay_observation_only": true,
+  "cli_rest_mcp_agree": true,
+  "private_signing_key_persisted": false,
+  "package_sha256": "6ecc05d2a4604204840229ea1a7449fe0ae5b3dc88c8a3064b27907a0906bae9"
+}

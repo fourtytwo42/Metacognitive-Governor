@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "application": "MetaCognitive Governor",
+  "version": "0.1.0",
+  "source_commit": "cad52f2033ddc21c02d838f86003c612ee86e890",
+  "source_dirty": false,
+  "files": [
+    {
+      "path": "target/release/bundle/nsis/MCG_0.1.0_x64-setup.exe",
+      "size_bytes": 24995786,
+      "sha256": "dbcce8a421eb8f5909daeacd0a7ed5aeb7e6b409b4b5af6108a897404b4474ec"
+    }
+  ]
+}

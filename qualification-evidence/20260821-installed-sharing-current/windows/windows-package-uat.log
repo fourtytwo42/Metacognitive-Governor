@@ -1,0 +1,65 @@
+Windows native accessibility qualification passed: C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d3a2f\desktop-native-accessibility.json
+
+
+UatRoot                           : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f
+Installer                         : C:\Users\mcg-runner\mcg-current-cad52f2-source\target\release\bundle\nsis\MCG_0.1.0
+                                    _x64-setup.exe
+InstalledFiles                    : 10
+HealthService                     : mcg-daemon
+HealthVersion                     : 0.1.0
+RestartHealthVersion              : 0.1.0
+GuiHealthVersion                  : 0.1.0
+CliStatus                         : mcg-daemon 0.1.0 (Ready) automatic shadow experiments: disabled
+DoctorSchema                      : 1
+BackupSchema                      : 2
+EncryptedBackupSchema             : 2
+EncryptedRestoreReport            : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\encrypted-restore.json
+GracefulShutdownQualified         : True
+ConsumerCliReport                 : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\consumer-cli.json
+ConsumerCliTaskCount              : 12
+ConsumerCliProjectCount           : 8
+ProviderSuccessReport             : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\provider-success.json
+ProviderSuccessRestartReport      : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\provider-success-restart.json
+MemoryTransferReport              : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\memory-transfer.json
+MemoryTransferRestartReport       : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\memory-transfer-restart.json
+OrganizationSharingReport         : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\organization-sharing.json
+OrganizationSharingRestartReport  : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\organization-sharing-restart.json
+InterfaceSuccessReport            : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\interface-success.json
+InterfaceSuccessRestartReport     : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\interface-success-restart.json
+RealProjectReport                 : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\real-project.json
+RealProjectRestartReport          : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\real-project-restart.json
+RealApiProjectReport              : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\real-api-project.json
+RealApiProjectRestartReport       : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\real-api-project-restart.json
+RealFullstackProjectReport        : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\real-fullstack-project.json
+RealFullstackProjectRestartReport : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\real-fullstack-project-restart.json
+McpToolCount                      : 55
+DesktopScreenshot                 : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\desktop.png
+NativeAccessibilityReport         : C:\Users\hendo420\AppData\Local\Temp\mcg-installer-uat-22676074a4404eb6ba2392b8862d
+                                    3a2f\desktop-native-accessibility.json
+ScreenshotWidth                   : 1280
+ScreenshotHeight                  : 800
+ScreenshotSampledColors           : 93
+DesktopSkipped                    : False
+DataRetained                      : True
+RepairPreservedData               : True
+ReinstallPreservedData            : True
+PluginRunnerQualified             : True
+AppExecutableRemoved              : True

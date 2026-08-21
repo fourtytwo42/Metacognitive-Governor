@@ -1,0 +1,28 @@
+Linux native accessibility qualification passed: /tmp/mcg-linux-package-uat-v75TGb/installed-native-accessibility.json
+Linux native accessibility qualification passed: /tmp/mcg-linux-package-uat-v75TGb/appimage-native-accessibility.json
+Linux package UAT passed.
+UAT_ROOT=/tmp/mcg-linux-package-uat-v75TGb
+DEB_PACKAGE=mcg
+INSTALLED_HEALTH_PORT=17778
+MCP_REPORT=/tmp/mcg-linux-package-uat-v75TGb/mcp.json
+CONSUMER_CLI_REPORT=/tmp/mcg-linux-package-uat-v75TGb/installed-consumer-cli.json
+PROVIDER_SUCCESS_REPORT=/tmp/mcg-linux-package-uat-v75TGb/provider-success.json
+PROVIDER_SUCCESS_RESTART_REPORT=/tmp/mcg-linux-package-uat-v75TGb/provider-success-restart.json
+ORGANIZATION_SHARING_REPORT=/tmp/mcg-linux-package-uat-v75TGb/organization-sharing.json
+ORGANIZATION_SHARING_RESTART_REPORT=/tmp/mcg-linux-package-uat-v75TGb/organization-sharing-restart.json
+REAL_PROJECT_REPORT=/tmp/mcg-linux-package-uat-v75TGb/real-project.json
+REAL_PROJECT_RESTART_REPORT=/tmp/mcg-linux-package-uat-v75TGb/real-project-restart.json
+REAL_API_PROJECT_REPORT=/tmp/mcg-linux-package-uat-v75TGb/real-api-project.json
+REAL_API_PROJECT_RESTART_REPORT=/tmp/mcg-linux-package-uat-v75TGb/real-api-project-restart.json
+REAL_FULLSTACK_PROJECT_REPORT=/tmp/mcg-linux-package-uat-v75TGb/real-fullstack-project.json
+REAL_FULLSTACK_PROJECT_RESTART_REPORT=/tmp/mcg-linux-package-uat-v75TGb/real-fullstack-project-restart.json
+INSTALLED_SCREENSHOT=/tmp/mcg-linux-package-uat-v75TGb/installed.png
+APPIMAGE_SCREENSHOT=/tmp/mcg-linux-package-uat-v75TGb/appimage.png
+INSTALLED_NATIVE_ACCESSIBILITY=/tmp/mcg-linux-package-uat-v75TGb/installed-native-accessibility.json
+APPIMAGE_NATIVE_ACCESSIBILITY=/tmp/mcg-linux-package-uat-v75TGb/appimage-native-accessibility.json
+DATA_RETAINED=true
+REPAIR_PRESERVED_DATA=true
+REINSTALL_PRESERVED_DATA=true
+APPLICATION_REMOVED=true
+PLUGIN_RUNNERS_QUALIFIED=true
+ENCRYPTED_BACKUP_RESTORE_REPORT=/tmp/mcg-linux-package-uat-v75TGb/encrypted-restore.json
