@@ -25,7 +25,18 @@ public static class McgNativeWindow {
 
     [StructLayout(LayoutKind.Explicit)]
     private struct INPUTUNION {
+        [FieldOffset(0)] public MOUSEINPUT mouse;
         [FieldOffset(0)] public KEYBDINPUT keyboard;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public UIntPtr extraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -91,15 +102,21 @@ public static class McgNativeWindow {
     }
 
     public static void SendTab() {
+        int inputSize = Marshal.SizeOf(typeof(INPUT));
+        int expectedSize = IntPtr.Size == 8 ? 40 : 28;
+        if (inputSize != expectedSize) {
+            throw new InvalidOperationException("Unexpected Win32 INPUT size " + inputSize + "; expected " + expectedSize + ".");
+        }
         INPUT[] inputs = new INPUT[2];
         inputs[0].type = INPUT_KEYBOARD;
         inputs[0].data.keyboard.virtualKey = VK_TAB;
         inputs[1].type = INPUT_KEYBOARD;
         inputs[1].data.keyboard.virtualKey = VK_TAB;
         inputs[1].data.keyboard.flags = KEYEVENTF_KEYUP;
-        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+        uint sent = SendInput((uint)inputs.Length, inputs, inputSize);
         if (sent != inputs.Length) {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "SendInput did not deliver Tab.");
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, "SendInput did not deliver Tab; input size " + inputSize + ".");
         }
     }
 }
