@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "application": "MetaCognitive Governor",
+  "version": "0.1.0",
+  "source_commit": "c1881f221978a4409575096e06feed6a393b89bd",
+  "source_dirty": false,
+  "files": [
+    {
+      "path": "target/release/bundle/dmg/MCG_0.1.0_x64.dmg",
+      "size_bytes": 40397053,
+      "sha256": "a70ffcb2761d8585e72a7a301fad729b180806586a9656cfdfcf20d87ec13cc4"
+    }
+  ]
+}

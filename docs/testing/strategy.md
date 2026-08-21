@@ -209,7 +209,9 @@ field as an OS-native password control. A typed canary must remain masked throug
 the accessibility value API and absent from every accessible name. Reports retain
 only booleans, public control names, counts, and the expected focus sequence. macOS
 qualification runs from the disposable VM's explicitly authorized Terminal session;
-the harness fails closed when `AXIsProcessTrusted` is false.
+the harness fails closed when `AXIsProcessTrusted` is false. Direct macOS visual
+evidence captures only the largest on-screen window owned by the exact desktop PID,
+so unrelated desktop windows and credential-bearing terminal scrollback are excluded.
 
 Updater contract tests prove unsigned builds fail closed, configured builds expose
 only their bounded HTTPS origin, and an available release requires a second review
