@@ -136,14 +136,20 @@ async function createLinuxClamAvScanner(now = new Date()) {
   if (!executable) fail("ClamAV clamscan is required at /usr/bin/clamscan or /usr/local/bin/clamscan.");
 
   const databaseRoot = "/var/lib/clamav";
+  const databaseRootEntry = await lstat(databaseRoot);
+  if (!databaseRootEntry.isDirectory() || databaseRootEntry.isSymbolicLink() || (databaseRootEntry.mode & 0o022) !== 0) {
+    fail("ClamAV signature directory must be a protected non-symlink directory.");
+  }
   const databases = (await readdir(databaseRoot, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && /\.(?:cvd|cld)$/u.test(entry.name))
     .map((entry) => path.join(databaseRoot, entry.name));
   if (databases.length === 0) fail("ClamAV has no installed signature databases.");
   let newestDatabaseMs = 0;
   for (const database of databases) {
-    const metadata = await stat(database);
-    if (metadata.uid !== 0 || (metadata.mode & 0o022) !== 0) fail("ClamAV signature databases must be protected root-owned files.");
+    const metadata = await lstat(database);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || ![0, databaseRootEntry.uid].includes(metadata.uid) || (metadata.mode & 0o022) !== 0) {
+      fail("ClamAV signature databases must be protected files owned by root or the signature-directory service account.");
+    }
     newestDatabaseMs = Math.max(newestDatabaseMs, metadata.mtimeMs);
   }
   const signatureAgeSeconds = Math.floor((now.getTime() - newestDatabaseMs) / 1000);
