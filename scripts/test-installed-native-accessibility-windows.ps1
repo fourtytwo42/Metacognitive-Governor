@@ -76,9 +76,13 @@ function Find-Element(
 
 function Wait-Focused(
     [System.Windows.Automation.AutomationElement]$Root,
-    [string]$Name,
-    [DateTime]$Deadline
+    [string]$Name
 ) {
+    # UIA tree enumeration can consume most of the caller's discovery timeout.
+    # Give every physical focus transition its own complete bounded window so a
+    # slow accessibility provider cannot turn a successful Tab into a stale-
+    # deadline failure.
+    $deadline = Get-Deadline
     do {
         $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($null -ne $focused -and $focused.Current.Name -eq $Name) { return }
@@ -152,11 +156,11 @@ if ($unnamedFocusable.Count -ne 0) {
 }
 
 $required.Goal.Element.SetFocus()
-Wait-Focused $root "Goal" $deadline
+Wait-Focused $root "Goal"
 [Windows.Forms.SendKeys]::SendWait("{TAB}")
-Wait-Focused $root "Open folder" $deadline
+Wait-Focused $root "Open folder"
 [Windows.Forms.SendKeys]::SendWait("{TAB}")
-Wait-Focused $root "Create task" $deadline
+Wait-Focused $root "Create task"
 
 $mode = Find-Element $root @("Advanced mode") @("Button") $deadline
 Invoke-Accessible $mode.Element
