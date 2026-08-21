@@ -596,6 +596,8 @@ try {
         MemoryTransferRestartReport = Join-Path $uatRoot "memory-transfer-restart.json"
         InterfaceSuccessReport = $interfaceSuccessReport
         InterfaceSuccessRestartReport = Join-Path $uatRoot "interface-success-restart.json"
+        RealProjectReport = Join-Path $uatRoot "real-project.json"
+        RealProjectRestartReport = Join-Path $uatRoot "real-project-restart.json"
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }

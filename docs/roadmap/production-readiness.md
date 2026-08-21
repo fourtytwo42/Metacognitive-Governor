@@ -38,16 +38,17 @@ hosting only.
 | M12 — Long-term roadmap | Partial | The first cross-project learning control is implemented as an explicit owner-reviewed, source-digest-bound, one-claim transfer. Schema 32 commits the copied target claim, immutable transfer evidence, and event atomically; caller-owned IDs replay safely after restart; occupied targets and changed/stale evidence fail closed. Read-only review, mutation, and history span REST, CLI, MCP, Tauri, and simple/advanced desktop, with core/API/component tests. Exact Windows, Ubuntu, and matched macOS package qualification now passes, including encrypted restore, daemon restart, cross-interface replay, and immutable inbound/outbound history. Signed organization sharing now has a first-class schema-34 trust/review/import vertical; existing experiments, ensembles, Sites, and typed SSH remain foundations for later slices. | Native macOS memory/sharing interaction and signed-final-candidate repetition remain open. Ambient or automatic cross-project learning intentionally remains absent. Distributed execution beyond typed SSH, fleet management, predictive intervention, long-term operational workflows, and an Android capability-profile application still require first-class vertical implementation and threat-model/benchmark evidence. |
 
 The first shared installed real-project gate is now implemented in
-`scripts/test-installed-real-project.py` and passes focused release-binary exercise
-and restart verification on Win11, Ubuntu, and macOS. It proves a seeded website
+`scripts/test-installed-real-project.py` and passes the complete existing
+manifest-qualified Windows NSIS, Ubuntu `.deb`/AppImage, and macOS app/DMG lanes.
+It proves a seeded website
 regression fails before work, three governed writes build the site, the discovered
 test and independent evaluation pass, real Chromium checks the rendered document
 and local references at 1280x720, exact replay is side-effect-free, and files/audit
 history/browser output survive daemon restart without the provider. This is one
 representative project and therefore strengthens, but does not close, the broader
-M5/M10 requirement for several installed final-candidate application projects. The
-shared verifier is wired into all package harnesses; complete matched package-lane
-reruns remain the next qualification gate.
+M5/M10 requirement for several installed final-candidate application projects.
+The compact secret-free reports and browser captures are retained under
+`qualification-evidence/20260820-installed-real-project/`.
 
 ## Immediate dependency order
 

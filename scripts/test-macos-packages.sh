@@ -9,6 +9,13 @@ fi
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_app="${1:-$repository_root/target/release/bundle/macos/MCG.app}"
 external_capture_request="${MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST:-}"
+external_capture_timeout_seconds="${MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS:-600}"
+[[ "$external_capture_timeout_seconds" =~ ^[0-9]+$ \
+  && "$external_capture_timeout_seconds" -ge 30 \
+  && "$external_capture_timeout_seconds" -le 1800 ]] || {
+  echo "MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS must be an integer from 30 through 1800." >&2
+  exit 1
+}
 case "$(uname -m)" in
   x86_64) bundle_arch=x64 ;;
   arm64|aarch64) bundle_arch=aarch64 ;;
@@ -336,7 +343,8 @@ if [[ -n "$external_capture_request" ]]; then
   [[ "$external_capture_request" == /* ]] || { echo "External capture request path must be absolute." >&2; exit 1; }
   [[ ! -e "$external_capture_request" ]] || { echo "Refusing to replace external capture request: $external_capture_request" >&2; exit 1; }
   (set -o noclobber; printf '%s\n' "$uat_root/desktop.png" > "$external_capture_request")
-  for _ in {1..600}; do
+  capture_attempts=$((external_capture_timeout_seconds * 10))
+  for ((capture_attempt = 0; capture_attempt < capture_attempts; capture_attempt++)); do
     [[ -s "$uat_root/desktop.png" ]] && break
     sleep 0.1
   done
@@ -376,6 +384,8 @@ SERVICE_HEALTH_PORT=$service_port
 MCP_REPORT=$uat_root/mcp.json
 PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
 PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
+REAL_PROJECT_REPORT=$uat_root/real-project.json
+REAL_PROJECT_RESTART_REPORT=$uat_root/real-project-restart.json
 DESKTOP_SCREENSHOT=$uat_root/desktop.png
 EXTERNAL_CAPTURE_REQUEST=${external_capture_request:-none}
 DATA_RETAINED=true

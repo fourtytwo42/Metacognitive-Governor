@@ -335,6 +335,10 @@ Playwright's unprivileged browser user namespace, this loopback-only rendering
 fixture passes Chromium `--no-sandbox` and records `browser_process_sandboxed=false`;
 the installed product's separate Bubblewrap/AppArmor execution gates remain
 mandatory and are not weakened by that browser-fixture accommodation.
+The macOS harness gives an external Chrome Remote Desktop capture ten minutes by
+default (`MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS`, bounded to 30–1800)
+so the operator can maximize and privacy-review the frame before it becomes
+retained evidence; a missing capture still fails closed.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected
