@@ -2009,7 +2009,7 @@ test("native project selection discovers the folder and associates the new task"
   }));
 });
 
-test("Ctrl+O adds a folder to the global project list", async () => {
+test("Ctrl+O registers a global folder without creating a project", async () => {
   const root = "C:\\Projects\\global-folder";
   const project = {
     id: "00000000-0000-4000-8000-000000000014",
@@ -2024,14 +2024,19 @@ test("Ctrl+O adds a folder to the global project list", async () => {
   render(<App />);
 
   fireEvent.click(screen.getByRole("button", { name: "File" }));
-  expect(screen.getByRole("button", { name: /Add folder.*Ctrl\+O/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Add global folder.*Ctrl\+O/ })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
+  expect(within(screen.getByLabelText("Global folders")).getByRole("button", { name: "Add global folder" })).toBeInTheDocument();
   fireEvent.keyDown(window, { key: "o", ctrlKey: true });
 
-  expect(await screen.findByRole("option", { name: "global-folder" })).toBeInTheDocument();
-  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
-  expect(within(screen.getByLabelText("Projects")).getByRole("button", { name: /^global-folder$/ })).toBeInTheDocument();
-  expect(client.discoverProject).toHaveBeenCalledWith(root);
+  expect(await within(screen.getByLabelText("Global folders")).findByText("global-folder")).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "global-folder" })).not.toBeInTheDocument();
+  expect(within(screen.getByLabelText("Projects")).queryByRole("button", { name: /^global-folder$/ })).not.toBeInTheDocument();
+  expect(client.discoverProject).not.toHaveBeenCalled();
+  expect(JSON.parse(window.localStorage.getItem("mcg.global-folders") ?? "[]")).toEqual([root]);
+
+  fireEvent.click(within(screen.getByLabelText("Global folders")).getByRole("button", { name: "Remove" }));
+  expect(within(screen.getByLabelText("Global folders")).getByText("No global folders added.")).toBeInTheDocument();
 });
 
 test("rediscovering a known Windows folder preserves its durable project identity", async () => {

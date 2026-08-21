@@ -113,6 +113,12 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .project-select select { width: auto; min-width: 112px; max-width: 155px; height: 34px; padding: 5px 28px 5px 9px; font-size: .76rem; }
 .folder-button { flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border-radius: 50%; font-size: 1rem; }
 .menu-shortcut { float: right; margin-left: 24px; color: #888; font-size: .72rem; }
+.global-folder-settings { margin-top: 18px; }
+.global-folder-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.global-folder-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 11px; border: 1px solid #383838; border-radius: 8px; background: #1b1b1b; }
+.global-folder-list li > span { min-width: 0; display: grid; gap: 3px; }
+.global-folder-list strong { color: #ddd; font-size: .8rem; }
+.global-folder-list small { overflow: hidden; color: #8d8d8d; font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
 .panel { padding: 24px; min-height: 230px; }

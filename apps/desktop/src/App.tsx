@@ -422,6 +422,17 @@ export function App() {
       return [];
     }
   });
+  const [globalFolders, setGlobalFolders] = useState<string[]>(() => {
+    try {
+      const stored = window.localStorage.getItem("mcg.global-folders");
+      const parsed = stored ? JSON.parse(stored) as unknown : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [globalFolderBusy, setGlobalFolderBusy] = useState(false);
+  const [globalFolderError, setGlobalFolderError] = useState<string | null>(null);
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
@@ -641,6 +652,10 @@ export function App() {
   }, [pinnedTaskIds]);
 
   useEffect(() => {
+    window.localStorage.setItem("mcg.global-folders", JSON.stringify(globalFolders));
+  }, [globalFolders]);
+
+  useEffect(() => {
     const restoreSurface = () => {
       const surface = window.location.hash.slice(1);
       if (surface) setActiveSurface(surface);
@@ -654,12 +669,12 @@ export function App() {
     const addFolderShortcut = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLocaleLowerCase() === "o") {
         event.preventDefault();
-        if (!taskBusy) void chooseProject("task");
+        if (!globalFolderBusy) void addGlobalFolder();
       }
     };
     window.addEventListener("keydown", addFolderShortcut);
     return () => window.removeEventListener("keydown", addFolderShortcut);
-  }, [projects, taskBusy]);
+  }, [globalFolderBusy]);
 
   function navigateSurface(surface: string, addHistory = true) {
     setActiveSurface(surface);
@@ -1813,6 +1828,22 @@ export function App() {
     }
   }
 
+  async function addGlobalFolder() {
+    setGlobalFolderBusy(true);
+    setGlobalFolderError(null);
+    try {
+      const root = await pickProjectDirectory();
+      if (!root) return;
+      setGlobalFolders((current) => current.some((folder) => projectRootKey(folder) === projectRootKey(root))
+        ? current
+        : [...current, root]);
+    } catch (error) {
+      setGlobalFolderError(errorMessage(error));
+    } finally {
+      setGlobalFolderBusy(false);
+    }
+  }
+
   function replaceReviewedTopologyPlan(plan: ReviewedTopologyPlan) {
     setReviewedTopologyPlans((current) => [
       plan,
@@ -2901,7 +2932,7 @@ export function App() {
           {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
             <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
             <div className={`desktop-menu-popover${desktopMenu === menu ? " open" : ""}`}>
-              {menu === "File" && <><button type="button" onClick={() => startNewChat()}>New chat</button><button type="button" disabled={taskBusy} onClick={() => chooseProject("task")}>Add folder… <span className="menu-shortcut">Ctrl+O</span></button><button type="button" onClick={() => navigateSurface("projects")}>Manage projects</button></>}
+              {menu === "File" && <><button type="button" onClick={() => startNewChat()}>New chat</button><button type="button" disabled={globalFolderBusy} onClick={addGlobalFolder}>Add global folder… <span className="menu-shortcut">Ctrl+O</span></button><button type="button" onClick={() => navigateSurface("projects")}>Manage projects</button></>}
               {menu === "Edit" && <button type="button" onClick={() => goalInputRef.current?.focus()}>Focus composer</button>}
               {menu === "View" && <><button type="button" onClick={() => setSidebarOpen((current) => !current)}>{sidebarOpen ? "Hide sidebar" : "Show sidebar"}</button><button type="button" onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button></>}
               {menu === "Help" && <><button type="button" onClick={() => navigateSurface("settings")}>Diagnostics</button><button type="button" onClick={() => navigateSurface("settings")}>About MCG</button></>}
@@ -3014,7 +3045,7 @@ export function App() {
                   {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
                 </select>
               </label>}
-              <button className="secondary icon-button folder-button" type="button" aria-label="Open folder" title="Add folder to MCG (Ctrl+O)" disabled={taskBusy} onClick={() => chooseProject("task")}><span aria-hidden="true">▱</span></button>
+              <button className="secondary icon-button folder-button" type="button" aria-label="Open folder" title="Create a project from a folder" disabled={taskBusy} onClick={() => chooseProject("task")}><span aria-hidden="true">▱</span></button>
               <button className="primary" type="button" disabled={taskBusy} onClick={addTask}>
                 {taskBusy ? "Creating..." : "Create task"}
               </button>
@@ -4344,6 +4375,19 @@ export function App() {
               </ul>
             </div>}
           </div> : <p className="empty-state">Loading durable settings…</p>}
+          <div className="provider-connections global-folder-settings" aria-label="Global folders">
+            <div className="section-heading compact-heading">
+              <div>
+                <h3>Global folders</h3>
+                <p className="muted">Folders shared with every project and general chat. Adding one here does not create a project.</p>
+              </div>
+              <button className="secondary" type="button" disabled={globalFolderBusy} onClick={addGlobalFolder}>{globalFolderBusy ? "Adding…" : "Add global folder"}</button>
+            </div>
+            {globalFolders.length === 0 ? <p className="empty-state">No global folders added.</p> : <ul className="global-folder-list">
+              {globalFolders.map((folder) => <li key={projectRootKey(folder)}><span><strong>{folder.split(/[\\/]/).filter(Boolean).at(-1) ?? folder}</strong><small>{folder}</small></span><button className="link-button" type="button" onClick={() => setGlobalFolders((current) => current.filter((candidate) => projectRootKey(candidate) !== projectRootKey(folder)))}>Remove</button></li>)}
+            </ul>}
+            {globalFolderError && <p className="error-message" role="alert">{globalFolderError}</p>}
+          </div>
           <div className="provider-connections" aria-label="Application updates">
             <div className="section-heading compact-heading">
               <div>

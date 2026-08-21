@@ -279,6 +279,9 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByRole("heading", { name: "What would you like to build?" })).toBeVisible();
   await expect(page.locator("#projects")).toBeHidden();
   await openOwnerSurface(page, "Settings");
+  const globalFolders = page.getByLabel("Global folders");
+  await expect(globalFolders.getByRole("button", { name: "Add global folder" })).toBeVisible();
+  await expect(globalFolders).toContainText("does not create a project");
   const updates = page.getByLabel("Application updates");
   await expect(updates.getByText(/Updates are unavailable in this build/)).toBeVisible();
   await expect(updates.getByText(/never accept an unsigned fallback/)).toBeVisible();
@@ -398,7 +401,7 @@ test("workspace navigation always opens a surface at its top", async ({ page }) 
   await expect(page.locator(".selected-project")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
   const folderButton = page.getByRole("button", { name: "Open folder" });
-  await expect(folderButton).toHaveAttribute("title", /Ctrl\+O/);
+  await expect(folderButton).toHaveAttribute("title", "Create a project from a folder");
   await expect(folderButton).not.toContainText("Open folder");
 
   await page.getByRole("button", { name: "New chat", exact: true }).click();
