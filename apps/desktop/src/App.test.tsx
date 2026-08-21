@@ -1086,7 +1086,32 @@ test("simple SSH workflow pins selected hosts and exposes run state", async () =
   expect(await within(workflows).findByText("succeeded")).toBeInTheDocument();
 });
 
-test("simple Sites flow registers a selected project and records governed health", async () => {
+test("simple Sites starts a project-aware website chat without exposing deployment administration", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000111",
+    project_id: "00000000-0000-4000-8000-000000000112",
+    root: "C:\\Projects\\site",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  render(<App />);
+  const panel = await screen.findByRole("region", { name: "Sites" });
+  expect(within(panel).getByRole("heading", { name: "Sites" })).toBeVisible();
+  expect(within(panel).getByText("No sites yet")).toBeVisible();
+  expect(within(panel).queryByLabelText("Public URL")).not.toBeInTheDocument();
+  expect(within(panel).queryByLabelText("Deployment executable")).not.toBeInTheDocument();
+  fireEvent.change(within(panel).getByLabelText("Starting point"), { target: { value: project.project_id } });
+  fireEvent.click(within(panel).getByRole("button", { name: "New site" }));
+  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Build a website");
+});
+
+test("advanced Sites registers a selected project and records governed health", async () => {
   const project = {
     id: "00000000-0000-4000-8000-000000000121",
     project_id: "00000000-0000-4000-8000-000000000122",
@@ -1144,6 +1169,7 @@ test("simple Sites flow registers a selected project and records governed health
     schedule: {}
   });
   render(<App />);
+  await enableAdvancedMode();
   const panel = await screen.findByRole("region", { name: "Sites" });
   fireEvent.change(within(panel).getByLabelText("Site project"), { target: { value: project.project_id } });
   fireEvent.change(within(panel).getByLabelText("Site name"), { target: { value: "Production site" } });

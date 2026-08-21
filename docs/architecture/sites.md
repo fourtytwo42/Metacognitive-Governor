@@ -1,5 +1,18 @@
 # Sites, Deployment, And Monitoring
 
+## Consumer workflow
+
+Simple mode treats a Site as a persistent hosted output that begins in chat. A user
+can start from an idea or select an existing project, describe the audience,
+purpose, behavior, and information the site needs, then review and refine the
+result before publishing. The Sites page is the durable library for reopening a
+live Site or continuing its project-bound editing conversation.
+
+Saving a reviewable version and publishing it are separate decisions. Simple mode
+therefore does not ask users for a hosting provider, health endpoint, executable,
+or deployment arguments. Those governed operational controls remain available in
+Advanced mode for custom and self-hosted providers.
+
 - Status: M8 implementation contract.
 - Contract version: `SITE_SCHEMA_VERSION = 1`.
 - Date: 2026-08-14.

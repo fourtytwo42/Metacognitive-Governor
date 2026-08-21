@@ -717,6 +717,29 @@ export function App() {
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
   }
 
+  function startSiteChat(project: ProjectModel | null = selectedProject) {
+    setSelectedProject(project);
+    setSelectedChatId(null);
+    setTaskGoal("Build a website. Start by asking me about its audience, purpose, required behavior, and information, then build and test a reviewable version before publishing it.");
+    setTaskConstraints("");
+    setTaskSuccess("");
+    setTaskError(null);
+    navigateSurface("tasks");
+    window.requestAnimationFrame(() => goalInputRef.current?.focus());
+  }
+
+  function continueSiteChat(site: Site) {
+    const project = projects.find((candidate) => candidate.project_id === site.project_id) ?? null;
+    setSelectedProject(project);
+    setSelectedChatId(null);
+    setTaskGoal(`Refine the website ${site.display_name} at ${site.public_url}. Inspect the existing project, show me a reviewable version, and do not publish changes until they are approved.`);
+    setTaskConstraints("");
+    setTaskSuccess("");
+    setTaskError(null);
+    navigateSurface("tasks");
+    window.requestAnimationFrame(() => goalInputRef.current?.focus());
+  }
+
   function openChat(taskId: string) {
     setSelectedChatId(taskId);
     navigateSurface("threads");
@@ -3443,6 +3466,52 @@ export function App() {
         </section>
 
         <section className="panel scheduler-panel" id="sites" aria-label="Sites">
+          {!advanced ? <>
+            <div className="section-heading sites-heading">
+              <div>
+                <p className="eyebrow">SITES</p>
+                <h2>Sites</h2>
+                <p className="muted">Create a website from an idea or an existing project, review it, and keep refining it in chat.</p>
+              </div>
+              <span className="count-badge">{sites.filter((site) => site.state !== "archived").length}</span>
+            </div>
+            <div className="sites-simple-layout">
+              <div className="site-start-card">
+                <div>
+                  <h3>Build a new site</h3>
+                  <p>Describe what you want in chat. You can start fresh or use one of your project folders.</p>
+                </div>
+                <label>
+                  <span>Starting point</span>
+                  <select value={selectedProject?.project_id ?? ""} onChange={(event) => setSelectedProject(projects.find((project) => project.project_id === event.target.value) ?? null)}>
+                    <option value="">Start from an idea</option>
+                    {projects.map((project) => <option key={project.project_id} value={project.project_id}>Project: {project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                  </select>
+                </label>
+                <button className="primary" type="button" onClick={() => startSiteChat()}>New site</button>
+              </div>
+              <div className="site-library" aria-label="Your sites">
+                {sites.filter((site) => site.state !== "archived").length === 0
+                  ? <div className="site-empty-state"><strong>No sites yet</strong><span>Build one from a prompt or an existing project.</span></div>
+                  : sites.filter((site) => site.state !== "archived").map((site) => {
+                    const project = projects.find((candidate) => candidate.project_id === site.project_id);
+                    const deployment = siteDeployments[site.id]?.deployments[0];
+                    return <article className="site-library-card" key={site.id}>
+                      <div className="site-preview" aria-hidden="true">▧</div>
+                      <div className="site-library-copy">
+                        <h3>{site.display_name}</h3>
+                        <a href={site.public_url} target="_blank" rel="noreferrer">{site.public_url}</a>
+                        <small>{project ? project.root.split(/[\\/]/).filter(Boolean).at(-1) : "Project unavailable"}{deployment ? ` · ${deployment.state}` : " · Ready to refine"}</small>
+                      </div>
+                      <div className="site-library-actions">
+                        <a className="secondary button-link" href={site.public_url} target="_blank" rel="noreferrer">Open site</a>
+                        <button className="secondary" type="button" onClick={() => continueSiteChat(site)}>Continue editing</button>
+                      </div>
+                    </article>;
+                  })}
+              </div>
+            </div>
+          </> : <>
           <div className="section-heading">
             <div>
               <p className="eyebrow">SITES</p>
@@ -3512,6 +3581,7 @@ export function App() {
               })}
             </div>
           </div>
+          </>}
         </section>
 
         <section className="panel scheduler-panel" id="ssh" aria-label="SSH hosts">

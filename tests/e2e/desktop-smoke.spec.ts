@@ -278,6 +278,14 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "What would you like to build?" })).toBeVisible();
   await expect(page.locator("#projects")).toBeHidden();
+  await page.getByRole("link", { name: "Sites", exact: true }).click();
+  const simpleSites = page.getByRole("region", { name: "Sites" });
+  await expect(simpleSites.getByRole("heading", { name: "Sites" })).toBeVisible();
+  await expect(simpleSites.getByRole("button", { name: "New site" })).toBeVisible();
+  await expect(simpleSites.getByText("No sites yet")).toBeVisible();
+  await expect(simpleSites.getByLabel("Public URL")).toHaveCount(0);
+  await simpleSites.getByRole("button", { name: "New site" }).click();
+  await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Build a website/);
   await openOwnerSurface(page, "Settings");
   const globalFolders = page.getByLabel("Global folders");
   await expect(globalFolders.getByRole("button", { name: "Add global folder" })).toBeVisible();
