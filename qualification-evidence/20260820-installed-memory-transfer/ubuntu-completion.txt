@@ -1,0 +1,2 @@
+6c03d35894f4324968aebf1500d86d82b3ee25c83e83d63f7d95331a34400d70  /home/hendo420/mcg-4ec61c4-harness/linux-package-memory-transfer.log
+EXIT_CODE=0

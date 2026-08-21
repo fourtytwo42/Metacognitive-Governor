@@ -2,13 +2,13 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
-### 2026-08-20 - Installed memory-transfer gate passes local restart qualification
+### 2026-08-20 - Installed memory-transfer gate passes Windows and Ubuntu packages
 
 - Context: The final macOS package lane remains technically unavailable: Chrome Remote Desktop accepts the connection but advertises `Waiting for host displays…`; this is not an approval wait. The previously known macOS SSH endpoint is also unreachable.
 - Decision/files: Add `scripts/test-installed-memory-transfer.py` to the Windows, Linux, and macOS package harnesses before encrypted backup and after restore/restart. The gate creates two projects, promotes one source claim to durable, binds an explicit transfer to the preview digest, crosses CLI and MCP, rejects a changed replay, and requires one target claim plus one inbound/outbound history record after restart. Packaging invariants and `docs/testing/strategy.md` require it.
-- Commands/tests: Current daemon/CLI build passes. A real local daemon exercise and forced-restart verification pass; Python compile, PowerShell parse, Git Bash syntax for both shell harnesses, packaging validation, and diff hygiene pass.
-- Result: The shared installed-memory-transfer verifier is functionally green locally and ready for complete installed Windows/Linux qualification. No credentials were retained.
-- Follow-up: Commit/push the checkpoint, run the complete package lanes on Win11 and Ubuntu, then transfer the exact final bundle and run the same gate on macOS after that VM exposes a display or SSH endpoint.
+- Commands/tests: Current daemon/CLI build and local restart exercise pass. Exact harness commit `4ec61c45e783de9b924b7bc1b8d55e728a1252c2` was sealed into a 2,942,447-byte bundle, SHA-256 `59AD1F2F056478D984A92C1BF7BFD33534F87B80F610C65E22454D2298934BEC`, independently verified and cleanly checked out on both VMs. Complete non-GUI installed-package lanes pass against the manifest-bound `8f50b99` Windows/Linux packages.
+- Result: Windows and Ubuntu both produce byte-identical exercise SHA-256 `D3377AE4E246BC065C365287664982BBCC6F78CF9795C0DBFA077D62E29D9649` and restart SHA-256 `5B928FDD1D0CC8EA5D7AA6DE8E2809BCCD381D75376210ECEA3ECFC90F3292F2`. Both prove digest review, one atomic target claim/history record, cross-interface exact replay without another event, changed-replay conflict, encrypted restore, daemon restart, and package repair/reinstall/uninstall. Windows package log SHA-256 is `C823B8D6AB16A7D9C46101A4A3C7B86E7CBA71750C0CF05C52C2F6685D9C875A`; Ubuntu is `6C03D35894F4324968AEBF1500D86D82B3EE25C83E83D63F7D95331A34400D70`. Secret-free evidence is under `qualification-evidence/20260820-installed-memory-transfer/`.
+- Cleanup/follow-up: Both credential-bearing UAT roots, temporary bundle/clones, and the local functional-test roots were removed; shared release packages remain. Final audits show zero candidate processes/listeners/registrations. Run the same gate on macOS after that VM exposes a display or SSH endpoint; no credentials were retained and no GitHub-hosted compute ran.
 
 ### 2026-08-20 - Final macOS package lane prepared at remote-desktop boundary
 
