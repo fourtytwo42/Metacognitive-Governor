@@ -1993,9 +1993,12 @@ test("native project selection discovers the folder and associates the new task"
   });
   render(<App />);
 
-  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+  const folderButton = screen.getByRole("button", { name: "Open folder" });
+  expect(folderButton).not.toHaveTextContent("Open folder");
+  fireEvent.click(folderButton);
   expect((await screen.findAllByText("sample")).length).toBeGreaterThan(0);
-  expect(screen.getByText(root)).toBeInTheDocument();
+  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expect(document.querySelector(".selected-project")).toBeNull();
   fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "Improve the sample" } });
   fireEvent.click(screen.getByRole("button", { name: "Create task" }));
 
@@ -2004,6 +2007,31 @@ test("native project selection discovers the folder and associates the new task"
   expect(client.createTask).toHaveBeenCalledWith(expect.objectContaining({
     project_id: project.project_id
   }));
+});
+
+test("Ctrl+O adds a folder to the global project list", async () => {
+  const root = "C:\\Projects\\global-folder";
+  const project = {
+    id: "00000000-0000-4000-8000-000000000014",
+    project_id: "00000000-0000-4000-8000-000000000015",
+    root,
+    observed_at: "2026-08-21T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: [], build_systems: [], test_systems: [], instructions: { conflicts: [] }
+  };
+  client.pickProject.mockResolvedValue(root);
+  client.discoverProject.mockResolvedValue({ project });
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "File" }));
+  expect(screen.getByRole("button", { name: /Add folder.*Ctrl\+O/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
+  fireEvent.keyDown(window, { key: "o", ctrlKey: true });
+
+  expect(await screen.findByRole("option", { name: "global-folder" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expect(within(screen.getByLabelText("Projects")).getByRole("button", { name: /^global-folder$/ })).toBeInTheDocument();
+  expect(client.discoverProject).toHaveBeenCalledWith(root);
 });
 
 test("rediscovering a known Windows folder preserves its durable project identity", async () => {
@@ -2091,7 +2119,8 @@ test("project intelligence stays advanced while project chat remains the simple 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
   expect(screen.getByRole("heading", { name: "New chat", level: 1 })).toBeInTheDocument();
-  expect(screen.getAllByRole("status").some((node) => node.textContent?.includes("remembered"))).toBe(true);
+  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expect(document.querySelector(".selected-project")).toBeNull();
   expect(screen.queryByLabelText("Project intelligence and memory")).not.toBeInTheDocument();
   await enableAdvancedMode();
   const intelligence = await screen.findByLabelText("Project intelligence and memory");

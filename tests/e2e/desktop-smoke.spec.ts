@@ -394,12 +394,15 @@ test("workspace navigation always opens a surface at its top", async ({ page }) 
   await expect(page.getByLabel("Project intelligence and memory")).toHaveCount(0);
   await page.getByRole("button", { name: "Start chat" }).click();
   await expect(page.getByRole("heading", { name: "New chat", level: 1 })).toBeVisible();
-  await expect(page.locator(".selected-project")).toContainText("consumer-app");
-  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect(page.getByLabel("Project", { exact: true })).toHaveValue("00000000-0000-4000-8000-000000000242");
+  await expect(page.locator(".selected-project")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
+  const folderButton = page.getByRole("button", { name: "Open folder" });
+  await expect(folderButton).toHaveAttribute("title", /Ctrl\+O/);
+  await expect(folderButton).not.toContainText("Open folder");
 
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Tasks" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
   await expect.poll(() => page.evaluate(() => Math.round(window.scrollY))).toBe(0);
 
   await openOwnerSurface(page, "Projects");

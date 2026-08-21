@@ -109,12 +109,10 @@ textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
 .artifact-evidence li { display: grid; grid-template-columns: minmax(180px, .55fr) minmax(0, 1.45fr); gap: 12px; padding: 8px 10px; background: #070b12; color: #aebed0; font-size: .75rem; }
 .artifact-evidence code { margin: 0; color: #65dccc; }
 .empty-inline { margin: 0; color: #8190a2; font-size: .78rem; }
-.selected-project { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 12px; border: 1px solid #2d756d; background: #42d9c80b; }
-.selected-project div { min-width: 0; display: grid; gap: 4px; }
-.selected-project strong { color: #dffaf6; }
-.selected-project span { color: #8199a9; font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-select { margin-right: auto; display: flex; align-items: center; gap: 8px; color: #a8b6c6; font-size: .78rem; }
-.project-select select { max-width: 180px; }
+.project-select { margin-right: auto; display: block; min-width: 0; }
+.project-select select { width: auto; min-width: 112px; max-width: 155px; height: 34px; padding: 5px 28px 5px 9px; font-size: .76rem; }
+.folder-button { flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border-radius: 50%; font-size: 1rem; }
+.menu-shortcut { float: right; margin-left: 24px; color: #888; font-size: .72rem; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
 .panel { padding: 24px; min-height: 230px; }
@@ -498,7 +496,6 @@ body { background: var(--mcg-bg); }
 }
 .simple-mode .workspace > section { display: none; }
 .simple-mode[data-active-surface="tasks"] .workspace > .hero-card,
-.simple-mode[data-active-surface="tasks"] .workspace > .task-panel,
 .simple-mode[data-active-surface="threads"] .workspace > .task-panel,
 .simple-mode[data-active-surface="pull-requests"] .workspace > #pull-requests,
 .simple-mode[data-active-surface="projects"] .workspace > #projects,

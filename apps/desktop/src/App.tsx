@@ -650,6 +650,17 @@ export function App() {
     return () => window.removeEventListener("popstate", restoreSurface);
   }, []);
 
+  useEffect(() => {
+    const addFolderShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLocaleLowerCase() === "o") {
+        event.preventDefault();
+        if (!taskBusy) void chooseProject("task");
+      }
+    };
+    window.addEventListener("keydown", addFolderShortcut);
+    return () => window.removeEventListener("keydown", addFolderShortcut);
+  }, [projects, taskBusy]);
+
   function navigateSurface(surface: string, addHistory = true) {
     setActiveSurface(surface);
     setOwnerMenuOpen(false);
@@ -2890,7 +2901,7 @@ export function App() {
           {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
             <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
             <div className={`desktop-menu-popover${desktopMenu === menu ? " open" : ""}`}>
-              {menu === "File" && <><button type="button" onClick={() => startNewChat()}>New chat</button><button type="button" onClick={() => navigateSurface("projects")}>Open project</button></>}
+              {menu === "File" && <><button type="button" onClick={() => startNewChat()}>New chat</button><button type="button" disabled={taskBusy} onClick={() => chooseProject("task")}>Add folder… <span className="menu-shortcut">Ctrl+O</span></button><button type="button" onClick={() => navigateSurface("projects")}>Manage projects</button></>}
               {menu === "Edit" && <button type="button" onClick={() => goalInputRef.current?.focus()}>Focus composer</button>}
               {menu === "View" && <><button type="button" onClick={() => setSidebarOpen((current) => !current)}>{sidebarOpen ? "Hide sidebar" : "Show sidebar"}</button><button type="button" onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button></>}
               {menu === "Help" && <><button type="button" onClick={() => navigateSurface("settings")}>Diagnostics</button><button type="button" onClick={() => navigateSurface("settings")}>About MCG</button></>}
@@ -2989,17 +3000,11 @@ export function App() {
                 <input type="number" min="0" step="0.01" value={taskMaxCost} onChange={(event) => setTaskMaxCost(event.target.value)} />
               </label>
             </div>}
-            {selectedProject && <div className="selected-project" role="status">
-              <div>
-                <strong>{selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1) ?? selectedProject.root}</strong>
-                <span>{selectedProject.root}</span>
-              </div>
-              <button className="link-button" type="button" onClick={() => setSelectedProject(null)}>Remove</button>
-            </div>}
             <div className="composer-actions">
               {projects.length > 0 && <label className="project-select">
-                Project
+                <span className="sr-only">Project</span>
                 <select
+                  aria-label="Project"
                   value={selectedProject?.project_id ?? ""}
                   onChange={(event) => setSelectedProject(
                     projects.find((project) => project.project_id === event.target.value) ?? null
@@ -3009,7 +3014,7 @@ export function App() {
                   {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
                 </select>
               </label>}
-              <button className="secondary" type="button" disabled={taskBusy} onClick={() => chooseProject("task")}>Open folder</button>
+              <button className="secondary icon-button folder-button" type="button" aria-label="Open folder" title="Add folder to MCG (Ctrl+O)" disabled={taskBusy} onClick={() => chooseProject("task")}><span aria-hidden="true">▱</span></button>
               <button className="primary" type="button" disabled={taskBusy} onClick={addTask}>
                 {taskBusy ? "Creating..." : "Create task"}
               </button>
