@@ -1,0 +1,16 @@
+Linux package UAT passed.
+UAT_ROOT=/tmp/mcg-linux-package-uat-qwOnuK
+DEB_PACKAGE=mcg
+INSTALLED_HEALTH_PORT=17778
+MCP_REPORT=/tmp/mcg-linux-package-uat-qwOnuK/mcp.json
+CONSUMER_CLI_REPORT=/tmp/mcg-linux-package-uat-qwOnuK/installed-consumer-cli.json
+PROVIDER_SUCCESS_REPORT=/tmp/mcg-linux-package-uat-qwOnuK/provider-success.json
+PROVIDER_SUCCESS_RESTART_REPORT=/tmp/mcg-linux-package-uat-qwOnuK/provider-success-restart.json
+INSTALLED_SCREENSHOT=/tmp/mcg-linux-package-uat-qwOnuK/installed.png
+APPIMAGE_SCREENSHOT=/tmp/mcg-linux-package-uat-qwOnuK/appimage.png
+DATA_RETAINED=true
+REPAIR_PRESERVED_DATA=true
+REINSTALL_PRESERVED_DATA=true
+APPLICATION_REMOVED=true
+PLUGIN_RUNNERS_QUALIFIED=true
+ENCRYPTED_BACKUP_RESTORE_REPORT=/tmp/mcg-linux-package-uat-qwOnuK/encrypted-restore.json

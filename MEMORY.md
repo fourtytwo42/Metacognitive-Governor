@@ -2,13 +2,13 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
-### 2026-08-20 - Installed multi-interface success gate passes local restart qualification
+### 2026-08-20 - Installed multi-interface success passes Windows and Ubuntu packages
 
 - Context: Installed Windows/Linux provider-backed success was previously CLI-led; direct OpenAI-compatible and complete MCP success remained an explicit M6 package gate while macOS exposes no CRD host display or SSH endpoint.
 - Decision/files: Add `scripts/test-installed-interface-success.py` to all package harnesses before encrypted backup and after restore/restart. One credential-free loopback provider drives direct REST project discovery, buffered and streaming Responses, Chat Completions, and a complete MCP consumer task with independent evaluation, query, and exact replay. The provider is then removed; restart verification requires content-free proxy history and provider-free MCP replay. Packaging/testing documents and invariants require the gate.
-- Commands/tests: A real current local daemon exercise uses exactly five provider calls and passes all surfaces; forced daemon restart passes the provider-free verification. Python compile, PowerShell parse, Git Bash syntax, packaging/docs validation, and diff hygiene pass; the local process, listener, and credential-bearing fixture root were removed.
-- Result: The shared multi-interface verifier is locally functional and ready for complete Windows/Linux package qualification.
-- Follow-up: Commit/push, exact-stage the checkpoint on both VMs, run complete package lanes, retain secret-free evidence, clean temporary state, then add the same gate to the pending matched macOS package lane.
+- Commands/tests: A real current local daemon exercise uses exactly five provider calls and passes all surfaces; forced daemon restart passes provider-free verification. Exact harness commit `62e8a1d4d73aa0c93e6b1303c9bfbd124439f7c9` was sealed into a 2,615,287-byte bundle, SHA-256 `178692F4F99893AE79E8C942F1DB785B40843DBEED9FFE4B8931B9C4FD5B18E3`, independently verified and cleanly checked out on both VMs. Complete non-GUI installed-package lanes pass against the manifest-bound `8f50b99` Windows/Linux packages.
+- Result: Windows and Ubuntu produce byte-identical exercise SHA-256 `AE5C5E375250388FFAA8A177DF7A9248A37BBE5BA710251F2AA5739C1B0E7E7B` and restart SHA-256 `A7527CBFC24668B17D541E4D56B06C21A7F15A902EE74B364C48F2B697E56982`. Both prove direct REST discovery, buffered/streaming Responses, Chat Completions, a complete MCP task/evaluator lifecycle, exact replay, three content-free proxy conversations, encrypted restore, restart, and provider-free MCP recovery. Windows package log SHA-256 is `550FCF3B3617C62B56B7E2052CC49C29BF1DE0D826488AF973FB02AFB2DAADA0`; Ubuntu is `0A154EB68F306B947F9AED8C92876BB4C1B02BE3C740C050A705F2A29ADFB8D6`. Secret-free evidence is under `qualification-evidence/20260820-installed-interface-success/`.
+- Cleanup/follow-up: The private prompt marker and credentials are absent from retained evidence. Both credential-bearing UAT roots, temporary bundle/clones, and the local fixture were removed; shared packages remain and final audits show zero candidate processes/listeners/registrations. Add the same gate to the pending matched macOS package lane; no GitHub-hosted compute ran.
 
 ### 2026-08-20 - Installed memory-transfer gate passes Windows and Ubuntu packages
 

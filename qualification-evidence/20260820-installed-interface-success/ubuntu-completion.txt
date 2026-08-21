@@ -1,0 +1,2 @@
+0a154eb68f306b947f9aed8c92876bb4c1b02be3c740c050a705f2a29adfb8d6  /home/hendo420/mcg-62e8a1d-harness/linux-package-interface-success.log
+EXIT_CODE=0
