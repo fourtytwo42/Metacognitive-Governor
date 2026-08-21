@@ -18,7 +18,7 @@ dmg="${2:-$repository_root/target/release/bundle/dmg/MCG_0.1.0_${bundle_arch}.dm
 
 [[ -d "$source_app" ]] || { echo "Missing app bundle: $source_app" >&2; exit 1; }
 [[ -f "$dmg" ]] || { echo "Missing disk image: $dmg" >&2; exit 1; }
-for command in codesign curl ditto hdiutil lsof node open pgrep plutil python3 screencapture sips spctl xcrun; do
+for command in codesign curl ditto hdiutil lsof node npm open pgrep plutil python3 screencapture sips spctl xcrun; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
 

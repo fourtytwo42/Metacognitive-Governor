@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - Final macOS package lane prepared at remote-desktop boundary
+
+- Context: The shared installed-provider success gate next needs the final macOS installed/native lane. Chrome Remote Desktop confirms `macOS-VM` is online and staged at its PIN prompt, while the former temporary SSH endpoint at `192.168.50.158` no longer responds.
+- Decision/files: `scripts/test-macos-packages.sh` now explicitly requires npm as well as Node because its discovered-project success condition executes `npm run test`; packaging invariants and documentation enforce the dependency.
+- Commands/tests: Native Git Bash syntax, packaging validation, documentation validation, and diff hygiene pass locally.
+- Result: The macOS harness is ready for an exact checkpoint and transfer. No PIN, password, key, or token was retained.
+- Follow-up: After the browser-required action-time confirmation to transmit the CRD PIN, connect, restore an unattended terminal path, exact-stage the checkpoint, and run installed/native macOS qualification.
+
 ### 2026-08-20 - Installed provider-backed CLI success passes Windows and Ubuntu packages
 
 - Context: Installed-package UAT previously proved human/JSON/NDJSON behavior only for honest missing-provider outcomes; successful worker-plus-Evaluator work remained source-only.
@@ -1501,9 +1509,9 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Continue the final matched macOS and remaining dependency-ordered M10/M12/release gates after sealing successful installed-provider Windows/Linux package evidence.
+- Current task: Run the final matched macOS installed/native package lane after sealing successful installed-provider Windows/Linux evidence; the CRD session is online and staged at its PIN prompt.
 - Last meaningful change: Private checkpoint `604c4f99dae95be1bfafb39c936ac9b27263fbb3` is pushed and matches origin. Its shared installed-provider verifier and Windows/Linux/macOS harness integration passed complete Windows and Ubuntu package lanes with three successful CLI modes, per-task evaluator/governed-command evidence, encrypted restore, restart, and provider-free replay; secret-free evidence is retained and exact current VM roots are removed.
-- Next step: Run the shared success gate with schema-34 sharing/browser corrections in the final matched macOS installed/native candidate, then continue remaining release-signing/updater gates. Repeat the two-hour daemon soak only if the final daemon identity changes.
+- Next step: Receive the browser-required action-time confirmation to transmit the macOS CRD PIN, restore unattended terminal access, and run the shared success gate with schema-34 sharing/browser corrections in the final matched macOS installed/native candidate. Then continue remaining release-signing/updater gates. Repeat the two-hour daemon soak only if the final daemon identity changes.
 - Blockers: No discretionary VM permission is outstanding; the owner reconfirmed standing authority for all in-scope administration and qualification on the disposable VMs. Execute installs, administrator prompts, transfers, restarts, tests, browser/desktop interaction, trust changes, and temporary cleanup directly without asking or waiting. If one interaction is genuinely automation-inaccessible, treat it as a technical constraint, try another in-scope route, and continue every independent lane; contact the owner only for an unavoidable identity-bound external-account action, never for redundant VM permission. Exact-v34 disposable updater trust has already been removed and fresh ordinary HTTPS distrust proven. Trusted production signing/notarization identities and unavoidable owner-account OAuth remain external release gates. Credentials are intentionally not retained here.
 - Win11 operations: `ssh mcg-win11-vm` is the qualified key-only administrative path for terminal/build/test/transfer work at `192.168.50.238`; Chrome Remote Desktop remains the GUI/UAT path. The SSH service and key transfer survived an actual reboot, so routine non-GUI work should no longer wait on browser interaction.
 - Extended verification: Exact-v27 matched two-hour/10,000-task crash-recovery lanes were freshly reverified on Windows and Ubuntu with the identical repository verifier hash, exact recovery, passing database/schema checks, and zero residual candidate processes/temp roots. Earlier one-hour lanes remain historical evidence only; the final matched multi-hour gate is closed for v27 and must repeat only if the final daemon identity changes.
