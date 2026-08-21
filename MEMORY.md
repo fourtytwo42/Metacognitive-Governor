@@ -52,7 +52,7 @@ Durable project context lives here. Update this file whenever information should
 ### 2026-08-21 - macOS Chrome Remote Desktop restored
 
 - Context: The owner repaired the `macOS-VM` Chrome Remote Desktop connection.
-- Result: Live in-app-browser verification reached the macOS desktop and captured a current interactive frame; the VM is available again for GUI-operated qualification.
+- Result: Live in-app-browser verification reached the macOS desktop and captured a current interactive frame; a later 2026-08-21 check reconfirmed the host online and the named session reaching its PIN boundary. Key-only SSH also remains healthy, with the preserved OAuth desktop/service processes still alive and port 7777 still listening. The VM is available again for GUI-operated qualification.
 - Follow-up: Use the restored VM for the remaining macOS native accessibility, normal OpenAI OAuth, package, and final signed/notarized-candidate UAT lanes. Prefer the already established key-only SSH path for unattended command/build work and Chrome Remote Desktop for GUI evidence.
 
 ### 2026-08-21 - Exact Linux native accessibility package lane passes
