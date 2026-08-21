@@ -231,6 +231,31 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 .scheduler-notification { border-left: 3px solid #42d9c8; }
 .scheduler-notification.severity-warning { border-left-color: #f3b95f; }
 .scheduler-notification.severity-high { border-left-color: #ff7085; }
+.scheduled-simple-layout { display: grid; gap: 20px; }
+.scheduled-chat-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr)) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 22px;
+  border: 1px solid #383838;
+  border-radius: 14px;
+  background: #1b1b1b;
+}
+.scheduled-chat-card > div:first-child, .scheduled-prompt-field { grid-column: 1 / -1; }
+.scheduled-chat-card h3, .scheduled-chat-card p { margin: 0; }
+.scheduled-chat-card p { margin-top: 6px; color: #aaa; line-height: 1.5; }
+.scheduled-chat-card label, .scheduled-field { display: grid; gap: 7px; color: #bdbdbd; font-size: .82rem; }
+.scheduled-prompt-field textarea { min-height: 84px; }
+.scheduled-local-note { margin: -7px 4px 0; color: #909090; font-size: .82rem; line-height: 1.5; }
+.scheduled-inbox-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 4px; }
+.scheduled-search { flex: 1 1 260px; }
+.scheduled-search input { width: 100%; }
+.scheduled-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.scheduled-filters button[aria-pressed="true"] { border-color: #686868; color: #fff; background: #3a3a3a; }
+.scheduled-inbox-card { align-items: flex-start; }
+.scheduled-inbox-card > div:first-child { min-width: 0; }
+.scheduled-inbox-card p { color: #c5c5c5; line-height: 1.45; }
 .sites-simple-layout { display: grid; gap: 24px; }
 .site-start-card {
   display: grid;
@@ -619,6 +644,8 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
   .simple-mode .hero-card { margin-top: 2vh; }
   .code-review-start-card { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .code-review-intro, .code-review-custom { grid-column: 1 / -1; }
+  .scheduled-chat-card { grid-template-columns: 1fr; align-items: stretch; }
+  .scheduled-chat-card > div:first-child, .scheduled-prompt-field { grid-column: auto; }
 }
 
 @media (max-width: 700px) {

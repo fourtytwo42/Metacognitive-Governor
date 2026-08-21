@@ -269,6 +269,14 @@ function freshPlatformSessionId(): string {
 }
 
 type CodeReviewScope = "branch" | "uncommitted" | "commit" | "custom";
+type ScheduleFilter = "all" | "enabled" | "paused" | "completed";
+
+const SCHEDULE_FILTERS: Array<[ScheduleFilter, string]> = [
+  ["all", "All"],
+  ["enabled", "Active"],
+  ["paused", "Paused"],
+  ["completed", "Completed"]
+];
 
 const CODE_REVIEW_GOAL_PREFIX = "Review code changes";
 
@@ -577,6 +585,10 @@ export function App() {
   const [scheduleId, setScheduleId] = useState(freshScheduleId);
   const [scheduleName, setScheduleName] = useState("");
   const [scheduleGoal, setScheduleGoal] = useState("");
+  const [scheduleSetupPrompt, setScheduleSetupPrompt] = useState("");
+  const [scheduleSearch, setScheduleSearch] = useState("");
+  const [scheduleFilter, setScheduleFilter] = useState<ScheduleFilter>("all");
+  const [scheduleDestination, setScheduleDestination] = useState<"standalone" | "chat">("standalone");
   const [scheduleKind, setScheduleKind] = useState<ScheduleTrigger["kind"]>("interval");
   const [scheduleDetail, setScheduleDetail] = useState("3600");
   const [scheduleSecondary, setScheduleSecondary] = useState("30");
@@ -2130,6 +2142,40 @@ export function App() {
     } catch (error) {
       setScheduleError(errorMessage(error));
     }
+  }
+
+  async function acknowledgeAllNotifications() {
+    if (scheduleNotifications.length === 0) return;
+    setScheduleBusy(true);
+    setScheduleError(null);
+    try {
+      await Promise.all(scheduleNotifications.map((notification) => acknowledgeSchedulerNotification(notification.id)));
+      setScheduleNotifications([]);
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  function startScheduleChat() {
+    if (!selectedProject) {
+      setScheduleError("Choose a project before setting up scheduled work.");
+      return;
+    }
+    const projectName = selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1) ?? selectedProject.root;
+    const requestedWork = scheduleSetupPrompt.trim() || "Help me decide what recurring work would be useful for this project.";
+    const destination = scheduleDestination === "chat"
+      ? "Return to this setup chat on each run so the work keeps its conversation context."
+      : "Start a separate chat for each run so every result is independent and appears in Scheduled.";
+    setSelectedChatId(null);
+    setTaskGoal(`Set up scheduled work for ${projectName}. Requested work: ${requestedWork} ${destination} First explain the unattended security boundary, then interview me for the exact cadence, stopping conditions, and permissions. Help me test and refine the prompt before enabling it. Use the narrowest access that can succeed. If this build cannot create the final schedule from chat yet, give me a complete reviewable schedule proposal and state that limitation clearly.`);
+    setTaskConstraints("");
+    setTaskSuccess("");
+    setTaskError(null);
+    setScheduleError(null);
+    navigateSurface("tasks");
+    window.requestAnimationFrame(() => goalInputRef.current?.focus());
   }
 
   function scheduleTriggerLabel(trigger: ScheduleTrigger): string {
@@ -3937,11 +3983,94 @@ export function App() {
         </section>
 
         <section className="panel scheduler-panel" id="scheduler" aria-label="Scheduler">
+          {!advanced ? <>
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">SCHEDULED</p>
+                <h2>Scheduled tasks</h2>
+                <p className="muted">Set up recurring work in chat, then review runs and anything that needs attention here.</p>
+              </div>
+              <span className="count-badge">{schedules.filter((schedule) => schedule.state === "enabled").length} active</span>
+            </div>
+            <div className="scheduled-simple-layout">
+              <div className="scheduled-chat-card">
+                <div>
+                  <h3>What should MCG do on a schedule?</h3>
+                  <p>Describe the work. MCG will help refine the prompt, cadence, destination, and permissions before it runs unattended.</p>
+                </div>
+                <div className="scheduled-field">
+                  <span>Project</span>
+                  <select aria-label="Scheduled project" value={selectedProject?.project_id ?? ""} onChange={(event) => {
+                    setSelectedProject(projects.find((project) => project.project_id === event.target.value) ?? null);
+                    setScheduleError(null);
+                  }}>
+                    <option value="">Choose a project</option>
+                    {projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                  </select>
+                </div>
+                <label className="scheduled-prompt-field">
+                  <span>Scheduled work</span>
+                  <textarea value={scheduleSetupPrompt} onChange={(event) => setScheduleSetupPrompt(event.target.value)} placeholder="For example: summarize important project changes every weekday morning" />
+                </label>
+                <label>
+                  <span>Each run</span>
+                  <select value={scheduleDestination} onChange={(event) => setScheduleDestination(event.target.value as "standalone" | "chat")}>
+                    <option value="standalone">Starts a new chat</option>
+                    <option value="chat">Returns to this chat</option>
+                  </select>
+                </label>
+                <button className="primary" type="button" disabled={!selectedProject} onClick={startScheduleChat}>Set up in chat</button>
+              </div>
+              <p className="scheduled-local-note">Local project schedules need this computer on, MCG running, and the project available. They currently run in the selected project; dedicated Git worktree isolation is planned.</p>
+              {scheduleError && <p className="error-message" role="alert">{scheduleError}</p>}
+              <div className="scheduled-inbox-toolbar">
+                <label className="scheduled-search">
+                  <span className="sr-only">Search scheduled tasks</span>
+                  <input aria-label="Search scheduled tasks" value={scheduleSearch} onChange={(event) => setScheduleSearch(event.target.value)} placeholder="Search scheduled tasks" />
+                </label>
+                <div className="scheduled-filters" aria-label="Schedule filters">
+                  {SCHEDULE_FILTERS.map(([filter, label]) => <button className="secondary" type="button" aria-pressed={scheduleFilter === filter} onClick={() => setScheduleFilter(filter)} key={filter}>{label}</button>)}
+                </div>
+                {scheduleNotifications.length > 0 && <button className="link-button" type="button" disabled={scheduleBusy} onClick={acknowledgeAllNotifications}>Mark all as read</button>}
+              </div>
+              {scheduleNotifications.length > 0 && <div className="notification-list" aria-label="Scheduler notifications">
+                <h3>Needs attention</h3>
+                {scheduleNotifications.map((notification) => <article className={`scheduler-notification severity-${notification.severity}`} key={notification.id}>
+                  <div><strong>{notification.title}</strong><p>{notification.detail}</p></div>
+                  <button className="link-button" type="button" onClick={() => acknowledgeNotification(notification.id)}>Mark as read</button>
+                </article>)}
+              </div>}
+              <div className="schedule-list" aria-label="Scheduled task inbox">
+                {schedules.filter((schedule) => (scheduleFilter === "all" || schedule.state === scheduleFilter) && `${schedule.name} ${schedule.goal}`.toLowerCase().includes(scheduleSearch.trim().toLowerCase())).length === 0
+                  ? <div className="site-empty-state"><strong>No scheduled tasks found</strong><span>Set up recurring work in chat or change the filters.</span></div>
+                  : schedules.filter((schedule) => (scheduleFilter === "all" || schedule.state === scheduleFilter) && `${schedule.name} ${schedule.goal}`.toLowerCase().includes(scheduleSearch.trim().toLowerCase())).map((schedule) => <article className="schedule-card scheduled-inbox-card" key={schedule.id}>
+                    <div>
+                      <span className={`task-state state-${schedule.state}`}>{schedule.state === "enabled" ? "active" : schedule.state}</span>
+                      <h3>{schedule.name}</h3>
+                      <p>{schedule.goal}</p>
+                      <small>{scheduleTriggerLabel(schedule.trigger)}{schedule.next_run_at ? ` · Next ${new Date(schedule.next_run_at).toLocaleString()}` : ""}</small>
+                      <small>{projects.find((project) => project.project_id === schedule.project_id)?.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "Project unavailable"}</small>
+                      {scheduleHistory[schedule.id] && <ol className="occurrence-list">
+                        {scheduleHistory[schedule.id]!.occurrences.map((occurrence) => <li key={occurrence.id}>
+                          <span>{occurrence.state.replaceAll("_", " ")}</span>
+                          <time>{new Date(occurrence.due_at).toLocaleString()}</time>
+                          {occurrence.detail && <small>{occurrence.detail}</small>}
+                        </li>)}
+                      </ol>}
+                    </div>
+                    <div className="task-actions">
+                      {schedule.state === "enabled" ? <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "paused")}>Pause</button> : schedule.state === "paused" && <button className="primary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "enabled")}>Resume</button>}
+                      <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => toggleScheduleHistory(schedule.id)}>{scheduleHistory[schedule.id] ? "Hide runs" : "Recent runs"}</button>
+                    </div>
+                  </article>)}
+              </div>
+            </div>
+          </> : <>
           <div className="section-heading">
             <div>
-              <p className="eyebrow">SCHEDULER</p>
-              <h2>Unattended work</h2>
-              <p className="muted">Schedules survive restarts and pause safely for permission or budget.</p>
+              <p className="eyebrow">ADVANCED SCHEDULER</p>
+              <h2>Scheduler administration</h2>
+              <p className="muted">Create exact triggers and inspect durable restart, permission, budget, and occurrence state.</p>
             </div>
             <span className="count-badge">{schedules.filter((schedule) => schedule.state === "enabled").length} active</span>
           </div>
@@ -3955,17 +4084,7 @@ export function App() {
                 Scheduled goal
                 <textarea value={scheduleGoal} onChange={(event) => setScheduleGoal(event.target.value)} placeholder="Check the project and fix verified problems" />
               </label>
-              {!advanced ? <label>
-                Repeat
-                <select value={scheduleDetail} onChange={(event) => {
-                  setScheduleKind("interval");
-                  setScheduleDetail(event.target.value);
-                }}>
-                  <option value="900">Every 15 minutes</option>
-                  <option value="3600">Every hour</option>
-                  <option value="86400">Every day</option>
-                </select>
-              </label> : <div className="scheduler-advanced">
+              <div className="scheduler-advanced">
                 <label>
                   Trigger
                   <select value={scheduleKind} onChange={(event) => {
@@ -4023,7 +4142,7 @@ export function App() {
                   Model call limit
                   <input type="number" min="1" value={scheduleModelCalls} onChange={(event) => setScheduleModelCalls(event.target.value)} />
                 </label>
-              </div>}
+              </div>
               <div className="composer-actions">
                 <span className="muted">{selectedProject ? `Project: ${selectedProject.root.split(/[\\/]/).filter(Boolean).at(-1)}` : "Select a project above"}</span>
                 <button className="primary" type="button" disabled={scheduleBusy || !selectedProject} onClick={addSchedule}>
@@ -4047,7 +4166,7 @@ export function App() {
                     <h3>{schedule.name}</h3>
                     <p>{scheduleTriggerLabel(schedule.trigger)}</p>
                     {schedule.next_run_at && <small>Next: {new Date(schedule.next_run_at).toLocaleString()}</small>}
-                    {advanced && <><code>{schedule.id}</code><small>{schedule.goal}</small></>}
+                    <code>{schedule.id}</code><small>{schedule.goal}</small>
                     {scheduleHistory[schedule.id] && <ol className="occurrence-list">
                       {scheduleHistory[schedule.id]!.occurrences.map((occurrence) => <li key={occurrence.id}>
                         <span>{occurrence.state.replaceAll("_", " ")}</span>
@@ -4058,14 +4177,16 @@ export function App() {
                   </div>
                   <div className="task-actions">
                     {schedule.state === "enabled" ? <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "paused")}>Pause</button> : schedule.state === "paused" && <button className="primary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "enabled")}>Resume</button>}
-                    {advanced && schedule.state !== "completed" && <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => requestScheduleWake(schedule.id)}>Wake now</button>}
+                    {schedule.state !== "completed" && <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => requestScheduleWake(schedule.id)}>Wake now</button>}
                     <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => toggleScheduleHistory(schedule.id)}>{scheduleHistory[schedule.id] ? "Hide history" : "History"}</button>
-                    {advanced && schedule.state !== "completed" && <button className="link-button" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "completed")}>Remove</button>}
+                    {schedule.state !== "completed" && <button className="link-button" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "completed")}>Remove</button>}
                   </div>
                 </article>)}
               </div>
             </div>
           </div>
+          <p className="integration-note">Advanced RFC 5545 recurrence rules, multi-project schedules, dedicated worktrees, and explicit model/reasoning selection remain product work. Existing schedules retain their durable local execution and restart-recovery contract.</p>
+          </>}
         </section>
 
         <section className="panel provider-panel" id="providers">

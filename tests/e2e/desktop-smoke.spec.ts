@@ -329,7 +329,12 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   const ownerMenu = await openOwnerMenu(page);
   await ownerMenu.getByRole("button", { name: "Simple mode" }).click();
   await page.getByRole("link", { name: "Scheduled", exact: true }).click();
-  await expect(scheduler.getByLabel("Repeat")).toHaveValue("3600");
+  await expect(scheduler.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
+  await expect(scheduler.getByRole("button", { name: "Set up in chat" })).toBeVisible();
+  await expect(scheduler.getByLabel("Trigger")).toHaveCount(0);
+  await scheduler.getByLabel("Scheduled work").fill("Summarize important project changes every morning");
+  await scheduler.getByRole("button", { name: "Set up in chat" }).click();
+  await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Summarize important project changes every morning/);
 });
 
 test("simple and advanced interfaces meet the WCAG A and AA accessibility baseline", async ({ page }) => {

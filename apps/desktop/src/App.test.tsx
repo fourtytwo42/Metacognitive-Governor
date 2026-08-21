@@ -1260,7 +1260,7 @@ test("advanced Sites registers a selected project and records governed health", 
   expect(await within(panel).findByRole("button", { name: "Resume monitoring" })).toBeVisible();
 });
 
-test("simple scheduler creates restart-safe recurring work for a selected project", async () => {
+test("simple Scheduled starts a project-aware setup chat and Advanced retains exact scheduling", async () => {
   const project = {
     id: "00000000-0000-4000-8000-000000000021",
     project_id: "00000000-0000-4000-8000-000000000022",
@@ -1279,7 +1279,7 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
     name: "Hourly health check",
     project_id: project.project_id,
     goal: "Check project health",
-    trigger: { kind: "interval", seconds: 3600 },
+    trigger: { kind: "cron", expression: "0 2 * * *" },
     state: "enabled",
     next_run_at: "2026-08-14T01:00:00Z",
     created_at: "2026-08-14T00:00:00Z",
@@ -1289,13 +1289,21 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
   client.createSchedule.mockResolvedValue(schedule);
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
-  const scheduler = screen.getByRole("region", { name: "Scheduler" });
+  const scheduler = await screen.findByRole("region", { name: "Scheduler" });
+  expect(within(scheduler).getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
+  expect(within(scheduler).queryByLabelText("Trigger")).not.toBeInTheDocument();
+  fireEvent.change(within(scheduler).getByLabelText("Scheduled project"), { target: { value: project.project_id } });
+  fireEvent.change(within(scheduler).getByLabelText("Scheduled work"), { target: { value: "Summarize important changes every morning" } });
+  fireEvent.change(within(scheduler).getByLabelText("Each run"), { target: { value: "chat" } });
+  fireEvent.click(within(scheduler).getByRole("button", { name: "Set up in chat" }));
+  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Summarize important changes every morning");
+  expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Return to this setup chat on each run");
+
   await enableAdvancedMode();
+  expect(within(scheduler).getByRole("heading", { name: "Scheduler administration" })).toBeVisible();
   fireEvent.change(within(scheduler).getByLabelText("Trigger"), { target: { value: "cron" } });
   expect(within(scheduler).getByLabelText("Five-field cron")).toHaveValue("0 2 * * *");
-  await enableSimpleMode();
-  expect(within(scheduler).getByLabelText("Repeat")).toHaveValue("3600");
   fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: schedule.name } });
   fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: schedule.goal } });
   fireEvent.click(within(scheduler).getByRole("button", { name: "Create schedule" }));
@@ -1304,7 +1312,7 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
   expect(client.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
     schedule_id: expect.any(String),
     project_id: project.project_id,
-    trigger: { kind: "interval", seconds: 3600 },
+    trigger: { kind: "cron", expression: "0 2 * * *" },
     budget: {
       max_tokens: 32768,
       max_cost_usd: undefined,
@@ -1312,6 +1320,43 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
     },
     max_model_calls: 16
   }));
+});
+
+test("simple Scheduled is an inbox for filtered tasks and unread findings", async () => {
+  const base = {
+    schema_version: 1,
+    definition_hash: "fixture-definition",
+    project_id: "00000000-0000-4000-8000-000000000722",
+    goal: "Inspect the project and report important findings",
+    trigger: { kind: "interval", seconds: 86400 },
+    created_at: "2026-08-21T00:00:00Z",
+    updated_at: "2026-08-21T00:00:00Z"
+  };
+  const schedules = [
+    { ...base, id: "00000000-0000-4000-8000-000000000723", name: "Daily project brief", state: "enabled", next_run_at: "2026-08-22T08:00:00Z" },
+    { ...base, id: "00000000-0000-4000-8000-000000000724", name: "Paused dependency check", state: "paused" },
+    { ...base, id: "00000000-0000-4000-8000-000000000725", name: "Finished migration watch", state: "completed" }
+  ];
+  const notifications = [
+    { id: "00000000-0000-4000-8000-000000000726", schedule_id: schedules[0].id, severity: "warning", title: "Review new findings", detail: "The latest run found a regression.", read: false, created_at: "2026-08-21T01:00:00Z" },
+    { id: "00000000-0000-4000-8000-000000000727", schedule_id: schedules[1].id, severity: "info", title: "Schedule paused", detail: "The schedule needs input.", read: false, created_at: "2026-08-21T02:00:00Z" }
+  ];
+  client.listSchedules.mockResolvedValue({ schedules });
+  client.listSchedulerNotifications.mockResolvedValue({ notifications });
+  client.acknowledgeSchedulerNotification.mockImplementation(async (id) => ({ ...notifications.find((item) => item.id === id)!, read: true }));
+  render(<App />);
+
+  const scheduler = await screen.findByRole("region", { name: "Scheduler" });
+  expect(within(scheduler).getByRole("heading", { name: "Daily project brief" })).toBeVisible();
+  expect(within(scheduler).getByRole("heading", { name: "Needs attention" })).toBeVisible();
+  fireEvent.click(within(scheduler).getByRole("button", { name: "Paused" }));
+  expect(within(scheduler).queryByRole("heading", { name: "Daily project brief" })).not.toBeInTheDocument();
+  expect(within(scheduler).getByRole("heading", { name: "Paused dependency check" })).toBeVisible();
+  fireEvent.change(within(scheduler).getByLabelText("Search scheduled tasks"), { target: { value: "missing" } });
+  expect(within(scheduler).getByText("No scheduled tasks found")).toBeVisible();
+  fireEvent.click(within(scheduler).getByRole("button", { name: "Mark all as read" }));
+  await waitFor(() => expect(client.acknowledgeSchedulerNotification).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(within(scheduler).queryByRole("heading", { name: "Needs attention" })).not.toBeInTheDocument());
 });
 
 test("platform reservation stays truthful and reuses identity after an uncertain failure", async () => {
@@ -1542,6 +1587,7 @@ test("scheduler retries reuse one identity and rotate it only after success", as
 
   fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
   const scheduler = screen.getByRole("region", { name: "Scheduler" });
+  await enableAdvancedMode();
   fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: completed.name } });
   fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: completed.goal } });
   const create = within(scheduler).getByRole("button", { name: "Create schedule" });
