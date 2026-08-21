@@ -243,6 +243,13 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-proje
   --token-file "$service_data/local-auth-token" \
   --cli "$installed_app/Contents/MacOS/mcg" --project "$real_project" \
   --state "$uat_root/real-project-state.json" --output "$uat_root/real-project.json"
+real_api_project="$uat_root/real-api-project"
+mkdir -p "$real_api_project"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-api-project.py" \
+  --mode exercise --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" --project "$real_api_project" \
+  --state "$uat_root/real-api-state.json" --output "$uat_root/real-api-project.json"
 env HOME="$uat_home" "${cli[@]}" backup create --json >"$uat_root/backup.json"
 
 node --input-type=module - "http://127.0.0.1:$service_port/mcp" "$service_data/local-auth-token" "$uat_root/mcp.json" <<'NODE'
@@ -316,6 +323,12 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-proje
   --cli "$installed_app/Contents/MacOS/mcg" --project "$real_project" \
   --state "$uat_root/real-project-state.json" \
   --output "$uat_root/real-project-restart.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-api-project.py" \
+  --mode verify --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" --project "$real_api_project" \
+  --state "$uat_root/real-api-state.json" \
+  --output "$uat_root/real-api-project-restart.json"
 stop_process "$restarted_service_pid"
 background_pids=()
 
@@ -386,6 +399,8 @@ PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
 PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
 REAL_PROJECT_REPORT=$uat_root/real-project.json
 REAL_PROJECT_RESTART_REPORT=$uat_root/real-project-restart.json
+REAL_API_PROJECT_REPORT=$uat_root/real-api-project.json
+REAL_API_PROJECT_RESTART_REPORT=$uat_root/real-api-project-restart.json
 DESKTOP_SCREENSHOT=$uat_root/desktop.png
 EXTERNAL_CAPTURE_REQUEST=${external_capture_request:-none}
 DATA_RETAINED=true

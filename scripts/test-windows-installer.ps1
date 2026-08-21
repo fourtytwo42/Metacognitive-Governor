@@ -407,6 +407,13 @@ try {
         --token-file $tokenFile --cli $cli --project $realProject `
         --state $realProjectState --output (Join-Path $uatRoot "real-project.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed representative website project verification failed." }
+    $realApiVerifier = Join-Path $PSScriptRoot "test-installed-real-api-project.py"
+    $realApiProject = Join-Path $uatRoot "real-api-project"
+    $realApiState = Join-Path $uatRoot "real-api-state.json"
+    & $python $realApiVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $realApiProject `
+        --state $realApiState --output (Join-Path $uatRoot "real-api-project.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed representative JSON API project verification failed." }
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
@@ -518,6 +525,10 @@ try {
         --token-file $tokenFile --cli $cli --project $realProject `
         --state $realProjectState --output (Join-Path $uatRoot "real-project-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed representative website evidence did not survive daemon restart." }
+    & $python $realApiVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $realApiProject `
+        --state $realApiState --output (Join-Path $uatRoot "real-api-project-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed representative JSON API evidence did not survive daemon restart." }
     $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 
@@ -598,6 +609,8 @@ try {
         InterfaceSuccessRestartReport = Join-Path $uatRoot "interface-success-restart.json"
         RealProjectReport = Join-Path $uatRoot "real-project.json"
         RealProjectRestartReport = Join-Path $uatRoot "real-project-restart.json"
+        RealApiProjectReport = Join-Path $uatRoot "real-api-project.json"
+        RealApiProjectRestartReport = Join-Path $uatRoot "real-api-project-restart.json"
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }

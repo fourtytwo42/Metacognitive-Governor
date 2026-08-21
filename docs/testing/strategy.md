@@ -339,6 +339,17 @@ The macOS harness gives an external Chrome Remote Desktop capture ten minutes by
 default (`MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS`, bounded to 30–1800)
 so the operator can maximize and privacy-review the frame before it becomes
 retained evidence; a missing capture still fails closed.
+`scripts/test-installed-real-api-project.py` adds a distinct local-service project
+to the same package boundary. The seeded Node regression must fail before work;
+the installed agent then creates a validated ledger domain, bounded loopback JSON
+server, and regression suite through three governed writes. The harness requires
+the discovered test and independent Evaluator to pass, launches the generated
+server, and proves health, two mutations, exact category totals, invalid-entry
+rejection, a 32 KiB body bound, unknown-route rejection, and listener teardown.
+The provider is removed before replay. After encrypted restore and daemon restart,
+the project bytes and audit must be unchanged, replay must remain provider-free and
+side-effect-free, and the complete runtime HTTP transcript digest must match.
+Every package harness invokes and reports both phases.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected
