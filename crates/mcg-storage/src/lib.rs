@@ -24,6 +24,7 @@ mod backup;
 mod backup_secrets;
 mod experiments;
 mod mcp;
+mod organization_sharing;
 mod platform;
 mod plugins;
 mod providers;
@@ -61,7 +62,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 33;
+pub const STORAGE_SCHEMA_VERSION: i64 = 34;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1197,6 +1198,65 @@ BEFORE DELETE ON reviewed_topology_plans BEGIN
 END;
 ";
 
+const MIGRATION_34: &str = r"
+CREATE TABLE IF NOT EXISTS organization_publishers (
+    publisher_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    publisher_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS organization_publishers_state_id
+    ON organization_publishers(state, publisher_id);
+CREATE TRIGGER IF NOT EXISTS organization_publishers_no_delete
+BEFORE DELETE ON organization_publishers BEGIN
+    SELECT RAISE(FAIL, 'organization publisher trust history cannot be deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS organization_publishers_monotonic_update
+BEFORE UPDATE ON organization_publishers
+WHEN NEW.publisher_id <> OLD.publisher_id
+  OR NEW.revision <> OLD.revision + 1
+  OR OLD.state = 'revoked'
+  OR NEW.created_at <> OLD.created_at
+BEGIN
+    SELECT RAISE(ABORT, 'organization publisher trust may only advance monotonically');
+END;
+
+CREATE TABLE IF NOT EXISTS organization_share_reviews (
+    review_id TEXT PRIMARY KEY,
+    package_sha256 TEXT NOT NULL,
+    publisher_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    import_id TEXT UNIQUE,
+    organization_id TEXT UNIQUE,
+    review_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(publisher_id) REFERENCES organization_publishers(publisher_id),
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id)
+);
+CREATE INDEX IF NOT EXISTS organization_share_reviews_state_time
+    ON organization_share_reviews(state, created_at, review_id);
+CREATE INDEX IF NOT EXISTS organization_share_reviews_package
+    ON organization_share_reviews(package_sha256, created_at, review_id);
+CREATE TRIGGER IF NOT EXISTS organization_share_reviews_no_delete
+BEFORE DELETE ON organization_share_reviews BEGIN
+    SELECT RAISE(FAIL, 'organization share review history cannot be deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS organization_share_reviews_monotonic_update
+BEFORE UPDATE ON organization_share_reviews
+WHEN OLD.state <> 'pending'
+  OR NEW.state NOT IN ('imported', 'rejected')
+  OR NEW.review_id <> OLD.review_id
+  OR NEW.package_sha256 <> OLD.package_sha256
+  OR NEW.publisher_id <> OLD.publisher_id
+  OR NEW.created_at <> OLD.created_at
+BEGIN
+    SELECT RAISE(ABORT, 'organization share review may only resolve once');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1233,6 +1293,8 @@ pub enum StorageError {
     SshWorkflowNotFound(mcg_domain::SshWorkflowId),
     #[error("reviewed topology plan {0} was not found")]
     ReviewedTopologyPlanNotFound(mcg_domain::ReviewedTopologyPlanId),
+    #[error("organization share review {0} was not found")]
+    OrganizationShareReviewNotFound(mcg_domain::OrganizationShareReviewId),
     #[error("backup {0} was not found")]
     BackupNotFound(Uuid),
     #[error("plugin {0} was not found")]
@@ -1359,6 +1421,7 @@ impl SqliteEventStore {
             (31_i64, MIGRATION_31),
             (32_i64, MIGRATION_32),
             (33_i64, MIGRATION_33),
+            (34_i64, MIGRATION_34),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",

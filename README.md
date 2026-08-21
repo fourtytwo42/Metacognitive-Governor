@@ -36,6 +36,7 @@ Implementation planning:
 - [M3 tool and policy plane](docs/architecture/tool-policy-plane.md)
 - [M4 project intelligence and memory](docs/architecture/project-intelligence-memory.md)
 - [M5 agent organization and run evidence](docs/architecture/agent-organization.md)
+- [Signed organization sharing and publisher trust](docs/architecture/organization-sharing.md)
 - [M6 MCP boundary](docs/architecture/mcp.md)
 - [M8 platform capabilities and sessions](docs/architecture/platform-sessions.md)
 - [M8 Sites, deployment, and monitoring](docs/architecture/sites.md)
@@ -84,6 +85,9 @@ cargo run -p mcg-cli -- organization history ORGANIZATION_ID
 cargo run -p mcg-cli -- organization export REVISION_ID --output team.mcg-organization.json
 cargo run -p mcg-cli -- organization import team.mcg-organization.json --import-id REQUEST_UUID
 cargo run -p mcg-cli -- organization compare LEFT_REVISION_ID RIGHT_REVISION_ID
+cargo run -p mcg-cli -- organization publishers
+cargo run -p mcg-cli -- organization review-share signed-team.json
+cargo run -p mcg-cli -- organization import-share REVIEW_ID --reason "Reviewed for this project"
 cargo run -p mcg-cli -- stop
 ```
 
@@ -184,6 +188,15 @@ run's Evaluator instance. `mcg run get RUN` reads the ordinary durable run view;
 `mcg run replay RUN` verifies the task, pinned organization, plan graph,
 authority, usage, evaluations, results, events, and tool audit without dispatching
 a provider or tool. Add `--json` for the complete digest-bearing evidence report.
+
+Signed organization sharing is opt-in and review-first. `organization
+trust-publisher` pins one Ed25519 public key to exact canonical HTTPS registry
+origins; `review-share` verifies a package but does not import it. A separate
+`import-share` or `reject-share` action requires an owner reason, rechecks the
+current trust head, and retains durable digest evidence. Revocation is terminal,
+and imported organizations receive fresh local authority rather than inheriting
+publisher permissions. See the
+[sharing threat model](docs/architecture/organization-sharing.md).
 
 Durable unattended work is controlled with `mcg schedule` and the native
 Scheduler dashboard. One-time jobs accept an RFC 3339 timestamp; fixed intervals,

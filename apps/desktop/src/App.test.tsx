@@ -58,6 +58,13 @@ const client = vi.hoisted(() => ({
   exportOrganization: vi.fn(),
   importOrganization: vi.fn(),
   compareOrganizations: vi.fn(),
+  listOrganizationPublishers: vi.fn(),
+  trustOrganizationPublisher: vi.fn(),
+  revokeOrganizationPublisher: vi.fn(),
+  listOrganizationShareReviews: vi.fn(),
+  reviewSharedOrganization: vi.fn(),
+  importSharedOrganization: vi.fn(),
+  rejectSharedOrganization: vi.fn(),
   listSchedules: vi.fn(),
   createSchedule: vi.fn(),
   setScheduleState: vi.fn(),
@@ -177,6 +184,13 @@ vi.mock("./desktop-client", () => ({
   exportOrganization: client.exportOrganization,
   importOrganization: client.importOrganization,
   compareOrganizations: client.compareOrganizations,
+  listOrganizationPublishers: client.listOrganizationPublishers,
+  trustOrganizationPublisher: client.trustOrganizationPublisher,
+  revokeOrganizationPublisher: client.revokeOrganizationPublisher,
+  listOrganizationShareReviews: client.listOrganizationShareReviews,
+  reviewSharedOrganization: client.reviewSharedOrganization,
+  importSharedOrganization: client.importSharedOrganization,
+  rejectSharedOrganization: client.rejectSharedOrganization,
   listSchedules: client.listSchedules,
   createSchedule: client.createSchedule,
   setScheduleState: client.setScheduleState,
@@ -299,6 +313,13 @@ beforeEach(() => {
   client.exportOrganization.mockReset();
   client.importOrganization.mockReset();
   client.compareOrganizations.mockReset();
+  client.listOrganizationPublishers.mockReset();
+  client.trustOrganizationPublisher.mockReset();
+  client.revokeOrganizationPublisher.mockReset();
+  client.listOrganizationShareReviews.mockReset();
+  client.reviewSharedOrganization.mockReset();
+  client.importSharedOrganization.mockReset();
+  client.rejectSharedOrganization.mockReset();
   client.listSchedules.mockReset();
   client.createSchedule.mockReset();
   client.setScheduleState.mockReset();
@@ -386,6 +407,8 @@ beforeEach(() => {
   client.listProjectMemoryTransfers.mockResolvedValue({ transfers: [] });
   client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n" });
   client.listOrganizations.mockResolvedValue({ organizations: [] });
+  client.listOrganizationPublishers.mockResolvedValue([]);
+  client.listOrganizationShareReviews.mockResolvedValue([]);
   client.listApprovals.mockResolvedValue({ approvals: [] });
   client.listSchedules.mockResolvedValue({ schedules: [] });
   client.listSchedulerNotifications.mockResolvedValue({ notifications: [] });
@@ -773,6 +796,112 @@ test("organization portability is simple to duplicate and advanced to export imp
   fireEvent.click(within(panel).getByRole("button", { name: "Import as new organization" }));
   await waitFor(() => expect(client.importOrganization).toHaveBeenCalledTimes(3));
   expect(client.importOrganization.mock.calls[2][1]).not.toBe(firstDuplicateId);
+});
+
+test("signed organization sharing separates verification from owner import and exposes advanced trust controls", async () => {
+  const organization = {
+    schema_version: 2,
+    organization_id: "00000000-0000-4000-8000-0000000002a1",
+    revision_id: "00000000-0000-4000-8000-0000000002a2",
+    revision: 1,
+    name: "Verified website team",
+    roles: [],
+    relationships: [],
+    policy: { prefer_minimal_organization: true, max_parallel_agents: 4, max_total_agents: 8, max_organizational_overhead_ratio: 0.3, default_lease_seconds: 900 },
+    evaluation: { require_independent_evaluation: false, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+    created_at: "2026-08-20T00:00:00Z"
+  };
+  const portable = {
+    schema_version: 1,
+    source: { organization_id: organization.organization_id, revision_id: organization.revision_id, revision: 1, exported_at: organization.created_at },
+    definition: { name: organization.name, roles: [], relationships: [], policy: organization.policy, evaluation: organization.evaluation },
+    content_sha256: "a".repeat(64)
+  };
+  const organizationPackage = {
+    schema_version: 1,
+    registry: "https://organizations.example.com",
+    package: "verified-website-team",
+    publisher: "example-publisher",
+    portable,
+    signature: { scheme: "ed25519-v1", signature_base64: "c".repeat(88) }
+  };
+  const review = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-0000000002a3",
+    package: organizationPackage,
+    evidence: {
+      schema_version: 1,
+      registry: organizationPackage.registry,
+      package: organizationPackage.package,
+      publisher: organizationPackage.publisher,
+      publisher_key_sha256: "b".repeat(64),
+      portable_sha256: portable.content_sha256,
+      package_sha256: "c".repeat(64),
+      signature_sha256: "d".repeat(64)
+    },
+    state: "pending" as const,
+    created_at: organization.created_at,
+    updated_at: organization.created_at
+  };
+  const publisher = {
+    schema_version: 1,
+    id: organizationPackage.publisher,
+    display_name: "Example publisher",
+    public_key_base64: "e".repeat(44),
+    registries: [organizationPackage.registry],
+    state: "trusted" as const,
+    revision: 1,
+    reason: "Owner reviewed",
+    created_at: organization.created_at,
+    updated_at: organization.created_at
+  };
+  client.listOrganizationPublishers.mockResolvedValue([publisher]);
+  client.listOrganizationShareReviews.mockResolvedValueOnce([]).mockResolvedValue([review]);
+  client.reviewSharedOrganization.mockResolvedValue({ review, replayed: false, event: {} });
+  client.importSharedOrganization.mockResolvedValue({
+    review: { ...review, state: "imported", import_id: "00000000-0000-4000-8000-0000000002a4", organization_id: organization.organization_id, decision_reason: "Reviewed for this project" },
+    organization,
+    replayed: false,
+    events: []
+  });
+  client.trustOrganizationPublisher.mockResolvedValue({ publisher, replayed: true });
+  client.revokeOrganizationPublisher.mockResolvedValue({ publisher: { ...publisher, state: "revoked", revision: 2 }, replayed: false });
+  render(<App />);
+
+  const sharing = await screen.findByLabelText("Signed organization sharing");
+  fireEvent.change(within(sharing).getByLabelText("Signed organization package"), { target: { value: JSON.stringify(organizationPackage) } });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Verify for review" }));
+  await waitFor(() => expect(client.reviewSharedOrganization).toHaveBeenCalledWith(expect.any(String), organizationPackage));
+  expect(client.importSharedOrganization).not.toHaveBeenCalled();
+  expect(await within(sharing).findByText(organization.name)).toBeInTheDocument();
+  expect(within(sharing).getByText(review.evidence.publisher_key_sha256)).toBeInTheDocument();
+  expect(within(sharing).getByText(review.evidence.package_sha256)).toBeInTheDocument();
+  expect(within(sharing).getByRole("button", { name: "Import verified organization" })).toBeDisabled();
+  fireEvent.change(within(sharing).getByLabelText("Owner decision reason"), { target: { value: "Reviewed for this project" } });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Import verified organization" }));
+  await waitFor(() => expect(client.importSharedOrganization).toHaveBeenCalledWith(
+    review.id,
+    expect.any(String),
+    "Reviewed for this project",
+    undefined
+  ));
+
+  await enableAdvancedMode();
+  fireEvent.change(within(sharing).getByLabelText("Publisher identity"), { target: { value: publisher.id } });
+  fireEvent.change(within(sharing).getByLabelText("Display name"), { target: { value: publisher.display_name } });
+  fireEvent.change(within(sharing).getByLabelText("Ed25519 public key"), { target: { value: publisher.public_key_base64 } });
+  fireEvent.change(within(sharing).getByLabelText("Trusted organization registries"), { target: { value: publisher.registries[0] } });
+  fireEvent.change(within(sharing).getByLabelText("Owner trust or revocation reason"), { target: { value: "Rechecked exact registry and key" } });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Trust or revise publisher" }));
+  await waitFor(() => expect(client.trustOrganizationPublisher).toHaveBeenCalledWith(expect.objectContaining({
+    id: publisher.id,
+    expected_revision: publisher.revision,
+    registries: publisher.registries,
+    reason: "Rechecked exact registry and key"
+  })));
+  fireEvent.change(within(sharing).getByLabelText("Owner trust or revocation reason"), { target: { value: "Publisher relationship ended" } });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Revoke permanently" }));
+  await waitFor(() => expect(client.revokeOrganizationPublisher).toHaveBeenCalledWith(publisher.id, publisher.revision, "Publisher relationship ended"));
 });
 
 test("measured improvement stays simple by default and exposes controlled transitions in advanced mode", async () => {

@@ -61,6 +61,7 @@ domain_id!(MemoryClaimId);
 domain_id!(MemoryTransferId);
 domain_id!(OrganizationId);
 domain_id!(OrganizationImportId);
+domain_id!(OrganizationShareReviewId);
 domain_id!(OrganizationRevisionId);
 domain_id!(RoleId);
 domain_id!(AgentInstanceId);

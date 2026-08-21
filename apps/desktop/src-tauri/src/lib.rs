@@ -1,7 +1,7 @@
 use mcg_agents::{
     ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, OrganizationGenome,
-    PortableOrganizationComparison, PortableOrganizationGenome, ShadowExecutionReceipt,
-    SupervisionObservation,
+    OrganizationShareReview, PortableOrganizationComparison, PortableOrganizationGenome,
+    ShadowExecutionReceipt, SupervisionObservation, TrustedOrganizationPublisher,
 };
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
@@ -9,26 +9,29 @@ use mcg_api::{
     CorrectMemoryClaimRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
     CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
     CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DeploySiteRequest, DiscoverProjectRequest, ExperimentBenchmarkListResponse,
-    ExperimentDecisionListResponse, ExperimentListResponse, ImportOrganizationRequest,
-    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
-    OrganizationMutationResponse, PlatformSessionHistoryResponse, PlatformSessionListResponse,
-    PluginInvocationHistoryResponse, PluginListResponse, ProjectListResponse,
-    ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
-    ResolveApprovalRequest, ReviewedTopologyPlan, ReviewedTopologyPlanListResponse,
-    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SetPluginEnabledRequest, SetPluginGrantsRequest,
-    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
-    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
-    StartOpenAiOAuthRequest, SupervisionObservationListResponse, TaskEventsResponse,
-    TaskListResponse, TaskMutationResponse, ToolAuditResponse, TransferProjectMemoryRequest,
-    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest,
+    DecideSharedOrganizationRequest, DeploySiteRequest, DiscoverProjectRequest,
+    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationHistoryResponse, OrganizationListResponse, OrganizationMutationResponse,
+    OrganizationPublisherListResponse, OrganizationShareReviewListResponse,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
+    PluginListResponse, ProjectListResponse, ProjectMemoryTransferListResponse,
+    ProjectTopologyPlan, ProviderListResponse, ResolveApprovalRequest,
+    ReviewSharedOrganizationRequest, ReviewedTopologyPlan, ReviewedTopologyPlanListResponse,
+    RevokeOrganizationPublisherRequest, RunSshOperationRequest, ScheduleHistoryResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
+    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransferProjectMemoryRequest, TransitionExperimentRequest, TransitionMemoryClaimRequest,
+    TransitionTaskRequest, TrustOrganizationPublisherRequest, UpdateSiteRequest,
+    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
+    WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
@@ -42,9 +45,11 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     CandidateRevisionMutation, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
-    MemoryClaimMutation, OAuthLoginStart, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
-    ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    MemoryClaimMutation, OAuthLoginStart, OrganizationPublisherMutation,
+    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
+    PlatformComputerActionMutation, PlatformComputerMutation, PluginInvocationMutation,
+    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
+    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
     ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
     SiteMutation, SshHostMutation, SshOperationMutation, SshWorkflowCreateRequest,
@@ -804,6 +809,100 @@ async fn compare_organizations(
         )),
         None::<&()>,
         "Organization comparison",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_organization_publishers() -> Result<Vec<TrustedOrganizationPublisher>, String> {
+    let response: OrganizationPublisherListResponse = daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/organization-publishers")),
+        None::<&()>,
+        "Organization publisher listing",
+    )
+    .await?;
+    Ok(response.publishers)
+}
+
+#[tauri::command]
+async fn trust_organization_publisher(
+    request: TrustOrganizationPublisherRequest,
+) -> Result<OrganizationPublisherMutation, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/organization-publishers")),
+        Some(&request),
+        "Organization publisher trust",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn revoke_organization_publisher(
+    publisher_id: String,
+    request: RevokeOrganizationPublisherRequest,
+) -> Result<OrganizationPublisherMutation, String> {
+    let publisher_id = canonical_marketplace_id(&publisher_id, "Publisher identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/organization-publishers/{publisher_id}/revoke"
+        )),
+        Some(&request),
+        "Organization publisher revocation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_organization_share_reviews() -> Result<Vec<OrganizationShareReview>, String> {
+    let response: OrganizationShareReviewListResponse = daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/organization-share-reviews")),
+        None::<&()>,
+        "Organization share review listing",
+    )
+    .await?;
+    Ok(response.reviews)
+}
+
+#[tauri::command]
+async fn review_shared_organization(
+    request: ReviewSharedOrganizationRequest,
+) -> Result<OrganizationShareReviewMutation, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/organization-share-reviews")),
+        Some(&request),
+        "Organization share review",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn import_shared_organization(
+    review_id: String,
+    request: ImportSharedOrganizationRequest,
+) -> Result<OrganizationShareImportMutation, String> {
+    let review_id = canonical_uuid(&review_id, "Organization share review identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/organization-share-reviews/{review_id}/import"
+        )),
+        Some(&request),
+        "Organization share import",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reject_shared_organization(
+    review_id: String,
+    request: DecideSharedOrganizationRequest,
+) -> Result<OrganizationShareReviewMutation, String> {
+    let review_id = canonical_uuid(&review_id, "Organization share review identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/organization-share-reviews/{review_id}/reject"
+        )),
+        Some(&request),
+        "Organization share rejection",
     )
     .await
 }
@@ -2049,6 +2148,19 @@ fn canonical_uuid(value: &str, label: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|_| format!("{label} must be a UUID"))
 }
 
+fn canonical_marketplace_id<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    if !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
+    {
+        Ok(value)
+    } else {
+        Err(format!("{label} is invalid"))
+    }
+}
+
 #[tauri::command]
 async fn list_project_memory(project_id: String) -> Result<MemoryClaimListResponse, String> {
     let project_id = canonical_uuid(&project_id, "Project identity")?;
@@ -2314,6 +2426,13 @@ pub fn run() {
             export_organization,
             import_organization,
             compare_organizations,
+            list_organization_publishers,
+            trust_organization_publisher,
+            revoke_organization_publisher,
+            list_organization_share_reviews,
+            review_shared_organization,
+            import_shared_organization,
+            reject_shared_organization,
             create_task,
             launch_task,
             retry_task,

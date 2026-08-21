@@ -82,6 +82,14 @@ and compare routes; CLI provides `organization history|export|import|compare`; M
 provides `mcg_query_organization` and `mcg_import_organization`; Tauri and desktop
 simple/advanced surfaces use the same daemon contract.
 
+Signed marketplace or organization sharing adds a separate cryptographic and
+owner-review boundary on top of portable genomes. Verification never imports or
+grants authority; current publisher trust is checked again during the explicit
+reasoned import transaction. See
+[Signed Organization Sharing](organization-sharing.md) for the threat model,
+signature contract, terminal revocation, schema-34 recovery, and every-interface
+control surface.
+
 ## Restart Recovery
 
 At daemon startup, an interrupted `running` or `waiting` run becomes

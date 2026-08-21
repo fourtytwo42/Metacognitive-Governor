@@ -33,7 +33,10 @@ import {
   handoffComputerSession,
   inheritOrganization,
   importOrganization,
+  importSharedOrganization,
   listMcpConnections,
+  listOrganizationPublishers,
+  listOrganizationShareReviews,
   listOrganizations,
   listPlugins,
   listExperiments,
@@ -91,8 +94,11 @@ import {
   openExternalUrl,
   type OAuthLoginStart,
   type OrganizationGenome,
+  type OrganizationSharePackage,
+  type OrganizationShareReview,
   type PortableOrganizationComparison,
   type PortableOrganizationGenome,
+  type TrustedOrganizationPublisher,
   type OpenAiOAuthMethod,
   type ProviderAuthMode,
   type ProviderKind,
@@ -137,6 +143,7 @@ import {
   reclaimBrowserSession,
   reclaimComputerSession,
   registerSite,
+  rejectSharedOrganization,
   recordCandidateRevision,
   recordExperimentBenchmark,
   recordShadowExecution,
@@ -157,6 +164,8 @@ import {
   setPluginEnabled,
   setPluginGrants,
   startOpenAiOAuth,
+  reviewSharedOrganization,
+  revokeOrganizationPublisher,
   setScheduleState,
   type TaskEnvelope,
   type ApprovalRequest,
@@ -174,6 +183,7 @@ import {
   reviewProjectMemoryTransfer,
   transferProjectMemory,
   transitionExperiment,
+  trustOrganizationPublisher,
   correctProjectMemory,
   updateSite,
   updateUserSettings,
@@ -510,6 +520,20 @@ export function App() {
   const [organizationCompareLeft, setOrganizationCompareLeft] = useState("");
   const [organizationCompareRight, setOrganizationCompareRight] = useState("");
   const [organizationComparison, setOrganizationComparison] = useState<PortableOrganizationComparison | null>(null);
+  const [organizationPublishers, setOrganizationPublishers] = useState<TrustedOrganizationPublisher[]>([]);
+  const [organizationShareReviews, setOrganizationShareReviews] = useState<OrganizationShareReview[]>([]);
+  const [publisherId, setPublisherId] = useState("");
+  const [publisherDisplayName, setPublisherDisplayName] = useState("");
+  const [publisherPublicKey, setPublisherPublicKey] = useState("");
+  const [publisherRegistries, setPublisherRegistries] = useState("");
+  const [publisherReason, setPublisherReason] = useState("");
+  const [organizationShareJson, setOrganizationShareJson] = useState("");
+  const [organizationShareReviewId, setOrganizationShareReviewId] = useState(() => crypto.randomUUID());
+  const [organizationShareReasons, setOrganizationShareReasons] = useState<Record<string, string>>({});
+  const [organizationShareNames, setOrganizationShareNames] = useState<Record<string, string>>({});
+  const [organizationShareImportIds, setOrganizationShareImportIds] = useState<Record<string, string>>({});
+  const [organizationShareBusy, setOrganizationShareBusy] = useState(false);
+  const [organizationShareError, setOrganizationShareError] = useState<string | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectErrorSurface, setProjectErrorSurface] = useState<"task" | "projects">("projects");
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -692,6 +716,20 @@ export function App() {
       })
       .catch((error) => {
         if (active) setOrganizationError(errorMessage(error));
+      });
+    listOrganizationPublishers()
+      .then((publishers) => {
+        if (active) setOrganizationPublishers(publishers);
+      })
+      .catch((error) => {
+        if (active) setOrganizationShareError(errorMessage(error));
+      });
+    listOrganizationShareReviews()
+      .then((reviews) => {
+        if (active) setOrganizationShareReviews(reviews);
+      })
+      .catch((error) => {
+        if (active) setOrganizationShareError(errorMessage(error));
       });
     listApprovals()
       .then((response) => {
@@ -2535,6 +2573,126 @@ export function App() {
     }
   }
 
+  async function refreshOrganizationSharing() {
+    const [publishers, reviews] = await Promise.all([
+      listOrganizationPublishers(),
+      listOrganizationShareReviews()
+    ]);
+    setOrganizationPublishers(publishers);
+    setOrganizationShareReviews(reviews);
+  }
+
+  async function saveOrganizationPublisher() {
+    const registries = publisherRegistries.split(/[\s,]+/).filter(Boolean);
+    if (!publisherId.trim() || !publisherDisplayName.trim() || !publisherPublicKey.trim() || registries.length === 0 || !publisherReason.trim()) {
+      setOrganizationShareError("Enter the publisher identity, name, Ed25519 public key, HTTPS registry scope, and owner reason.");
+      return;
+    }
+    setOrganizationShareBusy(true);
+    setOrganizationShareError(null);
+    try {
+      const existing = organizationPublishers.find((publisher) => publisher.id === publisherId.trim());
+      await trustOrganizationPublisher({
+        id: publisherId.trim(),
+        display_name: publisherDisplayName.trim(),
+        public_key_base64: publisherPublicKey.trim(),
+        registries,
+        expected_revision: existing?.revision,
+        reason: publisherReason.trim()
+      });
+      setPublisherReason("");
+      await refreshOrganizationSharing();
+    } catch (error) {
+      setOrganizationShareError(errorMessage(error));
+    } finally {
+      setOrganizationShareBusy(false);
+    }
+  }
+
+  async function revokeSharedPublisher(publisher: TrustedOrganizationPublisher) {
+    if (!publisherReason.trim()) {
+      setOrganizationShareError("Enter an owner reason before revoking publisher trust.");
+      return;
+    }
+    setOrganizationShareBusy(true);
+    setOrganizationShareError(null);
+    try {
+      await revokeOrganizationPublisher(publisher.id, publisher.revision, publisherReason);
+      setPublisherReason("");
+      await refreshOrganizationSharing();
+    } catch (error) {
+      setOrganizationShareError(errorMessage(error));
+    } finally {
+      setOrganizationShareBusy(false);
+    }
+  }
+
+  async function reviewOrganizationShare() {
+    if (!organizationShareJson.trim()) {
+      setOrganizationShareError("Paste one signed organization package to verify.");
+      return;
+    }
+    setOrganizationShareBusy(true);
+    setOrganizationShareError(null);
+    try {
+      const organizationPackage = JSON.parse(organizationShareJson) as OrganizationSharePackage;
+      await reviewSharedOrganization(organizationShareReviewId, organizationPackage);
+      setOrganizationShareReviewId(crypto.randomUUID());
+      setOrganizationShareJson("");
+      await refreshOrganizationSharing();
+    } catch (error) {
+      setOrganizationShareError(errorMessage(error));
+    } finally {
+      setOrganizationShareBusy(false);
+    }
+  }
+
+  async function importOrganizationShare(review: OrganizationShareReview) {
+    const reason = organizationShareReasons[review.id]?.trim() ?? "";
+    if (!reason) {
+      setOrganizationShareError("Enter an owner reason before importing the verified organization.");
+      return;
+    }
+    const importId = organizationShareImportIds[review.id] ?? crypto.randomUUID();
+    setOrganizationShareImportIds((current) => ({ ...current, [review.id]: importId }));
+    setOrganizationShareBusy(true);
+    setOrganizationShareError(null);
+    try {
+      const mutation = await importSharedOrganization(
+        review.id,
+        importId,
+        reason,
+        organizationShareNames[review.id]
+      );
+      await Promise.all([
+        refreshOrganizationSharing(),
+        refreshOrganizations(mutation.organization.organization_id)
+      ]);
+    } catch (error) {
+      setOrganizationShareError(errorMessage(error));
+    } finally {
+      setOrganizationShareBusy(false);
+    }
+  }
+
+  async function rejectOrganizationShare(review: OrganizationShareReview) {
+    const reason = organizationShareReasons[review.id]?.trim() ?? "";
+    if (!reason) {
+      setOrganizationShareError("Enter an owner reason before rejecting the organization share.");
+      return;
+    }
+    setOrganizationShareBusy(true);
+    setOrganizationShareError(null);
+    try {
+      await rejectSharedOrganization(review.id, reason);
+      await refreshOrganizationSharing();
+    } catch (error) {
+      setOrganizationShareError(errorMessage(error));
+    } finally {
+      setOrganizationShareBusy(false);
+    }
+  }
+
   async function refreshExperiments() {
     if (!experimentOrganizationId.trim()) {
       setExperimentError("Enter an organization ID to load its experiments.");
@@ -3000,6 +3158,61 @@ export function App() {
                   <button className="secondary" type="button" onClick={() => setExperimentOrganizationId(organization.organization_id)}>Use for experiments</button>
                 </div>
                 {advanced && organizationHistory[organization.organization_id] && <ol className="organization-history" aria-label={`${organization.name} revision history`}>{organizationHistory[organization.organization_id]!.map((revision) => <li key={revision.revision_id}>Revision {revision.revision} · <code>{revision.revision_id}</code></li>)}</ol>}
+              </article>)}
+            </div>
+          </div>
+          <div className="scheduler-layout organization-sharing" aria-label="Signed organization sharing">
+            <div className="schedule-composer">
+              <h3>Signed organization sharing</h3>
+              <p className="muted">Verification creates a review only. Import remains a separate owner decision and never inherits publisher authority.</p>
+              <label>
+                Signed organization package
+                <textarea aria-label="Signed organization package" value={organizationShareJson} onChange={(event) => setOrganizationShareJson(event.target.value)} placeholder="Paste a signed MCG organization package" />
+              </label>
+              <button className="secondary" type="button" disabled={organizationShareBusy || !organizationShareJson.trim()} onClick={reviewOrganizationShare}>
+                {organizationShareBusy ? "Checking..." : "Verify for review"}
+              </button>
+              <small>Verification identity: <code>{organizationShareReviewId}</code>. Verification alone cannot import or activate the organization.</small>
+              {advanced && <div className="advanced-fields" aria-label="Organization publisher trust controls">
+                <h4>Publisher trust</h4>
+                <label>Publisher identity<input value={publisherId} onChange={(event) => setPublisherId(event.target.value)} placeholder="example-publisher" /></label>
+                <label>Display name<input value={publisherDisplayName} onChange={(event) => setPublisherDisplayName(event.target.value)} placeholder="Example publisher" /></label>
+                <label>Ed25519 public key<input value={publisherPublicKey} onChange={(event) => setPublisherPublicKey(event.target.value)} placeholder="Canonical base64 public key" /></label>
+                <label>Trusted HTTPS registries<textarea aria-label="Trusted organization registries" value={publisherRegistries} onChange={(event) => setPublisherRegistries(event.target.value)} placeholder="https://organizations.example.com" /></label>
+                <label>Owner trust or revocation reason<input value={publisherReason} onChange={(event) => setPublisherReason(event.target.value)} placeholder="Why this exact authority and scope are acceptable" /></label>
+                <button className="secondary" type="button" disabled={organizationShareBusy} onClick={saveOrganizationPublisher}>Trust or revise publisher</button>
+                {organizationPublishers.length === 0 ? <p className="empty-state">No trusted organization publishers.</p> : organizationPublishers.map((publisher) => <article className="schedule-card organization-share-card" key={publisher.id}>
+                  <strong>{publisher.display_name}</strong>
+                  <span>{publisher.state} · revision {publisher.revision}</span>
+                  <code>{publisher.id}</code>
+                  {publisher.registries.map((registry) => <small key={registry}>{registry}</small>)}
+                  <code>key {publisher.public_key_base64}</code>
+                  {publisher.state === "trusted" && <button className="secondary" type="button" disabled={organizationShareBusy || !publisherReason.trim()} onClick={() => revokeSharedPublisher(publisher)}>Revoke permanently</button>}
+                </article>)}
+              </div>}
+              {organizationShareError && <p className="error-message" role="alert">{organizationShareError}</p>}
+            </div>
+            <div className="schedule-list" aria-label="Organization share reviews">
+              {organizationShareReviews.length === 0 ? <p className="empty-state">No signed organizations awaiting review.</p> : organizationShareReviews.map((review) => <article className="schedule-card organization-share-card" key={review.id}>
+                <div className="organization-summary">
+                  <strong>{review.package.portable.definition.name}</strong>
+                  <span>{review.evidence.publisher} · {review.state}</span>
+                  <small>{review.evidence.registry}/{review.evidence.package}</small>
+                  <small>Publisher key digest</small>
+                  <code>{review.evidence.publisher_key_sha256}</code>
+                  <small>Verified package digest</small>
+                  <code>{review.evidence.package_sha256}</code>
+                  {advanced && <><code>review {review.id}</code><code>portable {review.evidence.portable_sha256}</code><code>signature {review.evidence.signature_sha256}</code></>}
+                </div>
+                {review.state === "pending" ? <div className="advanced-fields organization-share-decision">
+                  <label>Imported name (optional)<input value={organizationShareNames[review.id] ?? ""} onChange={(event) => setOrganizationShareNames((current) => ({ ...current, [review.id]: event.target.value }))} placeholder={review.package.portable.definition.name} /></label>
+                  <label>Owner decision reason<input value={organizationShareReasons[review.id] ?? ""} onChange={(event) => setOrganizationShareReasons((current) => ({ ...current, [review.id]: event.target.value }))} placeholder="Why this verified organization should or should not be imported" /></label>
+                  <div className="organization-actions">
+                    <button className="primary" type="button" disabled={organizationShareBusy || !(organizationShareReasons[review.id]?.trim())} onClick={() => importOrganizationShare(review)}>Import verified organization</button>
+                    <button className="secondary" type="button" disabled={organizationShareBusy || !(organizationShareReasons[review.id]?.trim())} onClick={() => rejectOrganizationShare(review)}>Reject share</button>
+                  </div>
+                  {advanced && <small>Import retry identity: <code>{organizationShareImportIds[review.id] ?? "created on first import attempt"}</code></small>}
+                </div> : <p className="muted">{review.decision_reason}{review.organization_id ? ` · local organization ${review.organization_id}` : ""}</p>}
               </article>)}
             </div>
           </div>

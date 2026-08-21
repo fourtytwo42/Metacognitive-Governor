@@ -215,6 +215,10 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
 .experiment-card > * { min-width: 0; }
 .experiment-card > div { display: grid; gap: 4px; }
 .organization-card { display: grid; justify-content: stretch; gap: 12px; min-width: 0; }
+.organization-sharing { margin-top: 18px; }
+.organization-share-card { display: grid; justify-content: stretch; gap: 8px; min-width: 0; }
+.organization-share-card code { white-space: normal; overflow-wrap: anywhere; }
+.organization-share-decision { margin-top: 4px; }
 .organization-summary { min-width: 0; }
 .organization-summary strong, .organization-summary span { display: block; overflow-wrap: anywhere; }
 .organization-actions { display: flex; flex-wrap: wrap; gap: 8px; }

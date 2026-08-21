@@ -14,18 +14,18 @@ use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, EvaluationReport, ExecutivePlanner,
     ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
-    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
-    PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition,
-    SupervisionObservation, TaskComplexity,
+    OrganizationGenome, OrganizationSharePackage, OrganizationalMetrics, PlannedWork,
+    PlanningRequest, PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt,
+    SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
     ExperimentId, MemoryClaimId, MemoryTransferId, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInvocationId, ProjectId, ProjectSnapshotId, ReviewedTopologyPlanId, RiskLevel, RunId,
-    ScheduleId, ScheduleState, ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteState, SshAuthentication, SshHostId,
-    SshHostPlatform, SshHostState, SshOperationId, SshOperationKind, SshWorkflowId, TaskBudget,
-    TaskEnvelope, TaskId, TaskState, WorkItemId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformSessionId, PlatformSessionKind,
+    PluginCapabilityGrant, PluginInvocationId, ProjectId, ProjectSnapshotId,
+    ReviewedTopologyPlanId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState,
+    SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId, SshOperationKind,
+    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, ReviewedTopologyPlanCreateRequest,
@@ -887,6 +887,59 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
         }),
         json!({
+            "name": "mcg_organization_publishers",
+            "title": "List MCG Organization Publishers",
+            "description": "List owner-selected organization publisher trust heads, exact registry scopes, public-key fingerprints, and terminal revocation state.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_organization_publisher_mutate",
+            "title": "Change MCG Organization Publisher Trust",
+            "description": "Explicitly trust/revise or permanently revoke one signed-organization publisher. Public keys are immutable per identity and trust is scoped to canonical HTTPS registries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["trust", "revoke"]},
+                    "publisher_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "public_key_base64": {"type": "string", "minLength": 44, "maxLength": 44},
+                    "registries": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "format": "uri"}},
+                    "expected_revision": {"type": "integer", "minimum": 1},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 2000}
+                },
+                "required": ["action", "publisher_id", "reason"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_organization_share_reviews",
+            "title": "List MCG Organization Share Reviews",
+            "description": "List durable signed-organization reviews and their verified publisher/package evidence without granting import authority.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+            "annotations": read_annotations,
+        }),
+        json!({
+            "name": "mcg_organization_share_mutate",
+            "title": "Review or Decide an MCG Organization Share",
+            "description": "Verify a signed package into pending review, explicitly import it after current-trust revalidation, or reject it. Review alone never imports or activates authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["review", "import", "reject"]},
+                    "review_id": {"type": "string", "format": "uuid"},
+                    "package": {"type": "object"},
+                    "import_id": {"type": "string", "format": "uuid"},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 2000}
+                },
+                "required": ["action", "review_id"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
             "name": "mcg_query_task",
             "title": "Query an MCG Consumer Task",
             "description": "Read one durable task together with its authoritative event history, governed-tool audit, and consumer run when present.",
@@ -1663,6 +1716,10 @@ async fn call_tool(
         "mcg_query_project" => query_project(state, &arguments),
         "mcg_query_organization" => query_organization(state, &arguments),
         "mcg_import_organization" => import_organization(state, &arguments),
+        "mcg_organization_publishers" => organization_publishers(state, &arguments),
+        "mcg_organization_publisher_mutate" => organization_publisher_mutate(state, &arguments),
+        "mcg_organization_share_reviews" => organization_share_reviews(state, &arguments),
+        "mcg_organization_share_mutate" => organization_share_mutate(state, &arguments),
         "mcg_query_task" => query_task(state, &arguments),
         "mcg_query_run" => query_run(state, &arguments),
         "mcg_project_context" => project_context(state, &arguments),
@@ -4530,6 +4587,256 @@ fn import_organization(
         Err(_) => Ok(tool_error(
             "runtime_error",
             "MCG could not import the organization",
+        )),
+    }
+}
+
+fn organization_publishers(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &[])?;
+    match state.runtime.organization_publishers() {
+        Ok(publishers) => tool_success(Ok(json!({"publishers": publishers}))),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not list organization publisher trust",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrganizationPublisherMutationArguments {
+    action: String,
+    publisher_id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    public_key_base64: Option<String>,
+    #[serde(default)]
+    registries: Option<Vec<String>>,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    reason: String,
+}
+
+fn organization_publisher_mutate(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request: OrganizationPublisherMutationArguments =
+        serde_json::from_value(Value::Object(arguments.clone())).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Organization publisher arguments do not match the advertised schema",
+            )
+        })?;
+    let mutation = match request.action.as_str() {
+        "trust" => {
+            let (Some(display_name), Some(public_key_base64), Some(registries)) = (
+                request.display_name.as_deref(),
+                request.public_key_base64.as_deref(),
+                request.registries,
+            ) else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "trust requires display_name, public_key_base64, and registries",
+                ));
+            };
+            state.runtime.trust_organization_publisher(
+                &request.publisher_id,
+                display_name,
+                public_key_base64,
+                registries,
+                request.expected_revision,
+                &request.reason,
+            )
+        }
+        "revoke" => {
+            let Some(expected_revision) = request.expected_revision else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "revoke requires expected_revision",
+                ));
+            };
+            if request.display_name.is_some()
+                || request.public_key_base64.is_some()
+                || request.registries.is_some()
+            {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "revoke does not accept trust-definition fields",
+                ));
+            }
+            state.runtime.revoke_organization_publisher(
+                &request.publisher_id,
+                expected_revision,
+                &request.reason,
+            )
+        }
+        _ => {
+            return Ok(tool_error(
+                "invalid_arguments",
+                "action must be trust or revoke",
+            ));
+        }
+    };
+    match mutation {
+        Ok(mutation) => tool_success(serde_json::to_value(mutation)),
+        Err(error) if error.is_conflict() => Ok(tool_error(
+            "publisher_conflict",
+            "Organization publisher trust changed or is already terminal",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_publisher",
+            "Organization publisher trust failed bounded validation",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not change organization publisher trust",
+        )),
+    }
+}
+
+fn organization_share_reviews(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    require_only_keys(arguments, &[])?;
+    match state.runtime.organization_share_reviews() {
+        Ok(reviews) => tool_success(Ok(json!({"reviews": reviews}))),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not list organization share reviews",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrganizationShareMutationArguments {
+    action: String,
+    review_id: OrganizationShareReviewId,
+    #[serde(default)]
+    package: Option<OrganizationSharePackage>,
+    #[serde(default)]
+    import_id: Option<OrganizationImportId>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+fn organization_share_mutate(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let request: OrganizationShareMutationArguments =
+        serde_json::from_value(Value::Object(arguments.clone())).map_err(|_| {
+            RpcFailure::new(
+                StatusCode::OK,
+                None,
+                INVALID_PARAMS,
+                "Organization share arguments do not match the advertised schema",
+            )
+        })?;
+    match request.action.as_str() {
+        "review" => {
+            let Some(package) = request.package.as_ref() else {
+                return Ok(tool_error("invalid_arguments", "review requires package"));
+            };
+            if request.import_id.is_some() || request.name.is_some() || request.reason.is_some() {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "review accepts only review_id and package",
+                ));
+            }
+            match state
+                .runtime
+                .review_shared_organization(request.review_id, package)
+            {
+                Ok(mutation) => tool_success(serde_json::to_value(mutation)),
+                Err(error) if error.is_conflict() => Ok(tool_error(
+                    "review_conflict",
+                    "Review identity is already bound to another package",
+                )),
+                Err(error) if error.is_invalid_request() => Ok(tool_error(
+                    "invalid_share_package",
+                    "The organization share package or publisher trust is invalid",
+                )),
+                Err(_) => Ok(tool_error(
+                    "runtime_error",
+                    "MCG could not review the organization share package",
+                )),
+            }
+        }
+        "import" => {
+            let (Some(import_id), Some(reason)) = (request.import_id, request.reason.as_deref())
+            else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "import requires import_id and reason",
+                ));
+            };
+            if request.package.is_some() {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "import uses the retained reviewed package",
+                ));
+            }
+            organization_share_decision_result(state.runtime.import_shared_organization(
+                request.review_id,
+                import_id,
+                request.name.as_deref().map(str::trim),
+                reason.trim(),
+            ))
+        }
+        "reject" => {
+            let Some(reason) = request.reason.as_deref() else {
+                return Ok(tool_error("invalid_arguments", "reject requires reason"));
+            };
+            if request.package.is_some() || request.import_id.is_some() || request.name.is_some() {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "reject accepts only review_id and reason",
+                ));
+            }
+            organization_share_decision_result(
+                state
+                    .runtime
+                    .reject_shared_organization(request.review_id, reason.trim()),
+            )
+        }
+        _ => Ok(tool_error(
+            "invalid_arguments",
+            "action must be review, import, or reject",
+        )),
+    }
+}
+
+fn organization_share_decision_result(
+    result: Result<impl serde::Serialize, mcg_runtime::RuntimeError>,
+) -> Result<Value, RpcFailure> {
+    match result {
+        Ok(value) => tool_success(serde_json::to_value(value)),
+        Err(error) if error.is_conflict() => Ok(tool_error(
+            "review_conflict",
+            "Organization share review is stale or terminal",
+        )),
+        Err(error) if error.is_invalid_request() => Ok(tool_error(
+            "invalid_share_decision",
+            "Organization share decision failed bounded validation or current-trust verification",
+        )),
+        Err(error) if error.is_not_found() => Ok(tool_error(
+            "review_not_found",
+            "The organization share review is not known to MCG",
+        )),
+        Err(_) => Ok(tool_error(
+            "runtime_error",
+            "MCG could not resolve the organization share review",
         )),
     }
 }

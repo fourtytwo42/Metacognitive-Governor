@@ -464,6 +464,79 @@ export interface PortableOrganizationComparison {
   relationships_removed: string[];
 }
 
+export type OrganizationPublisherState = "trusted" | "revoked";
+export type OrganizationShareReviewState = "pending" | "imported" | "rejected";
+
+export interface TrustedOrganizationPublisher {
+  schema_version: number;
+  id: string;
+  display_name: string;
+  public_key_base64: string;
+  registries: string[];
+  state: OrganizationPublisherState;
+  revision: number;
+  reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrganizationShareSignature {
+  scheme: string;
+  signature_base64: string;
+}
+
+export interface OrganizationSharePackage {
+  schema_version: number;
+  registry: string;
+  package: string;
+  publisher: string;
+  portable: PortableOrganizationGenome;
+  signature: OrganizationShareSignature;
+}
+
+export interface VerifiedOrganizationShareEvidence {
+  schema_version: number;
+  registry: string;
+  package: string;
+  publisher: string;
+  publisher_key_sha256: string;
+  portable_sha256: string;
+  package_sha256: string;
+  signature_sha256: string;
+}
+
+export interface OrganizationShareReview {
+  schema_version: number;
+  id: string;
+  package: OrganizationSharePackage;
+  evidence: VerifiedOrganizationShareEvidence;
+  state: OrganizationShareReviewState;
+  import_id?: string;
+  organization_id?: string;
+  decision_reason?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrganizationPublisherMutation {
+  publisher: TrustedOrganizationPublisher;
+  replayed: boolean;
+  event?: { sequence: number; kind: string; occurred_at: string; payload?: Record<string, unknown> };
+}
+
+export interface OrganizationShareReviewMutation {
+  review: OrganizationShareReview;
+  replayed: boolean;
+  event?: { sequence: number; kind: string; occurred_at: string; payload?: Record<string, unknown> };
+}
+
+export interface OrganizationShareImportMutation {
+  review: OrganizationShareReview;
+  organization: OrganizationGenome;
+  replayed: boolean;
+  events: Array<{ sequence: number; kind: string; occurred_at: string; payload?: Record<string, unknown> }>;
+}
+
 export interface SupervisionObservationListResponse { observations: SupervisionObservation[] }
 export interface ExperimentListResponse { experiments: ExperimentDefinition[] }
 export interface ShadowExecutionListResponse { receipts: Array<Record<string, unknown>> }
@@ -1546,6 +1619,67 @@ export function compareOrganizations(
   rightRevisionId: string
 ): Promise<PortableOrganizationComparison> {
   return invoke("compare_organizations", { leftRevisionId, rightRevisionId });
+}
+
+export function listOrganizationPublishers(): Promise<TrustedOrganizationPublisher[]> {
+  return invoke("list_organization_publishers");
+}
+
+export function trustOrganizationPublisher(request: {
+  id: string;
+  display_name: string;
+  public_key_base64: string;
+  registries: string[];
+  expected_revision?: number;
+  reason: string;
+}): Promise<OrganizationPublisherMutation> {
+  return invoke("trust_organization_publisher", { request });
+}
+
+export function revokeOrganizationPublisher(
+  publisherId: string,
+  expectedRevision: number,
+  reason: string
+): Promise<OrganizationPublisherMutation> {
+  return invoke("revoke_organization_publisher", {
+    publisherId,
+    request: { expected_revision: expectedRevision, reason: reason.trim() }
+  });
+}
+
+export function listOrganizationShareReviews(): Promise<OrganizationShareReview[]> {
+  return invoke("list_organization_share_reviews");
+}
+
+export function reviewSharedOrganization(
+  reviewId: string,
+  organizationPackage: OrganizationSharePackage
+): Promise<OrganizationShareReviewMutation> {
+  return invoke("review_shared_organization", {
+    request: { review_id: reviewId, package: organizationPackage }
+  });
+}
+
+export function importSharedOrganization(
+  reviewId: string,
+  importId: string,
+  reason: string,
+  name?: string
+): Promise<OrganizationShareImportMutation> {
+  return invoke("import_shared_organization", {
+    reviewId,
+    request: { import_id: importId, name: name?.trim() || null, reason: reason.trim() }
+  });
+}
+
+export function rejectSharedOrganization(
+  reviewId: string,
+  reason: string
+): Promise<OrganizationShareReviewMutation> {
+  return invoke("reject_shared_organization", {
+    reviewId,
+    request: { reason: reason.trim() }
+  });
 }
 
 export function recordSupervisionObservation(observation: SupervisionObservation): Promise<unknown> {

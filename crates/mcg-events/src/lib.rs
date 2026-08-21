@@ -36,6 +36,10 @@ pub enum EventKind {
     MemoryClaimStateChanged,
     MemoryClaimTransferred,
     OrganizationRevisionRecorded,
+    OrganizationPublisherRecorded,
+    OrganizationShareReviewed,
+    OrganizationShareImported,
+    OrganizationShareRejected,
     AgentRunPlanned,
     AgentRunStateChanged,
     AgentInstanceRecorded,
@@ -91,6 +95,10 @@ impl EventKind {
             Self::MemoryClaimStateChanged => "memory_claim_state_changed",
             Self::MemoryClaimTransferred => "memory_claim_transferred",
             Self::OrganizationRevisionRecorded => "organization_revision_recorded",
+            Self::OrganizationPublisherRecorded => "organization_publisher_recorded",
+            Self::OrganizationShareReviewed => "organization_share_reviewed",
+            Self::OrganizationShareImported => "organization_share_imported",
+            Self::OrganizationShareRejected => "organization_share_rejected",
             Self::AgentRunPlanned => "agent_run_planned",
             Self::AgentRunStateChanged => "agent_run_state_changed",
             Self::AgentInstanceRecorded => "agent_instance_recorded",
@@ -123,6 +131,7 @@ impl EventKind {
     /// # Errors
     ///
     /// Returns the unknown value when no schema variant matches.
+    #[allow(clippy::too_many_lines)] // Exhaustive compatibility parser for the stable event registry.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "task_created" | "TaskCreated" => Ok(Self::TaskCreated),
@@ -167,6 +176,18 @@ impl EventKind {
             }
             "organization_revision_recorded" | "OrganizationRevisionRecorded" => {
                 Ok(Self::OrganizationRevisionRecorded)
+            }
+            "organization_publisher_recorded" | "OrganizationPublisherRecorded" => {
+                Ok(Self::OrganizationPublisherRecorded)
+            }
+            "organization_share_reviewed" | "OrganizationShareReviewed" => {
+                Ok(Self::OrganizationShareReviewed)
+            }
+            "organization_share_imported" | "OrganizationShareImported" => {
+                Ok(Self::OrganizationShareImported)
+            }
+            "organization_share_rejected" | "OrganizationShareRejected" => {
+                Ok(Self::OrganizationShareRejected)
             }
             "agent_run_planned" | "AgentRunPlanned" => Ok(Self::AgentRunPlanned),
             "agent_run_state_changed" | "AgentRunStateChanged" => Ok(Self::AgentRunStateChanged),

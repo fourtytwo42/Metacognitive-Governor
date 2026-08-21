@@ -13,8 +13,9 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
-    OrganizationGenome, PortableOrganizationComparison, PortableOrganizationGenome, RoleKind,
-    ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
+    OrganizationGenome, OrganizationSharePackage, PortableOrganizationComparison,
+    PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition,
+    SupervisionObservation, TaskComplexity,
 };
 use mcg_api::{
     ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
@@ -22,17 +23,20 @@ use mcg_api::{
     CorrectMemoryClaimRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
     CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
     CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
-    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    ImportOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
+    DecideSharedOrganizationRequest, DeploySiteRequest, DiscoverProjectRequest,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse,
+    ExperimentDecisionListResponse, ExperimentListResponse, ImportOrganizationRequest,
+    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
     InstallRegistryPluginRequest, InvokePluginRequest, LaunchExecution, LaunchTaskRequest,
     LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
     MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
-    OrganizationListResponse, OrganizationMutationResponse, PlanAgentRunRequest, PlanWorkRequest,
+    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
+    OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
     ProjectMemoryTransferListResponse, ProviderListResponse, ResolveApprovalRequest,
-    ReviewedTopologyPlanListResponse, RunSshOperationRequest, ScheduleHistoryResponse,
+    ReviewSharedOrganizationRequest, ReviewedTopologyPlanListResponse,
+    RevokeOrganizationPublisherRequest, RunSshOperationRequest, ScheduleHistoryResponse,
     ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
     SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse, ShutdownResponse,
     SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
@@ -40,17 +44,18 @@ use mcg_api::{
     SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
     TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
     TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest, UpdateSiteRequest, UpdateSshHostRequest,
-    UpdateUserSettingsRequest, UserSettingsHistoryResponse, WakeScheduleRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
+    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId, MemoryTransferId,
     NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
-    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
-    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
-    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
+    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
+    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
     SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
@@ -70,7 +75,8 @@ use mcg_providers::{
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, CandidateRevisionMutation, DiagnosticReport, DiagnosticSeverity,
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
+    OpenAiOAuthMethod, OrganizationPublisherMutation, OrganizationShareImportMutation,
+    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
     ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
@@ -1058,6 +1064,69 @@ enum OrganizationCommand {
     Compare {
         left_revision_id: String,
         right_revision_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List owner-selected signed-organization publishers and revocation state.
+    Publishers {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trust or revise one publisher under exact canonical HTTPS registry scopes.
+    TrustPublisher {
+        publisher_id: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        public_key_base64: String,
+        #[arg(long = "registry", required = true)]
+        registries: Vec<String>,
+        #[arg(long)]
+        expected_revision: Option<u64>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Permanently revoke one publisher identity.
+    RevokePublisher {
+        publisher_id: String,
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List durable signed-organization reviews and decisions.
+    ShareReviews {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a signed share package into pending review without importing it.
+    ReviewShare {
+        file: PathBuf,
+        #[arg(long)]
+        review_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly import one pending share after current publisher revalidation.
+    ImportShare {
+        review_id: String,
+        #[arg(long)]
+        import_id: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reject one pending signed-organization review.
+    RejectShare {
+        review_id: String,
+        #[arg(long)]
+        reason: String,
         #[arg(long)]
         json: bool,
     },
@@ -4095,6 +4164,260 @@ async fn run_organization(
                 );
             }
         }
+        OrganizationCommand::Publishers { json } => {
+            let response: OrganizationPublisherListResponse = client
+                .get(format!("{host}/api/v1/organization-publishers"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.publishers.is_empty() {
+                println!("No trusted organization publishers.");
+            } else {
+                for publisher in response.publishers {
+                    println!(
+                        "{}  revision {}  {:?}  key={}  registries={}",
+                        publisher.id,
+                        publisher.revision,
+                        publisher.state,
+                        publisher.public_key_sha256()?,
+                        publisher.registries.join(",")
+                    );
+                }
+            }
+        }
+        OrganizationCommand::TrustPublisher {
+            publisher_id,
+            display_name,
+            public_key_base64,
+            registries,
+            expected_revision,
+            reason,
+            json,
+        } => {
+            let mutation: OrganizationPublisherMutation = client
+                .post(format!("{host}/api/v1/organization-publishers"))
+                .bearer_auth(token)
+                .json(&TrustOrganizationPublisherRequest {
+                    id: publisher_id,
+                    display_name,
+                    public_key_base64,
+                    registries,
+                    expected_revision,
+                    reason,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  revision {}  {:?}  key={}  {}",
+                    mutation.publisher.id,
+                    mutation.publisher.revision,
+                    mutation.publisher.state,
+                    mutation.publisher.public_key_sha256()?,
+                    if mutation.replayed {
+                        "replayed"
+                    } else {
+                        "recorded"
+                    }
+                );
+            }
+        }
+        OrganizationCommand::RevokePublisher {
+            publisher_id,
+            expected_revision,
+            reason,
+            json,
+        } => {
+            let mutation: OrganizationPublisherMutation = client
+                .post(format!(
+                    "{host}/api/v1/organization-publishers/{publisher_id}/revoke"
+                ))
+                .bearer_auth(token)
+                .json(&RevokeOrganizationPublisherRequest {
+                    expected_revision,
+                    reason,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  revision {}  revoked  {}",
+                    mutation.publisher.id,
+                    mutation.publisher.revision,
+                    if mutation.replayed {
+                        "replayed"
+                    } else {
+                        "recorded"
+                    }
+                );
+            }
+        }
+        OrganizationCommand::ShareReviews { json } => {
+            let response: OrganizationShareReviewListResponse = client
+                .get(format!("{host}/api/v1/organization-share-reviews"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if response.reviews.is_empty() {
+                println!("No organization share reviews.");
+            } else {
+                for review in response.reviews {
+                    println!(
+                        "{}  {:?}  {}/{}  publisher={}  package_sha256={}",
+                        review.id,
+                        review.state,
+                        review.package.registry,
+                        review.package.package,
+                        review.evidence.publisher,
+                        review.evidence.package_sha256
+                    );
+                }
+            }
+        }
+        OrganizationCommand::ReviewShare {
+            file,
+            review_id,
+            json,
+        } => {
+            let package: OrganizationSharePackage =
+                serde_json::from_reader(std::fs::File::open(file)?)?;
+            let generated_review_id = review_id.is_none();
+            let review_id = review_id
+                .as_deref()
+                .map(OrganizationShareReviewId::from_str)
+                .transpose()?
+                .unwrap_or_default();
+            if generated_review_id {
+                eprintln!(
+                    "Review identity: {review_id} (reuse with --review-id if this request must be retried)"
+                );
+            }
+            let mutation: OrganizationShareReviewMutation = client
+                .post(format!("{host}/api/v1/organization-share-reviews"))
+                .bearer_auth(token)
+                .json(&ReviewSharedOrganizationRequest { review_id, package })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  pending  publisher={}  package_sha256={}  {}",
+                    mutation.review.id,
+                    mutation.review.evidence.publisher,
+                    mutation.review.evidence.package_sha256,
+                    if mutation.replayed {
+                        "replayed"
+                    } else {
+                        "reviewed"
+                    }
+                );
+            }
+        }
+        OrganizationCommand::ImportShare {
+            review_id,
+            import_id,
+            name,
+            reason,
+            json,
+        } => {
+            let review_id = OrganizationShareReviewId::from_str(&review_id)?;
+            let generated_import_id = import_id.is_none();
+            let import_id = import_id
+                .as_deref()
+                .map(OrganizationImportId::from_str)
+                .transpose()?
+                .unwrap_or_default();
+            if generated_import_id {
+                eprintln!(
+                    "Import identity: {import_id} (reuse with --import-id if this request must be retried)"
+                );
+            }
+            let mutation: OrganizationShareImportMutation = client
+                .post(format!(
+                    "{host}/api/v1/organization-share-reviews/{review_id}/import"
+                ))
+                .bearer_auth(token)
+                .json(&ImportSharedOrganizationRequest {
+                    import_id,
+                    name,
+                    reason,
+                })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  organization={}  import={}  {}",
+                    mutation.review.id,
+                    mutation.organization.organization_id,
+                    import_id,
+                    if mutation.replayed {
+                        "replayed"
+                    } else {
+                        "imported"
+                    }
+                );
+            }
+        }
+        OrganizationCommand::RejectShare {
+            review_id,
+            reason,
+            json,
+        } => {
+            let review_id = OrganizationShareReviewId::from_str(&review_id)?;
+            let mutation: OrganizationShareReviewMutation = client
+                .post(format!(
+                    "{host}/api/v1/organization-share-reviews/{review_id}/reject"
+                ))
+                .bearer_auth(token)
+                .json(&DecideSharedOrganizationRequest { reason })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&mutation)?);
+            } else {
+                println!(
+                    "{}  rejected  {}",
+                    mutation.review.id,
+                    if mutation.replayed {
+                        "replayed"
+                    } else {
+                        "recorded"
+                    }
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -5707,6 +6030,84 @@ mod tests {
             Command::Organization {
                 command: OrganizationCommand::History { json: true, .. }
             }
+        ));
+    }
+
+    #[test]
+    fn signed_organization_sharing_commands_preserve_review_authority() {
+        let trust = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "trust-publisher",
+            "publisher.example",
+            "--display-name",
+            "Example Publisher",
+            "--public-key-base64",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "--registry",
+            "https://registry.example/",
+            "--reason",
+            "Owner reviewed the publisher fingerprint.",
+            "--json",
+        ])
+        .expect("publisher trust command");
+        assert!(matches!(
+            trust.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::TrustPublisher {
+                    publisher_id,
+                    registries,
+                    json: true,
+                    ..
+                }
+            } if publisher_id == "publisher.example"
+                && registries == ["https://registry.example/"]
+        ));
+
+        let review_id = "00000000-0000-0000-0000-000000000043";
+        let review = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "review-share",
+            "shared-organization.json",
+            "--review-id",
+            review_id,
+            "--json",
+        ])
+        .expect("share review command");
+        assert!(matches!(
+            review.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::ReviewShare {
+                    review_id: Some(parsed),
+                    json: true,
+                    ..
+                }
+            } if parsed == review_id
+        ));
+
+        let import = Cli::try_parse_from([
+            "mcg",
+            "organization",
+            "import-share",
+            review_id,
+            "--import-id",
+            "00000000-0000-0000-0000-000000000044",
+            "--reason",
+            "Owner reviewed the signed organization.",
+            "--json",
+        ])
+        .expect("share import command");
+        assert!(matches!(
+            import.command.expect("command"),
+            Command::Organization {
+                command: OrganizationCommand::ImportShare {
+                    review_id: parsed,
+                    import_id: Some(_),
+                    json: true,
+                    ..
+                }
+            } if parsed == review_id
         ));
     }
 

@@ -32,5 +32,8 @@ url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+ed25519-dalek.workspace = true
+
 [lints]
 workspace = true

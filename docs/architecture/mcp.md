@@ -59,6 +59,10 @@ identity metadata on every successful tool result.
 | `mcg_query_project` | Lists current project models or reads one exact project UUID. |
 | `mcg_query_organization` | Lists immutable revision history, exports one bounded content-addressed genome, or compares two identity-independent revisions. |
 | `mcg_import_organization` | Imports one validated portable genome under caller-owned idempotent authority; conflicting retries fail closed. |
+| `mcg_organization_publishers` | Lists exact owner-selected publisher keys, registry scopes, revisions, and terminal trust state. |
+| `mcg_organization_publisher_mutate` | Trusts/revises or permanently revokes one publisher under expected-revision and reason checks. |
+| `mcg_organization_share_reviews` | Lists durable verified package evidence and pending/imported/rejected review state. |
+| `mcg_organization_share_mutate` | Verifies a package for review or separately imports/rejects it with caller-owned retry authority. |
 | `mcg_project_context` | Assembles current target-aware context within a caller-selected, server-bounded token budget. |
 | `mcg_project_topology_plan` | Reads deterministic snapshot-bound stages derived only from explicit manifest dependencies; cycles return no partial stages. |
 | `mcg_reviewed_topology_plans` | Lists reviewed plans for one project or reads one exact immutable plan. |

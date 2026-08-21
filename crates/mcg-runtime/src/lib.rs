@@ -25,12 +25,14 @@ use mcg_agents::{
     EXPERIMENT_SCHEMA_VERSION, EvaluationEvidence, EvaluationOutcome, EvaluationReport,
     ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
     ExperimentMode, ExperimentState, ExternalToolBinding, LeaseBudget, MeasuredCandidateDesigner,
-    OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
-    PortableOrganizationComparison, PortableOrganizationGenome, ProspectiveAnalysis,
-    ProviderProxyEnsembleCheckpoint, ProviderProxyTurnCheckpoint, RoleKind, RunSupervisionSnapshot,
-    SHADOW_WORKSPACE_SCHEMA_VERSION, ShadowAuthority, ShadowExecutionReceipt, ShadowWorkspace,
-    ShadowWorkspaceState, SuccessCondition, SupervisionAnalyzer, SupervisionObservation,
-    SupervisionSignal, TaskComplexity, WorkPlan,
+    OrganizationGenome, OrganizationPublisherState, OrganizationSharePackage,
+    OrganizationShareReview, OrganizationShareReviewState, OrganizationShareTrustStore,
+    OrganizationalMetrics, PlannedWork, PlanningRequest, PortableOrganizationComparison,
+    PortableOrganizationGenome, ProspectiveAnalysis, ProviderProxyEnsembleCheckpoint,
+    ProviderProxyTurnCheckpoint, RoleKind, RunSupervisionSnapshot, SHADOW_WORKSPACE_SCHEMA_VERSION,
+    ShadowAuthority, ShadowExecutionReceipt, ShadowWorkspace, ShadowWorkspaceState,
+    SuccessCondition, SupervisionAnalyzer, SupervisionObservation, SupervisionSignal,
+    TaskComplexity, WorkPlan,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
@@ -38,7 +40,7 @@ use mcg_domain::{
     ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, EvaluationId,
     ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, LeaseId, MemoryClaimId,
     MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
+    OrganizationRevisionId, OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
@@ -613,6 +615,28 @@ pub struct PortableOrganizationImportMutation {
     pub portable_sha256: String,
     pub replayed: bool,
     pub event: Option<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationPublisherMutation {
+    pub publisher: mcg_agents::TrustedOrganizationPublisher,
+    pub replayed: bool,
+    pub event: Option<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationShareReviewMutation {
+    pub review: OrganizationShareReview,
+    pub replayed: bool,
+    pub event: Option<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationShareImportMutation {
+    pub review: OrganizationShareReview,
+    pub organization: OrganizationGenome,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7078,6 +7102,281 @@ impl AppRuntime {
             .and_then(|()| right.validate())
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         Ok(left.compare(&right))
+    }
+
+    /// Lists owner-selected organization publisher trust heads.
+    ///
+    /// # Errors
+    /// Returns an error when storage cannot be read.
+    pub fn organization_publishers(
+        &self,
+    ) -> Result<Vec<mcg_agents::TrustedOrganizationPublisher>, RuntimeError> {
+        Ok(self.store()?.organization_publishers()?)
+    }
+
+    /// Creates or monotonically revises one publisher trust record. Public keys
+    /// are immutable per identity; revoked identities can never be restored.
+    /// Exact retries return the retained head without a second event.
+    ///
+    /// # Errors
+    /// Rejects malformed, stale, key-changing, or post-revocation requests.
+    #[allow(clippy::too_many_arguments)] // Public trust changes require all review-bound fields.
+    pub fn trust_organization_publisher(
+        &self,
+        id: &str,
+        display_name: &str,
+        public_key_base64: &str,
+        mut registries: Vec<String>,
+        expected_revision: Option<u64>,
+        reason: &str,
+    ) -> Result<OrganizationPublisherMutation, RuntimeError> {
+        registries.sort();
+        let now = Utc::now();
+        let mut store = self.store()?;
+        let current = store.organization_publisher(id)?;
+        if let Some(existing) = &current {
+            let retry_matches_revision = expected_revision
+                .map_or(existing.revision == 1, |value| {
+                    value.saturating_add(1) == existing.revision
+                });
+            if retry_matches_revision
+                && existing.state == OrganizationPublisherState::Trusted
+                && existing.display_name == display_name
+                && existing.public_key_base64 == public_key_base64
+                && existing.registries == registries
+                && existing.reason == reason
+            {
+                return Ok(OrganizationPublisherMutation {
+                    publisher: existing.clone(),
+                    replayed: true,
+                    event: None,
+                });
+            }
+        }
+        let publisher = mcg_agents::TrustedOrganizationPublisher {
+            schema_version: mcg_agents::ORGANIZATION_PUBLISHER_SCHEMA_VERSION,
+            id: id.into(),
+            display_name: display_name.into(),
+            public_key_base64: public_key_base64.into(),
+            registries,
+            state: OrganizationPublisherState::Trusted,
+            revision: current
+                .as_ref()
+                .map_or(1, |publisher| publisher.revision.saturating_add(1)),
+            reason: reason.into(),
+            created_at: current
+                .as_ref()
+                .map_or(now, |publisher| publisher.created_at),
+            updated_at: now,
+        };
+        let event = store.record_organization_publisher(&publisher, expected_revision)?;
+        Ok(OrganizationPublisherMutation {
+            publisher,
+            replayed: false,
+            event: Some(event),
+        })
+    }
+
+    /// Permanently revokes one publisher identity. Exact retries observe the
+    /// retained terminal revocation.
+    ///
+    /// # Errors
+    /// Rejects unknown, stale, malformed, or conflicting revocations.
+    pub fn revoke_organization_publisher(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        reason: &str,
+    ) -> Result<OrganizationPublisherMutation, RuntimeError> {
+        let now = Utc::now();
+        let mut store = self.store()?;
+        let current = store
+            .organization_publisher(id)?
+            .ok_or_else(|| StorageError::Conflict("organization publisher was not found".into()))?;
+        if current.state == OrganizationPublisherState::Revoked {
+            if current.revision == expected_revision.saturating_add(1) && current.reason == reason {
+                return Ok(OrganizationPublisherMutation {
+                    publisher: current,
+                    replayed: true,
+                    event: None,
+                });
+            }
+            return Err(
+                StorageError::Conflict("organization publisher is already revoked".into()).into(),
+            );
+        }
+        let mut revoked = current;
+        revoked.revision = revoked.revision.saturating_add(1);
+        revoked.state = OrganizationPublisherState::Revoked;
+        revoked.reason = reason.into();
+        revoked.updated_at = now;
+        let event = store.record_organization_publisher(&revoked, Some(expected_revision))?;
+        Ok(OrganizationPublisherMutation {
+            publisher: revoked,
+            replayed: false,
+            event: Some(event),
+        })
+    }
+
+    /// Verifies a signed organization package against current owner trust and
+    /// persists a pending review without importing or activating it.
+    ///
+    /// # Errors
+    /// Rejects untrusted, revoked, out-of-scope, malformed, tampered, or
+    /// conflicting review identities.
+    pub fn review_shared_organization(
+        &self,
+        review_id: OrganizationShareReviewId,
+        package: &OrganizationSharePackage,
+    ) -> Result<OrganizationShareReviewMutation, RuntimeError> {
+        let mut store = self.store()?;
+        if let Some(existing) = store.organization_share_review(review_id)? {
+            if existing.package != *package {
+                return Err(StorageError::Conflict(
+                    "organization share review id was already used for another package".into(),
+                )
+                .into());
+            }
+            return Ok(OrganizationShareReviewMutation {
+                review: existing,
+                replayed: true,
+                event: None,
+            });
+        }
+        let trust = OrganizationShareTrustStore::new(store.organization_publishers()?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let verified = trust
+            .verify(package)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let review = OrganizationShareReview::pending(review_id, &verified, Utc::now());
+        let event = store.create_organization_share_review(&review)?;
+        Ok(OrganizationShareReviewMutation {
+            review,
+            replayed: false,
+            event: Some(event),
+        })
+    }
+
+    /// Lists durable organization-share reviews newest first.
+    ///
+    /// # Errors
+    /// Returns an error when storage cannot be read.
+    pub fn organization_share_reviews(&self) -> Result<Vec<OrganizationShareReview>, RuntimeError> {
+        Ok(self.store()?.organization_share_reviews()?)
+    }
+
+    /// Rejects one pending share review. Exact retries are observation-only.
+    ///
+    /// # Errors
+    /// Rejects unknown, imported, malformed, or conflicting decisions.
+    pub fn reject_shared_organization(
+        &self,
+        review_id: OrganizationShareReviewId,
+        reason: &str,
+    ) -> Result<OrganizationShareReviewMutation, RuntimeError> {
+        let mut store = self.store()?;
+        let current = store
+            .organization_share_review(review_id)?
+            .ok_or(StorageError::OrganizationShareReviewNotFound(review_id))?;
+        if current.state == OrganizationShareReviewState::Rejected {
+            if current.decision_reason.as_deref() == Some(reason) {
+                return Ok(OrganizationShareReviewMutation {
+                    review: current,
+                    replayed: true,
+                    event: None,
+                });
+            }
+            return Err(StorageError::Conflict(
+                "organization share review was already rejected differently".into(),
+            )
+            .into());
+        }
+        let rejected = current
+            .rejected(reason, Utc::now())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let event = store.reject_organization_share_review(&rejected)?;
+        Ok(OrganizationShareReviewMutation {
+            review: rejected,
+            replayed: false,
+            event: Some(event),
+        })
+    }
+
+    /// Re-verifies current trust and atomically imports one explicitly reviewed
+    /// signed package. Revocation between review and import fails closed.
+    ///
+    /// # Errors
+    /// Rejects unknown/stale decisions, changed trust, occupied identities, or
+    /// invalid imported definitions.
+    pub fn import_shared_organization(
+        &self,
+        review_id: OrganizationShareReviewId,
+        import_id: OrganizationImportId,
+        name: Option<&str>,
+        reason: &str,
+    ) -> Result<OrganizationShareImportMutation, RuntimeError> {
+        let mut store = self.store()?;
+        let current = store
+            .organization_share_review(review_id)?
+            .ok_or(StorageError::OrganizationShareReviewNotFound(review_id))?;
+        if current.state == OrganizationShareReviewState::Imported {
+            let organization_id = current.organization_id.ok_or_else(|| {
+                StorageError::InvalidData("imported review has no organization identity".into())
+            })?;
+            let organization = store.organization(organization_id)?.ok_or_else(|| {
+                StorageError::InvalidData("imported review organization is missing".into())
+            })?;
+            let expected_name = name
+                .unwrap_or(&current.package.portable.definition.name)
+                .trim();
+            if current.import_id == Some(import_id)
+                && current.decision_reason.as_deref() == Some(reason)
+                && organization.name == expected_name
+            {
+                return Ok(OrganizationShareImportMutation {
+                    review: current,
+                    organization,
+                    replayed: true,
+                    events: Vec::new(),
+                });
+            }
+            return Err(StorageError::Conflict(
+                "organization share review was already imported differently".into(),
+            )
+            .into());
+        }
+        if current.state != OrganizationShareReviewState::Pending {
+            return Err(StorageError::Conflict(
+                "organization share review is no longer pending".into(),
+            )
+            .into());
+        }
+        let trust = OrganizationShareTrustStore::new(store.organization_publishers()?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let verified = trust
+            .verify(&current.package)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if verified.evidence() != &current.evidence {
+            return Err(StorageError::Conflict(
+                "organization share package or publisher identity changed after review".into(),
+            )
+            .into());
+        }
+        let organization = current
+            .package
+            .portable
+            .materialize_for_import(import_id, name, Utc::now())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let imported = current
+            .imported(import_id, organization.organization_id, reason, Utc::now())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let events = store.import_organization_share_review(&imported, &organization)?;
+        Ok(OrganizationShareImportMutation {
+            review: imported,
+            organization,
+            replayed: false,
+            events,
+        })
     }
 
     /// Loads the full inspectable durable view of one agent run.
@@ -14195,6 +14494,131 @@ mod tests {
             reopened.import_organization(import_id, &changed, None),
             Err(RuntimeError::Storage(StorageError::Conflict(_)))
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle proves trust, review, restart, import replay, and revocation.
+    fn signed_organization_review_requires_current_trust_and_replays_after_restart() {
+        let directory = tempfile::tempdir().expect("runtime directory");
+        let config = AppConfig::default().with_data_directory(directory.path().join("data"));
+        let key = SigningKey::from_bytes(&[61; 32]);
+        let public_key = STANDARD.encode(key.verifying_key().to_bytes());
+        let portable = PortableOrganizationGenome::export(
+            &OrganizationGenome::consumer_default(Utc::now()),
+            Utc::now(),
+        )
+        .expect("portable organization");
+        let mut package = OrganizationSharePackage {
+            schema_version: mcg_agents::ORGANIZATION_SHARE_SCHEMA_VERSION,
+            registry: "https://registry.example/".into(),
+            package: "consumer-default".into(),
+            publisher: "publisher.example".into(),
+            portable,
+            signature: mcg_agents::OrganizationShareSignature {
+                scheme: mcg_agents::ORGANIZATION_SHARE_SIGNATURE_SCHEME.into(),
+                signature_base64: STANDARD.encode([0_u8; 64]),
+            },
+        };
+        let payload = mcg_agents::organization_share_signing_payload(&package)
+            .expect("organization signing payload");
+        package.signature.signature_base64 = STANDARD.encode(key.sign(&payload).to_bytes());
+        let review_id = OrganizationShareReviewId::new();
+        let import_id = OrganizationImportId::new();
+        {
+            let runtime = AppRuntime::open(config.clone()).expect("runtime");
+            let trusted = runtime
+                .trust_organization_publisher(
+                    "publisher.example",
+                    "Example Publisher",
+                    &public_key,
+                    vec!["https://registry.example/".into()],
+                    None,
+                    "Owner reviewed the publisher fingerprint.",
+                )
+                .expect("trust publisher");
+            assert!(!trusted.replayed);
+            assert!(trusted.event.is_some());
+            let trust_replay = runtime
+                .trust_organization_publisher(
+                    "publisher.example",
+                    "Example Publisher",
+                    &public_key,
+                    vec!["https://registry.example/".into()],
+                    None,
+                    "Owner reviewed the publisher fingerprint.",
+                )
+                .expect("trust replay");
+            assert!(trust_replay.replayed);
+            assert!(trust_replay.event.is_none());
+            let review = runtime
+                .review_shared_organization(review_id, &package)
+                .expect("review package");
+            assert_eq!(review.review.state, OrganizationShareReviewState::Pending);
+            assert!(!review.replayed);
+        }
+        let reopened = AppRuntime::open(config.clone()).expect("reopened runtime");
+        let review_replay = reopened
+            .review_shared_organization(review_id, &package)
+            .expect("review replay");
+        assert!(review_replay.replayed);
+        assert!(review_replay.event.is_none());
+        let imported = reopened
+            .import_shared_organization(
+                review_id,
+                import_id,
+                Some("Shared Consumer Organization"),
+                "Owner reviewed roles, policy, and publisher evidence.",
+            )
+            .expect("import shared organization");
+        assert!(!imported.replayed);
+        assert_eq!(imported.events.len(), 2);
+        assert_eq!(imported.organization.name, "Shared Consumer Organization");
+        let organization = imported.organization.clone();
+        drop(reopened);
+
+        let terminal = AppRuntime::open(config).expect("terminal reopen");
+        let replay = terminal
+            .import_shared_organization(
+                review_id,
+                import_id,
+                Some("Shared Consumer Organization"),
+                "Owner reviewed roles, policy, and publisher evidence.",
+            )
+            .expect("import replay");
+        assert!(replay.replayed);
+        assert!(replay.events.is_empty());
+        assert_eq!(replay.organization, organization);
+
+        let pending_id = OrganizationShareReviewId::new();
+        terminal
+            .review_shared_organization(pending_id, &package)
+            .expect("second review");
+        terminal
+            .revoke_organization_publisher(
+                "publisher.example",
+                1,
+                "Owner revoked the publisher before import.",
+            )
+            .expect("revoke publisher");
+        assert!(matches!(
+            terminal.import_shared_organization(
+                pending_id,
+                OrganizationImportId::new(),
+                None,
+                "This import must fail after revocation."
+            ),
+            Err(RuntimeError::Storage(StorageError::InvalidData(_)))
+        ));
+        assert_eq!(
+            terminal
+                .organization_share_reviews()
+                .expect("reviews")
+                .into_iter()
+                .find(|review| review.id == pending_id)
+                .expect("pending review")
+                .state,
+            OrganizationShareReviewState::Pending
+        );
     }
 
     #[tokio::test]

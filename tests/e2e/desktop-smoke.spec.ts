@@ -79,6 +79,19 @@ test.beforeEach(async ({ page }) => {
       content_sha256: "c".repeat(64)
     };
     let organizations = [baseOrganization];
+    const organizationPublisher = {
+      schema_version: 1,
+      id: "example-publisher",
+      display_name: "Example publisher",
+      public_key_base64: "e".repeat(44),
+      registries: ["https://organizations.example.com"],
+      state: "trusted",
+      revision: 1,
+      reason: "Owner reviewed",
+      created_at: now,
+      updated_at: now
+    };
+    let organizationShareReviews: any[] = [];
     let memoryClaims: any[] = [];
     let sshWorkflows: any[] = [];
     let reviewedPlans: any[] = [];
@@ -96,6 +109,35 @@ test.beforeEach(async ({ page }) => {
           if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
           if (command === "list_projects") return { projects: [project] };
           if (command === "list_organizations") return { organizations };
+          if (command === "list_organization_publishers") return [organizationPublisher];
+          if (command === "list_organization_share_reviews") return organizationShareReviews;
+          if (command === "review_shared_organization") {
+            const review = {
+              schema_version: 1,
+              id: args.request.review_id,
+              package: args.request.package,
+              evidence: {
+                schema_version: 1,
+                registry: args.request.package.registry,
+                package: args.request.package.package,
+                publisher: args.request.package.publisher,
+                publisher_key_sha256: "b".repeat(64),
+                portable_sha256: args.request.package.portable.content_sha256,
+                package_sha256: "c".repeat(64),
+                signature_sha256: "d".repeat(64)
+              },
+              state: "pending",
+              created_at: now,
+              updated_at: now
+            };
+            organizationShareReviews = [review];
+            return { review, replayed: false };
+          }
+          if (command === "import_shared_organization") {
+            const review = { ...organizationShareReviews[0], state: "imported", import_id: args.request.import_id, organization_id: baseOrganization.organization_id, decision_reason: args.request.reason };
+            organizationShareReviews = [review];
+            return { review, organization: baseOrganization, replayed: false, events: [] };
+          }
           if (command === "organization_history") return { revisions: organizations.filter((item) => item.organization_id === args.organizationId) };
           if (command === "export_organization") return portableOrganization;
           if (command === "import_organization") {
@@ -422,6 +464,31 @@ test("consumer duplicates and inspects a portable organization without exposing 
   await organizations.getByRole("button", { name: "Compare portable definitions" }).click();
   await expect(organizations.getByText("Definitions are equivalent.")).toBeVisible();
   await expect(organizations.getByText(/Retry identity:/)).toBeVisible();
+});
+
+test("consumer verifies a signed organization before a separate reasoned import", async ({ page }) => {
+  await page.goto("/");
+  const sharing = page.getByLabel("Signed organization sharing");
+  await sharing.getByLabel("Signed organization package").fill(JSON.stringify({
+    schema_version: 1,
+    registry: "https://organizations.example.com",
+    package: "consumer-team",
+    publisher: "example-publisher",
+    portable: {
+      schema_version: 1,
+      source: { organization_id: "00000000-0000-4000-8000-000000000251", revision_id: "00000000-0000-4000-8000-000000000252", revision: 1, exported_at: "2026-08-18T00:00:00Z" },
+      definition: { name: "Consumer team", roles: [], relationships: [], policy: { prefer_minimal_organization: true, max_parallel_agents: 4, max_total_agents: 8, max_organizational_overhead_ratio: 0.3, default_lease_seconds: 900 }, evaluation: { require_independent_evaluation: false, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 } },
+      content_sha256: "c".repeat(64)
+    },
+    signature: { scheme: "ed25519-v1", signature_base64: "s".repeat(88) }
+  }));
+  await sharing.getByRole("button", { name: "Verify for review" }).click();
+  await expect(sharing.getByText("Publisher key digest")).toBeVisible();
+  await expect(sharing.getByText("Verified package digest")).toBeVisible();
+  await expect(sharing.getByRole("button", { name: "Import verified organization" })).toBeDisabled();
+  await sharing.getByLabel("Owner decision reason").fill("Reviewed for this local project");
+  await sharing.getByRole("button", { name: "Import verified organization" }).click();
+  await expect(sharing.getByText(/Reviewed for this local project/)).toBeVisible();
 });
 
 async function expectOrganizationCardsToFit(organizations: import("@playwright/test").Locator) {

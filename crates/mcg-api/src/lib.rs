@@ -25,24 +25,25 @@ use chrono::Utc;
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationReport,
     ExecutivePlanner, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
-    ExperimentState, OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest,
-    PortableOrganizationComparison, PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt,
-    SuccessCondition, SupervisionObservation, TaskComplexity,
+    ExperimentState, OrganizationGenome, OrganizationSharePackage, OrganizationShareReview,
+    OrganizationalMetrics, PlannedWork, PlanningRequest, PortableOrganizationComparison,
+    PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition,
+    SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
 };
 use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, ExperimentId,
     MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent,
-    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallation,
-    PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId,
-    RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor, SiteRevision,
-    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
-    SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow, SshWorkflowId,
-    TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
+    ReviewedTopologyPlanId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
+    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
+    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
+    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -61,7 +62,8 @@ use mcg_runtime::{
     BackupBundleSummary, BackupPassphrase, CandidateRevisionMutation,
     ConsumerEvaluationCheckpointState, ConsumerEvaluationProgress, DiagnosticReport,
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, PlatformBrowserMutation, PlatformComputerActionMutation,
+    OpenAiOAuthMethod, OrganizationPublisherMutation, OrganizationShareImportMutation,
+    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation,
     PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
     ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
@@ -371,6 +373,52 @@ pub struct ImportOrganizationRequest {
     pub portable: PortableOrganizationGenome,
     #[serde(default)]
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustOrganizationPublisherRequest {
+    pub id: String,
+    pub display_name: String,
+    pub public_key_base64: String,
+    pub registries: Vec<String>,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeOrganizationPublisherRequest {
+    pub expected_revision: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationPublisherListResponse {
+    pub publishers: Vec<TrustedOrganizationPublisher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewSharedOrganizationRequest {
+    pub review_id: OrganizationShareReviewId,
+    pub package: OrganizationSharePackage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecideSharedOrganizationRequest {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSharedOrganizationRequest {
+    pub import_id: OrganizationImportId,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationShareReviewListResponse {
+    pub reviews: Vec<OrganizationShareReview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1215,6 +1263,26 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             get(organization_history),
         )
         .route("/api/v1/organizations/import", post(import_organization))
+        .route(
+            "/api/v1/organization-publishers",
+            get(list_organization_publishers).post(trust_organization_publisher),
+        )
+        .route(
+            "/api/v1/organization-publishers/{publisher_id}/revoke",
+            post(revoke_organization_publisher),
+        )
+        .route(
+            "/api/v1/organization-share-reviews",
+            get(list_organization_share_reviews).post(review_shared_organization),
+        )
+        .route(
+            "/api/v1/organization-share-reviews/{review_id}/import",
+            post(import_shared_organization),
+        )
+        .route(
+            "/api/v1/organization-share-reviews/{review_id}/reject",
+            post(reject_shared_organization),
+        )
         .route(
             "/api/v1/organizations/{organization_id}/inherit",
             post(inherit_organization),
@@ -3252,6 +3320,115 @@ async fn compare_organizations(
         .map_err(map_runtime_error)
 }
 
+async fn list_organization_publishers(
+    State(state): State<ApiState>,
+) -> Result<Json<OrganizationPublisherListResponse>, ApiError> {
+    state
+        .runtime
+        .organization_publishers()
+        .map(|publishers| Json(OrganizationPublisherListResponse { publishers }))
+        .map_err(map_runtime_error)
+}
+
+async fn trust_organization_publisher(
+    State(state): State<ApiState>,
+    Json(request): Json<TrustOrganizationPublisherRequest>,
+) -> Result<(StatusCode, Json<OrganizationPublisherMutation>), ApiError> {
+    let mutation = state
+        .runtime
+        .trust_organization_publisher(
+            &request.id,
+            &request.display_name,
+            &request.public_key_base64,
+            request.registries,
+            request.expected_revision,
+            &request.reason,
+        )
+        .map_err(map_runtime_error)?;
+    Ok((
+        if mutation.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(mutation),
+    ))
+}
+
+async fn revoke_organization_publisher(
+    State(state): State<ApiState>,
+    Path(publisher_id): Path<String>,
+    Json(request): Json<RevokeOrganizationPublisherRequest>,
+) -> Result<Json<OrganizationPublisherMutation>, ApiError> {
+    state
+        .runtime
+        .revoke_organization_publisher(&publisher_id, request.expected_revision, &request.reason)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn list_organization_share_reviews(
+    State(state): State<ApiState>,
+) -> Result<Json<OrganizationShareReviewListResponse>, ApiError> {
+    state
+        .runtime
+        .organization_share_reviews()
+        .map(|reviews| Json(OrganizationShareReviewListResponse { reviews }))
+        .map_err(map_runtime_error)
+}
+
+async fn review_shared_organization(
+    State(state): State<ApiState>,
+    Json(request): Json<ReviewSharedOrganizationRequest>,
+) -> Result<(StatusCode, Json<OrganizationShareReviewMutation>), ApiError> {
+    let mutation = state
+        .runtime
+        .review_shared_organization(request.review_id, &request.package)
+        .map_err(map_runtime_error)?;
+    Ok((
+        if mutation.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(mutation),
+    ))
+}
+
+async fn import_shared_organization(
+    State(state): State<ApiState>,
+    Path(review_id): Path<String>,
+    Json(request): Json<ImportSharedOrganizationRequest>,
+) -> Result<(StatusCode, Json<OrganizationShareImportMutation>), ApiError> {
+    let review_id = parse_organization_share_review_id(&review_id)?;
+    let name = request.name.as_deref().map(str::trim);
+    let mutation = state
+        .runtime
+        .import_shared_organization(review_id, request.import_id, name, request.reason.trim())
+        .map_err(map_runtime_error)?;
+    Ok((
+        if mutation.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(mutation),
+    ))
+}
+
+async fn reject_shared_organization(
+    State(state): State<ApiState>,
+    Path(review_id): Path<String>,
+    Json(request): Json<DecideSharedOrganizationRequest>,
+) -> Result<Json<OrganizationShareReviewMutation>, ApiError> {
+    let review_id = parse_organization_share_review_id(&review_id)?;
+    state
+        .runtime
+        .reject_shared_organization(review_id, request.reason.trim())
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 #[allow(clippy::too_many_lines)] // Stable-key dependency conversion is one validation boundary.
 async fn plan_agent_run(
     State(state): State<ApiState>,
@@ -4947,6 +5124,12 @@ fn parse_organization_revision_id(value: &str) -> Result<OrganizationRevisionId,
         .map_err(|_| ApiError::bad_request("organization revision id must be a UUID"))
 }
 
+fn parse_organization_share_review_id(value: &str) -> Result<OrganizationShareReviewId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid organization share review id"))
+}
+
 fn parse_experiment_id(value: &str) -> Result<ExperimentId, ApiError> {
     value
         .parse()
@@ -5073,6 +5256,7 @@ mod tests {
     };
 
     use axum::{body::Body, http::Request, response::Html};
+    use ed25519_dalek::{Signer as _, SigningKey};
     use http_body_util::BodyExt;
     use mcg_agents::{AgentState, ConditionResult, EvaluationEvidence, EvaluationOutcome};
     use mcg_config::{AppConfig, AutonomyPreset};
@@ -7768,6 +7952,10 @@ form.addEventListener('submit', (event) => {
                 "mcg_query_project",
                 "mcg_query_organization",
                 "mcg_import_organization",
+                "mcg_organization_publishers",
+                "mcg_organization_publisher_mutate",
+                "mcg_organization_share_reviews",
+                "mcg_organization_share_mutate",
                 "mcg_query_task",
                 "mcg_query_run",
                 "mcg_scheduler_list",
@@ -14141,6 +14329,277 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("changed replay");
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full authenticated publisher-review-import lifecycle and tamper rejection.
+    async fn signed_organization_sharing_is_authenticated_reviewed_and_replay_safe() {
+        let runtime = test_runtime();
+        let app = router(runtime);
+        let key = SigningKey::from_bytes(&[67; 32]);
+        let public_key = STANDARD.encode(key.verifying_key().to_bytes());
+        let portable = PortableOrganizationGenome::export(
+            &OrganizationGenome::consumer_default(Utc::now()),
+            Utc::now(),
+        )
+        .expect("portable organization");
+        let mut package = OrganizationSharePackage {
+            schema_version: mcg_agents::ORGANIZATION_SHARE_SCHEMA_VERSION,
+            registry: "https://registry.example/".into(),
+            package: "consumer-default".into(),
+            publisher: "publisher.example".into(),
+            portable,
+            signature: mcg_agents::OrganizationShareSignature {
+                scheme: mcg_agents::ORGANIZATION_SHARE_SIGNATURE_SCHEME.into(),
+                signature_base64: STANDARD.encode([0_u8; 64]),
+            },
+        };
+        let payload =
+            mcg_agents::organization_share_signing_payload(&package).expect("signing payload");
+        package.signature.signature_base64 = STANDARD.encode(key.sign(&payload).to_bytes());
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/organization-publishers")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let trust_request = TrustOrganizationPublisherRequest {
+            id: "publisher.example".into(),
+            display_name: "Example Publisher".into(),
+            public_key_base64: public_key,
+            registries: vec!["https://registry.example/".into()],
+            expected_revision: None,
+            reason: "Owner reviewed the publisher fingerprint.".into(),
+        };
+        let trusted = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/organization-publishers"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&trust_request).expect("trust body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("trust response");
+        assert_eq!(trusted.status(), StatusCode::CREATED);
+        let trusted: OrganizationPublisherMutation =
+            serde_json::from_value(response_json(trusted).await).expect("trust mutation");
+        assert!(!trusted.replayed);
+        assert_eq!(
+            trusted
+                .publisher
+                .public_key_sha256()
+                .expect("key hash")
+                .len(),
+            64
+        );
+        let mcp_trust = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(201),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_organization_publisher_mutate"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "action": "trust",
+                            "publisher_id": trust_request.id.clone(),
+                            "display_name": trust_request.display_name.clone(),
+                            "public_key_base64": trust_request.public_key_base64.clone(),
+                            "registries": trust_request.registries.clone(),
+                            "reason": trust_request.reason.clone()
+                        }),
+                    ),
+                ]),
+                Some("mcg_organization_publisher_mutate"),
+            ))
+            .await
+            .expect("MCP trust replay");
+        let mcp_trust = response_json(mcp_trust).await;
+        assert_eq!(
+            mcp_trust.pointer("/result/structuredContent/replayed"),
+            Some(&serde_json::json!(true))
+        );
+
+        let review_id = OrganizationShareReviewId::new();
+        let review_request = ReviewSharedOrganizationRequest {
+            review_id,
+            package: package.clone(),
+        };
+        let reviewed = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/organization-share-reviews"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&review_request).expect("review body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("review response");
+        assert_eq!(reviewed.status(), StatusCode::CREATED);
+        let reviewed: OrganizationShareReviewMutation =
+            serde_json::from_value(response_json(reviewed).await).expect("review mutation");
+        assert_eq!(
+            reviewed.review.state,
+            mcg_agents::OrganizationShareReviewState::Pending
+        );
+
+        let import_id = OrganizationImportId::new();
+        let import_request = ImportSharedOrganizationRequest {
+            import_id,
+            name: Some("Shared Fixture".into()),
+            reason: "Owner reviewed the signed organization definition.".into(),
+        };
+        let import_path = format!("/api/v1/organization-share-reviews/{review_id}/import");
+        let imported = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&import_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&import_request).expect("import body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("import response");
+        assert_eq!(imported.status(), StatusCode::CREATED);
+        let imported: OrganizationShareImportMutation =
+            serde_json::from_value(response_json(imported).await).expect("import mutation");
+        assert_eq!(imported.organization.name, "Shared Fixture");
+        assert_eq!(imported.events.len(), 2);
+
+        let replay = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(&import_path))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&import_request).expect("replay body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("replay response");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: OrganizationShareImportMutation =
+            serde_json::from_value(response_json(replay).await).expect("replay mutation");
+        assert!(replay.replayed);
+        assert!(replay.events.is_empty());
+
+        let mcp_review_id = OrganizationShareReviewId::new();
+        let mcp_review = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(202),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_organization_share_mutate"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "action": "review",
+                            "review_id": mcp_review_id,
+                            "package": package.clone()
+                        }),
+                    ),
+                ]),
+                Some("mcg_organization_share_mutate"),
+            ))
+            .await
+            .expect("MCP share review");
+        let mcp_review = response_json(mcp_review).await;
+        assert_eq!(
+            mcp_review.pointer("/result/structuredContent/review/state"),
+            Some(&serde_json::json!("pending"))
+        );
+        let mcp_reject = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(203),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_organization_share_mutate"),
+                    ),
+                    (
+                        "arguments".into(),
+                        serde_json::json!({
+                            "action": "reject",
+                            "review_id": mcp_review_id,
+                            "reason": "Owner rejected the second package review."
+                        }),
+                    ),
+                ]),
+                Some("mcg_organization_share_mutate"),
+            ))
+            .await
+            .expect("MCP share rejection");
+        let mcp_reject = response_json(mcp_reject).await;
+        assert_eq!(
+            mcp_reject.pointer("/result/structuredContent/review/state"),
+            Some(&serde_json::json!("rejected"))
+        );
+        let mcp_reviews = app
+            .clone()
+            .oneshot(mcp_request(
+                &serde_json::json!(204),
+                "tools/call",
+                serde_json::Map::from_iter([
+                    (
+                        "name".into(),
+                        serde_json::json!("mcg_organization_share_reviews"),
+                    ),
+                    ("arguments".into(), serde_json::json!({})),
+                ]),
+                Some("mcg_organization_share_reviews"),
+            ))
+            .await
+            .expect("MCP share history");
+        let mcp_reviews = response_json(mcp_reviews).await;
+        assert!(
+            mcp_reviews
+                .pointer("/result/structuredContent/reviews")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|reviews| reviews.len() == 2)
+        );
+
+        let mut tampered = package;
+        tampered.portable.definition.name = "Tampered".into();
+        let bad = app
+            .oneshot(
+                authorized(Request::post("/api/v1/organization-share-reviews"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ReviewSharedOrganizationRequest {
+                            review_id: OrganizationShareReviewId::new(),
+                            package: tampered,
+                        })
+                        .expect("tampered body"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("tampered response");
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
