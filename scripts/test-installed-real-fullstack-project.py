@@ -479,18 +479,19 @@ def browser_run(
         ]
         if sys.platform.startswith("linux"):
             base.insert(1, "--no-sandbox")
-        if screenshot:
-            captured = subprocess.run(
-                [*base, f"--screenshot={image}", url],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-                check=False,
-            )
-            require(
-                captured.returncode == 0,
-                f"HomeBase browser screenshot failed: {captured.stderr[:4096]!r}",
-            )
+        captured = subprocess.run(
+            [*base, f"--screenshot={image}", url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+        require(
+            captured.returncode == 0,
+            f"HomeBase browser screenshot failed: {captured.stderr[:4096]!r}",
+        )
+        if not screenshot:
+            return "", None
         dom = subprocess.run(
             [*base, "--dump-dom", url],
             stdout=subprocess.PIPE,
