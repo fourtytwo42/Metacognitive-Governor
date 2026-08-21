@@ -253,18 +253,37 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+async function openOwnerMenu(page: import("@playwright/test").Page) {
+  const menu = page.locator(".owner-menu");
+  if (!await menu.isVisible()) {
+    await page.getByRole("button", { name: /Local owner/ }).click();
+  }
+  await expect(menu).toBeVisible();
+  return menu;
+}
+
+async function openOwnerSurface(page: import("@playwright/test").Page, name: string) {
+  const menu = await openOwnerMenu(page);
+  await menu.getByRole("button", { name, exact: true }).click();
+}
+
+async function enableAdvancedMode(page: import("@playwright/test").Page) {
+  const menu = await openOwnerMenu(page);
+  await menu.getByRole("button", { name: "Advanced mode" }).click();
+}
+
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "What would you like to build?" })).toBeVisible();
   await expect(page.locator("#projects")).toBeHidden();
-  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await openOwnerSurface(page, "Settings");
   const updates = page.getByLabel("Application updates");
   await expect(updates.getByText(/Updates are unavailable in this build/)).toBeVisible();
   await expect(updates.getByText(/never accept an unsigned fallback/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await enableAdvancedMode(page);
 
   await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
@@ -287,21 +306,22 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByLabel("Provider type")).toHaveValue("open_ai_compatible");
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
 
-  await page.getByRole("button", { name: "Simple mode" }).click();
-  await page.getByRole("link", { name: "Scheduler", exact: true }).click();
+  const ownerMenu = await openOwnerMenu(page);
+  await ownerMenu.getByRole("button", { name: "Simple mode" }).click();
+  await page.getByRole("link", { name: "Scheduled", exact: true }).click();
   await expect(scheduler.getByLabel("Repeat")).toHaveValue("3600");
 });
 
 test("simple and advanced interfaces meet the WCAG A and AA accessibility baseline", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
 
   const simple = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(simple.violations, "simple-mode accessibility violations").toEqual([]);
 
-  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await enableAdvancedMode(page);
   await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
 
   const advanced = await new AxeBuilder({ page })
@@ -312,42 +332,49 @@ test("simple and advanced interfaces meet the WCAG A and AA accessibility baseli
 
 test("keyboard-only navigation reaches every workspace and exposes visible focus", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your AI workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
 
   const navigation = [
-    "Tasks",
-    "Projects",
-    "Threads",
-    "Scheduler",
-    "Improvement",
+    "Hide sidebar",
+    "Back",
+    "Forward",
+    "File",
+    "Edit",
+    "View",
+    "Help",
+    "Search chats",
+    "New chat",
+    "Pull requests",
     "Sites",
-    "SSH",
-    "Computer & browser",
-    "Providers",
-    "Tools",
-    "Plugins",
-    "Settings"
+    "Scheduled",
+    "Plugins"
   ];
   for (const name of navigation) {
     await page.keyboard.press("Tab");
-    const link = page.getByRole("link", { name, exact: true });
-    await expect(link).toBeFocused();
-    await expectVisibleKeyboardFocus(link);
+    const control = name === "Search chats"
+      ? page.getByRole("textbox", { name })
+      : page.getByRole(name === "New chat" ? "button" : name === "Pull requests" || name === "Sites" || name === "Scheduled" || name === "Plugins" ? "link" : "button", { name, exact: true });
+    await expect(control).toBeFocused();
+    await expectVisibleKeyboardFocus(control);
   }
 
   await page.keyboard.press("Tab");
-  const mode = page.getByRole("button", { name: "Advanced mode" });
-  await expect(mode).toBeFocused();
-  await expectVisibleKeyboardFocus(mode);
+  await expect(page.getByRole("button", { name: "consumer-app" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  const owner = page.getByRole("button", { name: /Local owner/ });
+  await expect(owner).toBeFocused();
+  await expectVisibleKeyboardFocus(owner);
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Simple mode" })).toBeFocused();
+  await expect(page.locator(".owner-menu")).toBeVisible();
 });
 
 test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {
   await page.setViewportSize({ width: 720, height: 900 });
   await page.goto("/");
 
+  const owner = page.getByRole("button", { name: /Local owner/ });
+  await expect(owner).toBeVisible();
+  await owner.click();
   const mode = page.getByRole("button", { name: "Advanced mode" });
   await expect(mode).toBeVisible();
   const box = await mode.boundingBox();
@@ -358,29 +385,27 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
 
 test("workspace navigation always opens a surface at its top", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Use project" }).click();
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
 
-  await page.getByRole("link", { name: "Tasks", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(page.getByRole("region", { name: "Tasks" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => Math.round(window.scrollY))).toBe(0);
 
-  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  await openOwnerSurface(page, "Projects");
   await expect(page.locator("#projects")).toBeVisible();
   await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
   await expect.poll(() => page.evaluate(() => Math.round(window.scrollY))).toBe(0);
-  await expect(page.getByRole("link", { name: "Projects", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
 });
 
 test("scaled 1280x800 Windows layout keeps browser OAuth reachable", async ({ page }) => {
   await page.setViewportSize({ width: 853, height: 533 });
   await page.goto("/");
 
-  const providerLink = page.getByRole("link", { name: "Providers" });
-  await expect(providerLink).toBeVisible();
-  await providerLink.click();
+  await openOwnerSurface(page, "Providers");
 
   const connect = page.getByRole("button", { name: "Continue with OpenAI" });
   await connect.scrollIntoViewIfNeeded();
@@ -412,7 +437,7 @@ test("plugin permission review gates enablement and invocation", async ({ page }
 
 test("consumer composes and runs a revision-pinned multi-host workflow", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "SSH", exact: true }).click();
+  await openOwnerSurface(page, "SSH");
   const workflows = page.getByRole("region", { name: "SSH workflows" });
   await workflows.getByLabel("Workflow name").fill("Build and test remotely");
   await workflows.getByRole("checkbox", { name: /Linux builder/ }).check();
@@ -427,7 +452,7 @@ test("consumer composes and runs a revision-pinned multi-host workflow", async (
 
 test("consumer manages provenance-bearing project memory and inspects the world model", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Projects" }).click();
+  await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Use project" }).click();
   const intelligence = page.getByLabel("Project intelligence and memory");
   await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("Stage 1");
@@ -439,7 +464,7 @@ test("consumer manages provenance-bearing project memory and inspects the world 
   await expect(intelligence.getByText("package_manager")).toBeVisible();
   await expect(intelligence.getByText("pnpm", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await enableAdvancedMode(page);
   await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("database · compose.yaml");
   await expect(intelligence.getByLabel("Memory namespace")).toHaveValue("project");
   await expect(intelligence.getByLabel("Memory fresh until")).toBeVisible();
@@ -455,7 +480,7 @@ test("consumer manages provenance-bearing project memory and inspects the world 
 
 test("consumer reviews, approves, and runs an exact topology command", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Projects" }).click();
+  await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Use project" }).click();
   const intelligence = page.getByLabel("Project intelligence and memory");
   await intelligence.getByLabel("Reviewed topology reason").fill("Run the reviewed project tests");
@@ -471,7 +496,7 @@ test("consumer reviews, approves, and runs an exact topology command", async ({ 
 test("consumer duplicates and inspects a portable organization without exposing local authority", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
-  await page.getByRole("link", { name: "Improvement", exact: true }).click();
+  await openOwnerSurface(page, "Improvement");
   const improvement = page.getByRole("region", { name: "Measured improvement" });
   const organizations = improvement.getByLabel("Agent organizations");
   await expect(organizations.locator("strong", { hasText: "Consumer team" })).toBeVisible();
@@ -479,7 +504,7 @@ test("consumer duplicates and inspects a portable organization without exposing 
   await expect(organizations.locator("strong", { hasText: "Consumer team copy" })).toBeVisible();
   await expectOrganizationCardsToFit(organizations);
 
-  await page.getByRole("button", { name: "Advanced mode" }).click();
+  await enableAdvancedMode(page);
   await expectOrganizationCardsToFit(organizations);
   await organizations.getByRole("button", { name: "Show portable JSON" }).first().click();
   await expect(organizations.getByLabel("Portable organization JSON")).toContainText("cccccccc");
@@ -492,7 +517,7 @@ test("consumer duplicates and inspects a portable organization without exposing 
 
 test("consumer verifies a signed organization before a separate reasoned import", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Improvement", exact: true }).click();
+  await openOwnerSurface(page, "Improvement");
   const sharing = page.getByLabel("Signed organization sharing");
   await sharing.getByLabel("Signed organization package").fill(JSON.stringify({
     schema_version: 1,

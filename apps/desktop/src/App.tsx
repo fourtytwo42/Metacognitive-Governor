@@ -407,7 +407,21 @@ function TaskEvidence({
 
 export function App() {
   const modeButtonRef = useRef<HTMLButtonElement>(null);
+  const goalInputRef = useRef<HTMLTextAreaElement>(null);
   const [activeSurface, setActiveSurface] = useState("tasks");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [chatSearch, setChatSearch] = useState("");
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+  const [desktopMenu, setDesktopMenu] = useState<string | null>(null);
+  const [pinnedTaskIds, setPinnedTaskIds] = useState<string[]>(() => {
+    try {
+      const stored = window.localStorage.getItem("mcg.pinned-task-ids");
+      return stored ? JSON.parse(stored) as string[] : [];
+    } catch {
+      return [];
+    }
+  });
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
@@ -622,16 +636,31 @@ export function App() {
     };
   }, []);
 
-  function openSurface(event: MouseEvent<HTMLAnchorElement>, surface: string) {
-    event.preventDefault();
+  useEffect(() => {
+    window.localStorage.setItem("mcg.pinned-task-ids", JSON.stringify(pinnedTaskIds));
+  }, [pinnedTaskIds]);
+
+  useEffect(() => {
+    const restoreSurface = () => {
+      const surface = window.location.hash.slice(1);
+      if (surface) setActiveSurface(surface);
+      window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+    };
+    window.addEventListener("popstate", restoreSurface);
+    return () => window.removeEventListener("popstate", restoreSurface);
+  }, []);
+
+  function navigateSurface(surface: string, addHistory = true) {
     setActiveSurface(surface);
-    window.history.replaceState(null, "", `#${surface}`);
+    setOwnerMenuOpen(false);
+    setDesktopMenu(null);
+    if (addHistory) window.history.pushState(null, "", `#${surface}`);
     window.requestAnimationFrame(() => {
       const target = surface === "tasks"
         ? document.querySelector<HTMLElement>(".workspace")
         : surface === "threads"
           ? document.querySelector<HTMLElement>(".task-panel")
-        : document.getElementById(surface);
+          : document.getElementById(surface);
       if (target) {
         const headerOffset = advanced
           ? (document.querySelector<HTMLElement>(".topbar")?.offsetHeight ?? 0) + 18
@@ -644,6 +673,28 @@ export function App() {
         window.scrollTo({ top: 0, left: 0, behavior: "instant" });
       }
     });
+  }
+
+  function openSurface(event: MouseEvent<HTMLAnchorElement>, surface: string) {
+    event.preventDefault();
+    navigateSurface(surface);
+  }
+
+  function startNewChat() {
+    setSelectedChatId(null);
+    navigateSurface("tasks");
+    window.requestAnimationFrame(() => goalInputRef.current?.focus());
+  }
+
+  function openChat(taskId: string) {
+    setSelectedChatId(taskId);
+    navigateSurface("threads");
+  }
+
+  function togglePinnedTask(taskId: string) {
+    setPinnedTaskIds((current) => current.includes(taskId)
+      ? current.filter((candidate) => candidate !== taskId)
+      : [taskId, ...current]);
   }
 
   useEffect(() => {
@@ -2801,60 +2852,77 @@ export function App() {
     ).values()
   );
 
+  const normalizedChatSearch = chatSearch.trim().toLocaleLowerCase();
+  const matchingTasks = tasks.filter((task) => !normalizedChatSearch || task.goal.toLocaleLowerCase().includes(normalizedChatSearch));
+  const pinnedTasks = matchingTasks.filter((task) => pinnedTaskIds.includes(task.id));
+  const visibleTasks = activeSurface === "threads" && selectedChatId
+    ? tasks.filter((task) => task.id === selectedChatId)
+    : tasks;
+  const activeSurfaceTitle = activeSurface === "tasks"
+    ? "New chat"
+    : activeSurface === "threads"
+      ? tasks.find((task) => task.id === selectedChatId)?.goal ?? "Chats"
+      : activeSurface === "mcp"
+        ? "Tools"
+        : activeSurface === "ssh"
+          ? "SSH"
+          : activeSurface === "pull-requests"
+            ? "Pull requests"
+            : activeSurface.charAt(0).toUpperCase() + activeSurface.slice(1);
+
   return (
-    <div
-      className={`app-shell ${advanced ? "advanced-mode" : "simple-mode"}`}
-      data-active-surface={activeSurface}
-    >
-      <aside className="sidebar" aria-label="Primary navigation">
-        <div className="brand" aria-label="MetaCognitive Governor">
-          <span className="brand-mark">M</span>
-          <span>MCG</span>
+    <div className={`desktop-frame${sidebarOpen ? "" : " sidebar-collapsed"}`}>
+      <header className="desktop-menubar" aria-label="Application menu">
+        <button type="button" className="chrome-button sidebar-toggle" aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"} aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((current) => !current)}><span aria-hidden="true">◧</span></button>
+        <button type="button" className="chrome-button" aria-label="Back" onClick={() => window.history.back()}><span aria-hidden="true">←</span></button>
+        <button type="button" className="chrome-button" aria-label="Forward" onClick={() => window.history.forward()}><span aria-hidden="true">→</span></button>
+        <div className="desktop-menu-list">
+          {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
+            <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
+            <div className={`desktop-menu-popover${desktopMenu === menu ? " open" : ""}`}>
+              {menu === "File" && <><button type="button" onClick={startNewChat}>New chat</button><button type="button" onClick={() => navigateSurface("projects")}>Open project</button></>}
+              {menu === "Edit" && <button type="button" onClick={() => goalInputRef.current?.focus()}>Focus composer</button>}
+              {menu === "View" && <><button type="button" onClick={() => setSidebarOpen((current) => !current)}>{sidebarOpen ? "Hide sidebar" : "Show sidebar"}</button><button type="button" onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button></>}
+              {menu === "Help" && <><button type="button" onClick={() => navigateSurface("settings")}>Diagnostics</button><button type="button" onClick={() => navigateSurface("settings")}>About MCG</button></>}
+            </div>
+          </div>)}
         </div>
-        <nav aria-label="Workspace pages">
-          {[
-            ["tasks", "Tasks"],
-            ["projects", "Projects"],
-            ["threads", "Threads"],
-            ["scheduler", "Scheduler"],
-            ["improvement", "Improvement"],
-            ["sites", "Sites"],
-            ["ssh", "SSH"],
-            ["platform", "Computer & browser"],
-            ["providers", "Providers"],
-            ["mcp", "Tools"],
-            ["plugins", "Plugins"],
-            ["settings", "Settings"]
-          ].map(([surface, label]) => (
-            <a
-              className={`nav-item${activeSurface === surface ? " active" : ""}`}
-              href={`#${surface}`}
-              aria-current={activeSurface === surface ? "page" : undefined}
-              onClick={(event) => openSurface(event, surface)}
-              key={surface}
-            >
-              <span className="nav-glyph" aria-hidden="true" />
-              {label}
-            </a>
-          ))}
+      </header>
+      <div
+        className={`app-shell ${advanced ? "advanced-mode" : "simple-mode"}`}
+        data-active-surface={activeSurface}
+      >
+      <aside className="sidebar" aria-label="Primary navigation">
+        <div className="sidebar-heading">
+          <div className="brand" aria-label="MetaCognitive Governor"><span>MCG</span></div>
+          <label className="chat-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search chats</span><input aria-label="Search chats" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search" /></label>
+        </div>
+        <nav className="sidebar-shortcuts" aria-label="Workspace pages">
+          <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={startNewChat}><span className="shortcut-glyph" aria-hidden="true">✎</span>New chat</button>
+          {[(["pull-requests", "Pull requests", "⑂"]), (["sites", "Sites", "▦"]), (["scheduler", "Scheduled", "◷"]), (["plugins", "Plugins", "◉"])].map(([surface, label, glyph]) => <a className={`nav-item${activeSurface === surface ? " active" : ""}`} href={`#${surface}`} aria-current={activeSurface === surface ? "page" : undefined} onClick={(event) => openSurface(event, surface)} key={surface}><span className="shortcut-glyph" aria-hidden="true">{glyph}</span>{label}</a>)}
         </nav>
-        <button
-          ref={modeButtonRef}
-          className="mode-button"
-          type="button"
-          aria-pressed={advanced}
-          disabled={!userSettings || settingsBusy}
-          onClick={toggleAdvancedMode}
-        >
-          {advanced ? "Simple mode" : "Advanced mode"}
-        </button>
+        <div className="sidebar-library">
+          <section className="sidebar-section" aria-label="Pinned chats"><h2>Pinned</h2>{pinnedTasks.length === 0 ? <p>No pinned chats</p> : pinnedTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</section>
+          <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No projects</p>}{projects.map((project) => {
+            const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
+            const projectTasks = matchingTasks.filter((task) => task.project_id === project.project_id);
+            return <div className="project-tree-item" key={project.project_id}><button type="button" onClick={() => { setSelectedProject(project); navigateSurface("projects"); }}><span aria-hidden="true">▱</span>{name}</button>{projectTasks.length === 0 ? <p>No chats</p> : projectTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>;
+          })}{matchingTasks.filter((task) => !task.project_id).length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{matchingTasks.filter((task) => !task.project_id).map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>}</section>
+        </div>
+        <div className="sidebar-account-area">
+          <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><span className="owner-avatar" aria-hidden="true">M</span><span><strong>Local owner</strong><small>MCG workspace</small></span><span aria-hidden="true">⋯</span></button>
+          <div className={`owner-menu${ownerMenuOpen ? " open" : ""}`} aria-label="Owner menu">
+            {[(["providers", "Providers"]), (["mcp", "Tools"]), (["platform", "Computer & browser"]), (["ssh", "SSH"]), (["improvement", "Improvement"]), (["projects", "Projects"]), (["settings", "Settings"])].map(([surface, label]) => <button type="button" onClick={() => navigateSurface(surface)} key={surface}>{label}</button>)}
+            <button ref={modeButtonRef} className="mode-button" type="button" aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={toggleAdvancedMode}>{advanced ? "Simple mode" : "Advanced mode"}</button>
+          </div>
+        </div>
       </aside>
 
       <main className="workspace" id="tasks">
         <header className="topbar">
           <div>
             <p className="eyebrow">METACOGNITIVE GOVERNOR</p>
-            <h1>{activeSurface === "tasks" ? "Your AI workspace" : activeSurface === "threads" ? "Task history" : activeSurface === "mcp" ? "Tools" : activeSurface === "ssh" ? "SSH" : activeSurface.charAt(0).toUpperCase() + activeSurface.slice(1)}</h1>
+            <h1>{activeSurfaceTitle}</h1>
             <p className="topbar-subtitle">Build, review, and run work with a local AI team.</p>
           </div>
           <span
@@ -2878,6 +2946,7 @@ export function App() {
           <div className="composer">
             <label htmlFor="goal">Goal</label>
             <textarea
+              ref={goalInputRef}
               id="goal"
               value={taskGoal}
               onChange={(event) => setTaskGoal(event.target.value)}
@@ -2946,10 +3015,10 @@ export function App() {
               <p className="eyebrow">DURABLE WORK</p>
               <h2>Tasks</h2>
             </div>
-            <span className="count-badge">{tasks.length} total</span>
+            <span className="count-badge">{visibleTasks.length} total</span>
           </div>
           <div className="task-list">
-            {tasks.length === 0 ? <p className="empty-state">No tasks yet.</p> : tasks.map((task) => (
+            {visibleTasks.length === 0 ? <p className="empty-state">No chats yet.</p> : visibleTasks.map((task) => (
               <article className="task-card" key={task.id}>
                 <div className="task-card-main">
                   <span className={`task-state state-${task.state}`}>{task.state.replaceAll("_", " ")}</span>
@@ -2970,11 +3039,20 @@ export function App() {
                   {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="primary" type="button" disabled={taskBusy} onClick={() => approveAndResume(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Approve and continue</button>}
                   {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => denyApprovalRequest(task.id, approvals.find((approval) => approval.task_id === task.id)!.id)}>Deny</button>}
                   {!(["completed", "failed", "cancelled"] as string[]).includes(task.state) && <button className="secondary" type="button" disabled={taskBusy} onClick={() => changeTaskState(task.id, "cancelled")}>Cancel</button>}
+                  <button className="secondary" type="button" aria-pressed={pinnedTaskIds.includes(task.id)} onClick={() => togglePinnedTask(task.id)}>{pinnedTaskIds.includes(task.id) ? "Unpin" : "Pin"}</button>
                   <button className="secondary" type="button" disabled={taskBusy} onClick={() => toggleTaskHistory(task.id)}>{taskHistory[task.id] ? "Hide evidence" : "Evidence"}</button>
                 </div>
               </article>
             ))}
           </div>
+        </section>
+
+        <section className="panel pull-request-panel" id="pull-requests" aria-label="Pull requests">
+          <div className="section-heading">
+            <div><p className="eyebrow">REVIEW</p><h2>Pull requests</h2><p className="muted">Review work that needs an owner decision before it can continue.</p></div>
+            <span className="count-badge">{tasks.filter((task) => task.state === "waiting_for_approval").length} awaiting review</span>
+          </div>
+          {tasks.filter((task) => task.state === "waiting_for_approval").length === 0 ? <p className="empty-state">No pull requests or approval reviews need your attention.</p> : <div className="task-list">{tasks.filter((task) => task.state === "waiting_for_approval").map((task) => <article className="task-card" key={task.id}><div className="task-card-main"><span className="task-state state-waiting_for_approval">review</span><h3>{task.goal}</h3><small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "General workspace"}</small></div><button className="secondary" type="button" onClick={() => openChat(task.id)}>Open chat</button></article>)}</div>}
         </section>
 
         <section className="grid" id="projects">
@@ -4362,6 +4440,7 @@ export function App() {
           </div>
         </section>
       </main>
+    </div>
     </div>
   );
 }

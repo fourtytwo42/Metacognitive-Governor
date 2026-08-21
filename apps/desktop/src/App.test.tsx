@@ -256,6 +256,7 @@ vi.mock("./desktop-client", () => ({
 import { App } from "./App";
 
 beforeEach(() => {
+  window.localStorage.clear();
   client.localServiceStatus.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
@@ -502,6 +503,54 @@ async function enableSimpleMode() {
   fireEvent.click(button);
   await screen.findByRole("button", { name: "Advanced mode" });
 }
+
+test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000610",
+    project_id: "00000000-0000-4000-8000-000000000611",
+    root: "C:\\Projects\\consumer-app",
+    observed_at: "2026-08-21T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: [],
+    build_systems: [],
+    test_systems: [],
+    instructions: { conflicts: [] }
+  };
+  const task = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000612",
+    project_id: project.project_id,
+    goal: "Polish the consumer dashboard",
+    constraints: [],
+    success_conditions: [],
+    risk: "low",
+    budget: {},
+    state: "active",
+    created_at: "2026-08-21T00:00:00Z",
+    updated_at: "2026-08-21T00:00:00Z"
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.listTasks.mockResolvedValue({ tasks: [task] });
+  render(<App />);
+
+  const projectTree = screen.getByLabelText("Projects");
+  expect(await within(projectTree).findByRole("button", { name: /consumer-app/ })).toBeInTheDocument();
+  expect(within(projectTree).getByRole("button", { name: task.goal })).toBeInTheDocument();
+
+  fireEvent.click(await screen.findByRole("button", { name: "Pin" }));
+  const pinned = screen.getByLabelText("Pinned chats");
+  expect(within(pinned).getByRole("button", { name: task.goal })).toBeInTheDocument();
+  expect(JSON.parse(window.localStorage.getItem("mcg.pinned-task-ids") ?? "[]")).toEqual([task.id]);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Search chats" }), { target: { value: "missing" } });
+  expect(within(projectTree).queryByRole("button", { name: task.goal })).not.toBeInTheDocument();
+  expect(within(pinned).queryByRole("button", { name: task.goal })).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Search chats" }), { target: { value: "dashboard" } });
+  fireEvent.click(within(pinned).getByRole("button", { name: task.goal }));
+  expect(screen.getByRole("heading", { name: task.goal, level: 1 })).toBeInTheDocument();
+});
 
 test("packaged local service readiness is visible and failures are not disguised", async () => {
   client.localServiceStatus.mockResolvedValue({
@@ -1971,7 +2020,8 @@ test("rediscovering a known Windows folder preserves its durable project identit
   client.discoverProject.mockResolvedValue({ project: { ...project, root: selectedRoot } });
   render(<App />);
 
-  fireEvent.click(screen.getByRole("link", { name: "Projects" }));
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: "Projects" }));
   fireEvent.click(await screen.findByRole("button", { name: "Add project folder" }));
 
   await waitFor(() => expect(client.discoverProject).toHaveBeenCalledWith(selectedRoot, project.project_id));
@@ -2232,7 +2282,8 @@ test("project discovery errors remain visible on the Projects screen", async () 
   client.discoverProject.mockRejectedValue(new Error("Project discovery failed (405 Method Not Allowed)"));
   render(<App />);
 
-  fireEvent.click(screen.getByRole("link", { name: "Projects" }));
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: "Projects" }));
   fireEvent.click(screen.getByRole("button", { name: "Add project folder" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Project discovery failed (405 Method Not Allowed)");
