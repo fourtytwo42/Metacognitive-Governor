@@ -50,9 +50,13 @@ M5/M10 requirement for several installed final-candidate application projects.
 The second gate in `scripts/test-installed-real-api-project.py` builds a bounded
 loopback JSON ledger service, tests health/mutation/summary and invalid/oversized/
 unknown inputs, tears down its listener, and binds runtime behavior across replay
-and daemon restart. Its complete package qualification is still in progress. The
-website gate's compact secret-free reports and browser captures are retained under
-`qualification-evidence/20260820-installed-real-project/`.
+and daemon restart. It now also passes the complete existing manifest-qualified
+Windows NSIS, Ubuntu `.deb`/AppImage, and macOS app/DMG lanes with byte-identical
+exercise, restart, and runtime reports on all three platforms. Compact secret-free
+evidence is retained under `qualification-evidence/20260820-installed-real-project/`
+and `qualification-evidence/20260820-installed-real-api-project/`. These two
+representative projects strengthen, but do not close, the several-project and
+signed-final-candidate requirements.
 
 ## Immediate dependency order
 

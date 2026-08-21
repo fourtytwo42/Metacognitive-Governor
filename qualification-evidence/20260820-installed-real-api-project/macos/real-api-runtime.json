@@ -1,0 +1,1 @@
+{"health_passed": true, "invalid_input_failed_closed": true, "loopback_only": true, "mutation_passed": true, "oversized_body_failed_closed": true, "schema_version": 1, "summary_passed": true, "transcript_sha256": "caf2ede44ad6bbbe7dd8c8fa00f5e9cbb81878072312682f7586609c3cb347fa", "unknown_route_failed_closed": true}
