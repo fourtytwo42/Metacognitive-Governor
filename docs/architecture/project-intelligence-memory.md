@@ -236,6 +236,17 @@ compression, secret rejection, correction-driven durability, immutable snapshot
 history, atomic claim versioning, concurrent/stale correction rejection, API
 lifecycle behavior, and restart recovery.
 
+The installed-package boundary also runs
+`scripts/test-installed-reviewed-topology.py` on Windows, Linux, and macOS. It
+discovers a fresh three-stage Compose world, requires REST/CLI topology agreement,
+creates and exactly replays an immutable review without execution, proves guided
+approval before an MCP-triggered brokered command, and requires one content-addressed
+terminal log. CLI/MCP replay cannot repeat the side effect, and a manifest change
+must make the reviewed authority stale and return a conflict. A second phase after
+backup restore and daemon restart proves the same review, approval, result, log,
+settings, and fail-closed stale behavior across REST, CLI, and MCP. Reports retain
+only bounded identities and digests, never authentication material or private paths.
+
 Topology fixtures cover cross-language runtimes/dependencies, named Compose
 service-to-database relationships, scalar and structured port declarations,
 Kubernetes workloads/init containers/images/selector-matched Services/TLS

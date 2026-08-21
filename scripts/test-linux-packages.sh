@@ -519,6 +519,13 @@ runuser -u "$uat_user" -- env \
   --token-file "$installed_data/local-auth-token" --workspace "$uat_root" \
   --state "$uat_root/interface-success-state.json" \
   --output "$uat_root/interface-success.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-reviewed-topology.py" \
+  --mode exercise --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --workspace "$uat_root" --state "$uat_root/reviewed-topology-state.json" \
+  --output "$uat_root/reviewed-topology.json"
 real_project="$uat_root/real-project"
 mkdir -p "$real_project"
 chown -R "$uat_user":"$(id -gn "$uat_user")" "$real_project"
@@ -673,6 +680,13 @@ runuser -u "$uat_user" -- env \
   --output "$uat_root/interface-success-restart.json"
 runuser -u "$uat_user" -- env \
   HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-reviewed-topology.py" \
+  --mode verify --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --workspace "$uat_root" --state "$uat_root/reviewed-topology-state.json" \
+  --output "$uat_root/reviewed-topology-restart.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
   python3 "$repository_root/scripts/test-installed-real-project.py" \
   --mode verify --host "http://127.0.0.1:$installed_port" \
   --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
@@ -816,6 +830,8 @@ PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
 PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
 ORGANIZATION_SHARING_REPORT=$uat_root/organization-sharing.json
 ORGANIZATION_SHARING_RESTART_REPORT=$uat_root/organization-sharing-restart.json
+REVIEWED_TOPOLOGY_REPORT=$uat_root/reviewed-topology.json
+REVIEWED_TOPOLOGY_RESTART_REPORT=$uat_root/reviewed-topology-restart.json
 REAL_PROJECT_REPORT=$uat_root/real-project.json
 REAL_PROJECT_RESTART_REPORT=$uat_root/real-project-restart.json
 REAL_API_PROJECT_REPORT=$uat_root/real-api-project.json

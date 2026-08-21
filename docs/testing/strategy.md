@@ -343,6 +343,17 @@ complete MCP consumer task with independent evaluation and exact replay. The
 provider is removed before restore/restart; the second phase requires content-free
 proxy conversation history and provider-free MCP replay to retain the same terminal
 task, run, and evaluation. All package harnesses invoke this shared gate.
+`scripts/test-installed-reviewed-topology.py` adds the installed advanced-project
+workflow gate. A fresh Compose fixture must expose explicit database-to-API-to-web
+stages and the same topology digest through REST and CLI. Creating and replaying an
+immutable review cannot execute work; guided execution must stop on the exact durable
+approval; after approval, MCP runs the admitted manifest command exactly once through
+the ordinary broker and retains a content-addressed log. CLI and MCP terminal replays
+must be observation-only, a changed manifest must reject stale authority without a
+side effect, and the original autonomy setting must be restored. After encrypted
+restore and daemon restart, REST, CLI, and MCP must agree on the same topology, plan,
+approval, terminal result, and log while another stale run still fails closed. All
+package harnesses retain private-path-free initial and restart reports.
 `scripts/test-installed-real-project.py` adds the first shared representative
 consumer project gate. It seeds a Node website regression that must fail before
 work, has the installed CLI build an accessible responsive site through three

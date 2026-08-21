@@ -414,6 +414,13 @@ try {
         --token-file $tokenFile --workspace $uatRoot `
         --state $interfaceSuccessState --output $interfaceSuccessReport
     if ($LASTEXITCODE -ne 0) { throw "Installed REST/OpenAI/MCP success verification failed." }
+    $reviewedTopologyVerifier = Join-Path $PSScriptRoot "test-installed-reviewed-topology.py"
+    $reviewedTopologyState = Join-Path $uatRoot "reviewed-topology-state.json"
+    $reviewedTopologyReport = Join-Path $uatRoot "reviewed-topology.json"
+    & $python $reviewedTopologyVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --workspace $uatRoot `
+        --state $reviewedTopologyState --output $reviewedTopologyReport
+    if ($LASTEXITCODE -ne 0) { throw "Installed reviewed-topology workflow verification failed." }
     $realProjectVerifier = Join-Path $PSScriptRoot "test-installed-real-project.py"
     $realProject = Join-Path $uatRoot "real-project"
     $realProjectState = Join-Path $uatRoot "real-project-state.json"
@@ -546,6 +553,10 @@ try {
         --token-file $tokenFile --workspace $uatRoot `
         --state $interfaceSuccessState --output (Join-Path $uatRoot "interface-success-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed REST/OpenAI/MCP evidence did not survive daemon restart." }
+    & $python $reviewedTopologyVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --workspace $uatRoot `
+        --state $reviewedTopologyState --output (Join-Path $uatRoot "reviewed-topology-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed reviewed-topology evidence did not survive daemon restart." }
     & $python $realProjectVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
         --token-file $tokenFile --cli $cli --project $realProject `
         --state $realProjectState --output (Join-Path $uatRoot "real-project-restart.json")
@@ -644,6 +655,8 @@ try {
         OrganizationSharingRestartReport = Join-Path $uatRoot "organization-sharing-restart.json"
         InterfaceSuccessReport = $interfaceSuccessReport
         InterfaceSuccessRestartReport = Join-Path $uatRoot "interface-success-restart.json"
+        ReviewedTopologyReport = $reviewedTopologyReport
+        ReviewedTopologyRestartReport = Join-Path $uatRoot "reviewed-topology-restart.json"
         RealProjectReport = Join-Path $uatRoot "real-project.json"
         RealProjectRestartReport = Join-Path $uatRoot "real-project-restart.json"
         RealApiProjectReport = Join-Path $uatRoot "real-api-project.json"
