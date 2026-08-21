@@ -270,12 +270,20 @@ function freshPlatformSessionId(): string {
 
 type CodeReviewScope = "branch" | "uncommitted" | "commit" | "custom";
 type ScheduleFilter = "all" | "enabled" | "paused" | "completed";
+type PluginDirectoryTab = "openai" | "workspace" | "personal" | "installed";
 
 const SCHEDULE_FILTERS: Array<[ScheduleFilter, string]> = [
   ["all", "All"],
   ["enabled", "Active"],
   ["paused", "Paused"],
   ["completed", "Completed"]
+];
+
+const PLUGIN_DIRECTORY_TABS: Array<[PluginDirectoryTab, string]> = [
+  ["openai", "OpenAI"],
+  ["workspace", "Workspace"],
+  ["personal", "Personal"],
+  ["installed", "Installed"]
 ];
 
 const CODE_REVIEW_GOAL_PREFIX = "Review code changes";
@@ -500,6 +508,9 @@ export function App() {
   const [pluginInputDrafts, setPluginInputDrafts] = useState<Record<string, string>>({});
   const [pluginInvocations, setPluginInvocations] = useState<Record<string, PluginInvocationMutation | undefined>>({});
   const [pluginHistoryCounts, setPluginHistoryCounts] = useState<Record<string, number>>({});
+  const [pluginSearch, setPluginSearch] = useState("");
+  const [pluginDirectoryTab, setPluginDirectoryTab] = useState<PluginDirectoryTab>("installed");
+  const [pluginAccessReviewId, setPluginAccessReviewId] = useState<string | null>(null);
   const [pluginBusy, setPluginBusy] = useState(false);
   const [pluginError, setPluginError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskEnvelope[]>([]);
@@ -1507,6 +1518,21 @@ export function App() {
     } finally {
       setPluginBusy(false);
     }
+  }
+
+  function usePluginInNewChat(plugin: PluginDescriptor) {
+    if (!plugin.installation.enabled) {
+      setPluginError("Enable this plugin before using it in a new chat.");
+      return;
+    }
+    setSelectedChatId(null);
+    setTaskGoal(`Use @${plugin.active_revision.manifest.display_name} to `);
+    setTaskConstraints("");
+    setTaskSuccess("");
+    setTaskError(null);
+    setPluginError(null);
+    navigateSurface("tasks");
+    window.requestAnimationFrame(() => goalInputRef.current?.focus());
   }
 
   async function runPlugin(plugin: PluginDescriptor) {
@@ -3010,7 +3036,16 @@ export function App() {
   const pinnedTasks = matchingTasks.filter((task) => pinnedTaskIds.includes(task.id));
   const visibleTasks = activeSurface === "threads" && selectedChatId
     ? tasks.filter((task) => task.id === selectedChatId)
-    : tasks;
+      : tasks;
+  const directoryPlugins = plugins.filter((plugin) => {
+    const manifest = plugin.active_revision.manifest;
+    const matchesSearch = `${manifest.display_name} ${manifest.id}`.toLowerCase().includes(pluginSearch.trim().toLowerCase());
+    if (!matchesSearch) return false;
+    if (pluginDirectoryTab === "installed") return true;
+    if (pluginDirectoryTab === "personal") return plugin.active_revision.source.kind === "local_import";
+    if (pluginDirectoryTab === "workspace") return plugin.active_revision.source.kind === "registry";
+    return false;
+  });
   const activeSurfaceTitle = activeSurface === "tasks"
     ? "New chat"
     : activeSurface === "threads"
@@ -4495,47 +4530,102 @@ export function App() {
           </div>
         </section>
 
-        <section className="panel plugin-panel" id="plugins" aria-labelledby="plugins-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">EXTENSIONS</p>
-              <h2 id="plugins-heading">Plugins</h2>
-              <p className="muted">Install sandboxed extensions, review every permission, then choose when to enable them.</p>
+        <section className="panel plugin-panel" id="plugins" aria-label="Plugins">
+          {!advanced ? <>
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">PLUGINS</p>
+                <h2 id="plugins-heading">Plugin directory</h2>
+                <p className="muted">Add reusable skills and connections, then use them naturally from a new chat.</p>
+              </div>
+              <span className="count-badge">{plugins.length} installed</span>
             </div>
-            <span className="count-badge">{plugins.length} installed</span>
-          </div>
-
-          <div className="plugin-import" aria-label="Install local plugin">
-            <div>
-              <h3>Install from this computer</h3>
-              <p className="form-note">Local plugins are imported disabled and unsigned. MCG does not grant access automatically.</p>
+            <div className="plugin-directory-toolbar">
+              <label className="plugin-directory-search">
+                <span className="sr-only">Search plugins</span>
+                <input aria-label="Search plugins" value={pluginSearch} onChange={(event) => setPluginSearch(event.target.value)} placeholder="Search plugins" />
+              </label>
+              <div className="plugin-directory-tabs" aria-label="Plugin sources">
+                {PLUGIN_DIRECTORY_TABS.map(([tab, label]) => <button type="button" className="secondary" aria-pressed={pluginDirectoryTab === tab} onClick={() => setPluginDirectoryTab(tab)} key={tab}>{label}</button>)}
+              </div>
             </div>
-            <label>
-              Manifest (.json)
-              <input type="file" accept="application/json,.json" onChange={(event) => setPluginManifestFile(event.target.files?.[0] ?? null)} />
-            </label>
-            <label>
-              Module (.wasm)
-              <input type="file" accept="application/wasm,.wasm" onChange={(event) => setPluginModuleFile(event.target.files?.[0] ?? null)} />
-            </label>
-            <button className="primary" type="button" disabled={pluginBusy} onClick={importPlugin}>
-              {pluginBusy ? "Working…" : "Install plugin"}
-            </button>
-          </div>
-          {advanced && <div className="plugin-registry-import" aria-label="Install verified registry plugin">
-            <div>
-              <h3>Install signed registry package</h3>
-              <p className="form-note">Advanced: import the bounded package request supplied by a configured trusted registry.</p>
+            <p className="plugin-directory-note">Enabled plugins can seed a new chat with an explicit @ mention. Direct chat-to-plugin resolution, the universal public marketplace, and connector sign-in are not connected in this build yet; exact invocation remains available in Advanced mode.</p>
+            {pluginError && <p className="error-message" role="alert">{pluginError}</p>}
+            <div className="plugin-directory-grid" aria-label="Plugin directory results">
+              {directoryPlugins.length === 0 ? <div className="site-empty-state">
+                <strong>{pluginSearch.trim() ? "No matching plugins" : pluginDirectoryTab === "openai" ? "OpenAI catalog not connected" : `No ${pluginDirectoryTab} plugins`}</strong>
+                <span>{pluginDirectoryTab === "installed" ? "Install a plugin from Advanced mode or change the source." : "This source will populate when marketplace synchronization is configured."}</span>
+              </div> : directoryPlugins.map((plugin) => {
+                const installation = plugin.installation;
+                const manifest = plugin.active_revision.manifest;
+                const granted = installation.capability_grants.length === manifest.requested_capabilities.length;
+                const reviewingAccess = pluginAccessReviewId === installation.plugin_id;
+                return <article className="plugin-directory-card" key={installation.plugin_id}>
+                  <div className="plugin-directory-card-heading">
+                    <span className="plugin-directory-icon" aria-hidden="true">{manifest.display_name.slice(0, 1).toUpperCase()}</span>
+                    <div>
+                      <h3>{manifest.display_name}</h3>
+                      <p>{plugin.active_revision.source.kind === "registry" ? "Workspace marketplace" : "Personal · local"} · Version {manifest.version}</p>
+                    </div>
+                    <span className={`status-chip ${installation.enabled ? "status-enabled" : "status-disabled"}`}>{installation.enabled ? "On" : "Off"}</span>
+                  </div>
+                  <p className="plugin-directory-description">Adds a reusable sandboxed capability to MCG chats. Its requested access stays governed by the host policy.</p>
+                  <div className="plugin-component-chips" aria-label={`${manifest.display_name} components`}>
+                    <span>Capability</span>
+                    {manifest.requested_capabilities.map((capability) => <span key={capability}>{capabilityLabel(capability)}</span>)}
+                  </div>
+                  <div className="composer-actions">
+                    {installation.enabled ? <>
+                      <button className="primary" type="button" onClick={() => usePluginInNewChat(plugin)}>Start new chat</button>
+                      <button className="secondary" type="button" disabled={pluginBusy} onClick={() => togglePlugin(plugin)}>Turn off</button>
+                    </> : <>
+                      {!granted && <button className="secondary" type="button" onClick={() => setPluginAccessReviewId(reviewingAccess ? null : installation.plugin_id)}>{reviewingAccess ? "Close access review" : "Review access"}</button>}
+                      <button className="primary" type="button" disabled={pluginBusy || !granted} onClick={() => togglePlugin(plugin)}>Turn on</button>
+                    </>}
+                  </div>
+                  {reviewingAccess && <div className="plugin-simple-access" aria-label={`Review access for ${manifest.display_name}`}>
+                    <h4>Requested access</h4>
+                    <p>Review and limit what this plugin can reach before turning it on.</p>
+                    <ul>{manifest.requested_capabilities.map((capability) => <li key={capability}>
+                      <strong>{capabilityLabel(capability)}</strong>
+                      {(capability === "filesystem_read" || capability === "filesystem_write") && <span>Current task project only</span>}
+                      {capability === "network" && <input aria-label={`${manifest.display_name} network origin`} value={draftPluginScope(installation.plugin_id, "network")} onChange={(event) => updatePluginScope(installation.plugin_id, "network", event.target.value)} placeholder="https://api.example.com" />}
+                      {capability === "process" && <input aria-label={`${manifest.display_name} executable`} value={draftPluginScope(installation.plugin_id, "process")} onChange={(event) => updatePluginScope(installation.plugin_id, "process", event.target.value)} placeholder="Exact executable" />}
+                      {capability === "credentials" && <input aria-label={`${manifest.display_name} credential`} value={draftPluginScope(installation.plugin_id, "credentials")} onChange={(event) => updatePluginScope(installation.plugin_id, "credentials", event.target.value)} placeholder="provider:key" />}
+                    </li>)}</ul>
+                    <button className="primary" type="button" disabled={pluginBusy} onClick={() => grantPluginAccess(plugin)}>Approve requested access</button>
+                  </div>}
+                </article>;
+              })}
             </div>
-            <label>
-              Signed package request (.json)
-              <input type="file" accept="application/json,.json" onChange={(event) => setPluginRegistryPackageFile(event.target.files?.[0] ?? null)} />
-            </label>
-            <button className="secondary" type="button" disabled={pluginBusy} onClick={importRegistryPlugin}>Verify and install</button>
-          </div>}
-          {pluginError && <p className="error-message" role="alert">{pluginError}</p>}
-
-          <div className="plugin-list" aria-label="Installed plugins">
+          </> : <>
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">ADVANCED PLUGINS</p>
+                <h2 id="plugins-heading">Plugin administration</h2>
+                <p className="muted">Import bounded packages, configure exact broker scopes, invoke structured inputs, and inspect immutable evidence.</p>
+              </div>
+              <span className="count-badge">{plugins.length} installed</span>
+            </div>
+            <div className="plugin-import" aria-label="Install local plugin">
+              <div>
+                <h3>Install from this computer</h3>
+                <p className="form-note">Local plugins are imported disabled and unsigned. MCG does not grant access automatically.</p>
+              </div>
+              <label>Manifest (.json)<input type="file" accept="application/json,.json" onChange={(event) => setPluginManifestFile(event.target.files?.[0] ?? null)} /></label>
+              <label>Module (.wasm)<input type="file" accept="application/wasm,.wasm" onChange={(event) => setPluginModuleFile(event.target.files?.[0] ?? null)} /></label>
+              <button className="primary" type="button" disabled={pluginBusy} onClick={importPlugin}>{pluginBusy ? "Working…" : "Install plugin"}</button>
+            </div>
+            <div className="plugin-registry-import" aria-label="Install verified registry plugin">
+              <div>
+                <h3>Install signed registry package</h3>
+                <p className="form-note">Import the bounded package request supplied by a configured trusted registry.</p>
+              </div>
+              <label>Signed package request (.json)<input type="file" accept="application/json,.json" onChange={(event) => setPluginRegistryPackageFile(event.target.files?.[0] ?? null)} /></label>
+              <button className="secondary" type="button" disabled={pluginBusy} onClick={importRegistryPlugin}>Verify and install</button>
+            </div>
+            {pluginError && <p className="error-message" role="alert">{pluginError}</p>}
+            <div className="plugin-list" aria-label="Installed plugins">
             {plugins.length === 0 ? <p className="empty-state">No plugins installed yet.</p> : plugins.map((plugin) => {
               const installation = plugin.installation;
               const manifest = plugin.active_revision.manifest;
@@ -4586,7 +4676,7 @@ export function App() {
                   </div>}
                 </div>
 
-                {advanced && <details className="advanced-details">
+                <details className="advanced-details">
                   <summary>Audit details</summary>
                   <dl>
                     <div><dt>Plugin ID</dt><dd><code>{installation.plugin_id}</code></dd></div>
@@ -4597,10 +4687,11 @@ export function App() {
                   {invocation && <button className="secondary" type="button" disabled={pluginBusy} onClick={() => refreshPluginHistory(plugin)}>
                     Refresh invocation history{pluginHistoryCounts[installation.plugin_id] !== undefined ? ` (${pluginHistoryCounts[installation.plugin_id]} records)` : ""}
                   </button>}
-                </details>}
+                </details>
               </article>;
             })}
-          </div>
+            </div>
+          </>}
         </section>
 
         <section className="panel" id="settings" aria-labelledby="settings-heading">

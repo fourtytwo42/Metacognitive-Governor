@@ -459,7 +459,11 @@ test("plugin permission review gates enablement and invocation", async ({ page }
   await page.getByRole("link", { name: "Plugins", exact: true }).click();
 
   const plugins = page.getByRole("region", { name: "Plugins" });
+  await expect(plugins.getByRole("heading", { name: "Plugin directory" })).toBeVisible();
   await expect(plugins.getByRole("heading", { name: "Weather helper" })).toBeVisible();
+  await expect(plugins.getByLabel("Plugin input (JSON)")).toHaveCount(0);
+  await enableAdvancedMode(page);
+  await expect(plugins.getByRole("heading", { name: "Plugin administration" })).toBeVisible();
   await expect(plugins.getByRole("button", { name: "Enable" })).toBeDisabled();
   await plugins.getByLabel("Weather helper network origin").fill("https://weather.example");
   await plugins.getByRole("button", { name: "Grant requested access" }).click();

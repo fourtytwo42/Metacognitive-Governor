@@ -4,6 +4,32 @@ MCG supports the PRD's two plugin trust classes through different structural
 boundaries. A plugin never chooses its own trust class at runtime, and failure in
 one class never falls back to the other.
 
+## Consumer workflow
+
+Simple mode follows the Codex plugin-directory model. Plugins are grouped by
+OpenAI, workspace, personal, and installed sources; users search or browse,
+review requested access separately, turn an installed plugin on or off, and use
+an enabled plugin from a new chat with an explicit `@Plugin` prompt. Raw manifest
+and module import, signed-package verification, exact broker scopes, structured
+JSON invocation, immutable identities, digests, and invocation history remain in
+Advanced mode.
+
+The current daemon has a qualified installed-plugin catalog, local import, and
+verified-registry installation boundary. It does not yet synchronize OpenAI's
+universal public marketplace or implement third-party connector OAuth. Simple
+mode states that boundary instead of displaying fabricated public entries or a
+nonfunctional sign-in action. Registry plugins appear under workspace and local
+imports under personal; Installed shows both.
+
+Remaining directory parity requires a typed, signed marketplace index with
+OpenAI/workspace/personal provenance; install and uninstall mutations; connector
+and MCP authentication lifecycle; bundled skill, hook, browser-extension, UI,
+and scheduled-template metadata; new-chat/session activation; and runtime
+resolution of natural-language or explicit `@` plugin selection. Connector
+disconnection remains a separate account action from plugin uninstall. These
+extensions must preserve the existing host sandbox, approval, and exact-scope
+contracts. They must not use GitHub Actions or other GitHub-hosted compute.
+
 ## Trusted native plugins
 
 Trusted native plugins implement `TrustedNativePlugin` and are statically linked

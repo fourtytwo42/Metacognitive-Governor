@@ -636,6 +636,28 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .state-active, .link-button, .device-login summary, .advanced-details summary { color: #dba270; }
 .panel, .grid, .provider-panel, .mcp-panel, .scheduler-panel, .plugin-panel { scroll-margin-top: 92px; }
 
+.plugin-directory-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 10px; }
+.plugin-directory-search { flex: 1 1 260px; }
+.plugin-directory-search input { width: 100%; }
+.plugin-directory-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.plugin-directory-tabs .secondary[aria-pressed="true"] { border-color: #777; color: #f4f4f4; background: #383838; }
+.plugin-directory-note { margin: 0 0 18px; color: #929292; font-size: .82rem; line-height: 1.5; }
+.plugin-directory-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+.plugin-directory-grid > .site-empty-state { grid-column: 1 / -1; }
+.plugin-directory-card { display: grid; align-content: start; gap: 14px; padding: 16px; border: 1px solid #383838; border-radius: 12px; background: #1b1b1b; }
+.plugin-directory-card-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.plugin-directory-card-heading h3 { margin: 0 0 3px; font-size: 1rem; }
+.plugin-directory-card-heading p, .plugin-directory-description { margin: 0; color: #999; font-size: .8rem; line-height: 1.45; }
+.plugin-directory-icon { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid #454545; border-radius: 10px; color: #ececec; background: #292929; font-weight: 700; }
+.plugin-component-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.plugin-component-chips span { padding: 4px 8px; border: 1px solid #3d3d3d; border-radius: 999px; color: #bdbdbd; background: #242424; font-size: .72rem; }
+.plugin-simple-access { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #383838; }
+.plugin-simple-access h4, .plugin-simple-access p { margin: 0; }
+.plugin-simple-access p { color: #999; font-size: .8rem; }
+.plugin-simple-access ul { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.plugin-simple-access li { display: grid; gap: 6px; color: #aaa; font-size: .78rem; }
+.plugin-simple-access strong { color: #ddd; }
+
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 230px minmax(0, 1fr); }
   .sidebar { position: sticky; top: 44px; height: calc(100vh - 44px); display: flex; grid-template-columns: none; gap: 12px; overflow: hidden; border-right: 1px solid var(--mcg-border); border-bottom: 0; background: var(--mcg-sidebar); }

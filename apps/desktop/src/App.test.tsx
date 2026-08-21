@@ -2490,7 +2490,7 @@ test("task evidence uses the durable blocked state when no evaluation exists", a
   expect(within(await screen.findByRole("region", { name: "Task evidence" })).getByText("Blocked")).toBeInTheDocument();
 });
 
-test("plugin access is scoped before the owner can enable an extension", async () => {
+test("simple Plugins reviews access, enables an extension, and starts a new chat", async () => {
   const installation = {
     schema_version: 1,
     plugin_id: "example.weather",
@@ -2526,21 +2526,38 @@ test("plugin access is scoped before the owner can enable an extension", async (
     scopes: [{ kind: "network_origin", origin: "https://weather.example" }]
   };
   const granted = { ...descriptor, installation: { ...installation, revision: 2, capability_grants: [grant] } };
-  client.listPlugins.mockResolvedValueOnce({ plugins: [descriptor] }).mockResolvedValue({ plugins: [granted] });
+  const enabled = { ...descriptor, installation: { ...granted.installation, revision: 3, enabled: true } };
+  client.listPlugins
+    .mockResolvedValueOnce({ plugins: [descriptor] })
+    .mockResolvedValueOnce({ plugins: [granted] })
+    .mockResolvedValue({ plugins: [enabled] });
   client.setPluginGrants.mockResolvedValue(granted.installation);
-  client.setPluginEnabled.mockResolvedValue({ ...granted.installation, enabled: true, revision: 3 });
+  client.setPluginEnabled.mockResolvedValue(enabled.installation);
   render(<App />);
 
+  expect(await screen.findByRole("heading", { name: "Plugin directory" })).toBeInTheDocument();
   expect(await screen.findByRole("heading", { name: "Weather helper" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Enable" })).toBeDisabled();
+  expect(screen.queryByLabelText("Plugin input (JSON)")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Install plugin" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "OpenAI" }));
+  expect(screen.getByText("OpenAI catalog not connected")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Personal" }));
+  expect(screen.getByRole("heading", { name: "Weather helper" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Search plugins"), { target: { value: "missing" } });
+  expect(screen.getByText("No matching plugins")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Search plugins"), { target: { value: "weather" } });
+  expect(screen.getByRole("button", { name: "Turn on" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Review access" }));
   fireEvent.change(screen.getByLabelText("Weather helper network origin"), { target: { value: "https://weather.example" } });
-  fireEvent.click(screen.getByRole("button", { name: "Grant requested access" }));
+  fireEvent.click(screen.getByRole("button", { name: "Approve requested access" }));
 
   await waitFor(() => expect(client.setPluginGrants).toHaveBeenCalledWith("example.weather", {
     expected_revision: 1,
     grants: [grant]
   }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Enable" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Enable" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Turn on" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
   await waitFor(() => expect(client.setPluginEnabled).toHaveBeenCalledWith("example.weather", 2, true));
+  fireEvent.click(await screen.findByRole("button", { name: "Start new chat" }));
+  expect(screen.getByLabelText("Goal")).toHaveValue("Use @Weather helper to ");
 });
