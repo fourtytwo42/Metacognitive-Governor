@@ -14,10 +14,94 @@ if (-not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 public static class McgNativeWindow {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT {
+        public uint type;
+        public INPUTUNION data;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION {
+        [FieldOffset(0)] public KEYBDINPUT keyboard;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT {
+        public ushort virtualKey;
+        public ushort scanCode;
+        public uint flags;
+        public uint time;
+        public UIntPtr extraInfo;
+    }
+
+    private const uint INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const ushort VK_TAB = 0x09;
+    private const int SW_RESTORE = 9;
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr handle);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr handle, int command);
+
+    [DllImport("user32.dll")]
+    private static extern bool BringWindowToTop(IntPtr handle);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr handle);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr handle, IntPtr processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint attach, uint attachTo, bool value);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+    public static bool FocusWindow(IntPtr handle) {
+        ShowWindowAsync(handle, SW_RESTORE);
+        IntPtr foreground = GetForegroundWindow();
+        uint currentThread = GetCurrentThreadId();
+        uint foregroundThread = GetWindowThreadProcessId(foreground, IntPtr.Zero);
+        uint targetThread = GetWindowThreadProcessId(handle, IntPtr.Zero);
+        bool foregroundAttached = foregroundThread != 0 && foregroundThread != currentThread &&
+            AttachThreadInput(currentThread, foregroundThread, true);
+        bool targetAttached = targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread &&
+            AttachThreadInput(currentThread, targetThread, true);
+        try {
+            BringWindowToTop(handle);
+            SetForegroundWindow(handle);
+            SetFocus(handle);
+        } finally {
+            if (targetAttached) AttachThreadInput(currentThread, targetThread, false);
+            if (foregroundAttached) AttachThreadInput(currentThread, foregroundThread, false);
+        }
+        return GetForegroundWindow() == handle;
+    }
+
+    public static void SendTab() {
+        INPUT[] inputs = new INPUT[2];
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].data.keyboard.virtualKey = VK_TAB;
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].data.keyboard.virtualKey = VK_TAB;
+        inputs[1].data.keyboard.flags = KEYEVENTF_KEYUP;
+        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+        if (sent != inputs.Length) {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "SendInput did not deliver Tab.");
+        }
+    }
 }
 "@
 
@@ -88,7 +172,10 @@ function Wait-Focused(
         if ($null -ne $focused -and $focused.Current.Name -eq $Name) { return }
         Start-Sleep -Milliseconds 50
     } while ([DateTime]::UtcNow -lt $Deadline)
-    throw "Native keyboard focus did not reach '$Name'."
+    $observed = [System.Windows.Automation.AutomationElement]::FocusedElement
+    $observedName = if ($null -eq $observed) { "<none>" } else { [string]$observed.Current.Name }
+    $foreground = [McgNativeWindow]::GetForegroundWindow()
+    throw "Native keyboard focus did not reach '$Name'; observed '$observedName' with foreground handle $foreground."
 }
 
 function Invoke-Accessible([System.Windows.Automation.AutomationElement]$Element) {
@@ -114,7 +201,9 @@ do {
 } while ([DateTime]::UtcNow -lt $deadline)
 if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "MCG did not expose a native window." }
 
-[void][McgNativeWindow]::SetForegroundWindow($process.MainWindowHandle)
+if (-not [McgNativeWindow]::FocusWindow($process.MainWindowHandle)) {
+    throw "MCG could not become the foreground window for physical keyboard qualification."
+}
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
 if ($root.Current.Name -ne "MCG") { throw "The native window has no stable MCG accessible name." }
 
@@ -157,9 +246,12 @@ if ($unnamedFocusable.Count -ne 0) {
 
 $required.Goal.Element.SetFocus()
 Wait-Focused $root "Goal"
-[Windows.Forms.SendKeys]::SendWait("{TAB}")
+if (-not [McgNativeWindow]::FocusWindow($process.MainWindowHandle)) {
+    throw "MCG lost the foreground before the first Tab transition."
+}
+[McgNativeWindow]::SendTab()
 Wait-Focused $root "Open folder"
-[Windows.Forms.SendKeys]::SendWait("{TAB}")
+[McgNativeWindow]::SendTab()
 Wait-Focused $root "Create task"
 
 $mode = Find-Element $root @("Advanced mode") @("Button") $deadline
