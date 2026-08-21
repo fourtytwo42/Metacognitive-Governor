@@ -388,25 +388,44 @@ def run_test(project: pathlib.Path, evidence: pathlib.Path, label: str) -> int:
 
 def browser_executable() -> pathlib.Path:
     configured = os.environ.get("MCG_BROWSER_EXECUTABLE")
-    candidates = [pathlib.Path(configured)] if configured else []
+    candidates: list[pathlib.Path] = []
+    cache_homes = [pathlib.Path.home()]
+    if os.name != "nt":
+        import pwd
+
+        account_home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
+        if account_home not in cache_homes:
+            cache_homes.append(account_home)
     if sys.platform == "darwin":
-        candidates += list(
-            pathlib.Path.home().glob(
-                "Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-mac-*/chrome-headless-shell"
+        for cache_home in cache_homes:
+            candidates += list(
+                cache_home.glob(
+                    "Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-mac-*/chrome-headless-shell"
+                )
             )
-        )
+        if configured:
+            candidates.append(pathlib.Path(configured))
     elif os.name == "nt":
         candidates += list(
             pathlib.Path.home().glob(
                 "AppData/Local/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-win*/chrome-headless-shell.exe"
             )
         )
+        if configured:
+            candidates.append(pathlib.Path(configured))
     else:
-        candidates += list(
-            pathlib.Path.home().glob(
-                ".cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell"
+        for cache_home in cache_homes:
+            candidates += list(
+                cache_home.glob(
+                    ".cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell"
+                )
             )
-        ) + [pathlib.Path("/usr/bin/chromium"), pathlib.Path("/usr/bin/google-chrome")]
+        if configured:
+            candidates.append(pathlib.Path(configured))
+        candidates += [
+            pathlib.Path("/usr/bin/chromium"),
+            pathlib.Path("/usr/bin/google-chrome"),
+        ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
