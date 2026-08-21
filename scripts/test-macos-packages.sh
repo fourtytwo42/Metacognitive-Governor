@@ -205,7 +205,11 @@ printf '%s' retain-on-uninstall >"$sentinel"
 ditto "$mounted_app" "$installed_app"
 [[ -f "$sentinel" ]] || { echo "Repair installation removed external MCG data." >&2; exit 1; }
 
-service_port=17779
+service_port="${MCG_MACOS_UAT_SERVICE_PORT:-17779}"
+[[ "$service_port" =~ ^[0-9]+$ && "$service_port" -ge 1024 && "$service_port" -le 65535 ]] || {
+  echo "MCG_MACOS_UAT_SERVICE_PORT must be an unprivileged TCP port." >&2
+  exit 1
+}
 if lsof -nP -iTCP:"$service_port" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Service UAT requires unused loopback port $service_port." >&2
   exit 1
@@ -361,7 +365,15 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-fulls
 stop_process "$restarted_service_pid"
 background_pids=()
 
-gui_port=7777
+gui_port="${MCG_MACOS_UAT_GUI_PORT:-7777}"
+[[ "$gui_port" =~ ^[0-9]+$ && "$gui_port" -ge 1024 && "$gui_port" -le 65535 ]] || {
+  echo "MCG_MACOS_UAT_GUI_PORT must be an unprivileged TCP port." >&2
+  exit 1
+}
+[[ "$gui_port" != "$service_port" ]] || {
+  echo "macOS service and desktop UAT ports must be distinct." >&2
+  exit 1
+}
 if lsof -nP -iTCP:"$gui_port" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Desktop UAT requires unused loopback port $gui_port." >&2
   exit 1
