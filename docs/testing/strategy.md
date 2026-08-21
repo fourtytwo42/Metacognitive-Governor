@@ -351,6 +351,16 @@ the project bytes and audit must be unchanged, replay must remain provider-free 
 side-effect-free, and the complete runtime HTTP transcript digest must match.
 Every package harness invokes and reports both phases.
 
+`scripts/test-installed-real-fullstack-project.py` adds the third representative
+consumer project, HomeBase Inventory. Five governed writes create an accessible
+browser UI, bounded loopback JSON service, atomic file persistence, and regression
+suite. Real Chromium drives a quick-add through the page into the API; the harness
+then proves exact persisted inventory after an application restart, canonical
+1280x720 rendering, invalid and oversized request rejection, unknown-route denial,
+and listener teardown. Independent evaluation, exact replay, encrypted restore,
+and daemon-restart verification remain mandatory. Every package harness retains
+separate exercise, restart, and runtime reports.
+
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected
 Bubblewrap payload/source/license and AppArmor load/namespace/unload checks, retained

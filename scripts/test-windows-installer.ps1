@@ -414,6 +414,13 @@ try {
         --token-file $tokenFile --cli $cli --project $realApiProject `
         --state $realApiState --output (Join-Path $uatRoot "real-api-project.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed representative JSON API project verification failed." }
+    $realFullstackVerifier = Join-Path $PSScriptRoot "test-installed-real-fullstack-project.py"
+    $realFullstackProject = Join-Path $uatRoot "homebase"
+    $realFullstackState = Join-Path $uatRoot "real-fullstack-state.json"
+    & $python $realFullstackVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $realFullstackProject `
+        --state $realFullstackState --output (Join-Path $uatRoot "real-fullstack-project.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed representative full-stack project verification failed." }
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
@@ -529,6 +536,10 @@ try {
         --token-file $tokenFile --cli $cli --project $realApiProject `
         --state $realApiState --output (Join-Path $uatRoot "real-api-project-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed representative JSON API evidence did not survive daemon restart." }
+    & $python $realFullstackVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $realFullstackProject `
+        --state $realFullstackState --output (Join-Path $uatRoot "real-fullstack-project-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed representative full-stack evidence did not survive daemon restart." }
     $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 
@@ -611,6 +622,8 @@ try {
         RealProjectRestartReport = Join-Path $uatRoot "real-project-restart.json"
         RealApiProjectReport = Join-Path $uatRoot "real-api-project.json"
         RealApiProjectRestartReport = Join-Path $uatRoot "real-api-project-restart.json"
+        RealFullstackProjectReport = Join-Path $uatRoot "real-fullstack-project.json"
+        RealFullstackProjectRestartReport = Join-Path $uatRoot "real-fullstack-project-restart.json"
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }

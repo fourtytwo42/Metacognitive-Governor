@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-21 - Third representative full-stack project started
+
+- Context: The first website and second JSON API projects are package-qualified, but neither alone proves a browser UI mutating an atomically persistent local service.
+- Decision/files: Add `scripts/test-installed-real-fullstack-project.py` for HomeBase Inventory. Its contract requires five governed writes, seeded and generated regression results, independent evaluation, a real Chromium quick-add through the UI, bounded loopback API failures, atomic disk persistence across application restart, MCG daemon restart, provider-free replay, and listener teardown.
+- Commands/tests: Python warning-strict compilation, Ruff, formatting, PowerShell/shell parsing, packaging/docs validation, and diff hygiene pass. A real local debug-daemon/CLI exercise plus forced daemon restart passes with exactly five governed writes, three provider calls, Chromium quick-add, application persistence, unchanged audit/files/runtime behavior, and provider-free replay.
+- Discovery: A first long nested path hit Windows atomic temporary-write resolution; a second fixture nested inside this Git worktree correctly bound to the surrounding project and rejected `create_new`. The isolated short consumer path used by package UAT passed, so harness project directories are explicitly short (`homebase`) and remain outside source.
+- Follow-up: Commit/push the integrated gate, run focused release-binary Windows/Ubuntu/macOS qualification, then run complete package lanes.
+
 ### 2026-08-20 - macOS VM connectivity reconfirmed
 
 - Context: The owner repaired `macOS-VM` after its Chrome Remote Desktop interruption.
