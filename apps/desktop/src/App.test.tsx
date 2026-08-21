@@ -1711,6 +1711,33 @@ test("Settings follows the grouped Codex navigation and filters sections", async
   expect(within(navigation).queryByRole("button", { name: "General" })).not.toBeInTheDocument();
 });
 
+test("Appearance applies a durable theme and reduced-motion preference", async () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Light" }));
+  expect(document.documentElement).toHaveAttribute("data-theme", "light");
+  expect(window.localStorage.getItem("mcg.theme")).toBe("light");
+
+  fireEvent.click(screen.getByRole("checkbox", { name: /Reduce motion/ }));
+  expect(document.documentElement).toHaveAttribute("data-reduce-motion", "true");
+  expect(window.localStorage.getItem("mcg.reduce-motion")).toBe("true");
+});
+
+test("Keyboard shortcuts is searchable and lists only implemented bindings", async () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+  const search = screen.getByRole("textbox", { name: "Search shortcuts" });
+  expect(screen.getByText("Open global folder")).toBeInTheDocument();
+
+  fireEvent.change(search, { target: { value: "full screen" } });
+  expect(screen.getByText("Toggle full screen")).toBeInTheDocument();
+  expect(screen.queryByText("Open global folder")).not.toBeInTheDocument();
+
+  fireEvent.change(search, { target: { value: "temporary chat" } });
+  expect(screen.getByText("No shortcuts found.")).toBeInTheDocument();
+});
+
 test("advanced mode keeps device-code login an explicit headless fallback", async () => {
   client.start.mockResolvedValue({
     session_id: "device-session",

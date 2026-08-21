@@ -274,6 +274,26 @@ type CodeReviewScope = "branch" | "uncommitted" | "commit" | "custom";
 type ScheduleFilter = "all" | "enabled" | "paused" | "completed";
 type PluginDirectoryTab = "openai" | "workspace" | "personal" | "installed";
 type SettingsTab = "general" | "import" | "profile" | "appearance" | "voice" | "configuration" | "personalization" | "shortcuts" | "usage" | "account" | "plugins" | "browser" | "computer" | "hooks" | "connections" | "git" | "environments" | "worktrees" | "archived";
+type ThemePreference = "system" | "light" | "dark";
+
+const MCG_SHORTCUTS = [
+  ["New chat", "Start a new chat", "Ctrl+N"],
+  ["Open global folder", "Make a folder available to every project and general chat", "Ctrl+O"],
+  ["Settings", "Open MCG settings", "Ctrl+,"],
+  ["Find a chat", "Search chats in the sidebar", "Ctrl+F"],
+  ["Toggle sidebar", "Show or hide the sidebar", "Ctrl+B"],
+  ["Toggle file tree", "Show or hide the project file tree", "Ctrl+Shift+E"],
+  ["Previous chat", "Switch to the previous chat", "Ctrl+Shift+["],
+  ["Next chat", "Switch to the next chat", "Ctrl+Shift+]"],
+  ["Back", "Go back in navigation history", "Ctrl+["],
+  ["Forward", "Go forward in navigation history", "Ctrl+]"],
+  ["Find on page", "Find text in the active page", "Ctrl+F"],
+  ["Close", "Close the active window", "Ctrl+W"],
+  ["Zoom in", "Increase interface scale", "Ctrl+Shift+="],
+  ["Zoom out", "Decrease interface scale", "Ctrl+-"],
+  ["Actual size", "Reset interface scale", "Ctrl+0"],
+  ["Toggle full screen", "Enter or leave full screen", "F11"]
+] as const;
 
 const SCHEDULE_FILTERS: Array<[ScheduleFilter, string]> = [
   ["all", "All"],
@@ -439,6 +459,12 @@ export function App() {
   const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [settingsSearch, setSettingsSearch] = useState("");
+  const [shortcutSearch, setShortcutSearch] = useState("");
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => {
+    const stored = window.localStorage.getItem("mcg.theme");
+    return stored === "light" || stored === "dark" || stored === "system" ? stored : "dark";
+  });
+  const [reduceMotion, setReduceMotion] = useState(() => window.localStorage.getItem("mcg.reduce-motion") === "true");
   const [desktopMenu, setDesktopMenu] = useState<string | null>(null);
   const [pinnedSummaryOpen, setPinnedSummaryOpen] = useState(true);
   const [projectTreeOpen, setProjectTreeOpen] = useState(true);
@@ -694,6 +720,16 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("mcg.global-folders", JSON.stringify(globalFolders));
   }, [globalFolders]);
+
+  useEffect(() => {
+    window.localStorage.setItem("mcg.theme", themePreference);
+    document.documentElement.dataset.theme = themePreference;
+  }, [themePreference]);
+
+  useEffect(() => {
+    window.localStorage.setItem("mcg.reduce-motion", String(reduceMotion));
+    document.documentElement.dataset.reduceMotion = String(reduceMotion);
+  }, [reduceMotion]);
 
   useEffect(() => {
     const restoreSurface = () => {
@@ -3227,6 +3263,10 @@ export function App() {
     { label: "Archived", items: [{ id: "archived", label: "Archived chats", glyph: "▤" }] }
   ];
   const normalizedSettingsSearch = settingsSearch.trim().toLocaleLowerCase();
+  const normalizedShortcutSearch = shortcutSearch.trim().toLocaleLowerCase();
+  const filteredShortcuts = MCG_SHORTCUTS.filter(([name, description, shortcut]) =>
+    !normalizedShortcutSearch || `${name} ${description} ${shortcut}`.toLocaleLowerCase().includes(normalizedShortcutSearch)
+  );
   const activeSurfaceTitle = activeSurface === "tasks"
     ? "New chat"
     : activeSurface === "threads"
@@ -4958,7 +4998,7 @@ export function App() {
                   <div><h2 id="settings-heading">General</h2><p className="muted">Choose how MCG works by default.</p></div>
                   {userSettings && <span className="count-badge">Revision {userSettings.revision}</span>}
                 </div>
-                {userSettings ? <div className="provider-setup" aria-label="Owner settings">
+                {userSettings ? <><h3>Permissions</h3><div className="provider-setup settings-card settings-card-stack" aria-label="Owner settings">
             <label>
               Autonomy
               <select
@@ -5008,10 +5048,24 @@ export function App() {
                 </li>)}
               </ul>
             </div>}
-                </div> : <p className="empty-state">Loading durable settings…</p>}
+                </div><h3>General</h3><div className="settings-card settings-card-stack">
+                  <div className="settings-control"><span><strong>Default file destination</strong><small>Files and folders remain in their attached project or explicit global folder.</small></span><span className="count-badge">Project</span></div>
+                  <div className="settings-control"><span><strong>Agent environment</strong><small>MCG runs locally on this computer through the governed daemon.</small></span><span className="count-badge">Local</span></div>
+                  <div className="settings-control"><span><strong>Language</strong><small>Language for the app interface</small></span><span className="count-badge">Auto detect</span></div>
+                  <div className="settings-control"><span><strong>Suggested prompts</strong><small>Show focused starting points on consumer workflows.</small></span><span className="count-badge">On</span></div>
+                </div><h3>Composer</h3><div className="settings-card settings-card-stack">
+                  <div className="settings-control"><span><strong>Send shortcut</strong><small>Enter sends a prompt; Shift+Enter inserts a line.</small></span><span className="count-badge">Enter</span></div>
+                  <div className="settings-control"><span><strong>Follow-up behavior</strong><small>New messages are queued while MCG is working.</small></span><span className="count-badge">Queue</span></div>
+                </div><h3>Notifications</h3><div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Permission and question notifications</strong><small>MCG surfaces requests that require owner input without pretending a background action completed.</small></span><span className="count-badge">On</span></div></div></> : <p className="empty-state">Loading durable settings…</p>}
               </div>
               <div className="settings-pane" data-settings-pane="import">
-                <div className="section-heading"><div><h2>Import</h2><p className="muted">Add folders available to every chat and manage portable backups.</p></div></div>
+                <div className="section-heading"><div><h2>Import</h2><p className="muted">Bring local folders and portable MCG data into this installation.</p></div></div>
+          <h3>Import from another AI app</h3>
+          <div className="settings-card settings-card-stack settings-unavailable" aria-label="Other AI app imports">
+            <div className="settings-control"><span><strong>Keep imports in sync</strong><small>Continuous cross-app synchronization is not available.</small></span><span className="count-badge">Off</span></div>
+            <div className="settings-control"><span><strong>Claude Code</strong><small>No compatible setup was detected; direct import is not implemented.</small></span><button className="secondary" type="button" disabled>Import</button></div>
+            <div className="settings-control"><span><strong>Cursor</strong><small>No compatible setup was detected; direct import is not implemented.</small></span><button className="secondary" type="button" disabled>Import</button></div>
+          </div>
           <div className="provider-connections global-folder-settings" aria-label="Global folders">
             <div className="section-heading compact-heading">
               <div>
@@ -5027,7 +5081,15 @@ export function App() {
           </div>
               </div>
               <div className="settings-pane" data-settings-pane="configuration">
-                <div className="section-heading"><div><h2>Configuration</h2><p className="muted">Updates, diagnostics, and durable application details.</p></div></div>
+                <div className="section-heading"><div><h2>Configuration</h2><p className="muted">Configure agent defaults, updates, and diagnostics.</p></div></div>
+          <h3>Agent defaults</h3>
+          <div className="settings-card settings-card-stack">
+            <div className="settings-control"><span><strong>Approval policy</strong><small>Derived from the durable autonomy setting.</small></span><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>{userSettings?.autonomy ?? "Loading"}</button></div>
+            <div className="settings-control"><span><strong>Filesystem boundary</strong><small>Attached projects and explicit global folders define normal workspace authority.</small></span><span className="count-badge">Governed</span></div>
+            <div className="settings-control"><span><strong>Web access</strong><small>Provider and tool access stays within reviewed capabilities.</small></span><span className="count-badge">Capability based</span></div>
+            <div className="settings-control"><span><strong>Reasoning and output detail</strong><small>Available model features are discovered from each provider endpoint.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Models</button></div>
+          </div>
+          <h3>Application</h3>
           <div className="provider-connections" aria-label="Application updates">
             <div className="section-heading compact-heading">
               <div>
@@ -5142,12 +5204,89 @@ export function App() {
           </div>
               </div>
 
-              <div className="settings-pane settings-summary-pane" data-settings-pane="profile"><h2>Profile</h2><div className="settings-card"><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><div><strong>{signedInWithOpenAi ? "OpenAI account" : "Local owner"}</strong><p>{signedInWithOpenAi ? "Your ChatGPT subscription is connected to MCG." : "Sign in with ChatGPT to use your OpenAI subscription."}</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Manage account</button></div></div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="appearance"><h2>Appearance</h2><div className="settings-card"><div><strong>Theme</strong><p>MCG currently uses its Codex-aligned dark theme. System and light themes will be added here when their visual qualification is complete.</p></div><span className="count-badge">Dark</span></div></div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="voice"><h2>Voice</h2><div className="settings-card"><div><strong>Voice input</strong><p>Voice controls are not configured in this build. MCG will not claim microphone access until the governed voice interface is available.</p></div></div></div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="personalization"><h2>Personalization</h2><div className="settings-card"><div><strong>How MCG works with you</strong><p>Autonomy and shadow-model preferences are durable owner controls.</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>Open general settings</button></div></div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="shortcuts"><h2>Keyboard shortcuts</h2><dl className="shortcut-list"><div><dt>New chat</dt><dd><kbd>Ctrl</kbd> + <kbd>N</kbd></dd></div><div><dt>Open Settings</dt><dd><kbd>Ctrl</kbd> + <kbd>,</kbd></dd></div><div><dt>Open a global folder</dt><dd><kbd>Ctrl</kbd> + <kbd>O</kbd></dd></div><div><dt>Find a chat</dt><dd><kbd>Ctrl</kbd> + <kbd>F</kbd></dd></div><div><dt>Toggle sidebar</dt><dd><kbd>Ctrl</kbd> + <kbd>B</kbd></dd></div><div><dt>Toggle project file tree</dt><dd><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd></dd></div><div><dt>Previous or next chat</dt><dd><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd></dd></div></dl></div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="usage"><h2>Usage &amp; billing</h2><div className="settings-card"><div><strong>{proxyUsage ? `${proxyUsage.usage.total_tokens.toLocaleString()} tokens recorded` : "Usage is loading"}</strong><p>{proxyUsage ? `${proxyUsage.call_count.toLocaleString()} calls across ${proxyUsage.conversation_count.toLocaleString()} conversations. Known API cost: $${proxyUsage.known_actual_cost_usd.toFixed(6)}.` : "MCG keeps credential-free local usage totals."}</p><small>ChatGPT subscription usage is governed by OpenAI and is not converted into API charges here. API-key providers remain separately billed.</small></div><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Provider details</button></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="profile">
+                <h2>Profile</h2>
+                <div className="settings-profile-hero">
+                  <span className="settings-profile-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span>
+                  <strong>{signedInWithOpenAi ? "OpenAI account" : "Local owner"}</strong>
+                  <span>{signedInWithOpenAi ? "ChatGPT subscription connected" : "Private local profile"}</span>
+                </div>
+                <h3>Activity</h3>
+                <div className="settings-stats" aria-label="Profile activity">
+                  <div><strong>{proxyUsage?.usage.total_tokens.toLocaleString() ?? "—"}</strong><span>Tokens</span></div>
+                  <div><strong>{proxyUsage?.call_count.toLocaleString() ?? "—"}</strong><span>Provider calls</span></div>
+                  <div><strong>{proxyUsage?.conversation_count.toLocaleString() ?? "—"}</strong><span>Conversations</span></div>
+                  <div><strong>{projects.length.toLocaleString()}</strong><span>Projects</span></div>
+                </div>
+                <div className="settings-card"><div><strong>Private by design</strong><p>MCG shows only activity recorded by this local installation. It does not invent streaks, public handles, or subscription details that providers do not expose.</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Manage account</button></div>
+              </div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="appearance">
+                <h2>Appearance</h2>
+                <h3>Theme</h3>
+                <div className="theme-choices" role="group" aria-label="Theme">
+                  {(["system", "light", "dark"] as ThemePreference[]).map((theme) => <button key={theme} type="button" aria-pressed={themePreference === theme} onClick={() => setThemePreference(theme)}><span className={`theme-preview theme-preview-${theme}`} aria-hidden="true"><i /><i /><i /></span><strong>{theme.charAt(0).toUpperCase() + theme.slice(1)}</strong></button>)}
+                </div>
+                <h3>Preferences</h3>
+                <div className="settings-card settings-card-stack">
+                  <label className="settings-control"><span><strong>Reduce motion</strong><small>Reduce interface animation and transitions</small></span><input type="checkbox" checked={reduceMotion} onChange={(event) => setReduceMotion(event.target.checked)} /></label>
+                  <div className="settings-control"><span><strong>UI font</strong><small>Use the operating system interface font</small></span><span className="count-badge">System default</span></div>
+                  <div className="settings-control"><span><strong>Code font</strong><small>Use the operating system monospace font</small></span><span className="count-badge">System default</span></div>
+                  <div className="settings-control"><span><strong>UI font size</strong><small>Base size used throughout MCG</small></span><span className="count-badge">14 px</span></div>
+                  <div className="settings-control"><span><strong>Diff markers</strong><small>Show changes using color and +/− markers</small></span><span className="count-badge">Color</span></div>
+                </div>
+              </div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="voice">
+                <h2>Voice</h2>
+                <h3>General</h3>
+                <div className="settings-card settings-card-stack settings-unavailable">
+                  <div className="settings-control"><span><strong>Microphone</strong><small>Voice input is not available in this build</small></span><button className="secondary" type="button" disabled>System default</button></div>
+                </div>
+                <h3>Voice chat</h3>
+                <div className="settings-card settings-card-stack settings-unavailable">
+                  <div className="settings-control"><span><strong>Voice</strong><small>A governed voice runtime has not been implemented</small></span><span className="count-badge">Unavailable</span></div>
+                  <div className="settings-control"><span><strong>Voice chat hotkey</strong><small>Global voice activation remains off</small></span><span className="count-badge">Off</span></div>
+                </div>
+                <h3>Dictation</h3>
+                <div className="settings-card settings-card-stack settings-unavailable"><div className="settings-control"><span><strong>Dictation controls</strong><small>MCG will not request microphone authority or save recordings until this capability is implemented and tested.</small></span><span className="count-badge">Unavailable</span></div></div>
+              </div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="personalization">
+                <h2>Personalization</h2>
+                <h3>Custom instructions</h3>
+                <p className="muted">Give MCG durable guidance for future chats.</p>
+                <textarea className="settings-instructions" aria-label="Custom instructions" disabled placeholder="Custom instructions are not connected to the runtime yet." />
+                <h3>Working style</h3>
+                <div className="settings-card settings-card-stack">
+                  <div className="settings-control"><span><strong>Autonomy</strong><small>Choose how independently MCG acts within its owner constitution.</small></span><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>{userSettings?.autonomy ?? "Loading"}</button></div>
+                  <div className="settings-control"><span><strong>Shadow verification</strong><small>Optional second-model checks are controlled in General settings.</small></span><span className="count-badge">{userSettings?.shadow_experiments ? "On" : "Off"}</span></div>
+                  <div className="settings-control"><span><strong>Local memories</strong><small>Automatic cross-chat personal memory is not enabled. Project memory remains explicit and reviewable.</small></span><span className="count-badge">Off</span></div>
+                </div>
+              </div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="shortcuts">
+                <h2>Keyboard shortcuts</h2>
+                <label className="shortcut-search"><span aria-hidden="true">⌕</span><input aria-label="Search shortcuts" value={shortcutSearch} onChange={(event) => setShortcutSearch(event.target.value)} placeholder="Search shortcuts" /></label>
+                <dl className="shortcut-list">
+                  {filteredShortcuts.map(([name, description, shortcut]) => <div key={`${name}-${shortcut}`}><span><dt>{name}</dt><small>{description}</small></span><dd>{shortcut.split("+").map((key) => <kbd key={`${name}-${key}`}>{key}</kbd>)}</dd></div>)}
+                </dl>
+                {filteredShortcuts.length === 0 && <p className="empty-state">No shortcuts found.</p>}
+                <p className="form-note">Only shortcuts that work in this MCG build are listed. Shortcut reassignment will appear after conflict-safe binding is implemented.</p>
+              </div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="usage">
+                <h2>Usage &amp; billing</h2>
+                <p className="muted">Review usage recorded by this local installation. Billing remains with the provider you chose.</p>
+                <h3>Local usage</h3>
+                <div className="settings-stats" aria-label="Local usage totals">
+                  <div><strong>{proxyUsage?.usage.total_tokens.toLocaleString() ?? "—"}</strong><span>Tokens</span></div>
+                  <div><strong>{proxyUsage?.call_count.toLocaleString() ?? "—"}</strong><span>Calls</span></div>
+                  <div><strong>{proxyUsage?.conversation_count.toLocaleString() ?? "—"}</strong><span>Conversations</span></div>
+                  <div><strong>{proxyUsage ? `$${proxyUsage.known_actual_cost_usd.toFixed(4)}` : "—"}</strong><span>Known API cost</span></div>
+                </div>
+                <h3>Provider billing</h3>
+                <div className="settings-card settings-card-stack">
+                  <div className="settings-control"><span><strong>ChatGPT subscription</strong><small>{signedInWithOpenAi ? "Connected through explicit OpenAI OAuth. Subscription usage is reported and governed by OpenAI." : "Not connected. You can sign in from Account without enabling API-key billing."}</small></span><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>{signedInWithOpenAi ? "Manage" : "Connect"}</button></div>
+                  <div className="settings-control"><span><strong>API and compatible providers</strong><small>API keys, OpenRouter, and OpenAI-compatible endpoints are billed by their provider. Unknown custom-model costs remain unknown.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Provider details</button></div>
+                </div>
+                <p className="form-note">MCG does not sell credits, collect subscription payments, or silently move subscription work to API billing.</p>
+              </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="account"><h2>Account</h2><div className="settings-card account-card"><span className="owner-avatar" aria-hidden="true">{signedInWithOpenAi ? "O" : "M"}</span><div><strong>{signedInWithOpenAi ? "Signed in with ChatGPT" : "Connect your OpenAI subscription"}</strong><p>{signedInWithOpenAi ? "MCG uses the explicit ChatGPT OAuth connection for subscription access." : "A browser window will open for OpenAI sign-in and return authorization to MCG."}</p><small>Subscription OAuth never silently falls back to API-key billing.</small></div>{signedInWithOpenAi ? <button className="secondary" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}>{busy ? "Logging out…" : "Log out"}</button> : <button className="primary" type="button" disabled={busy || Boolean(login)} onClick={() => void startLogin("browser")}>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</button>}</div>
                 {login && <div className="oauth-card" role="status"><p>Finish signing in with OpenAI in your browser, then return here.</p><button className="link-button" type="button" onClick={() => openVerification(login.verification_url)}>Open sign-in page</button><div className="composer-actions"><button className="secondary" type="button" disabled={busy} onClick={cancelLogin}>Cancel</button><button className="primary" type="button" disabled={busy} onClick={finishLogin}>{busy ? "Checking…" : "Finish connection"}</button></div></div>}
                 <p className="provider-state" role="status">{providerStatus}</p>{providerError && <p className="error-message" role="alert">{providerError}</p>}

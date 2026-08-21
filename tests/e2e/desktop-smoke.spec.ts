@@ -277,7 +277,9 @@ async function openOwnerSurface(page: import("@playwright/test").Page, name: str
 }
 
 async function enableAdvancedMode(page: import("@playwright/test").Page) {
-  await openOwnerSurface(page, "Settings");
+  if (!await page.getByRole("region", { name: "Settings" }).isVisible()) {
+    await openOwnerSurface(page, "Settings");
+  }
   await page.getByRole("button", { name: "General", exact: true }).click();
   await page.getByRole("button", { name: "Use advanced mode" }).click();
 }
@@ -339,6 +341,7 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
 
   await page.getByRole("button", { name: "Use simple mode" }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Scheduled", exact: true }).click();
   await expect(scheduler.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
   await expect(scheduler.getByRole("button", { name: "Set up in chat" })).toBeVisible();
@@ -463,6 +466,22 @@ test("account menu and Settings follow the compact Codex information architectur
   await page.getByRole("textbox", { name: "Search settings" }).fill("account");
   await expect(settings.getByRole("button", { name: "Account" })).toBeVisible();
   await expect(settings.getByRole("button", { name: "General" })).toHaveCount(0);
+
+  await page.getByRole("textbox", { name: "Search settings" }).fill("");
+  await settings.getByRole("button", { name: "Appearance" }).click();
+  await expect(page.getByRole("group", { name: "Theme" })).toBeVisible();
+  await page.getByRole("button", { name: "Light" }).click();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
+  await page.getByRole("button", { name: "Dark" }).click();
+
+  await settings.getByRole("button", { name: "Keyboard shortcuts" }).click();
+  await page.getByRole("textbox", { name: "Search shortcuts" }).fill("global folder");
+  const shortcutList = page.locator(".shortcut-list");
+  await expect(shortcutList.getByText("Open global folder")).toBeVisible();
+  await expect(shortcutList.getByText("Toggle full screen")).toHaveCount(0);
+
+  await settings.getByRole("button", { name: "Usage & billing" }).click();
+  await expect(page.getByText("MCG does not sell credits, collect subscription payments, or silently move subscription work to API billing.")).toBeVisible();
 });
 
 test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {
