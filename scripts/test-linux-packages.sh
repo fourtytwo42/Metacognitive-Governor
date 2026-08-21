@@ -506,6 +506,16 @@ runuser -u "$uat_user" -- env \
   --token-file "$installed_data/local-auth-token" --workspace "$uat_root" \
   --state "$uat_root/interface-success-state.json" \
   --output "$uat_root/interface-success.json"
+real_project="$uat_root/real-project"
+mkdir -p "$real_project"
+chown -R "$uat_user":"$(id -gn "$uat_user")" "$real_project"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-real-project.py" \
+  --mode exercise --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --project "$real_project" --state "$uat_root/real-project-state.json" \
+  --output "$uat_root/real-project.json"
 run_cli "$installed_data" "$installed_port" /usr/bin/mcg backup create --json >"$uat_root/backup.json"
 encrypted_backup_id="00000000-0000-4000-8000-00000000b002"
 encrypted_bundle="$installed_data/backups/$encrypted_backup_id.mcgb"
@@ -621,6 +631,13 @@ runuser -u "$uat_user" -- env \
   --token-file "$installed_data/local-auth-token" --workspace "$uat_root" \
   --state "$uat_root/interface-success-state.json" \
   --output "$uat_root/interface-success-restart.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  python3 "$repository_root/scripts/test-installed-real-project.py" \
+  --mode verify --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --project "$real_project" --state "$uat_root/real-project-state.json" \
+  --output "$uat_root/real-project-restart.json"
 stop_tree "$restarted_service_pid"
 background_pids=()
 

@@ -2,6 +2,20 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-20 - macOS VM connectivity reconfirmed
+
+- Context: The owner repaired `macOS-VM` after its Chrome Remote Desktop interruption.
+- Result: Chrome Remote Desktop again exposes the named session, and the authoritative unattended path `ssh mcg-macos-vm` succeeds key-only against the previously verified host identity. The VM reports macOS 26.0 x86_64.
+- Current work: `scripts/test-installed-real-project.py` now passes focused exercise/restart verification against release binaries on Win11, Ubuntu, and macOS and is integrated into every package harness. Continue complete matched package-harness qualification without waiting for routine VM permission.
+
+### 2026-08-20 - First installed real-project verifier passes three-platform prototype
+
+- Context: M5/M10 still required a representative consumer project that proves useful installed work independently rather than only deterministic fixture settlement.
+- Decision/files: Add `scripts/test-installed-real-project.py` and invoke it before encrypted backup plus after restore/restart from `scripts/test-{windows-installer.ps1,linux-packages.sh,macos-packages.sh}`. Packaging invariants and `docs/testing/strategy.md` require the shared gate.
+- Result: A seeded Node website test fails before work. One credential-free loopback provider then drives exactly three governed `fs.write` calls; the discovered test and independent Evaluator pass, the audit retains three writes plus governed `process.exec`, real Chromium renders 1280x720 and checks all three local references, and exact replay creates no side effect or provider call. Restart verification requires identical files/audit and provider-free replay plus an identical browser PNG. Focused release-binary exercise/restart passes on Win11, Ubuntu, and macOS. Screenshot SHA-256 is stable within each platform across restart: Windows `A28C4FD94AF3F41A7B177138C5C01E163E330D559AB309FDF34E73E0661D6BE8`, Ubuntu `FBDCA2779E84CB0987B3A65B5FD67288E16E959CEC7C590B6BBD4927BEBF31E8`, macOS `3745120EB41A07D84F83B80CA0BDD8932F66B73165C070A65266C7FA75BD2CC1`.
+- Platform note: Ubuntu's AppArmor policy denies the Playwright browser user namespace, so only the loopback rendering fixture uses Chromium `--no-sandbox` and records `browser_process_sandboxed=false`; the package's separate Bubblewrap/AppArmor product gates remain mandatory.
+- Follow-up: Run the complete matched Windows/Linux/macOS package harnesses with the new gate, retain secret-free reports/screenshots, clean temporary credential-bearing roots/processes, then checkpoint/push. One project does not close the broader several-project requirement.
+
 ### 2026-08-20 - Matched macOS package and interface qualification passes
 
 - Context: Chrome Remote Desktop display service was repaired and the VM's verified Ed25519 host identity was rediscovered at `192.168.50.151`; unattended key-only SSH was restored for user `hendo42`. The VM rebooted once during final linking, and the build resumed incrementally without weakening the package boundary.

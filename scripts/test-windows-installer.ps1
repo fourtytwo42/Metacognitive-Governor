@@ -400,6 +400,13 @@ try {
         --token-file $tokenFile --workspace $uatRoot `
         --state $interfaceSuccessState --output $interfaceSuccessReport
     if ($LASTEXITCODE -ne 0) { throw "Installed REST/OpenAI/MCP success verification failed." }
+    $realProjectVerifier = Join-Path $PSScriptRoot "test-installed-real-project.py"
+    $realProject = Join-Path $uatRoot "real-project"
+    $realProjectState = Join-Path $uatRoot "real-project-state.json"
+    & $python $realProjectVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $realProject `
+        --state $realProjectState --output (Join-Path $uatRoot "real-project.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed representative website project verification failed." }
     $backupOutput = & $cli --host "http://127.0.0.1:$servicePort" --token-file $tokenFile backup create --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI backup failed: $backupOutput" }
     $backup = ($backupOutput -join [Environment]::NewLine) | ConvertFrom-Json
@@ -507,6 +514,10 @@ try {
         --token-file $tokenFile --workspace $uatRoot `
         --state $interfaceSuccessState --output (Join-Path $uatRoot "interface-success-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed REST/OpenAI/MCP evidence did not survive daemon restart." }
+    & $python $realProjectVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --project $realProject `
+        --state $realProjectState --output (Join-Path $uatRoot "real-project-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed representative website evidence did not survive daemon restart." }
     $null = Stop-UatDaemonGracefully $restartedDaemon $cli "http://127.0.0.1:$servicePort" $tokenFile $serviceDataRoot (Join-Path $uatRoot "restarted-graceful-stop.json")
     $restartedDaemon = $null
 

@@ -320,6 +320,21 @@ complete MCP consumer task with independent evaluation and exact replay. The
 provider is removed before restore/restart; the second phase requires content-free
 proxy conversation history and provider-free MCP replay to retain the same terminal
 task, run, and evaluation. All package harnesses invoke this shared gate.
+`scripts/test-installed-real-project.py` adds the first shared representative
+consumer project gate. It seeds a Node website regression that must fail before
+work, has the installed CLI build an accessible responsive site through three
+governed file writes, requires the discovered project test and independent
+Evaluator to pass, and renders the result in a real Chromium-family browser at
+1280x720 while checking every local reference. The provider is removed before
+exact replay. After encrypted restore and daemon restart, the same gate requires
+byte-identical project files, unchanged audit history, a provider-free
+side-effect-free replay, another passing regression run, and an identical browser
+capture. Windows, Linux, and macOS package harnesses retain separate initial and
+restart reports and screenshots. On Ubuntu hosts whose AppArmor policy denies
+Playwright's unprivileged browser user namespace, this loopback-only rendering
+fixture passes Chromium `--no-sandbox` and records `browser_process_sandboxed=false`;
+the installed product's separate Bubblewrap/AppArmor execution gates remain
+mandatory and are not weakened by that browser-fixture accommodation.
 
 Linux release qualification additionally runs the real `.deb` and AppImage through
 `scripts/test-linux-packages.sh`: package install/repair/uninstall/reinstall, protected

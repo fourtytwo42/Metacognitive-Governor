@@ -229,6 +229,13 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-interface-
   --token-file "$service_data/local-auth-token" --workspace "$uat_root" \
   --state "$uat_root/interface-success-state.json" \
   --output "$uat_root/interface-success.json"
+real_project="$uat_root/real-project"
+mkdir -p "$real_project"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-project.py" \
+  --mode exercise --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" --project "$real_project" \
+  --state "$uat_root/real-project-state.json" --output "$uat_root/real-project.json"
 env HOME="$uat_home" "${cli[@]}" backup create --json >"$uat_root/backup.json"
 
 node --input-type=module - "http://127.0.0.1:$service_port/mcp" "$service_data/local-auth-token" "$uat_root/mcp.json" <<'NODE'
@@ -296,6 +303,12 @@ env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-interface-
   --token-file "$service_data/local-auth-token" --workspace "$uat_root" \
   --state "$uat_root/interface-success-state.json" \
   --output "$uat_root/interface-success-restart.json"
+env HOME="$uat_home" python3 "$repository_root/scripts/test-installed-real-project.py" \
+  --mode verify --host "http://127.0.0.1:$service_port" \
+  --token-file "$service_data/local-auth-token" \
+  --cli "$installed_app/Contents/MacOS/mcg" --project "$real_project" \
+  --state "$uat_root/real-project-state.json" \
+  --output "$uat_root/real-project-restart.json"
 stop_process "$restarted_service_pid"
 background_pids=()
 
