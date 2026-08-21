@@ -66,12 +66,14 @@ if (JSON.stringify(developmentConfig.plugins?.updater) !== JSON.stringify({ endp
   throw new Error("The base Tauri config must provide a valid inert updater object so unsigned packages start without update authority.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
   read("scripts/create-macos-dmg.sh"),
   read("scripts/test-updater-signing.mjs"),
+  read("scripts/scan-release-artifacts.mjs"),
+  read("scripts/test-scan-release-artifacts.mjs"),
   read("scripts/write-updater-build-config.mjs"),
   read("scripts/write-updater-manifest.mjs"),
   read("apps/desktop/src-tauri/examples/verify-updater-signature.rs"),
@@ -138,6 +140,12 @@ for (const invariant of ["generateKeyPairSync", "ed25519", "private_signing_key_
 for (const invariant of ["mkdtemp", '"signer"', '"generate"', '"sign"', "TAURI_SIGNING_PRIVATE_KEY_PATH", "finally", "rm(resolvedTemporaryRoot"]) {
   requireText(updaterSigningTest, invariant, "ephemeral updater signing qualification");
 }
+for (const invariant of ["Microsoft Defender Antivirus", "-DisableRemediation", "ClamAV", "--infected", "signatures must be no more than 72 hours old", "source commit does not match repository HEAD", "Release artifact SHA-256 mismatch", "Refusing to replace existing release scan evidence", "macOS public-release reputation is enforced by the notarization, stapling, and Gatekeeper package lane"]) {
+  requireText(releaseArtifactScanner, invariant, "release artifact malware scanner");
+}
+for (const invariant of ["mcg-release-scan-", "Qualification Scanner", "must not disclose absolute paths", "unsafe path", "SHA-256 mismatch", "fixture detection", "Refusing to replace existing release scan evidence"]) {
+  requireText(releaseArtifactScannerTest, invariant, "release artifact malware-scanner qualification");
+}
 for (const invariant of ["canonical bounded credential-free HTTPS", "canonical bounded base64", "Tauri minisign envelope", "createUpdaterArtifacts", "endpoints", "pubkey", 'flag: "wx"', "mode: 0o600", "output already exists"]) {
   requireText(updaterBuildConfigWriter, invariant, "temporary updater bundler configuration writer");
 }
@@ -188,6 +196,11 @@ requireText(linuxBuilder, "harden-linux-deb.sh", "Linux release builder");
 requireText(macosBuilder, "--bundles app", "macOS release builder");
 requireText(macosBuilder, "create-macos-dmg.sh", "macOS release builder");
 requireText(macosBuilder, 'rm -rf -- "$dmg_directory"', "macOS release builder");
+for (const [source, label] of [[windowsBuilder, "Windows release builder"], [linuxBuilder, "Linux release builder"]]) {
+  requireText(source, "scan-release-artifacts.mjs", label);
+  requireText(source, "release-security-scan.json", label);
+  requireText(source, "Refusing to replace existing release security-scan evidence", label);
+}
 for (const invariant of ["hdiutil create", "hdiutil verify", "staging/MCG.app", "staging/Applications", "Refusing to replace existing disk image", "macOS disk images must be created on macOS"]) {
   requireText(macosDmgBuilder, invariant, "macOS disk-image builder");
 }
@@ -246,7 +259,7 @@ if (wasmtimeLicenseDigest !== "23823edf263108ef7acbefde293225117b4784759c9c5bcd0
   throw new Error("Wasmtime 45.0.3 license payload does not match the reviewed upstream text.");
 }
 
-for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/build-release-macos.sh", "scripts/create-macos-dmg.sh", "scripts/write-updater-build-config.mjs", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh", "scripts/prepare-linux-sandbox.sh", "scripts/harden-linux-deb.sh"]) {
+for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "scripts/build-release-macos.sh", "scripts/create-macos-dmg.sh", "scripts/scan-release-artifacts.mjs", "scripts/test-scan-release-artifacts.mjs", "scripts/write-updater-build-config.mjs", "scripts/prepare-sidecars.ps1", "scripts/prepare-sidecars.sh", "scripts/prepare-linux-sandbox.sh", "scripts/harden-linux-deb.sh"]) {
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");

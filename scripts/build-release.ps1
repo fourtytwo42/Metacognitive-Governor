@@ -10,6 +10,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Release source preflight failed with exit code $LASTEXITCODE."
     }
+    $securityScanReport = Join-Path $repositoryRoot "target\release\release-security-scan.json"
+    if (Test-Path -LiteralPath $securityScanReport) {
+        throw "Refusing to replace existing release security-scan evidence: $securityScanReport"
+    }
     & "$PSScriptRoot/prepare-sidecars.ps1" -Profile release
     if ($LASTEXITCODE -ne 0) {
         throw "Sidecar preparation failed with exit code $LASTEXITCODE."
@@ -56,6 +60,10 @@ try {
     node scripts/write-release-manifest.mjs target/release/bundle/nsis
     if ($LASTEXITCODE -ne 0) {
         throw "Windows release manifest failed with exit code $LASTEXITCODE."
+    }
+    node scripts/scan-release-artifacts.mjs --root $repositoryRoot --manifest (Join-Path $repositoryRoot "target\release\release-manifest.json") --output $securityScanReport
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows release artifact malware scan failed with exit code $LASTEXITCODE."
     }
 } finally {
     if ($loadedSigningKeyFromPath) {

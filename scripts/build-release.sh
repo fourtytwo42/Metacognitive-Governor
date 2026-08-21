@@ -9,6 +9,8 @@ fi
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repository_root"
 node scripts/check-release-source.mjs
+security_scan_report="$repository_root/target/release/release-security-scan.json"
+[[ ! -e "$security_scan_report" ]] || { echo "Refusing to replace existing release security-scan evidence: $security_scan_report" >&2; exit 1; }
 "$repository_root/scripts/prepare-sidecars.sh" release
 bash "$repository_root/scripts/prepare-linux-sandbox.sh"
 tauri_config=(--config src-tauri/tauri.release.conf.json)
@@ -49,3 +51,7 @@ fi
 npm run tauri --workspace @mcg/desktop -- build --ci "${tauri_config[@]}" --bundles deb,appimage
 bash "$repository_root/scripts/harden-linux-deb.sh" "$repository_root/target/release/bundle/deb"
 node scripts/write-release-manifest.mjs target/release/bundle/deb target/release/bundle/appimage
+node scripts/scan-release-artifacts.mjs \
+  --root "$repository_root" \
+  --manifest "$repository_root/target/release/release-manifest.json" \
+  --output "$security_scan_report"

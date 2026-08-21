@@ -26,6 +26,8 @@ npm run check:packaging
 Assert-NativeSuccess "packaging contract check"
 npm run test:updater-signing
 Assert-NativeSuccess "updater signing tests"
+npm run test:release-artifact-scan
+Assert-NativeSuccess "release artifact malware-scan tests"
 npm run test:updater-uat-server
 Assert-NativeSuccess "updater scenario server tests"
 npm run test:prepare-updater-uat-source

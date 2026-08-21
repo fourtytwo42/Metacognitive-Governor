@@ -10,6 +10,7 @@ cargo test --workspace --all-features
 npm run check:docs
 npm run check:packaging
 npm run test:updater-signing
+npm run test:release-artifact-scan
 npm run test:updater-uat-server
 npm run test:prepare-updater-uat-source
 npm run test:prepare-updater-uat-workspace

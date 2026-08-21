@@ -11,6 +11,7 @@
     "check": "npm run typecheck --workspace @mcg/desktop",
     "test": "npm run test --workspace @mcg/desktop",
     "test:updater-signing": "node scripts/test-updater-signing.mjs",
+    "test:release-artifact-scan": "node scripts/test-scan-release-artifacts.mjs",
     "test:updater-uat-server": "node scripts/test-updater-uat-server.mjs",
     "serve:updater-uat": "node scripts/updater-uat-server.mjs",
     "prepare:updater-uat-source": "node scripts/prepare-updater-uat-source.mjs",
@@ -23,6 +24,7 @@
     "test:release-soak-unattended": "node scripts/test-release-soak-unattended.mjs",
     "test:verify-release-soak-evidence": "node scripts/test-verify-release-soak-evidence.mjs",
     "verify:release-soak-evidence": "node scripts/verify-release-soak-evidence.mjs",
+    "scan:release-artifacts": "node scripts/scan-release-artifacts.mjs",
     "build": "npm run build --workspace @mcg/desktop",
     "dev": "npm run dev --workspace @mcg/desktop",
     "test:e2e": "playwright test"

@@ -528,6 +528,7 @@ reversion scans observation-only.
 - signed installer, upgrade, rollback, backup/restore, and uninstall tests;
 - Windows/Linux/macOS clean-machine matrices and long-running soak;
 - native macOS app/DMG build, signature/notarization validation, and installed-app UAT;
+- exact-manifest Microsoft Defender and ClamAV scans with enabled engines, definitions no older than 72 hours, detection/error rejection, remediation disabled, and secret-free no-clobber evidence;
 - reproducibility, SBOM, provenance, and artifact signature checks.
 
 Installed desktop UAT must exercise populated simple and advanced surfaces, not
