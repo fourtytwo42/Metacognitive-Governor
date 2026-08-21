@@ -535,7 +535,8 @@ test("Codex-style sidebar groups project chats, searches them, and persists pins
   render(<App />);
 
   const projectTree = screen.getByLabelText("Projects");
-  expect(await within(projectTree).findByRole("button", { name: /consumer-app/ })).toBeInTheDocument();
+  expect(await within(projectTree).findByRole("button", { name: "consumer-app" })).toBeInTheDocument();
+  expect(within(projectTree).getByRole("button", { name: "New chat in consumer-app" })).toBeInTheDocument();
   expect(within(projectTree).getByRole("button", { name: task.goal })).toBeInTheDocument();
 
   fireEvent.click(await screen.findByRole("button", { name: "Pin" }));
@@ -1201,7 +1202,7 @@ test("simple scheduler creates restart-safe recurring work for a selected projec
   client.createSchedule.mockResolvedValue(schedule);
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
   const scheduler = screen.getByRole("region", { name: "Scheduler" });
   await enableAdvancedMode();
   fireEvent.change(within(scheduler).getByLabelText("Trigger"), { target: { value: "cron" } });
@@ -1452,7 +1453,7 @@ test("scheduler retries reuse one identity and rotate it only after success", as
     .mockResolvedValueOnce({ ...completed, id: "00000000-0000-4000-8000-000000000034", name: "Next schedule" });
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
   const scheduler = screen.getByRole("region", { name: "Scheduler" });
   fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: completed.name } });
   fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: completed.goal } });
@@ -2027,7 +2028,7 @@ test("rediscovering a known Windows folder preserves its durable project identit
   await waitFor(() => expect(client.discoverProject).toHaveBeenCalledWith(selectedRoot, project.project_id));
 });
 
-test("desktop project memory is simple to add and advanced lifecycle evidence stays visible", async () => {
+test("project intelligence stays advanced while project chat remains the simple default", async () => {
   const project = {
     schema_version: 1,
     id: "00000000-0000-4000-8000-000000000510",
@@ -2088,10 +2089,15 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
+  expect(screen.getByRole("heading", { name: "New chat", level: 1 })).toBeInTheDocument();
+  expect(screen.getAllByRole("status").some((node) => node.textContent?.includes("remembered"))).toBe(true);
+  expect(screen.queryByLabelText("Project intelligence and memory")).not.toBeInTheDocument();
+  await enableAdvancedMode();
   const intelligence = await screen.findByLabelText("Project intelligence and memory");
-  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("Stage 1main databaseStage 2web");
-  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).not.toHaveTextContent("compose.yaml");
+  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("Stage 1");
+  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("main database");
+  expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("database · compose.yaml");
   fireEvent.change(within(intelligence).getByLabelText("Memory fact name"), { target: { value: "package_manager" } });
   fireEvent.change(within(intelligence).getByLabelText("Memory value"), { target: { value: "pnpm" } });
   fireEvent.click(within(intelligence).getByRole("button", { name: "Remember this" }));
@@ -2104,7 +2110,6 @@ test("desktop project memory is simple to add and advanced lifecycle evidence st
   })));
   expect(await within(intelligence).findByText("pnpm")).toBeInTheDocument();
 
-  await enableAdvancedMode();
   expect(within(intelligence).getByRole("list", { name: "Project topology plan" })).toHaveTextContent("database · compose.yaml");
   fireEvent.change(within(intelligence).getByLabelText("Memory fact name"), { target: { value: "temporary_endpoint" } });
   fireEvent.change(within(intelligence).getByLabelText("Memory value"), { target: { value: "http://127.0.0.1:4173" } });
@@ -2185,9 +2190,10 @@ test("simple mode separately reviews and policy-runs a snapshot-pinned topology 
   client.approveRequest.mockResolvedValue({});
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Use project" }));
-  const intelligence = await screen.findByLabelText("Project intelligence and memory");
+  fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
+  expect(screen.queryByLabelText("Project intelligence and memory")).not.toBeInTheDocument();
   await enableAdvancedMode();
+  const intelligence = await screen.findByLabelText("Project intelligence and memory");
   const authority = within(intelligence).getByLabelText("Reviewed topology authority");
   expect(within(authority).getByText("Snapshot")).toBeInTheDocument();
   expect(within(authority).getByText("Topology SHA-256")).toBeInTheDocument();
@@ -2260,7 +2266,9 @@ test("simple mode reviews and transfers one durable fact to an explicitly chosen
   });
 
   render(<App />);
-  fireEvent.click((await screen.findAllByRole("button", { name: "Use project" }))[0]!);
+  fireEvent.click((await screen.findAllByRole("button", { name: "Start chat" }))[0]!);
+  expect(screen.queryByLabelText("Project intelligence and memory")).not.toBeInTheDocument();
+  await enableAdvancedMode();
   const intelligence = await screen.findByLabelText("Project intelligence and memory");
   fireEvent.click(await within(intelligence).findByRole("button", { name: "Share with another project" }));
   await waitFor(() => expect(client.reviewProjectMemoryTransfer).toHaveBeenCalledWith(source.project_id, claim.id));

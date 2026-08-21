@@ -414,7 +414,7 @@ body { background: var(--mcg-bg); }
 .sidebar-section { margin-top: 16px; }
 .sidebar-section h2 { margin: 0 7px 7px; color: #9a9a9a; font-size: .72rem; font-weight: 650; letter-spacing: .02em; }
 .sidebar-section > p, .project-tree-item > p { margin: 5px 8px 7px 27px; color: #929292; font-size: .75rem; }
-.chat-link, .project-tree-item > button {
+.chat-link, .project-tree-item > button, .project-tree-name, .project-new-chat {
   width: 100%;
   display: block;
   padding: 7px 8px;
@@ -429,9 +429,14 @@ body { background: var(--mcg-bg); }
   white-space: nowrap;
 }
 .chat-link { padding-left: 27px; }
-.chat-link:hover, .chat-link.active, .project-tree-item > button:hover { color: #eee; background: #303030; }
-.project-tree-item > button { display: flex; align-items: center; gap: 8px; color: #d0d0d0; font-weight: 600; }
+.chat-link:hover, .chat-link.active, .project-tree-item > button:hover, .project-tree-heading:hover { color: #eee; background: #303030; }
+.project-tree-item > button, .project-tree-name { display: flex; align-items: center; gap: 8px; color: #d0d0d0; font-weight: 600; }
 .project-tree-item { margin-bottom: 3px; }
+.project-tree-heading { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; border-radius: 7px; }
+.project-tree-name { min-width: 0; background: transparent; }
+.project-new-chat { width: 26px; height: 26px; padding: 0; border-radius: 6px; color: #bdbdbd; background: transparent; text-align: center; opacity: 0; pointer-events: none; }
+.project-tree-heading:hover .project-new-chat, .project-tree-heading:focus-within .project-new-chat { opacity: 1; pointer-events: auto; }
+.project-new-chat:hover { color: #fff; background: #484848; }
 .sidebar-account-area { position: relative; margin-top: auto; padding-top: 9px; border-top: 1px solid #333; }
 .owner-menu-button { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 8px; border: 0; border-radius: 8px; color: #ddd; background: transparent; text-align: left; }
 .owner-menu-button:hover, .owner-menu-button[aria-expanded="true"] { background: #303030; }

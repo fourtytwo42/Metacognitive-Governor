@@ -359,7 +359,11 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
   }
 
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "consumer-app" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "consumer-app", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  const projectChat = page.getByRole("button", { name: "New chat in consumer-app" });
+  await expect(projectChat).toBeFocused();
+  await expectVisibleKeyboardFocus(projectChat);
   await page.keyboard.press("Tab");
   const owner = page.getByRole("button", { name: /Local owner/ });
   await expect(owner).toBeFocused();
@@ -386,7 +390,11 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
 test("workspace navigation always opens a surface at its top", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");
-  await page.getByRole("button", { name: "Use project" }).click();
+  await expect(page.getByRole("heading", { name: "Choose a project", level: 2 })).toBeVisible();
+  await expect(page.getByLabel("Project intelligence and memory")).toHaveCount(0);
+  await page.getByRole("button", { name: "Start chat" }).click();
+  await expect(page.getByRole("heading", { name: "New chat", level: 1 })).toBeVisible();
+  await expect(page.locator(".selected-project")).toContainText("consumer-app");
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
 
@@ -398,7 +406,7 @@ test("workspace navigation always opens a surface at its top", async ({ page }) 
   await expect(page.locator("#projects")).toBeVisible();
   await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
   await expect.poll(() => page.evaluate(() => Math.round(window.scrollY))).toBe(0);
-  await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Choose a project", level: 2 })).toBeVisible();
 });
 
 test("scaled 1280x800 Windows layout keeps browser OAuth reachable", async ({ page }) => {
@@ -452,19 +460,19 @@ test("consumer composes and runs a revision-pinned multi-host workflow", async (
 
 test("consumer manages provenance-bearing project memory and inspects the world model", async ({ page }) => {
   await page.goto("/");
+  await enableAdvancedMode(page);
   await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Use project" }).click();
   const intelligence = page.getByLabel("Project intelligence and memory");
   await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("Stage 1");
   await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("main database");
-  await expect(intelligence.getByRole("list", { name: "Project topology plan" })).not.toContainText("compose.yaml");
+  await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("compose.yaml");
   await intelligence.getByLabel("Memory fact name").fill("package_manager");
   await intelligence.getByLabel("Memory value").fill("pnpm");
   await intelligence.getByRole("button", { name: "Remember this" }).click();
-  await expect(intelligence.getByText("package_manager")).toBeVisible();
+  await expect(intelligence.getByText("package_manager", { exact: true })).toBeVisible();
   await expect(intelligence.getByText("pnpm", { exact: true })).toBeVisible();
 
-  await enableAdvancedMode(page);
   await expect(intelligence.getByRole("list", { name: "Project topology plan" })).toContainText("database · compose.yaml");
   await expect(intelligence.getByLabel("Memory namespace")).toHaveValue("project");
   await expect(intelligence.getByLabel("Memory fresh until")).toBeVisible();
@@ -480,6 +488,7 @@ test("consumer manages provenance-bearing project memory and inspects the world 
 
 test("consumer reviews, approves, and runs an exact topology command", async ({ page }) => {
   await page.goto("/");
+  await enableAdvancedMode(page);
   await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Use project" }).click();
   const intelligence = page.getByLabel("Project intelligence and memory");

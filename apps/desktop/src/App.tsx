@@ -680,8 +680,13 @@ export function App() {
     navigateSurface(surface);
   }
 
-  function startNewChat() {
+  function startNewChat(project: ProjectModel | null = null) {
+    setSelectedProject(project);
     setSelectedChatId(null);
+    setTaskGoal("");
+    setTaskConstraints("");
+    setTaskSuccess("");
+    setTaskError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
   }
@@ -1785,6 +1790,11 @@ export function App() {
         mutation.project,
         ...current.filter((project) => project.project_id !== mutation.project.project_id)
       ]);
+      if (surface === "projects" && !advanced) {
+        setSelectedChatId(null);
+        navigateSurface("tasks");
+        window.requestAnimationFrame(() => goalInputRef.current?.focus());
+      }
     } catch (error) {
       setProjectError(errorMessage(error));
     } finally {
@@ -2880,7 +2890,7 @@ export function App() {
           {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
             <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
             <div className={`desktop-menu-popover${desktopMenu === menu ? " open" : ""}`}>
-              {menu === "File" && <><button type="button" onClick={startNewChat}>New chat</button><button type="button" onClick={() => navigateSurface("projects")}>Open project</button></>}
+              {menu === "File" && <><button type="button" onClick={() => startNewChat()}>New chat</button><button type="button" onClick={() => navigateSurface("projects")}>Open project</button></>}
               {menu === "Edit" && <button type="button" onClick={() => goalInputRef.current?.focus()}>Focus composer</button>}
               {menu === "View" && <><button type="button" onClick={() => setSidebarOpen((current) => !current)}>{sidebarOpen ? "Hide sidebar" : "Show sidebar"}</button><button type="button" onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button></>}
               {menu === "Help" && <><button type="button" onClick={() => navigateSurface("settings")}>Diagnostics</button><button type="button" onClick={() => navigateSurface("settings")}>About MCG</button></>}
@@ -2898,7 +2908,7 @@ export function App() {
           <label className="chat-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search chats</span><input aria-label="Search chats" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search" /></label>
         </div>
         <nav className="sidebar-shortcuts" aria-label="Workspace pages">
-          <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={startNewChat}><span className="shortcut-glyph" aria-hidden="true">✎</span>New chat</button>
+          <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={() => startNewChat()}><span className="shortcut-glyph" aria-hidden="true">✎</span>New chat</button>
           {[(["pull-requests", "Pull requests", "⑂"]), (["sites", "Sites", "▦"]), (["scheduler", "Scheduled", "◷"]), (["plugins", "Plugins", "◉"])].map(([surface, label, glyph]) => <a className={`nav-item${activeSurface === surface ? " active" : ""}`} href={`#${surface}`} aria-current={activeSurface === surface ? "page" : undefined} onClick={(event) => openSurface(event, surface)} key={surface}><span className="shortcut-glyph" aria-hidden="true">{glyph}</span>{label}</a>)}
         </nav>
         <div className="sidebar-library">
@@ -2906,7 +2916,7 @@ export function App() {
           <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No projects</p>}{projects.map((project) => {
             const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
             const projectTasks = matchingTasks.filter((task) => task.project_id === project.project_id);
-            return <div className="project-tree-item" key={project.project_id}><button type="button" onClick={() => { setSelectedProject(project); navigateSurface("projects"); }}><span aria-hidden="true">▱</span>{name}</button>{projectTasks.length === 0 ? <p>No chats</p> : projectTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>;
+            return <div className="project-tree-item" key={project.project_id}><div className="project-tree-heading"><button className="project-tree-name" type="button" onClick={() => startNewChat(project)}><span aria-hidden="true">▱</span>{name}</button><button className="project-new-chat" type="button" aria-label={`New chat in ${name}`} title={`New chat in ${name}`} onClick={() => startNewChat(project)}><span aria-hidden="true">＋</span></button></div>{projectTasks.length === 0 ? <p>No chats</p> : projectTasks.map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>;
           })}{matchingTasks.filter((task) => !task.project_id).length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{matchingTasks.filter((task) => !task.project_id).map((task) => <button className={selectedChatId === task.id ? "chat-link active" : "chat-link"} type="button" onClick={() => openChat(task.id)} key={task.id}>{task.goal}</button>)}</div>}</section>
         </div>
         <div className="sidebar-account-area">
@@ -3060,7 +3070,8 @@ export function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">PROJECTS</p>
-                <h2>Your workspaces</h2>
+                <h2>{advanced ? "Your workspaces" : "Choose a project"}</h2>
+                {!advanced && <p className="muted">Start a chat with an AI team that can work inside the selected repository.</p>}
               </div>
               <button className="secondary" type="button" disabled={taskBusy} onClick={() => chooseProject("projects")}>Add project folder</button>
             </div>
@@ -3071,20 +3082,20 @@ export function App() {
                 return <article className={`project-card${selected ? " selected" : ""}`} key={project.project_id}>
                   <div>
                     <h3>{name}</h3>
-                    <p>{project.languages.length > 0 ? project.languages.join(", ") : "Language not detected"}</p>
-                    <div className="project-tags">
+                    {advanced && <p>{project.languages.length > 0 ? project.languages.join(", ") : "Language not detected"}</p>}
+                    {advanced && <div className="project-tags">
                       {project.build_systems.map((system) => <span key={`build-${system}`}>{system}</span>)}
                       {project.test_systems.map((system) => <span key={`test-${system}`}>{system}</span>)}
                       {project.repository.is_git && <span>{project.repository.dirty ? "Git · changes" : "Git · clean"}</span>}
-                    </div>
+                    </div>}
                     {advanced && <><code>{project.root}</code><small>{project.repository.branch ? `Branch ${project.repository.branch} · ` : ""}{project.instructions.conflicts.length} instruction conflicts</small></>}
                   </div>
-                  <button className={selected ? "project-selected" : "secondary"} type="button" disabled={selected} onClick={() => setSelectedProject(project)}>{selected ? "Selected" : "Use project"}</button>
+                  {advanced ? <button className={selected ? "project-selected" : "secondary"} type="button" disabled={selected} onClick={() => setSelectedProject(project)}>{selected ? "Selected" : "Use project"}</button> : <button className="primary" type="button" onClick={() => startNewChat(project)}>Start chat</button>}
                 </article>;
               })}
             </div>}
             {projectError && projectErrorSurface === "projects" && <p className="error-message" role="alert">{projectError}</p>}
-            {selectedProject && <div className="project-intelligence" aria-label="Project intelligence and memory">
+            {advanced && selectedProject && <div className="project-intelligence" aria-label="Project intelligence and memory">
               <div className="section-heading compact-heading">
                 <div>
                   <h3>Topology plan</h3>
