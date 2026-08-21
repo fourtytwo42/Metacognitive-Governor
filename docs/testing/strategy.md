@@ -222,10 +222,6 @@ tampering, proves exact import replay is observation-only, and requires CLI/REST
 agreement after restart. Retained reports contain only booleans and public digests;
 the private fixture key is never written to disk.
 
-The macOS harness accepts bounded, distinct service and desktop loopback ports so a
-complete isolated candidate lane can run without terminating an unrelated owner
-session already using the default application port.
-
 Updater contract tests prove unsigned builds fail closed, configured builds expose
 only their bounded HTTPS origin, and an available release requires a second review
 step before invoking installation with a fresh backup identity. Native tests reject

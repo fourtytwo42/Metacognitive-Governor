@@ -120,9 +120,6 @@ for (const [harness, label] of [
   requireText(harness, "test-installed-organization-sharing.mjs", label);
   requireText(harness, "organization-sharing-restart.json", label);
 }
-for (const invariant of ["MCG_MACOS_UAT_SERVICE_PORT", "MCG_MACOS_UAT_GUI_PORT", "macOS service and desktop UAT ports must be distinct"]) {
-  requireText(macosPackageHarness, invariant, "macOS package harness");
-}
 for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
   requireText(windowsNativeAccessibility, invariant, "Windows native accessibility verifier");
 }
