@@ -243,6 +243,10 @@ if ($existing) {
 }
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$nativeAccessibilityVerifier = Join-Path $PSScriptRoot "test-installed-native-accessibility-windows.ps1"
+if (-not (Test-Path -LiteralPath $nativeAccessibilityVerifier -PathType Leaf)) {
+    throw "Windows native accessibility verifier is missing: $nativeAccessibilityVerifier"
+}
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath = Join-Path $repositoryRoot "target/release/bundle/nsis/MCG_0.1.0_x64-setup.exe"
 }
@@ -267,6 +271,7 @@ $desktopService = $null
 $guiHealth = $null
 $screenshot = $null
 $desktopScreenshot = $null
+$nativeAccessibilityReport = $null
 $installationRemoved = $true
 
 try {
@@ -565,6 +570,8 @@ try {
         Start-Sleep -Seconds 2
         $desktopScreenshot = Join-Path $uatRoot "desktop.png"
         $screenshot = Save-DesktopScreenshot $desktopScreenshot
+        $nativeAccessibilityReport = Join-Path $uatRoot "desktop-native-accessibility.json"
+        & $nativeAccessibilityVerifier -ProcessId $desktop.Id -OutputPath $nativeAccessibilityReport
         Stop-UatProcess $desktop
         $desktop = $null
         $guiTokenFile = Join-Path $guiDataRoot "local-auth-token"
@@ -626,6 +633,7 @@ try {
         RealFullstackProjectRestartReport = Join-Path $uatRoot "real-fullstack-project-restart.json"
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
+        NativeAccessibilityReport = $nativeAccessibilityReport
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }
         ScreenshotHeight = if ($null -eq $screenshot) { 0 } else { $screenshot.Height }
         ScreenshotSampledColors = if ($null -eq $screenshot) { 0 } else { $screenshot.SampledColors }

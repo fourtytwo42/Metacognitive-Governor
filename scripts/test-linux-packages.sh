@@ -21,9 +21,13 @@ deb="$(realpath -- "$deb")"
 appimage="$(realpath -- "$appimage")"
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
-for command in apparmor_parser apparmor_status curl dpkg dpkg-deb find identify import npm pgrep python3 runuser script ss stat xdotool Xvfb; do
+for command in apparmor_parser apparmor_status curl dbus-daemon dpkg dpkg-deb find identify import npm pgrep python3 runuser script ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
+python3 -c 'import pyatspi' >/dev/null 2>&1 || {
+  echo "Missing UAT dependency: python3-pyatspi" >&2
+  exit 1
+}
 
 package_name="$(dpkg-deb -f "$deb" Package)"
 if dpkg-query -W -f='${Status}' "$package_name" 2>/dev/null | grep -q 'install ok installed'; then
@@ -34,10 +38,12 @@ fi
 uat_root="$(mktemp -d /tmp/mcg-linux-package-uat-XXXXXX)"
 chown "$uat_user":"$(id -gn "$uat_user")" "$uat_root"
 uat_home="$uat_root/home"
+uat_runtime="$uat_root/runtime"
 installed_data="$uat_root/installed-data"
 appimage_data="$uat_root/appimage-data"
-mkdir -p "$uat_home" "$installed_data" "$appimage_data"
-chown -R "$uat_user":"$(id -gn "$uat_user")" "$uat_home" "$installed_data" "$appimage_data"
+mkdir -p "$uat_home" "$uat_runtime" "$installed_data" "$appimage_data"
+chown -R "$uat_user":"$(id -gn "$uat_user")" "$uat_home" "$uat_runtime" "$installed_data" "$appimage_data"
+chmod 700 "$uat_runtime"
 
 package_installed=false
 background_pids=()
@@ -676,9 +682,17 @@ stop_tree "$restarted_service_pid"
 background_pids=()
 
 display=:97
+mapfile -t a11y_dbus < <(runuser -u "$uat_user" -- env XDG_RUNTIME_DIR="$uat_runtime" \
+  dbus-daemon --session --fork --print-address=1 --print-pid=1)
+[[ "${#a11y_dbus[@]}" -eq 2 && "${a11y_dbus[1]}" =~ ^[0-9]+$ ]] || {
+  echo "Could not start the private accessibility D-Bus session." >&2
+  exit 1
+}
+a11y_dbus_address="${a11y_dbus[0]}"
+a11y_dbus_pid="${a11y_dbus[1]}"
 runuser -u "$uat_user" -- Xvfb "$display" -screen 0 1280x800x24 -nolisten tcp >"$uat_root/xvfb.log" 2>&1 &
 xvfb_pid=$!
-background_pids+=("$xvfb_pid")
+background_pids+=("$a11y_dbus_pid" "$xvfb_pid")
 sleep 0.5
 
 launch_and_capture() {
@@ -691,7 +705,8 @@ launch_and_capture() {
     exit 1
   fi
   runuser -u "$uat_user" -- env \
-    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" DISPLAY="$display" \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" DISPLAY="$display" \
+    DBUS_SESSION_BUS_ADDRESS="$a11y_dbus_address" NO_AT_BRIDGE=0 GTK_MODULES=gail:atk-bridge \
     MCG_DATA_DIR="$data_root" MCG_BIND_ADDRESS="127.0.0.1:$port" \
     "$executable" >"$uat_root/$label-desktop.log" 2>&1 &
   local desktop_pid=$!
@@ -725,9 +740,14 @@ launch_and_capture() {
     echo "$label service is not bound to its isolated data directory." >&2
     exit 1
   }
+  runuser -u "$uat_user" -- env \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" DISPLAY="$display" \
+    DBUS_SESSION_BUS_ADDRESS="$a11y_dbus_address" \
+    python3 "$repository_root/scripts/test-installed-native-accessibility-linux.py" \
+      --output "$uat_root/$label-native-accessibility.json"
   stop_tree "$desktop_pid"
   stop_tree "$service_pid"
-  background_pids=("$xvfb_pid")
+  background_pids=("$a11y_dbus_pid" "$xvfb_pid")
 }
 
 launch_and_capture /usr/bin/mcg-desktop "$uat_root/installed-desktop-data" 7777 installed
@@ -788,6 +808,8 @@ REAL_FULLSTACK_PROJECT_REPORT=$uat_root/real-fullstack-project.json
 REAL_FULLSTACK_PROJECT_RESTART_REPORT=$uat_root/real-fullstack-project-restart.json
 INSTALLED_SCREENSHOT=$uat_root/installed.png
 APPIMAGE_SCREENSHOT=$uat_root/appimage.png
+INSTALLED_NATIVE_ACCESSIBILITY=$uat_root/installed-native-accessibility.json
+APPIMAGE_NATIVE_ACCESSIBILITY=$uat_root/appimage-native-accessibility.json
 DATA_RETAINED=true
 REPAIR_PRESERVED_DATA=true
 REINSTALL_PRESERVED_DATA=true

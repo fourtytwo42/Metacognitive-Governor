@@ -66,7 +66,7 @@ if (JSON.stringify(developmentConfig.plugins?.updater) !== JSON.stringify({ endp
   throw new Error("The base Tauri config must provide a valid inert updater object so unsigned packages start without update authority.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
@@ -96,8 +96,22 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt"),
   read("apps/mcg-shadow-runner/src/main.rs"),
   read("crates/mcg-runtime/src/shadow_verification.rs"),
-  read("apps/mcg-updater/src/lib.rs")
+  read("apps/mcg-updater/src/lib.rs"),
+  read("scripts/test-windows-installer.ps1"),
+  read("scripts/test-linux-packages.sh"),
+  read("scripts/test-installed-native-accessibility-windows.ps1"),
+  read("scripts/test-installed-native-accessibility-linux.py")
 ]);
+for (const [harness, verifier, label] of [
+  [windowsPackageHarness, "test-installed-native-accessibility-windows.ps1", "Windows package harness"],
+  [linuxPackageHarness, "test-installed-native-accessibility-linux.py", "Linux package harness"]
+]) requireText(harness, verifier, label);
+for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
+  requireText(windowsNativeAccessibility, invariant, "Windows native accessibility verifier");
+}
+for (const invariant of ["AT-SPI", "password text", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
+  requireText(linuxNativeAccessibility, invariant, "Linux native accessibility verifier");
+}
 for (const invariant of ["mkdtemp", '"signer"', '"generate"', '"sign"', "TAURI_SIGNING_PRIVATE_KEY_PATH", "finally", "rm(resolvedTemporaryRoot"]) {
   requireText(updaterSigningTest, invariant, "ephemeral updater signing qualification");
 }

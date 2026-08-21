@@ -199,6 +199,16 @@ interface mode with Enter, and requires the asynchronously persisted mode contro
 to regain focus. Native package UAT still covers platform assistive behavior that
 browser automation cannot prove.
 
+Installed Windows and Linux package UAT also crosses the operating-system
+accessibility bridge rather than inferring native support from the DOM. Windows UI
+Automation and Linux AT-SPI must expose the named MCG window/document, primary
+navigation, core task controls, provider actions, and settings; the native focus
+sequence must move from Goal to Open folder to Create task; and native input must
+change Simple/Advanced mode. Opening provider setup must expose the credential
+field as an OS-native password control. A typed canary must remain masked through
+the accessibility value API and absent from every accessible name. Reports retain
+only booleans, public control names, counts, and the expected focus sequence.
+
 Updater contract tests prove unsigned builds fail closed, configured builds expose
 only their bounded HTTPS origin, and an available release requires a second review
 step before invoking installation with a fresh backup identity. Native tests reject
