@@ -213,6 +213,15 @@ the harness fails closed when `AXIsProcessTrusted` is false. Direct macOS visual
 evidence captures only the largest on-screen window owned by the exact desktop PID,
 so unrelated desktop windows and credential-bearing terminal scrollback are excluded.
 
+Every installed package family also runs one disposable signed-organization sharing
+lifecycle before encrypted backup and reopens it after restore plus daemon restart.
+The shared verifier generates its Ed25519 signing key only in process memory, trusts
+and later terminally revokes the public publisher through the installed CLI, reviews
+and imports through authenticated REST, rejects a second review through MCP, rejects
+tampering, proves exact import replay is observation-only, and requires CLI/REST/MCP
+agreement after restart. Retained reports contain only booleans and public digests;
+the private fixture key is never written to disk.
+
 Updater contract tests prove unsigned builds fail closed, configured builds expose
 only their bounded HTTPS origin, and an available release requires a second review
 step before invoking installation with a fresh backup identity. Native tests reject

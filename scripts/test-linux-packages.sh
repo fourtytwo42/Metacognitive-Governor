@@ -507,6 +507,13 @@ runuser -u "$uat_user" -- env \
   --output "$uat_root/memory-transfer.json"
 runuser -u "$uat_user" -- env \
   HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  node "$repository_root/scripts/test-installed-organization-sharing.mjs" \
+  --mode exercise --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --state "$uat_root/organization-sharing-state.json" \
+  --output "$uat_root/organization-sharing.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
   python3 "$repository_root/scripts/test-installed-interface-success.py" \
   --mode exercise --host "http://127.0.0.1:$installed_port" \
   --token-file "$installed_data/local-auth-token" --workspace "$uat_root" \
@@ -650,6 +657,13 @@ runuser -u "$uat_user" -- env \
   --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
   --workspace "$uat_root" --state "$uat_root/memory-transfer-state.json" \
   --output "$uat_root/memory-transfer-restart.json"
+runuser -u "$uat_user" -- env \
+  HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
+  node "$repository_root/scripts/test-installed-organization-sharing.mjs" \
+  --mode verify --host "http://127.0.0.1:$installed_port" \
+  --token-file "$installed_data/local-auth-token" --cli /usr/bin/mcg \
+  --state "$uat_root/organization-sharing-state.json" \
+  --output "$uat_root/organization-sharing-restart.json"
 runuser -u "$uat_user" -- env \
   HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" MCG_DATA_DIR="$installed_data" \
   python3 "$repository_root/scripts/test-installed-interface-success.py" \
@@ -800,6 +814,8 @@ MCP_REPORT=$uat_root/mcp.json
 CONSUMER_CLI_REPORT=$uat_root/installed-consumer-cli.json
 PROVIDER_SUCCESS_REPORT=$uat_root/provider-success.json
 PROVIDER_SUCCESS_RESTART_REPORT=$uat_root/provider-success-restart.json
+ORGANIZATION_SHARING_REPORT=$uat_root/organization-sharing.json
+ORGANIZATION_SHARING_RESTART_REPORT=$uat_root/organization-sharing-restart.json
 REAL_PROJECT_REPORT=$uat_root/real-project.json
 REAL_PROJECT_RESTART_REPORT=$uat_root/real-project-restart.json
 REAL_API_PROJECT_REPORT=$uat_root/real-api-project.json

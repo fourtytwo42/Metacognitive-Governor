@@ -378,6 +378,7 @@ try {
     } else {
         $python = (Get-Command python.exe -ErrorAction Stop).Source
     }
+    $node = (Get-Command node.exe -ErrorAction Stop).Source
     $experimentVerifier = Join-Path $PSScriptRoot "test-installed-experiments.py"
     $experimentState = Join-Path $uatRoot "experiment-state.json"
     & $python $experimentVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
@@ -399,6 +400,13 @@ try {
         --token-file $tokenFile --cli $cli --workspace $uatRoot `
         --state $memoryTransferState --output $memoryTransferReport
     if ($LASTEXITCODE -ne 0) { throw "Installed cross-project memory transfer verification failed." }
+    $organizationSharingVerifier = Join-Path $PSScriptRoot "test-installed-organization-sharing.mjs"
+    $organizationSharingState = Join-Path $uatRoot "organization-sharing-state.json"
+    $organizationSharingReport = Join-Path $uatRoot "organization-sharing.json"
+    & $node $organizationSharingVerifier --mode exercise --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --state $organizationSharingState `
+        --output $organizationSharingReport
+    if ($LASTEXITCODE -ne 0) { throw "Installed signed-organization sharing verification failed." }
     $interfaceSuccessVerifier = Join-Path $PSScriptRoot "test-installed-interface-success.py"
     $interfaceSuccessState = Join-Path $uatRoot "interface-success-state.json"
     $interfaceSuccessReport = Join-Path $uatRoot "interface-success.json"
@@ -530,6 +538,10 @@ try {
         --token-file $tokenFile --cli $cli --workspace $uatRoot `
         --state $memoryTransferState --output (Join-Path $uatRoot "memory-transfer-restart.json")
     if ($LASTEXITCODE -ne 0) { throw "Installed cross-project memory transfer did not survive daemon restart." }
+    & $node $organizationSharingVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
+        --token-file $tokenFile --cli $cli --state $organizationSharingState `
+        --output (Join-Path $uatRoot "organization-sharing-restart.json")
+    if ($LASTEXITCODE -ne 0) { throw "Installed signed-organization sharing did not survive daemon restart." }
     & $python $interfaceSuccessVerifier --mode verify --host "http://127.0.0.1:$servicePort" `
         --token-file $tokenFile --workspace $uatRoot `
         --state $interfaceSuccessState --output (Join-Path $uatRoot "interface-success-restart.json")
@@ -628,6 +640,8 @@ try {
         ProviderSuccessRestartReport = Join-Path $uatRoot "provider-success-restart.json"
         MemoryTransferReport = $memoryTransferReport
         MemoryTransferRestartReport = Join-Path $uatRoot "memory-transfer-restart.json"
+        OrganizationSharingReport = $organizationSharingReport
+        OrganizationSharingRestartReport = Join-Path $uatRoot "organization-sharing-restart.json"
         InterfaceSuccessReport = $interfaceSuccessReport
         InterfaceSuccessRestartReport = Join-Path $uatRoot "interface-success-restart.json"
         RealProjectReport = Join-Path $uatRoot "real-project.json"

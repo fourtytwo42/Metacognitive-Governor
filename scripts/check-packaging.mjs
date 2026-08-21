@@ -105,12 +105,21 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("scripts/test-installed-native-accessibility-macos.swift"),
   read("scripts/capture-installed-macos-window.swift")
 ]);
+const installedOrganizationSharing = await read("scripts/test-installed-organization-sharing.mjs");
 for (const [harness, verifier, label] of [
   [windowsPackageHarness, "test-installed-native-accessibility-windows.ps1", "Windows package harness"],
   [linuxPackageHarness, "test-installed-native-accessibility-linux.py", "Linux package harness"],
   [macosPackageHarness, "test-installed-native-accessibility-macos.swift", "macOS package harness"],
   [macosPackageHarness, "capture-installed-macos-window.swift", "macOS package harness"]
 ]) requireText(harness, verifier, label);
+for (const [harness, label] of [
+  [windowsPackageHarness, "Windows package harness"],
+  [linuxPackageHarness, "Linux package harness"],
+  [macosPackageHarness, "macOS package harness"]
+]) {
+  requireText(harness, "test-installed-organization-sharing.mjs", label);
+  requireText(harness, "organization-sharing-restart.json", label);
+}
 for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
   requireText(windowsNativeAccessibility, invariant, "Windows native accessibility verifier");
 }
@@ -122,6 +131,9 @@ for (const invariant of ["AXIsProcessTrusted", "kAXSecureTextFieldSubrole", "key
 }
 for (const invariant of ["CGWindowListCopyWindowInfo", "kCGWindowOwnerPID", "screencapture", "-l"]) {
   requireText(macosWindowCapture, invariant, "macOS window capture verifier");
+}
+for (const invariant of ["generateKeyPairSync", "ed25519", "private_signing_key_persisted", "tampered_package_rejected", "revoked_review_mutation_free", "cli_rest_mcp_agree", "post_restart_import_replay_observation_only"]) {
+  requireText(installedOrganizationSharing, invariant, "installed organization-sharing verifier");
 }
 for (const invariant of ["mkdtemp", '"signer"', '"generate"', '"sign"', "TAURI_SIGNING_PRIVATE_KEY_PATH", "finally", "rm(resolvedTemporaryRoot"]) {
   requireText(updaterSigningTest, invariant, "ephemeral updater signing qualification");
