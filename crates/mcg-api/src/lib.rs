@@ -33,15 +33,17 @@ use mcg_agents::{
 };
 use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
-    ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, Conversation,
-    ConversationId, ConversationTurnId, ConversationView, ExecutionPreferences, ExperimentId,
-    MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
-    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
+    AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComputerActionBatchId,
+    ComputerUseCapability, ComputerUseTarget, Conversation, ConversationAgentSessionId,
+    ConversationId, ConversationTeamState, ConversationTurnId, ConversationView,
+    ExecutionPreferences, ExperimentId, MemoryClaimId, MemoryTransferId, NotificationSeverity,
+    OrganizationId, OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
+    PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId, RiskLevel, RoleId,
+    RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, SharedContextHit, Site, SiteDeployment, SiteDeploymentCommand,
     SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
     SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
     SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
@@ -62,12 +64,12 @@ use mcg_providers::{
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, BackupBundleManifest,
     BackupBundleSummary, BackupPassphrase, CandidateRevisionMutation, CodexSiteInventory,
-    ConsumerEvaluationCheckpointState, ConsumerEvaluationProgress, DiagnosticReport,
-    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, OrganizationPublisherMutation, OrganizationShareImportMutation,
-    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation,
-    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
+    ConsumerEvaluationCheckpointState, ConsumerEvaluationProgress, DelegationReview,
+    DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation,
+    OAuthLoginStart, OpenAiOAuthMethod, OrganizationPublisherMutation,
+    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
+    PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
+    PluginInvocationMutation, PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
     ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport, RuntimeError,
     RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
@@ -206,6 +208,40 @@ pub struct ConversationListResponse {
 pub struct ConversationListQuery {
     #[serde(default)]
     pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SharedContextSearchQuery {
+    pub q: String,
+    #[serde(default = "default_context_search_limit")]
+    pub limit: usize,
+}
+
+const fn default_context_search_limit() -> usize {
+    20
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationMutationRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeMutationRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteBlackboardRequest {
+    pub author_session_id: ConversationAgentSessionId,
+    #[serde(default)]
+    pub delegation_id: Option<AgentDelegationId>,
+    pub kind: BlackboardEntryKind,
+    pub content: String,
+    #[serde(default)]
+    pub source_references: Vec<String>,
+    #[serde(default)]
+    pub supersedes_id: Option<BlackboardEntryId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1414,6 +1450,34 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/messages",
             post(send_conversation_message),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/team",
+            get(get_conversation_team),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/context/search",
+            get(search_conversation_context),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/blackboard",
+            post(write_conversation_blackboard),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/review",
+            get(review_conversation_delegation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/cancel",
+            post(cancel_conversation_delegation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/apply",
+            post(apply_conversation_delegation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/discard",
+            post(discard_conversation_delegation),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/turns/{turn_id}/interrupt",
@@ -3456,6 +3520,131 @@ async fn send_conversation_message(
                 request.execution_preferences,
             )
             .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn get_conversation_team(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<ConversationTeamState>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .conversation_team(conversation_id)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn search_conversation_context(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<SharedContextSearchQuery>,
+) -> Result<Json<Vec<SharedContextHit>>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .search_shared_context(conversation_id, &query.q, query.limit)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn write_conversation_blackboard(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<WriteBlackboardRequest>,
+) -> Result<Json<ConversationTeamState>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .write_blackboard(
+                conversation_id,
+                request.author_session_id,
+                request.delegation_id,
+                request.kind,
+                request.content,
+                request.source_references,
+                request.supersedes_id,
+            )
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+fn parse_delegation_path(
+    conversation_id: String,
+    delegation_id: String,
+) -> Result<(ConversationId, AgentDelegationId), ApiError> {
+    Ok((
+        conversation_id
+            .parse::<ConversationId>()
+            .map_err(|_| ApiError::bad_request("conversation id is invalid"))?,
+        delegation_id
+            .parse::<AgentDelegationId>()
+            .map_err(|_| ApiError::bad_request("delegation id is invalid"))?,
+    ))
+}
+
+async fn review_conversation_delegation(
+    State(state): State<ApiState>,
+    Path((conversation_id, delegation_id)): Path<(String, String)>,
+) -> Result<Json<DelegationReview>, ApiError> {
+    let (conversation_id, delegation_id) = parse_delegation_path(conversation_id, delegation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .delegation_review(conversation_id, delegation_id)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn cancel_conversation_delegation(
+    State(state): State<ApiState>,
+    Path((conversation_id, delegation_id)): Path<(String, String)>,
+    Json(request): Json<DelegationMutationRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let (conversation_id, delegation_id) = parse_delegation_path(conversation_id, delegation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .cancel_delegation(conversation_id, delegation_id, request.expected_revision)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn apply_conversation_delegation(
+    State(state): State<ApiState>,
+    Path((conversation_id, delegation_id)): Path<(String, String)>,
+    Json(request): Json<DelegationMutationRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let (conversation_id, delegation_id) = parse_delegation_path(conversation_id, delegation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .integrate_delegation(conversation_id, delegation_id, request.expected_revision)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn discard_conversation_delegation(
+    State(state): State<ApiState>,
+    Path((conversation_id, delegation_id)): Path<(String, String)>,
+    Json(request): Json<WorktreeMutationRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let (conversation_id, delegation_id) = parse_delegation_path(conversation_id, delegation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .discard_delegation_worktree(conversation_id, delegation_id, request.expected_revision)
             .map_err(map_runtime_error)?,
     ))
 }

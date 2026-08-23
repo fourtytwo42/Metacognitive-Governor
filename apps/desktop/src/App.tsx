@@ -221,6 +221,10 @@ import {
   retryTask,
   resumeTask,
   sendConversationMessage,
+  reviewConversationDelegation,
+  cancelConversationDelegation,
+  applyConversationDelegation,
+  discardConversationDelegation,
   steerConversationTurn,
   requestPlatformSession,
   reclaimBrowserSession,
@@ -757,9 +761,35 @@ function ConversationActivityTimeline({ messages, activities }: { messages: Conv
   return <div className="chat-activity-timeline" aria-label="Turn activity">{content}</div>;
 }
 
-function CodingAgentCards({ team }: { team?: ConversationTeamState }) {
+function CodingAgentCards({ team, conversationId, onView }: { team?: ConversationTeamState; conversationId?: string; onView: (view: ConversationView) => void }) {
+  const [tabs, setTabs] = useState<Record<string, "activity" | "exchange" | "blackboard" | "changes" | "evidence">>({});
+  const [patches, setPatches] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   if (!team || team.delegations.length === 0) return null;
   const stateLabel = (state: AgentDelegation["state"]) => state.replaceAll("_", " ").replace(/^./, (value) => value.toLocaleUpperCase());
+  async function runAction(delegation: AgentDelegation, action: "review" | "cancel" | "apply" | "discard", worktreeRevision?: number) {
+    if (!conversationId) return;
+    setBusy(`${delegation.id}:${action}`);
+    setErrors((current) => ({ ...current, [delegation.id]: "" }));
+    try {
+      if (action === "review") {
+        const review = await reviewConversationDelegation(conversationId, delegation.id);
+        setPatches((current) => ({ ...current, [delegation.id]: review.patch || "No file changes were reported." }));
+        setTabs((current) => ({ ...current, [delegation.id]: "changes" }));
+      } else if (action === "cancel") {
+        onView(await cancelConversationDelegation(conversationId, delegation.id, delegation.revision));
+      } else if (action === "apply") {
+        onView(await applyConversationDelegation(conversationId, delegation.id, delegation.revision));
+      } else if (worktreeRevision !== undefined) {
+        onView(await discardConversationDelegation(conversationId, delegation.id, worktreeRevision));
+      }
+    } catch (error) {
+      setErrors((current) => ({ ...current, [delegation.id]: errorMessage(error) }));
+    } finally {
+      setBusy(null);
+    }
+  }
   return <section className="coding-agent-stack" aria-label="Coding agent activity">
     {team.delegations.map((delegation, index) => {
       const session = team.sessions.find((candidate) => candidate.id === delegation.coder_session_id);
@@ -767,6 +797,11 @@ function CodingAgentCards({ team }: { team?: ConversationTeamState }) {
       const messages = team.messages.filter((message) => message.delegation_id === delegation.id);
       const blackboard = team.blackboard.filter((entry) => entry.delegation_id === delegation.id);
       const active = ["requested", "preparing", "running", "waiting", "blocked", "reported", "integrating"].includes(delegation.state);
+      const tab = tabs[delegation.id] ?? "activity";
+      const cancellable = ["requested", "preparing", "running", "waiting"].includes(delegation.state);
+      const reviewable = Boolean(worktree) && ["reported", "blocked", "failed", "cancelled"].includes(delegation.state);
+      const applicable = Boolean(worktree) && ["reported", "blocked"].includes(delegation.state);
+      const discardable = Boolean(worktree) && worktree?.state !== "removed" && !["preparing", "running", "integrating"].includes(delegation.state);
       return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id}>
         <summary>
           <span className="coding-agent-glyph" aria-hidden="true">⌘</span>
@@ -780,11 +815,14 @@ function CodingAgentCards({ team }: { team?: ConversationTeamState }) {
             <span>Prompt revision <code>{session?.prompt_revision ?? "—"}</code></span>
             {worktree && <span>Branch <code>{worktree.branch}</code></span>}
           </div>
-          <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>
-          <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>
-          {(delegation.changed_files.length > 0 || delegation.checks.length > 0) && <section><h4>Changes and evidence</h4>{delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{delegation.checks.map((check) => <p key={check}>{check}</p>)}</section>}
-          {delegation.summary && <section><h4>Report</h4><p>{delegation.summary}</p></section>}
-          {delegation.error && <p className="error-message" role="alert">{delegation.error}</p>}
+          <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
+          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}</section>}
+          {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
+          {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
+          {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch">{patches[delegation.id]}</pre>}</section>}
+          {tab === "evidence" && <section><h4>Evidence</h4>{delegation.checks.length === 0 ? <p>No checks reported yet.</p> : delegation.checks.map((check) => <p key={check}>{check}</p>)}{delegation.summary && <p>{delegation.summary}</p>}</section>}
+          <div className="coding-agent-actions">{cancellable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "cancel")}>Cancel</button>}{reviewable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "review")}>Review</button>}{applicable && <button type="button" className="primary" disabled={busy !== null} onClick={() => void runAction(delegation, "apply")}>Apply</button>}{discardable && <button type="button" className="secondary danger" disabled={busy !== null} onClick={() => void runAction(delegation, "discard", worktree?.revision)}>Discard</button>}</div>
+          {(delegation.error || errors[delegation.id]) && <p className="error-message" role="alert">{errors[delegation.id] || delegation.error}</p>}
         </div>
       </details>;
     })}
@@ -5062,6 +5100,13 @@ export function App() {
   const contextChat = chatContextMenu ? chatSummaries.find((chat) => chat.id === chatContextMenu.chatId) : undefined;
   const visibleTasks = tasks;
   const visibleConversation = selectedChatId ? conversationViews[selectedChatId] : undefined;
+  const managedConversationWorktrees = Object.values(conversationViews).flatMap((view) =>
+    (view?.team?.worktrees ?? []).map((worktree) => ({
+      worktree,
+      conversationId: view!.conversation.id,
+      delegation: view!.team!.delegations.find((candidate) => candidate.id === worktree.delegation_id)
+    }))
+  );
   const activeConversationTurn = visibleConversation?.turns
     .slice()
     .reverse()
@@ -5074,6 +5119,20 @@ export function App() {
     ? queuedChatMessages.filter((message) => message.conversation_id === selectedChatId)
     : [];
   const conversationIsActive = Boolean(activeConversationTurn || taskBusy);
+  const codingTeamIsRunning = Boolean(visibleConversation?.team?.delegations.some((delegation) =>
+    ["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state)
+  ));
+
+  useEffect(() => {
+    if (activeSurface !== "threads" || !selectedChatId || !codingTeamIsRunning) return;
+    const refresh = () => {
+      void getConversation(selectedChatId).then((view) => {
+        setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
+      }).catch(() => undefined);
+    };
+    const timer = window.setInterval(refresh, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSurface, selectedChatId, codingTeamIsRunning]);
 
   useEffect(() => {
     const next = visibleQueuedMessages[0];
@@ -5640,7 +5699,7 @@ export function App() {
                   activities={(visibleConversation.activities ?? []).filter((activity) => activity.turn_id === turn.id)}
                   active={activeConversationTurn?.id === turn.id}
                 />)}
-              <CodingAgentCards team={visibleConversation?.team} />
+              <CodingAgentCards team={visibleConversation?.team} conversationId={visibleConversation?.conversation.id} onView={(view) => setConversationViews((current) => ({ ...current, [view.conversation.id]: view }))} />
               {activeConversationTurn?.state === "waiting_for_approval" && activeConversationApproval && <section className="chat-permission" aria-label="Codex permission request">
                 <strong>Permission needed to continue</strong>
                 <p>{activeConversationApproval.reason}</p>
@@ -6070,7 +6129,7 @@ export function App() {
           {agentTab === "overview" && <div className="agents-stack">
             <article className="agent-governor-card">
               <div className="governor-mark" aria-hidden="true">MCG</div>
-              <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC GOVERNOR</span><h3>MCG Governor</h3><p>Enforces owner policy above every model agent. It brokers tools, permissions, budgets, leases, memory, and evidence.</p></div>
+              <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC RUNTIME · NOT A MODEL AGENT</span><h3>MCG runtime</h3><p>Enforces owner policy above the Chat and Coding Agents. It brokers tools, permissions, budgets, leases, memory, and evidence.</p></div>
               <div className="agent-status-summary"><span className={`agent-state state-${governorOverview?.status.state ?? "starting"}`}>{governorOverview?.status.state ?? "starting"}</span><strong>{governorOverview?.active_runs ?? 0}</strong><small>active runs</small></div>
               <details className="governor-details">
                 <summary>Subsystem status</summary>
@@ -6089,9 +6148,17 @@ export function App() {
               </details>
             </article>
 
+            <article className="agent-section-card">
+              <div className="section-heading compact-heading"><div><h3>Live conversation agents</h3><p className="muted">Only the user-facing Chat Agent and currently working Coding Agents are shown.</p></div></div>
+              <div className="instance-list">
+                {(visibleConversation?.team?.sessions ?? []).filter((session) => session.kind === "chat" || (session.kind === "coder" && ["starting", "working", "waiting"].includes(session.state))).map((session) => <div className="instance-row" key={session.id}><span><strong>{session.kind === "chat" ? "Chat Agent" : "Coding Agent"}</strong><small>{session.model ?? "Automatic model"} · prompt revision {session.prompt_revision}</small></span><em>{session.state}</em></div>)}
+                {!visibleConversation?.team?.sessions.some((session) => session.kind === "chat" || (session.kind === "coder" && ["starting", "working", "waiting"].includes(session.state))) && <p className="muted">Open a conversation to inspect its Chat Agent and active Coding Agents.</p>}
+              </div>
+            </article>
+
             <article className="agent-section-card topology-card">
               <div className="section-heading compact-heading"><div><h3>Active team</h3><p className="muted">{activeOrganization ? `${activeOrganization.name} · revision ${activeOrganization.revision}` : "Loading assignment…"}</p></div>{activeOrganization && <button className="secondary" type="button" onClick={() => editOrganization(activeOrganization)}>Edit team</button>}</div>
-              {activeOrganization && <><div className="topology-diagram" aria-hidden="true"><div className="topology-governor">MCG Governor</div><span className="topology-line" /><div className="topology-team">{activeOrganization.name}</div><div className="topology-roles">{activeOrganization.roles.map((role) => <div className={`topology-role role-${role.kind}`} key={role.id}><strong>{role.name}</strong><small>{role.kind}</small></div>)}</div></div><ul className="topology-accessible-list" aria-label="Active organization roles">{activeOrganization.roles.map((role) => <li key={`accessible-${role.id}`}><strong>{role.name}</strong><span>{role.kind.replaceAll("_", " ")} · {role.purpose}</span></li>)}</ul></>}
+              {activeOrganization && <><div className="topology-diagram" aria-hidden="true"><div className="topology-governor">MCG runtime</div><span className="topology-line" /><div className="topology-team">{activeOrganization.name}</div><div className="topology-roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coder").map((role) => <div className={`topology-role role-${role.kind}`} key={role.id}><strong>{role.name}</strong><small>{role.kind}</small></div>)}</div></div><ul className="topology-accessible-list" aria-label="Active conversation roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coder").map((role) => <li key={`accessible-${role.id}`}><strong>{role.name}</strong><span>{role.kind.replaceAll("_", " ")} · {role.purpose}</span></li>)}</ul></>}
             </article>
 
             <div className="agent-overview-grid"><article className="agent-section-card"><h3>Current work</h3><strong className="agent-metric">{governorOverview?.active_runs ?? 0}</strong><p className="muted">running or waiting agent teams</p><button className="link-button" type="button" onClick={() => setAgentTab("activity")}>Inspect activity →</button></article><article className="agent-section-card"><h3>Recent outcomes</h3><strong className="agent-metric">{agentRuns.filter((run) => run.run.state === "completed").length}</strong><p className="muted">completed in the latest {governorOverview?.recent_runs ?? agentRuns.length} runs</p></article><article className="agent-section-card"><h3>Default assignment</h3><strong>{activeOrganization?.name ?? "Loading"}</strong><p className="muted">Projects and tasks can override this team.</p><button className="link-button" type="button" onClick={() => setAgentTab("teams")}>Manage assignments →</button></article></div>
@@ -7748,11 +7815,11 @@ export function App() {
                 <div className="settings-page-heading"><h2>Worktrees</h2><p>Review isolated task workspace defaults and managed worktrees.</p></div>
                 <div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>Worktree root</strong><small>Managed worktrees will use an owner-controlled local directory.</small></span><span className="settings-value-field">Runtime managed</span></div>
-                  <div className="settings-control settings-unavailable"><span><strong>Automatically delete old worktrees</strong><small>Automatic consumer worktree cleanup is not available yet.</small></span><label className="settings-switch"><span className="sr-only">Automatically delete old worktrees</span><input type="checkbox" readOnly disabled /><i aria-hidden="true" /></label></div>
+                  <div className="settings-control"><span><strong>Cleanup policy</strong><small>Integrated worktrees are removed; failed, cancelled, conflicting, and unapplied work is retained.</small></span><span className="count-badge">Safe retention</span></div>
                   <div className="settings-control"><span><strong>Isolation policy</strong><small>Scheduled and coding work must remain within reviewed project boundaries.</small></span><span className="count-badge">Governed</span></div>
                 </div>
-                <div className="settings-section-heading"><strong>No managed worktrees yet</strong></div>
-                <div className="settings-empty-card"><p>Isolated worktrees created by MCG will appear here after the managed lifecycle is implemented.</p></div>
+                <div className="settings-section-heading"><strong>Managed worktrees</strong><span>{managedConversationWorktrees.length}</span></div>
+                {managedConversationWorktrees.length === 0 ? <div className="settings-empty-card"><p>No managed coding worktrees have been created in loaded conversations.</p></div> : <div className="settings-card settings-card-stack" aria-label="Managed worktrees">{managedConversationWorktrees.map(({ worktree, conversationId, delegation }) => <div className="settings-control" key={worktree.id}><span><strong>{worktree.branch}</strong><small>{worktree.state}{worktree.retained_reason ? ` · ${worktree.retained_reason}` : ""} · {(worktree.storage_bytes / (1024 * 1024)).toFixed(1)} MiB</small></span><span className="settings-inline-actions"><button className="secondary" type="button" onClick={() => openChat(conversationId)}>Review</button>{worktree.state !== "removed" && delegation && !["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state) && <button className="secondary danger" type="button" onClick={() => void discardConversationDelegation(conversationId, delegation.id, worktree.revision).then((view) => setConversationViews((current) => ({ ...current, [conversationId]: view }))).catch((error) => setTaskError(errorMessage(error)))}>Discard</button>}</span></div>)}</div>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="archived"><h2>Archived chats</h2>{archivedConversations.length === 0 ? <div className="settings-card"><div><strong>No archived chats</strong><p>Chats you archive will appear here and can be restored at any time.</p></div></div> : <div className="settings-card archived-chat-list">{archivedConversations.map((conversation) => <div className="settings-row" key={conversation.id}><div><strong>{conversation.title}</strong><p>{conversation.project_id ? projects.find((project) => project.project_id === conversation.project_id)?.root ?? "Project chat" : "General chat"}</p></div><button className="secondary" type="button" disabled={chatMutationBusy} onClick={() => void setChatArchived(conversation.id, false)}>Restore</button></div>)}</div>}</div>
             </div>

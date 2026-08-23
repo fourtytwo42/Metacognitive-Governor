@@ -67,14 +67,14 @@ use mcg_domain::{
     ReviewedTopologyStepId, RiskLevel, RunId, SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION,
     SSH_WORKFLOW_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
     ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
-    SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId, SiteState,
-    SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision, SshHostRevisionId,
-    SshHostState, SshOperation, SshOperationId, SshOperationKind, SshOperationState, SshWorkflow,
-    SshWorkflowId, SshWorkflowState, SshWorkflowStep, SshWorkflowStepId, SshWorkflowStepState,
-    SupervisionObservationId, TaskBudget, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
-    ToolRequestId, WorkItemId,
+    SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteDeploymentState, SiteEnvironment, SiteHealthCheck,
+    SiteHealthCheckId, SiteHealthState, SiteId, SiteMonitor, SiteRevision, SiteRevisionId,
+    SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform, SshHostRevision,
+    SshHostRevisionId, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    SshOperationState, SshWorkflow, SshWorkflowId, SshWorkflowState, SshWorkflowStep,
+    SshWorkflowStepId, SshWorkflowStepState, SupervisionObservationId, TaskBudget, TaskEnvelope,
+    TaskId, TaskState, ToolExecutionId, ToolRequestId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -167,6 +167,7 @@ pub struct RuntimeStatus {
     pub recovered_agent_runs: u64,
     pub recovered_agent_instances: u64,
     pub recovered_agent_leases: u64,
+    pub recovered_conversation_delegations: u64,
     pub recovered_schedule_occurrences: u64,
     pub recovered_platform_sessions: u64,
     pub expired_platform_sessions: u64,
@@ -177,6 +178,13 @@ pub struct RuntimeStatus {
     pub recovered_reviewed_topology_plans: u64,
     pub recovered_shadow_workspaces: u64,
     pub recovered_plugin_invocations: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationReview {
+    pub delegation: AgentDelegation,
+    pub worktree: Option<ManagedWorktree>,
+    pub patch: String,
 }
 
 pub const DIAGNOSTICS_SCHEMA_VERSION: u16 = 1;
@@ -1558,6 +1566,26 @@ fn bounded_untracked_overlay(repository: &Path, worktree: &Path) -> Result<(), S
     Ok(())
 }
 
+fn directory_size_bytes(root: &Path) -> Result<u64, StorageError> {
+    let mut total = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).map_err(StorageError::Io)? {
+            let entry = entry.map_err(StorageError::Io)?;
+            let file_type = entry.file_type().map_err(StorageError::Io)?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                total = total.saturating_add(entry.metadata().map_err(StorageError::Io)?.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
 pub struct AppRuntime {
     config: AppConfig,
     data_lock: Option<DataDirectoryLock>,
@@ -1568,6 +1596,7 @@ pub struct AppRuntime {
     recovery: RecoveryReport,
     recovered_tool_leases: u64,
     agent_recovery: AgentRecoveryReport,
+    recovered_conversation_delegations: u64,
     recovered_schedule_occurrences: u64,
     recovered_platform_sessions: u64,
     expired_platform_sessions: u64,
@@ -1585,6 +1614,11 @@ pub struct AppRuntime {
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     codex_harness: CodexAppServerHarness,
+    conversation_chat_locks:
+        Arc<tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>>,
+    active_delegations:
+        Arc<tokio::sync::Mutex<BTreeMap<AgentDelegationId, tokio::task::AbortHandle>>>,
+    project_integration_locks: Arc<Mutex<BTreeMap<ProjectId, Arc<Mutex<()>>>>>,
     oauth_state: OAuthRuntimeState,
     oauth_refresh: Arc<OAuthRefreshCoordinator>,
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
@@ -1624,6 +1658,7 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        let recovered_conversation_delegations = store.recover_conversation_team_work(Utc::now())?;
         let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
         let startup_now = Utc::now();
         let expired_platform_sessions = store.expire_platform_sessions(startup_now)?;
@@ -1662,6 +1697,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            recovered_conversation_delegations,
             recovered_schedule_occurrences,
             recovered_platform_sessions,
             expired_platform_sessions,
@@ -1724,6 +1760,7 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        let recovered_conversation_delegations = store.recover_conversation_team_work(Utc::now())?;
         let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
         let startup_now = Utc::now();
         let expired_platform_sessions = store.expire_platform_sessions(startup_now)?;
@@ -1764,6 +1801,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            recovered_conversation_delegations,
             recovered_schedule_occurrences,
             recovered_platform_sessions,
             expired_platform_sessions,
@@ -1795,6 +1833,7 @@ impl AppRuntime {
         recovery: RecoveryReport,
         recovered_tool_leases: u64,
         agent_recovery: AgentRecoveryReport,
+        recovered_conversation_delegations: u64,
         recovered_schedule_occurrences: u64,
         recovered_platform_sessions: u64,
         expired_platform_sessions: u64,
@@ -1865,6 +1904,7 @@ impl AppRuntime {
             recovery,
             recovered_tool_leases,
             agent_recovery,
+            recovered_conversation_delegations,
             recovered_schedule_occurrences,
             recovered_platform_sessions,
             expired_platform_sessions,
@@ -1882,6 +1922,9 @@ impl AppRuntime {
             mcp_credentials,
             provider_registry,
             codex_harness,
+            conversation_chat_locks: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            active_delegations: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            project_integration_locks: Arc::new(Mutex::new(BTreeMap::new())),
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
             oauth_refresh,
             shadow_command_verifier: default_shadow_command_verifier(),
@@ -1921,6 +1964,7 @@ impl AppRuntime {
             recovered_agent_runs: self.agent_recovery.runs_marked_recovering,
             recovered_agent_instances: self.agent_recovery.instances_expired,
             recovered_agent_leases: self.agent_recovery.leases_expired,
+            recovered_conversation_delegations: self.recovered_conversation_delegations,
             recovered_schedule_occurrences: self.recovered_schedule_occurrences,
             recovered_platform_sessions: self.recovered_platform_sessions,
             expired_platform_sessions: self.expired_platform_sessions,
@@ -2022,6 +2066,31 @@ impl AppRuntime {
         Ok((session, instructions))
     }
 
+    async fn conversation_chat_lock(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.conversation_chat_locks.lock().await;
+        locks
+            .entry(conversation_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn project_integration_lock(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Arc<Mutex<()>>, RuntimeError> {
+        let mut locks = self
+            .project_integration_locks
+            .lock()
+            .map_err(|_| RuntimeError::StorageLock)?;
+        Ok(locks
+            .entry(project_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
+    }
+
     fn prepare_conversation_worktree(
         &self,
         conversation: &Conversation,
@@ -2068,32 +2137,43 @@ impl AppRuntime {
             &repository,
             &["worktree", "add", "-b", &branch, &root_text, &base_head],
         )?;
-        let dirty_patch = git_output(&repository, &["diff", "--binary", "HEAD", "--"])?;
-        if !dirty_patch.is_empty() {
-            git_with_input(&root, &["apply", "--whitespace=nowarn", "-"], &dirty_patch)?;
-        }
-        bounded_untracked_overlay(&repository, &root)?;
-        git_output(&root, &["add", "-A"])?;
-        let staged = git_output(&root, &["diff", "--cached", "--name-only", "--"])?;
-        let baseline_head = if staged.is_empty() {
-            base_head.clone()
-        } else {
-            git_output(
-                &root,
-                &[
-                    "-c",
-                    "user.name=MCG",
-                    "-c",
-                    "user.email=mcg@local.invalid",
-                    "commit",
-                    "-m",
-                    "MCG isolated user baseline",
-                ],
-            )?;
-            String::from_utf8(git_output(&root, &["rev-parse", "HEAD"])?)
-                .map_err(|_| StorageError::InvalidData("worktree HEAD was not UTF-8".into()))?
-                .trim()
-                .to_owned()
+        let preparation = (|| -> Result<(Vec<u8>, Vec<u8>, String), RuntimeError> {
+            let dirty_patch = git_output(&repository, &["diff", "--binary", "HEAD", "--"])?;
+            if !dirty_patch.is_empty() {
+                git_with_input(&root, &["apply", "--whitespace=nowarn", "-"], &dirty_patch)?;
+            }
+            bounded_untracked_overlay(&repository, &root)?;
+            git_output(&root, &["add", "-A"])?;
+            let staged = git_output(&root, &["diff", "--cached", "--name-only", "--"])?;
+            let baseline_head = if staged.is_empty() {
+                base_head.clone()
+            } else {
+                git_output(
+                    &root,
+                    &[
+                        "-c",
+                        "user.name=MCG",
+                        "-c",
+                        "user.email=mcg@local.invalid",
+                        "commit",
+                        "-m",
+                        "MCG isolated user baseline",
+                    ],
+                )?;
+                String::from_utf8(git_output(&root, &["rev-parse", "HEAD"])?)
+                    .map_err(|_| StorageError::InvalidData("worktree HEAD was not UTF-8".into()))?
+                    .trim()
+                    .to_owned()
+            };
+            Ok((dirty_patch, staged, baseline_head))
+        })();
+        let (dirty_patch, staged, baseline_head) = match preparation {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = git_output(&repository, &["worktree", "remove", "--force", &root_text]);
+                let _ = git_output(&repository, &["branch", "-D", &branch]);
+                return Err(error);
+            }
         };
         let mut digest = Sha256::new();
         digest.update(base_head.as_bytes());
@@ -2110,8 +2190,12 @@ impl AppRuntime {
                 root: root_text,
                 branch,
                 base_head,
+                baseline_head: Some(baseline_head.clone()),
                 baseline_sha256: format!("{:x}", digest.finalize()),
                 state: ManagedWorktreeState::Ready,
+                revision: 1,
+                retained_reason: None,
+                storage_bytes: directory_size_bytes(&root).unwrap_or(0),
                 created_at: now,
                 updated_at: now,
             },
@@ -2121,6 +2205,7 @@ impl AppRuntime {
 
     async fn execute_coding_delegation(
         &self,
+        delegation_id: AgentDelegationId,
         conversation: &Conversation,
         chat_session: &ConversationAgentSession,
         chat_thread_id: &str,
@@ -2158,12 +2243,15 @@ impl AppRuntime {
         };
         let mut delegation = AgentDelegation {
             schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
-            id: AgentDelegationId::new(),
+            id: delegation_id,
             conversation_id: conversation.id,
             source_session_id: chat_session.id,
             coder_session_id: Some(coder_session.id),
             project_id,
             organization_revision_id: organization.revision_id,
+            revision: 1,
+            prompt_revision: organization.revision,
+            permission_mode: Some(conversation.execution_preferences.approval_mode),
             state: AgentDelegationState::Requested,
             brief: brief.clone(),
             task_id: None,
@@ -2213,6 +2301,7 @@ impl AppRuntime {
             let _ = self.event_sender.send(event);
         }
         delegation.state = AgentDelegationState::Preparing;
+        delegation.revision = delegation.revision.saturating_add(1);
         delegation.updated_at = Utc::now();
         let event = self.store()?.save_agent_delegation(&delegation)?;
         let _ = self.event_sender.send(event);
@@ -2220,6 +2309,7 @@ impl AppRuntime {
             self.prepare_conversation_worktree(conversation, delegation.id)?;
         delegation.worktree_id = Some(worktree.id);
         delegation.state = AgentDelegationState::Running;
+        delegation.revision = delegation.revision.saturating_add(1);
         delegation.updated_at = Utc::now();
         coder_session.state = ConversationAgentSessionState::Working;
         coder_session.updated_at = Utc::now();
@@ -2296,22 +2386,39 @@ impl AppRuntime {
         delegation.summary = Some(coder_result.text.clone());
         let agent_patch = git_output(&root, &["diff", "--binary", &baseline_head, "--"])?;
         delegation.state = AgentDelegationState::Reported;
+        delegation.revision = delegation.revision.saturating_add(1);
         delegation.updated_at = Utc::now();
         worktree.state = ManagedWorktreeState::Dirty;
+        worktree.revision = worktree.revision.saturating_add(1);
         worktree.updated_at = Utc::now();
         if !matches!(
             conversation.execution_preferences.approval_mode,
             mcg_domain::ApprovalMode::Ask
         ) {
+            let integration_lock = self.project_integration_lock(project_id)?;
+            let _integration_guard = integration_lock
+                .lock()
+                .map_err(|_| RuntimeError::StorageLock)?;
             delegation.state = AgentDelegationState::Integrating;
+            delegation.revision = delegation.revision.saturating_add(1);
             worktree.state = ManagedWorktreeState::Integrating;
+            worktree.revision = worktree.revision.saturating_add(1);
             let project = self.project(project_id)?.ok_or_else(|| {
                 StorageError::InvalidData(
                     "conversation project disappeared during integration".into(),
                 )
             })?;
             let repository = fs::canonicalize(project.root)?;
-            let integration = if agent_patch.is_empty() {
+            let live_head = String::from_utf8(git_output(&repository, &["rev-parse", "HEAD"])?)
+                .map_err(|_| StorageError::InvalidData("Git HEAD was not UTF-8".into()))?
+                .trim()
+                .to_owned();
+            let integration: Result<(), RuntimeError> = if live_head != worktree.base_head {
+                Err(StorageError::Conflict(
+                    "live repository HEAD changed before automatic integration".into(),
+                )
+                .into())
+            } else if agent_patch.is_empty() {
                 Ok(())
             } else {
                 git_with_input(
@@ -2320,11 +2427,14 @@ impl AppRuntime {
                     &agent_patch,
                 )
                 .and_then(|()| git_with_input(&repository, &["apply", "--3way", "-"], &agent_patch))
+                .map_err(RuntimeError::from)
             };
             match integration {
                 Ok(()) => {
                     delegation.state = AgentDelegationState::Completed;
+                    delegation.revision = delegation.revision.saturating_add(1);
                     worktree.state = ManagedWorktreeState::Integrated;
+                    worktree.revision = worktree.revision.saturating_add(1);
                     let worktree_root = fs::canonicalize(&worktree.root)?;
                     let managed_root =
                         fs::canonicalize(self.config.data_directory.join("worktrees"))?;
@@ -2340,13 +2450,17 @@ impl AppRuntime {
                     )?;
                     git_output(&repository, &["branch", "-D", &worktree.branch])?;
                     worktree.state = ManagedWorktreeState::Removed;
+                    worktree.revision = worktree.revision.saturating_add(1);
                 }
                 Err(error) => {
                     delegation.state = AgentDelegationState::Blocked;
+                    delegation.revision = delegation.revision.saturating_add(1);
                     delegation.error = Some(format!(
                         "Integration stopped because the live project no longer accepted the isolated patch: {error}"
                     ));
                     worktree.state = ManagedWorktreeState::Conflict;
+                    worktree.revision = worktree.revision.saturating_add(1);
+                    worktree.retained_reason = Some("automatic integration conflict".into());
                 }
             }
             delegation.updated_at = Utc::now();
@@ -2380,11 +2494,477 @@ impl AppRuntime {
             coder_result.text,
             delegation.changed_files.join("\n")
         );
+        let chat_lock = self.conversation_chat_lock(conversation.id).await;
+        let _chat_guard = chat_lock.lock().await;
         let synthesis = self
             .codex_harness
             .start_turn(chat_thread_id, &synthesis_prompt, preferences, false)
             .await?;
         Ok(synthesis.text)
+    }
+
+    async fn append_background_chat_response(
+        &self,
+        conversation_id: ConversationId,
+        turn_id: ConversationTurnId,
+        content: String,
+    ) -> Result<(), RuntimeError> {
+        let message = ConversationMessage {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationMessageId::new(),
+            conversation_id,
+            turn_id,
+            role: ConversationRole::Assistant,
+            content,
+            codex_item_id: None,
+            created_at: Utc::now(),
+        };
+        let event = self.store()?.append_conversation_message(&message)?;
+        let _ = self.event_sender.send(event);
+        Ok(())
+    }
+
+    fn settle_failed_delegation(
+        &self,
+        delegation_id: AgentDelegationId,
+        error: &str,
+    ) -> Result<(), RuntimeError> {
+        let Some(mut delegation) = self.store()?.agent_delegation(delegation_id)? else {
+            return Ok(());
+        };
+        if delegation.state == AgentDelegationState::Cancelled {
+            return Ok(());
+        }
+        delegation.state = AgentDelegationState::Failed;
+        delegation.revision = delegation.revision.saturating_add(1);
+        delegation.error = Some(error.to_owned());
+        delegation.updated_at = Utc::now();
+        let event = self.store()?.save_agent_delegation(&delegation)?;
+        let _ = self.event_sender.send(event);
+        if let Some(mut worktree) = self
+            .store()?
+            .managed_worktree_for_delegation(delegation_id)?
+            && worktree.state != ManagedWorktreeState::Removed
+        {
+            worktree.state = ManagedWorktreeState::Retained;
+            worktree.revision = worktree.revision.saturating_add(1);
+            worktree.retained_reason = Some("coding delegation failed".into());
+            worktree.updated_at = Utc::now();
+            let event = self.store()?.save_managed_worktree(&worktree)?;
+            let _ = self.event_sender.send(event);
+        }
+        Ok(())
+    }
+
+    async fn launch_coding_delegation(
+        self: &Arc<Self>,
+        conversation: Conversation,
+        chat_session: ConversationAgentSession,
+        chat_thread_id: String,
+        preferences: CodexExecutionPreferences,
+        brief: CodingDelegationBrief,
+        turn_id: ConversationTurnId,
+    ) -> Result<(AgentDelegationId, String), RuntimeError> {
+        let organization = self.resolve_organization(conversation.project_id, None)?;
+        let active = self
+            .store()?
+            .conversation_team_state(conversation.id)?
+            .delegations
+            .into_iter()
+            .filter(|delegation| !delegation.state.is_terminal())
+            .count();
+        if active >= usize::from(organization.policy.max_parallel_agents) {
+            return Err(StorageError::Conflict(format!(
+                "the organization allows at most {} parallel Coding Agents",
+                organization.policy.max_parallel_agents
+            ))
+            .into());
+        }
+        let delegation_id = AgentDelegationId::new();
+        let runtime = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let result = runtime
+                .execute_coding_delegation(
+                    delegation_id,
+                    &conversation,
+                    &chat_session,
+                    &chat_thread_id,
+                    &preferences,
+                    brief,
+                )
+                .await;
+            let response = match result {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = runtime.settle_failed_delegation(delegation_id, &error.to_string());
+                    format!(
+                        "Coding Agent delegation {delegation_id} stopped safely: {error}. Any isolated work is retained for review."
+                    )
+                }
+            };
+            let _ = runtime
+                .append_background_chat_response(conversation.id, turn_id, response)
+                .await;
+            runtime
+                .active_delegations
+                .lock()
+                .await
+                .remove(&delegation_id);
+        });
+        self.active_delegations
+            .lock()
+            .await
+            .insert(delegation_id, task.abort_handle());
+        Ok((
+            delegation_id,
+            format!(
+                "I delegated this coding task to Coding Agent `{delegation_id}`. I’ll remain available here while it works in an isolated managed worktree."
+            ),
+        ))
+    }
+
+    pub fn conversation_team(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<mcg_domain::ConversationTeamState, RuntimeError> {
+        if self.store()?.conversation(conversation_id)?.is_none() {
+            return Err(StorageError::ConversationNotFound(conversation_id).into());
+        }
+        Ok(self.store()?.conversation_team_state(conversation_id)?)
+    }
+
+    pub fn search_shared_context(
+        &self,
+        conversation_id: ConversationId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SharedContextHit>, RuntimeError> {
+        if self.store()?.conversation(conversation_id)?.is_none() {
+            return Err(StorageError::ConversationNotFound(conversation_id).into());
+        }
+        Ok(self
+            .store()?
+            .search_conversation_context(conversation_id, query, limit)?)
+    }
+
+    pub fn write_blackboard(
+        &self,
+        conversation_id: ConversationId,
+        author_session_id: ConversationAgentSessionId,
+        delegation_id: Option<AgentDelegationId>,
+        kind: BlackboardEntryKind,
+        content: String,
+        source_references: Vec<String>,
+        supersedes_id: Option<BlackboardEntryId>,
+    ) -> Result<mcg_domain::ConversationTeamState, RuntimeError> {
+        let team = self.store()?.conversation_team_state(conversation_id)?;
+        if !team
+            .sessions
+            .iter()
+            .any(|session| session.id == author_session_id)
+        {
+            return Err(StorageError::InvalidData(
+                "blackboard author does not belong to this conversation".into(),
+            )
+            .into());
+        }
+        if let Some(delegation_id) = delegation_id
+            && !team
+                .delegations
+                .iter()
+                .any(|delegation| delegation.id == delegation_id)
+        {
+            return Err(StorageError::InvalidData(
+                "blackboard delegation does not belong to this conversation".into(),
+            )
+            .into());
+        }
+        if let Some(supersedes_id) = supersedes_id
+            && !team
+                .blackboard
+                .iter()
+                .any(|entry| entry.id == supersedes_id)
+        {
+            return Err(StorageError::InvalidData(
+                "superseded blackboard entry does not belong to this conversation".into(),
+            )
+            .into());
+        }
+        let content = content.trim().to_owned();
+        if content.is_empty() || content.len() > 64 * 1024 {
+            return Err(StorageError::InvalidData(
+                "blackboard content must contain 1 to 65536 characters".into(),
+            )
+            .into());
+        }
+        let entry = BlackboardEntry {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: BlackboardEntryId::new(),
+            conversation_id,
+            delegation_id,
+            author_session_id,
+            kind,
+            content,
+            source_references,
+            supersedes_id,
+            created_at: Utc::now(),
+        };
+        let event = self.store()?.append_blackboard_entry(&entry)?;
+        let _ = self.event_sender.send(event);
+        Ok(self.store()?.conversation_team_state(conversation_id)?)
+    }
+
+    pub async fn cancel_delegation(
+        &self,
+        conversation_id: ConversationId,
+        delegation_id: AgentDelegationId,
+        expected_revision: u64,
+    ) -> Result<ConversationView, RuntimeError> {
+        if let Some(abort) = self.active_delegations.lock().await.remove(&delegation_id) {
+            abort.abort();
+        }
+        let mut delegation = self
+            .store()?
+            .agent_delegation(delegation_id)?
+            .ok_or_else(|| StorageError::InvalidData("coding delegation was not found".into()))?;
+        if delegation.conversation_id != conversation_id {
+            return Err(StorageError::InvalidData(
+                "coding delegation does not belong to this conversation".into(),
+            )
+            .into());
+        }
+        if delegation.revision != expected_revision {
+            return Err(StorageError::Conflict(
+                "coding delegation changed; refresh and retry".into(),
+            )
+            .into());
+        }
+        if !delegation.state.is_terminal() {
+            delegation.state = AgentDelegationState::Cancelled;
+            delegation.revision = delegation.revision.saturating_add(1);
+            delegation.updated_at = Utc::now();
+            let event = self.store()?.save_agent_delegation(&delegation)?;
+            let _ = self.event_sender.send(event);
+        }
+        if let Some(mut worktree) = self
+            .store()?
+            .managed_worktree_for_delegation(delegation_id)?
+            && worktree.state != ManagedWorktreeState::Removed
+        {
+            worktree.state = ManagedWorktreeState::Retained;
+            worktree.revision = worktree.revision.saturating_add(1);
+            worktree.retained_reason = Some("owner cancelled delegation".into());
+            worktree.updated_at = Utc::now();
+            let event = self.store()?.save_managed_worktree(&worktree)?;
+            let _ = self.event_sender.send(event);
+        }
+        self.conversation(conversation_id)
+    }
+
+    pub fn delegation_review(
+        &self,
+        conversation_id: ConversationId,
+        delegation_id: AgentDelegationId,
+    ) -> Result<DelegationReview, RuntimeError> {
+        let delegation = self
+            .store()?
+            .agent_delegation(delegation_id)?
+            .ok_or_else(|| StorageError::InvalidData("coding delegation was not found".into()))?;
+        if delegation.conversation_id != conversation_id {
+            return Err(StorageError::InvalidData(
+                "coding delegation does not belong to this conversation".into(),
+            )
+            .into());
+        }
+        let worktree = self
+            .store()?
+            .managed_worktree_for_delegation(delegation_id)?;
+        let patch = if let Some(worktree) = &worktree {
+            let baseline = worktree
+                .baseline_head
+                .as_deref()
+                .unwrap_or(&worktree.base_head);
+            let bytes = git_output(
+                Path::new(&worktree.root),
+                &["diff", "--binary", baseline, "--"],
+            )?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                return Err(StorageError::InvalidData(
+                    "delegation patch exceeds the 4 MiB review limit".into(),
+                )
+                .into());
+            }
+            String::from_utf8(bytes)
+                .map_err(|_| StorageError::InvalidData("delegation patch was not UTF-8".into()))?
+        } else {
+            String::new()
+        };
+        Ok(DelegationReview {
+            delegation,
+            worktree,
+            patch,
+        })
+    }
+
+    fn remove_managed_worktree(
+        &self,
+        repository: &Path,
+        worktree: &ManagedWorktree,
+    ) -> Result<(), RuntimeError> {
+        let managed_root = fs::canonicalize(self.config.data_directory.join("worktrees"))?;
+        if Path::new(&worktree.root).exists() {
+            let worktree_root = fs::canonicalize(&worktree.root)?;
+            if !worktree_root.starts_with(&managed_root) || worktree_root == managed_root {
+                return Err(StorageError::InvalidData(
+                    "refusing to remove a worktree outside MCG's managed root".into(),
+                )
+                .into());
+            }
+            git_output(
+                repository,
+                &["worktree", "remove", "--force", &worktree.root],
+            )?;
+        } else {
+            let _ = git_output(repository, &["worktree", "prune"])?;
+        }
+        let branch_exists = Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", worktree.branch),
+            ])
+            .current_dir(repository)
+            .status()
+            .map_err(StorageError::Io)?
+            .success();
+        if branch_exists {
+            git_output(repository, &["branch", "-D", &worktree.branch])?;
+        }
+        Ok(())
+    }
+
+    pub fn integrate_delegation(
+        &self,
+        conversation_id: ConversationId,
+        delegation_id: AgentDelegationId,
+        expected_revision: u64,
+    ) -> Result<ConversationView, RuntimeError> {
+        let review = self.delegation_review(conversation_id, delegation_id)?;
+        let mut delegation = review.delegation;
+        let integration_lock = self.project_integration_lock(delegation.project_id)?;
+        let _integration_guard = integration_lock
+            .lock()
+            .map_err(|_| RuntimeError::StorageLock)?;
+        if delegation.revision != expected_revision {
+            return Err(StorageError::Conflict(
+                "coding delegation changed; refresh and retry".into(),
+            )
+            .into());
+        }
+        if !matches!(
+            delegation.state,
+            AgentDelegationState::Reported | AgentDelegationState::Blocked
+        ) {
+            return Err(StorageError::Conflict(
+                "only reported or blocked coding work can be applied".into(),
+            )
+            .into());
+        }
+        let mut worktree = review.worktree.ok_or_else(|| {
+            StorageError::InvalidData("coding delegation has no managed worktree".into())
+        })?;
+        let project = self.project(delegation.project_id)?.ok_or_else(|| {
+            StorageError::InvalidData("coding delegation project was not found".into())
+        })?;
+        let repository = fs::canonicalize(project.root)?;
+        let live_head = String::from_utf8(git_output(&repository, &["rev-parse", "HEAD"])?)
+            .map_err(|_| StorageError::InvalidData("Git HEAD was not UTF-8".into()))?
+            .trim()
+            .to_owned();
+        if live_head != worktree.base_head {
+            worktree.state = ManagedWorktreeState::Conflict;
+            worktree.revision = worktree.revision.saturating_add(1);
+            worktree.retained_reason = Some("live repository HEAD changed".into());
+            worktree.updated_at = Utc::now();
+            let event = self.store()?.save_managed_worktree(&worktree)?;
+            let _ = self.event_sender.send(event);
+            return Err(StorageError::Conflict(
+                "live repository HEAD changed; review the retained worktree".into(),
+            )
+            .into());
+        }
+        delegation.state = AgentDelegationState::Integrating;
+        delegation.revision = delegation.revision.saturating_add(1);
+        delegation.updated_at = Utc::now();
+        worktree.state = ManagedWorktreeState::Integrating;
+        worktree.revision = worktree.revision.saturating_add(1);
+        worktree.updated_at = Utc::now();
+        for event in [
+            self.store()?.save_agent_delegation(&delegation)?,
+            self.store()?.save_managed_worktree(&worktree)?,
+        ] {
+            let _ = self.event_sender.send(event);
+        }
+        if !review.patch.is_empty() {
+            git_with_input(
+                &repository,
+                &["apply", "--3way", "--check", "-"],
+                review.patch.as_bytes(),
+            )?;
+            git_with_input(
+                &repository,
+                &["apply", "--3way", "-"],
+                review.patch.as_bytes(),
+            )?;
+        }
+        self.remove_managed_worktree(&repository, &worktree)?;
+        delegation.state = AgentDelegationState::Completed;
+        delegation.revision = delegation.revision.saturating_add(1);
+        delegation.updated_at = Utc::now();
+        worktree.state = ManagedWorktreeState::Removed;
+        worktree.revision = worktree.revision.saturating_add(1);
+        worktree.retained_reason = None;
+        worktree.updated_at = Utc::now();
+        for event in [
+            self.store()?.save_agent_delegation(&delegation)?,
+            self.store()?.save_managed_worktree(&worktree)?,
+        ] {
+            let _ = self.event_sender.send(event);
+        }
+        self.conversation(conversation_id)
+    }
+
+    pub fn discard_delegation_worktree(
+        &self,
+        conversation_id: ConversationId,
+        delegation_id: AgentDelegationId,
+        expected_worktree_revision: u64,
+    ) -> Result<ConversationView, RuntimeError> {
+        let review = self.delegation_review(conversation_id, delegation_id)?;
+        let mut worktree = review.worktree.ok_or_else(|| {
+            StorageError::InvalidData("coding delegation has no managed worktree".into())
+        })?;
+        if worktree.revision != expected_worktree_revision {
+            return Err(StorageError::Conflict(
+                "managed worktree changed; refresh and retry".into(),
+            )
+            .into());
+        }
+        if worktree.state != ManagedWorktreeState::Removed {
+            let project = self.project(worktree.project_id)?.ok_or_else(|| {
+                StorageError::InvalidData("managed worktree project was not found".into())
+            })?;
+            let repository = fs::canonicalize(project.root)?;
+            self.remove_managed_worktree(&repository, &worktree)?;
+            worktree.state = ManagedWorktreeState::Removed;
+            worktree.revision = worktree.revision.saturating_add(1);
+            worktree.retained_reason = None;
+            worktree.updated_at = Utc::now();
+            let event = self.store()?.save_managed_worktree(&worktree)?;
+            let _ = self.event_sender.send(event);
+        }
+        self.conversation(conversation_id)
     }
 
     pub fn conversation(
@@ -2750,7 +3330,7 @@ impl AppRuntime {
     /// Sends one governed chat turn through the Codex app-server harness. Ordinary
     /// conversation turns remain task-free unless a later promotion explicitly links one.
     pub async fn send_conversation_message(
-        &self,
+        self: &Arc<Self>,
         conversation_id: ConversationId,
         content: String,
         turn_preferences: Option<ExecutionPreferences>,
@@ -2803,6 +3383,8 @@ impl AppRuntime {
         let event = self.store()?.append_conversation_message(&user_message)?;
         let _ = self.event_sender.send(event);
 
+        let chat_lock = self.conversation_chat_lock(conversation_id).await;
+        let _chat_guard = chat_lock.lock().await;
         let (mut chat_session, chat_instructions) =
             self.ensure_chat_agent_session(&conversation)?;
         // The user-facing Chat Agent is deliberately detached from the project
@@ -2910,28 +3492,20 @@ impl AppRuntime {
                         context_references,
                     };
                     match self
-                        .execute_coding_delegation(
-                            &conversation,
-                            &chat_session,
-                            &thread_id,
-                            &codex_preferences,
+                        .launch_coding_delegation(
+                            conversation.clone(),
+                            chat_session.clone(),
+                            thread_id.clone(),
+                            codex_preferences.clone(),
                             brief,
+                            turn.id,
                         )
                         .await
                     {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let recovery_prompt = format!(
-                                "The governed Coding Agent delegation could not start or complete: {error}. Explain this failure to the owner without claiming any code changed, and provide the safest next action."
-                            );
-                            self.codex_harness
-                                .start_turn(&thread_id, &recovery_prompt, &codex_preferences, false)
-                                .await
-                                .map(|result| result.text)
-                                .unwrap_or_else(|_| {
-                                    format!("Coding Agent delegation failed: {error}")
-                                })
-                        }
+                        Ok((_, response)) => response,
+                        Err(error) => format!(
+                            "I could not start another Coding Agent safely: {error}. No project files were changed."
+                        ),
                     }
                 }
             };

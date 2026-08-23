@@ -1146,7 +1146,7 @@ pub struct PluginInvocationRecord {
 }
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
-pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 1;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1226,6 +1226,12 @@ pub struct AgentDelegation {
     pub coder_session_id: Option<ConversationAgentSessionId>,
     pub project_id: ProjectId,
     pub organization_revision_id: OrganizationRevisionId,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub prompt_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<ApprovalMode>,
     pub state: AgentDelegationState,
     pub brief: CodingDelegationBrief,
     pub task_id: Option<TaskId>,
@@ -1319,8 +1325,16 @@ pub struct ManagedWorktree {
     pub root: String,
     pub branch: String,
     pub base_head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_head: Option<String>,
     pub baseline_sha256: String,
     pub state: ManagedWorktreeState,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_reason: Option<String>,
+    #[serde(default)]
+    pub storage_bytes: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1337,6 +1351,26 @@ pub struct ConversationTeamState {
     pub blackboard: Vec<BlackboardEntry>,
     #[serde(default)]
     pub worktrees: Vec<ManagedWorktree>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedContextSourceKind {
+    ConversationMessage,
+    AgentMessage,
+    Blackboard,
+    ProjectContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedContextHit {
+    pub source_id: String,
+    pub conversation_id: ConversationId,
+    pub delegation_id: Option<AgentDelegationId>,
+    pub source_kind: SharedContextSourceKind,
+    pub author_role: String,
+    pub created_at: DateTime<Utc>,
+    pub snippet: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

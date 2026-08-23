@@ -379,6 +379,9 @@ export interface AgentDelegation {
   coder_session_id?: string;
   project_id: string;
   organization_revision_id: string;
+  revision: number;
+  prompt_revision: number;
+  permission_mode?: ApprovalMode;
   state: AgentDelegationState;
   brief: { objective: string; scope: string[]; constraints: string[]; success_conditions: string[]; context_references: string[] };
   task_id?: string;
@@ -404,10 +407,12 @@ export interface BlackboardEntry {
 }
 export interface ManagedWorktree {
   schema_version: number; id: string; conversation_id: string; delegation_id: string; project_id: string;
-  root: string; branch: string; base_head: string; baseline_sha256: string;
+  root: string; branch: string; base_head: string; baseline_head?: string; baseline_sha256: string;
   state: "preparing" | "ready" | "dirty" | "integrating" | "integrated" | "conflict" | "retained" | "removed" | "failed";
+  revision: number; retained_reason?: string; storage_bytes: number;
   created_at: string; updated_at: string;
 }
+export interface DelegationReview { delegation: AgentDelegation; worktree?: ManagedWorktree; patch: string; }
 export interface ConversationTeamState {
   sessions: ConversationAgentSession[];
   delegations: AgentDelegation[];
@@ -1716,6 +1721,26 @@ export function archiveConversation(conversationId: string, archived = true): Pr
 
 export function sendConversationMessage(conversationId: string, request: SendConversationMessageRequest): Promise<ConversationView> {
   return invoke("send_conversation_message", { conversationId, request });
+}
+
+export function getConversationTeam(conversationId: string): Promise<ConversationTeamState> {
+  return invoke("get_conversation_team", { conversationId });
+}
+
+export function reviewConversationDelegation(conversationId: string, delegationId: string): Promise<DelegationReview> {
+  return invoke("review_conversation_delegation", { conversationId, delegationId });
+}
+
+export function cancelConversationDelegation(conversationId: string, delegationId: string, expectedRevision: number): Promise<ConversationView> {
+  return invoke("cancel_conversation_delegation", { conversationId, delegationId, expectedRevision });
+}
+
+export function applyConversationDelegation(conversationId: string, delegationId: string, expectedRevision: number): Promise<ConversationView> {
+  return invoke("apply_conversation_delegation", { conversationId, delegationId, expectedRevision });
+}
+
+export function discardConversationDelegation(conversationId: string, delegationId: string, expectedRevision: number): Promise<ConversationView> {
+  return invoke("discard_conversation_delegation", { conversationId, delegationId, expectedRevision });
 }
 
 export function interruptConversationTurn(conversationId: string, turnId: string): Promise<ConversationTurn> {

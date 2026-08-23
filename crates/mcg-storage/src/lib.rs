@@ -8,7 +8,8 @@ use mcg_domain::{
     ConversationActivity, ConversationAgentSession, ConversationId, ConversationMessage,
     ConversationMessageId, ConversationTeamState, ConversationTurn, ConversationTurnId,
     ConversationView, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
-    ProjectSnapshotId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    ProjectSnapshotId, SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState,
+    ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -65,7 +66,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 38;
+pub const STORAGE_SCHEMA_VERSION: i64 = 39;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1411,6 +1412,38 @@ CREATE INDEX IF NOT EXISTS managed_worktrees_project_state
     ON managed_worktrees(project_id, state, updated_at, worktree_id);
 ";
 
+const MIGRATION_39: &str = r"
+CREATE VIRTUAL TABLE IF NOT EXISTS conversation_context_fts USING fts5(
+    source_id UNINDEXED,
+    conversation_id UNINDEXED,
+    delegation_id UNINDEXED,
+    author_role UNINDEXED,
+    source_kind UNINDEXED,
+    created_at UNINDEXED,
+    content
+);
+INSERT INTO conversation_context_fts(source_id, conversation_id, delegation_id, author_role, source_kind, created_at, content)
+SELECT message_id, conversation_id, NULL, json_extract(message_json, '$.role'), 'conversation_message', created_at,
+       json_extract(message_json, '$.content')
+FROM conversation_messages
+WHERE NOT EXISTS (SELECT 1 FROM conversation_context_fts LIMIT 1);
+INSERT INTO conversation_context_fts(source_id, conversation_id, delegation_id, author_role, source_kind, created_at, content)
+SELECT message_id, conversation_id, delegation_id, 'agent', 'agent_message', created_at,
+       json_extract(message_json, '$.content')
+FROM agent_messages
+WHERE NOT EXISTS (
+    SELECT 1 FROM conversation_context_fts context_row
+    WHERE context_row.source_kind='agent_message' AND context_row.source_id=agent_messages.message_id
+);
+INSERT INTO conversation_context_fts(source_id, conversation_id, delegation_id, author_role, source_kind, created_at, content)
+SELECT entry_id, conversation_id, delegation_id, 'agent', 'blackboard', created_at, content
+FROM blackboard_entries
+WHERE NOT EXISTS (
+    SELECT 1 FROM conversation_context_fts context_row
+    WHERE context_row.source_kind='blackboard' AND context_row.source_id=blackboard_entries.entry_id
+);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1584,6 +1617,7 @@ impl SqliteEventStore {
             (36_i64, MIGRATION_36),
             (37_i64, MIGRATION_37),
             (38_i64, MIGRATION_38),
+            (39_i64, MIGRATION_39),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1702,6 +1736,16 @@ impl SqliteEventStore {
                 conversation_role_name(message.role), serde_json::to_string(message)?, message.created_at.to_rfc3339(),
             ],
         )?;
+        index_conversation_context(
+            &transaction,
+            &message.id.to_string(),
+            message.conversation_id,
+            None,
+            conversation_role_name(message.role),
+            "conversation_message",
+            message.created_at,
+            &message.content,
+        )?;
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
@@ -1728,6 +1772,16 @@ impl SqliteEventStore {
                 message.id.to_string(), message.conversation_id.to_string(), message.turn_id.to_string(),
                 conversation_role_name(message.role), serde_json::to_string(message)?, message.created_at.to_rfc3339(),
             ],
+        )?;
+        index_conversation_context(
+            &transaction,
+            &message.id.to_string(),
+            message.conversation_id,
+            None,
+            conversation_role_name(message.role),
+            "conversation_message",
+            message.created_at,
+            &message.content,
         )?;
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
@@ -1826,6 +1880,24 @@ impl SqliteEventStore {
             "INSERT INTO agent_messages(message_id, conversation_id, delegation_id, message_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![message.id.to_string(), message.conversation_id.to_string(), message.delegation_id.map(|id| id.to_string()), serde_json::to_string(message)?, message.created_at.to_rfc3339()],
         )?;
+        let author_role = transaction
+            .query_row(
+                "SELECT json_extract(session_json, '$.kind') FROM conversation_agent_sessions WHERE session_id=?1",
+                [message.from_session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "agent".into());
+        index_conversation_context(
+            &transaction,
+            &message.id.to_string(),
+            message.conversation_id,
+            message.delegation_id,
+            &author_role,
+            "agent_message",
+            message.created_at,
+            &message.content,
+        )?;
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
@@ -1844,6 +1916,24 @@ impl SqliteEventStore {
         transaction.execute(
             "INSERT INTO blackboard_entries(entry_id, conversation_id, delegation_id, entry_json, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![entry.id.to_string(), entry.conversation_id.to_string(), entry.delegation_id.map(|id| id.to_string()), serde_json::to_string(entry)?, entry.content, entry.created_at.to_rfc3339()],
+        )?;
+        let author_role = transaction
+            .query_row(
+                "SELECT json_extract(session_json, '$.kind') FROM conversation_agent_sessions WHERE session_id=?1",
+                [entry.author_session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "agent".into());
+        index_conversation_context(
+            &transaction,
+            &entry.id.to_string(),
+            entry.conversation_id,
+            entry.delegation_id,
+            &author_role,
+            "blackboard",
+            entry.created_at,
+            &entry.content,
         )?;
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
@@ -1913,6 +2003,147 @@ impl SqliteEventStore {
                 conversation_id,
             )?,
         })
+    }
+
+    pub fn agent_delegation(
+        &self,
+        delegation_id: mcg_domain::AgentDelegationId,
+    ) -> Result<Option<AgentDelegation>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT delegation_json FROM agent_delegations WHERE delegation_id=?1",
+                [delegation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn managed_worktree_for_delegation(
+        &self,
+        delegation_id: mcg_domain::AgentDelegationId,
+    ) -> Result<Option<ManagedWorktree>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT worktree_json FROM managed_worktrees WHERE delegation_id=?1",
+                [delegation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn search_conversation_context(
+        &self,
+        conversation_id: ConversationId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SharedContextHit>, StorageError> {
+        let expression = query
+            .split_whitespace()
+            .filter(|term| !term.is_empty())
+            .take(12)
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        if expression.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, delegation_id, author_role, source_kind, created_at,
+                    snippet(conversation_context_fts, 6, '', '', ' … ', 24)
+             FROM conversation_context_fts
+             WHERE conversation_context_fts MATCH ?1 AND conversation_id=?2
+             ORDER BY rank LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                params![
+                    expression,
+                    conversation_id.to_string(),
+                    limit.clamp(1, 100) as i64
+                ],
+                |row| {
+                    let delegation_id = row
+                        .get::<_, Option<String>>(1)?
+                        .map(|value| value.parse())
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                    let source_kind = match row.get::<_, String>(3)?.as_str() {
+                        "conversation_message" => SharedContextSourceKind::ConversationMessage,
+                        "agent_message" => SharedContextSourceKind::AgentMessage,
+                        "blackboard" => SharedContextSourceKind::Blackboard,
+                        _ => SharedContextSourceKind::ProjectContext,
+                    };
+                    let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?
+                        .with_timezone(&Utc);
+                    Ok(SharedContextHit {
+                        source_id: row.get(0)?,
+                        conversation_id,
+                        delegation_id,
+                        author_role: row.get(2)?,
+                        source_kind,
+                        created_at,
+                        snippet: row.get(5)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn recover_conversation_team_work(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let delegations = {
+            let mut statement = self.connection.prepare(
+                "SELECT delegation_json FROM agent_delegations ORDER BY created_at, delegation_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect::<Result<Vec<AgentDelegation>, _>>()?
+        };
+        let mut recovered = 0_u64;
+        for mut delegation in delegations
+            .into_iter()
+            .filter(|delegation| !delegation.state.is_terminal())
+        {
+            delegation.state = mcg_domain::AgentDelegationState::Blocked;
+            delegation.revision = delegation.revision.saturating_add(1);
+            delegation.error = Some(
+                "MCG restarted while this coding delegation was active. The isolated work is retained for review; retry explicitly to continue.".into(),
+            );
+            delegation.updated_at = now;
+            self.save_agent_delegation(&delegation)?;
+            if let Some(mut worktree) = self.managed_worktree_for_delegation(delegation.id)?
+                && !matches!(worktree.state, mcg_domain::ManagedWorktreeState::Removed)
+            {
+                worktree.state = mcg_domain::ManagedWorktreeState::Retained;
+                worktree.revision = worktree.revision.saturating_add(1);
+                worktree.retained_reason = Some("runtime restart recovery boundary".into());
+                worktree.updated_at = now;
+                self.save_managed_worktree(&worktree)?;
+            }
+            recovered = recovered.saturating_add(1);
+        }
+        Ok(recovered)
     }
 
     pub fn save_codex_thread_binding(
@@ -3571,6 +3802,37 @@ const fn conversation_role_name(role: mcg_domain::ConversationRole) -> &'static 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn index_conversation_context(
+    transaction: &Transaction<'_>,
+    source_id: &str,
+    conversation_id: ConversationId,
+    delegation_id: Option<mcg_domain::AgentDelegationId>,
+    author_role: &str,
+    source_kind: &str,
+    created_at: DateTime<Utc>,
+    content: &str,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "DELETE FROM conversation_context_fts WHERE source_id=?1 AND source_kind=?2",
+        params![source_id, source_kind],
+    )?;
+    transaction.execute(
+        "INSERT INTO conversation_context_fts(source_id, conversation_id, delegation_id, author_role, source_kind, created_at, content)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            source_id,
+            conversation_id.to_string(),
+            delegation_id.map(|id| id.to_string()),
+            author_role,
+            source_kind,
+            created_at.to_rfc3339(),
+            content,
+        ],
+    )?;
+    Ok(())
+}
+
 const fn lease_state_name(state: LeaseState) -> &'static str {
     match state {
         LeaseState::Active => "active",
@@ -3755,6 +4017,9 @@ mod tests {
             coder_session_id: Some(coder.id),
             project_id: ProjectId::new(),
             organization_revision_id: chat.organization_revision_id,
+            revision: 1,
+            prompt_revision: chat.prompt_revision,
+            permission_mode: None,
             state: mcg_domain::AgentDelegationState::Running,
             brief: mcg_domain::CodingDelegationBrief {
                 objective: "change code".into(),
@@ -3802,9 +4067,23 @@ mod tests {
         };
         store.append_blackboard_entry(&entry).expect("blackboard");
 
+        let hits = store
+            .search_conversation_context(first.id, "shared", 10)
+            .expect("scoped context search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_id, entry.id.to_string());
+        assert_eq!(hits[0].author_role, "chat");
+        assert_eq!(hits[0].delegation_id, Some(delegation.id));
+        assert!(
+            store
+                .search_conversation_context(second.id, "shared", 10)
+                .expect("unrelated context search")
+                .is_empty()
+        );
+
         let first_team = store.conversation_team_state(first.id).expect("first team");
         assert_eq!(first_team.sessions, vec![chat, coder]);
-        assert_eq!(first_team.delegations, vec![delegation]);
+        assert_eq!(first_team.delegations, vec![delegation.clone()]);
         assert_eq!(first_team.messages, vec![message]);
         assert_eq!(first_team.blackboard, vec![entry]);
         assert_eq!(
@@ -3812,6 +4091,64 @@ mod tests {
                 .conversation_team_state(second.id)
                 .expect("second team"),
             ConversationTeamState::default()
+        );
+
+        let worktree = ManagedWorktree {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::ManagedWorktreeId::new(),
+            conversation_id: first.id,
+            delegation_id: delegation.id,
+            project_id: delegation.project_id,
+            root: "C:\\managed\\fixture".into(),
+            branch: "codex/fixture".into(),
+            base_head: "abc123".into(),
+            baseline_head: Some("abc123".into()),
+            baseline_sha256: "fixture-hash".into(),
+            state: mcg_domain::ManagedWorktreeState::Ready,
+            revision: 1,
+            retained_reason: None,
+            storage_bytes: 42,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO projects(project_id, root, current_snapshot_id, project_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    delegation.project_id.to_string(),
+                    "C:\\fixture-project",
+                    ProjectSnapshotId::new().to_string(),
+                    "{}",
+                    now.to_rfc3339(),
+                ],
+            )
+            .expect("fixture project projection");
+        store
+            .save_managed_worktree(&worktree)
+            .expect("managed worktree");
+        assert_eq!(
+            store.recover_conversation_team_work(now).expect("recovery"),
+            1
+        );
+        let recovered = store
+            .conversation_team_state(first.id)
+            .expect("recovered team");
+        assert_eq!(
+            recovered.delegations[0].state,
+            mcg_domain::AgentDelegationState::Blocked
+        );
+        assert_eq!(recovered.delegations[0].revision, 2);
+        assert_eq!(
+            recovered.worktrees[0].state,
+            mcg_domain::ManagedWorktreeState::Retained
+        );
+        assert_eq!(recovered.worktrees[0].revision, 2);
+        assert!(
+            recovered.worktrees[0]
+                .retained_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("restart"))
         );
     }
 

@@ -806,7 +806,7 @@ test("active governed browser sessions render a live page preview in the side pa
   expect(client.navigateBrowserSession).toHaveBeenCalledWith(active.id, "http://localhost:3000/about?private=value");
 });
 
-test("Agents exposes the governor topology and assignments as a first-class surface", async () => {
+test("Agents distinguishes the deterministic runtime from live model agents", async () => {
   const organization = {
     schema_version: 1,
     organization_id: "00000000-0000-4000-8000-000000000921",
@@ -828,7 +828,8 @@ test("Agents exposes the governor topology and assignments as a first-class surf
 
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
-  expect(await screen.findByRole("heading", { name: "MCG Governor" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "MCG runtime" })).toBeInTheDocument();
+  expect(screen.getByText(/not a model agent/i)).toBeInTheDocument();
   expect(screen.getByText("Product team · revision 3")).toBeInTheDocument();
   expect(screen.getByText("Policy enforcement")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Teams" }));

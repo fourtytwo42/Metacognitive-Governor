@@ -11,38 +11,39 @@ use mcg_api::{
     CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
     CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
-    CreateTaskRequest, DecideSharedOrganizationRequest, DeploySiteRequest, DiscoverProjectRequest,
-    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    GovernorOverviewResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
-    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    NavigateBrowserSessionRequest, OrganizationAssignmentResponse, OrganizationHistoryResponse,
-    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
-    OrganizationRevisionPreview, OrganizationShareReviewListResponse,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
-    PluginListResponse, PreviewOrganizationRevisionRequest, ProjectListResponse,
-    ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
-    PublishOrganizationRevisionRequest, ResolveApprovalRequest, ReviewSharedOrganizationRequest,
-    ReviewedTopologyPlan, ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest,
-    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SendConversationMessageRequest,
-    SetOrganizationAssignmentRequest, SetPluginEnabledRequest, SetPluginGrantsRequest,
-    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
-    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
-    StartOpenAiOAuthRequest, SteerConversationTurnRequest, SupervisionObservationListResponse,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
-    UpdateConversationRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest,
+    CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
+    DeploySiteRequest, DiscoverProjectRequest, ExperimentBenchmarkListResponse,
+    ExperimentDecisionListResponse, ExperimentListResponse, GovernorOverviewResponse,
+    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationAssignmentResponse, OrganizationHistoryResponse, OrganizationListResponse,
+    OrganizationMutationResponse, OrganizationPublisherListResponse, OrganizationRevisionPreview,
+    OrganizationShareReviewListResponse, PlatformSessionHistoryResponse,
+    PlatformSessionListResponse, PluginInvocationHistoryResponse, PluginListResponse,
+    PreviewOrganizationRevisionRequest, ProjectListResponse, ProjectMemoryTransferListResponse,
+    ProjectTopologyPlan, ProviderListResponse, PublishOrganizationRevisionRequest,
+    ResolveApprovalRequest, ReviewSharedOrganizationRequest, ReviewedTopologyPlan,
+    ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest, RunSshOperationRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SendConversationMessageRequest, SetOrganizationAssignmentRequest, SetPluginEnabledRequest,
+    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    SshWorkflowListResponse, StartOpenAiOAuthRequest, SteerConversationTurnRequest,
+    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransferProjectMemoryRequest, TransitionAgentRunRequest,
+    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    TrustOrganizationPublisherRequest, UpdateConversationRequest, UpdateSiteRequest,
+    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
+    WakeScheduleRequest, WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
-    Conversation, ConversationView, PlatformCapabilitySnapshot, PlatformSession,
-    PluginInstallation, ScheduleDefinition, SchedulerNotification, Site, SiteMonitor, SshHost,
-    SshWorkflow, TaskEnvelope,
+    Conversation, ConversationTeamState, ConversationView, PlatformCapabilitySnapshot,
+    PlatformSession, PluginInstallation, ScheduleDefinition, SchedulerNotification, Site,
+    SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -50,9 +51,9 @@ use mcg_providers::{
     ProviderConnection, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
-    AgentRunView, CandidateRevisionMutation, CodexSiteInventory, DiagnosticReport,
-    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OrganizationPublisherMutation, OrganizationShareImportMutation,
+    AgentRunView, CandidateRevisionMutation, CodexSiteInventory, DelegationReview,
+    DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation,
+    OAuthLoginStart, OrganizationPublisherMutation, OrganizationShareImportMutation,
     OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
     PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
     ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
@@ -829,6 +830,81 @@ async fn send_conversation_message(
         )),
         Some(&request),
         "Conversation message",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_conversation_team(conversation_id: String) -> Result<ConversationTeamState, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/team"
+        )),
+        None::<&()>,
+        "Conversation team",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn review_conversation_delegation(
+    conversation_id: String,
+    delegation_id: String,
+) -> Result<DelegationReview, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/review"
+        )),
+        None::<&()>,
+        "Coding delegation review",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_conversation_delegation(
+    conversation_id: String,
+    delegation_id: String,
+    expected_revision: u64,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/cancel"
+        )),
+        Some(&DelegationMutationRequest { expected_revision }),
+        "Coding delegation cancellation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn apply_conversation_delegation(
+    conversation_id: String,
+    delegation_id: String,
+    expected_revision: u64,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/apply"
+        )),
+        Some(&DelegationMutationRequest { expected_revision }),
+        "Coding delegation integration",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn discard_conversation_delegation(
+    conversation_id: String,
+    delegation_id: String,
+    expected_revision: u64,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/discard"
+        )),
+        Some(&WorktreeMutationRequest { expected_revision }),
+        "Coding delegation discard",
     )
     .await
 }
@@ -3407,6 +3483,11 @@ pub fn run() {
             update_conversation,
             archive_conversation,
             send_conversation_message,
+            get_conversation_team,
+            review_conversation_delegation,
+            cancel_conversation_delegation,
+            apply_conversation_delegation,
+            discard_conversation_delegation,
             interrupt_conversation_turn,
             steer_conversation_turn,
             codex_models,
