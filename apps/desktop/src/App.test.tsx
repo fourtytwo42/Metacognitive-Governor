@@ -1,6 +1,19 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
+const nativeWindow = vi.hoisted(() => ({
+  close: vi.fn(),
+  destroy: vi.fn(),
+  minimize: vi.fn(),
+  toggleMaximize: vi.fn(),
+  isFullscreen: vi.fn(),
+  setFullscreen: vi.fn()
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => nativeWindow
+}));
+
 const client = vi.hoisted(() => ({
   start: vi.fn(),
   complete: vi.fn(),
@@ -331,6 +344,8 @@ vi.mock("./desktop-client", () => ({
 import { App, isChatViewportNearBottom } from "./App";
 
 beforeEach(() => {
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  for (const method of Object.values(nativeWindow)) method.mockReset();
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
   client.localServiceStatus.mockReset();
@@ -503,7 +518,7 @@ beforeEach(() => {
     connection_id: connectionId,
     models: [],
     discovered_at: new Date().toISOString()
-  }));
+}));
   client.proxyUsage.mockResolvedValue({
     conversation_count: 0,
     call_count: 0,
@@ -743,6 +758,21 @@ async function enableSimpleMode() {
   fireEvent.click(button);
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
 }
+
+test("custom desktop chrome invokes native minimize, maximize, and close controls", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Minimize" }));
+  fireEvent.click(screen.getByRole("button", { name: "Maximize or restore" }));
+  fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+
+  await waitFor(() => {
+    expect(nativeWindow.minimize).toHaveBeenCalledOnce();
+    expect(nativeWindow.toggleMaximize).toHaveBeenCalledOnce();
+    expect(nativeWindow.close).toHaveBeenCalledOnce();
+  });
+});
 
 test("workspace toolbar toggles the docked side panel and project terminal", async () => {
   render(<App />);

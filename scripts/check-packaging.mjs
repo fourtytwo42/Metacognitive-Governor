@@ -14,6 +14,24 @@ const developmentConfig = JSON.parse(await read("apps/desktop/src-tauri/tauri.co
 if (developmentConfig.bundle?.active !== false || developmentConfig.bundle?.externalBin) {
   throw new Error("Default development and test builds must not depend on generated release sidecars.");
 }
+const desktopWindowCapability = JSON.parse(await read("apps/desktop/src-tauri/capabilities/desktop-window.json"));
+const requiredDesktopWindowPermissions = [
+  "core:default",
+  "core:window:allow-close",
+  "core:window:allow-destroy",
+  "core:window:allow-minimize",
+  "core:window:allow-toggle-maximize",
+  "core:window:allow-set-fullscreen",
+  "core:window:allow-start-dragging"
+];
+if (JSON.stringify(desktopWindowCapability.windows) !== JSON.stringify(["*"])) {
+  throw new Error("The custom desktop title bar capability must cover every MCG-owned window.");
+}
+for (const permission of requiredDesktopWindowPermissions) {
+  if (!desktopWindowCapability.permissions?.includes(permission)) {
+    throw new Error(`The custom desktop title bar is missing its native permission: ${permission}`);
+  }
+}
 const [rootPackage, desktopPackage, cargoManifest, desktopHtml, portableWindowsBuilder] = await Promise.all([
   read("package.json").then(JSON.parse),
   read("apps/desktop/package.json").then(JSON.parse),
