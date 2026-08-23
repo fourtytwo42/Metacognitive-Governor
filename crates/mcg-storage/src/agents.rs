@@ -1,9 +1,12 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState,
     AgentState, AgentTurnCheckpoint, AgentTurnResult, AgentUsageRecord, AssignedModel,
-    ConfidenceEstimate, EvaluationReport, ExperimentState, ModelCallEvidence, OrganizationGenome,
-    OrganizationalMetrics, ShadowWorkspaceState, UsageKind, WorkPlan,
+    ConfidenceEstimate, EvaluationReport, ExperimentState, ModelCallEvidence,
+    OrganizationAssignments, OrganizationGenome, OrganizationalMetrics, ShadowWorkspaceState,
+    UsageKind, WorkPlan,
 };
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ExperimentId, OrganizationId, OrganizationRevisionId,
@@ -15,6 +18,30 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{SqliteEventStore, StorageError};
+
+fn ensure_assignable_organization(
+    store: &SqliteEventStore,
+    organization_id: OrganizationId,
+) -> Result<(), StorageError> {
+    let organization = store.organization(organization_id)?.ok_or_else(|| {
+        StorageError::InvalidData(format!("organization {organization_id} was not found"))
+    })?;
+    organization
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    for required in [
+        mcg_agents::RoleKind::Executive,
+        mcg_agents::RoleKind::Coder,
+        mcg_agents::RoleKind::Evaluator,
+    ] {
+        if !organization.roles.iter().any(|role| role.kind == required) {
+            return Err(StorageError::InvalidData(format!(
+                "assignable organizations require a {required:?} role"
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AgentRecoveryReport {
@@ -1206,8 +1233,6 @@ impl SqliteEventStore {
             || task.id != plan.task_id
             || run.organization_revision_id != genome.revision_id
             || run.organization_revision_id != plan.organization_revision_id
-            || genome.revision != 1
-            || genome.parent_revision_id.is_some()
         {
             return Err(StorageError::InvalidData(
                 "task launch identities or initial states are inconsistent".into(),
@@ -1228,11 +1253,29 @@ impl SqliteEventStore {
                 "task launch metrics or aggregate work budgets are invalid".into(),
             ));
         }
-        if self.organization(genome.organization_id)?.is_some() {
-            return Err(StorageError::Conflict(
-                "task launch organization identity already exists".into(),
-            ));
-        }
+        let stored_revision = self.organization_revision(genome.revision_id)?;
+        let organization_exists = self.organization(genome.organization_id)?.is_some();
+        let persist_organization = match stored_revision {
+            Some(stored) if stored == *genome => false,
+            Some(_) => {
+                return Err(StorageError::Conflict(
+                    "task launch organization revision does not match durable state".into(),
+                ));
+            }
+            None if organization_exists => {
+                return Err(StorageError::Conflict(
+                    "task launch organization revision is not durable".into(),
+                ));
+            }
+            None => {
+                if genome.revision != 1 || genome.parent_revision_id.is_some() {
+                    return Err(StorageError::InvalidData(
+                        "a new task launch organization must begin at revision one".into(),
+                    ));
+                }
+                true
+            }
+        };
 
         let mut active_task = task.clone();
         active_task.transition_to(TaskState::Active)?;
@@ -1268,30 +1311,33 @@ impl SqliteEventStore {
         );
 
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO organization_revisions(
-                revision_id, organization_id, revision, parent_revision_id,
-                organization_json, created_at
-             ) VALUES (?1, ?2, 1, NULL, ?3, ?4)",
-            params![
-                genome.revision_id.to_string(),
-                genome.organization_id.to_string(),
-                serde_json::to_string(genome)?,
-                genome.created_at.to_rfc3339(),
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO organizations(
-                organization_id, current_revision_id, organization_json, updated_at
-             ) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                genome.organization_id.to_string(),
-                genome.revision_id.to_string(),
-                serde_json::to_string(genome)?,
-                genome.created_at.to_rfc3339(),
-            ],
-        )?;
-        let mut events = vec![Self::insert_event(&transaction, &organization_event)?];
+        let mut events = Vec::new();
+        if persist_organization {
+            transaction.execute(
+                "INSERT INTO organization_revisions(
+                    revision_id, organization_id, revision, parent_revision_id,
+                    organization_json, created_at
+                 ) VALUES (?1, ?2, 1, NULL, ?3, ?4)",
+                params![
+                    genome.revision_id.to_string(),
+                    genome.organization_id.to_string(),
+                    serde_json::to_string(genome)?,
+                    genome.created_at.to_rfc3339(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO organizations(
+                    organization_id, current_revision_id, organization_json, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    genome.organization_id.to_string(),
+                    genome.revision_id.to_string(),
+                    serde_json::to_string(genome)?,
+                    genome.created_at.to_rfc3339(),
+                ],
+            )?;
+            events.push(Self::insert_event(&transaction, &organization_event)?);
+        }
         transaction.execute(
             "INSERT INTO agent_runs(
                 run_id, task_id, organization_revision_id, state, run_json,
@@ -1744,6 +1790,165 @@ impl SqliteEventStore {
     /// Returns an error when a row cannot be decoded.
     pub fn organizations(&self) -> Result<Vec<OrganizationGenome>, StorageError> {
         self.read_all_json("SELECT organization_json FROM organizations ORDER BY organization_id")
+    }
+
+    /// Ensures one reusable global organization exists and returns all durable assignments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted organizations or assignments cannot be read, validated,
+    /// or written.
+    pub fn initialize_organization_assignments(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<OrganizationAssignments, StorageError> {
+        if let Some(assignments) = self.organization_assignments()? {
+            return Ok(assignments);
+        }
+        let global = self
+            .organizations()?
+            .into_iter()
+            .filter(|organization| {
+                organization.name == "MCG Consumer Default" && organization.validate().is_ok()
+            })
+            .max_by_key(|organization| organization.created_at)
+            .unwrap_or_else(|| OrganizationGenome::consumer_default(now));
+        if self.organization(global.organization_id)?.is_none() {
+            self.record_organization_revision(&global)?;
+        }
+        self.set_global_organization_assignment(global.organization_id, now)?;
+        self.organization_assignments()?.ok_or_else(|| {
+            StorageError::InvalidData("organization assignments were not initialized".into())
+        })
+    }
+
+    /// Loads the global organization assignment and all project overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when assignment rows cannot be read or contain invalid identities or
+    /// timestamps.
+    pub fn organization_assignments(
+        &self,
+    ) -> Result<Option<OrganizationAssignments>, StorageError> {
+        let global = self.connection.query_row(
+            "SELECT organization_id, updated_at FROM organization_assignments WHERE scope_key = 'global'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?;
+        let Some((global, global_updated_at)) = global else {
+            return Ok(None);
+        };
+        let global_organization_id = OrganizationId::from_str(&global).map_err(|_| {
+            StorageError::InvalidData("invalid global organization assignment".into())
+        })?;
+        let mut statement = self.connection.prepare(
+            "SELECT project_id, organization_id, updated_at FROM organization_assignments WHERE project_id IS NOT NULL ORDER BY project_id"
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut project_overrides = std::collections::BTreeMap::new();
+        let mut updated_at = DateTime::parse_from_rfc3339(&global_updated_at)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?
+            .with_timezone(&Utc);
+        for row in rows {
+            let (project, organization, changed) = row?;
+            let project = mcg_domain::ProjectId::from_str(&project).map_err(|_| {
+                StorageError::InvalidData("invalid project organization assignment".into())
+            })?;
+            let organization = OrganizationId::from_str(&organization).map_err(|_| {
+                StorageError::InvalidData("invalid project organization assignment".into())
+            })?;
+            let changed = DateTime::parse_from_rfc3339(&changed)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?
+                .with_timezone(&Utc);
+            updated_at = updated_at.max(changed);
+            project_overrides.insert(project, organization);
+        }
+        Ok(Some(OrganizationAssignments {
+            global_organization_id,
+            project_overrides,
+            updated_at,
+        }))
+    }
+
+    /// Replaces the global organization assignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the organization is not assignable or the assignment cannot be
+    /// persisted and reloaded.
+    pub fn set_global_organization_assignment(
+        &mut self,
+        organization_id: OrganizationId,
+        now: DateTime<Utc>,
+    ) -> Result<OrganizationAssignments, StorageError> {
+        ensure_assignable_organization(self, organization_id)?;
+        self.connection.execute(
+            "INSERT INTO organization_assignments(scope_key, project_id, organization_id, updated_at)
+             VALUES ('global', NULL, ?1, ?2)
+             ON CONFLICT(scope_key) DO UPDATE SET organization_id = excluded.organization_id, updated_at = excluded.updated_at",
+            params![organization_id.to_string(), now.to_rfc3339()],
+        )?;
+        self.organization_assignments()?
+            .ok_or_else(|| StorageError::InvalidData("global assignment disappeared".into()))
+    }
+
+    /// Sets or clears one project's organization override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project or organization does not exist, the organization is not
+    /// assignable, or the assignment cannot be persisted and reloaded.
+    pub fn set_project_organization_assignment(
+        &mut self,
+        project_id: mcg_domain::ProjectId,
+        organization_id: Option<OrganizationId>,
+        now: DateTime<Utc>,
+    ) -> Result<OrganizationAssignments, StorageError> {
+        if self.project(project_id)?.is_none() {
+            return Err(StorageError::ProjectNotFound(project_id));
+        }
+        if let Some(organization_id) = organization_id {
+            ensure_assignable_organization(self, organization_id)?;
+            let scope = format!("project:{project_id}");
+            self.connection.execute(
+                "INSERT INTO organization_assignments(scope_key, project_id, organization_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(scope_key) DO UPDATE SET organization_id = excluded.organization_id, updated_at = excluded.updated_at",
+                params![scope, project_id.to_string(), organization_id.to_string(), now.to_rfc3339()],
+            )?;
+        } else {
+            self.connection.execute(
+                "DELETE FROM organization_assignments WHERE project_id = ?1",
+                [project_id.to_string()],
+            )?;
+        }
+        self.organization_assignments()?
+            .ok_or_else(|| StorageError::InvalidData("global assignment is missing".into()))
+    }
+
+    /// Lists recent agent runs in reverse update order under a bounded limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when run rows cannot be read or decoded.
+    pub fn agent_runs(&self, limit: usize) -> Result<Vec<AgentRun>, StorageError> {
+        let limit = i64::try_from(limit.clamp(1, 100)).unwrap_or(100);
+        let mut statement = self.connection.prepare(
+            "SELECT run_json FROM agent_runs ORDER BY updated_at DESC, run_id DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            let json = row?;
+            serde_json::from_str(&json).map_err(StorageError::from)
+        })
+        .collect()
     }
 
     /// Loads one immutable organization revision.
@@ -4687,6 +4892,44 @@ mod tests {
                 .expect("present")
                 .state,
             TaskState::Blocked
+        );
+    }
+
+    #[test]
+    fn organization_assignment_bootstrap_is_idempotent_and_persistent() {
+        let directory = tempdir().expect("temp directory");
+        let database = directory.path().join("assignments.sqlite3");
+        let now = Utc::now();
+        let mut store = SqliteEventStore::open(&database).expect("open store");
+        let first = store
+            .initialize_organization_assignments(now)
+            .expect("bootstrap assignments");
+        let second = store
+            .initialize_organization_assignments(now + Duration::seconds(1))
+            .expect("repeat bootstrap");
+        assert_eq!(first.global_organization_id, second.global_organization_id);
+        assert_eq!(store.organizations().expect("organizations").len(), 1);
+
+        let alternative = OrganizationGenome::consumer_default(now + Duration::seconds(2));
+        store
+            .record_organization_revision(&alternative)
+            .expect("record alternative");
+        store
+            .set_global_organization_assignment(
+                alternative.organization_id,
+                now + Duration::seconds(3),
+            )
+            .expect("change default");
+        drop(store);
+
+        let reopened = SqliteEventStore::open(&database).expect("reopen store");
+        assert_eq!(
+            reopened
+                .organization_assignments()
+                .expect("load assignments")
+                .expect("assignments present")
+                .global_organization_id,
+            alternative.organization_id
         );
     }
 }

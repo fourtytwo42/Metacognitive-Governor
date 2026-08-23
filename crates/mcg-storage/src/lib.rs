@@ -4,8 +4,11 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    ApprovalId, LeaseId, MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId,
-    TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    AgentDelegation, AgentMessage, ApprovalId, BlackboardEntry, CodexThreadBinding, Conversation,
+    ConversationActivity, ConversationAgentSession, ConversationId, ConversationMessage,
+    ConversationMessageId, ConversationTeamState, ConversationTurn, ConversationTurnId,
+    ConversationView, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
+    ProjectSnapshotId, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -62,7 +65,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 34;
+pub const STORAGE_SCHEMA_VERSION: i64 = 38;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1257,6 +1260,157 @@ BEGIN
 END;
 ";
 
+const MIGRATION_35: &str = r"
+CREATE TABLE IF NOT EXISTS organization_assignments (
+    scope_key TEXT PRIMARY KEY,
+    project_id TEXT UNIQUE,
+    organization_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((scope_key = 'global' AND project_id IS NULL) OR
+           (scope_key = 'project:' || project_id AND project_id IS NOT NULL)),
+    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id)
+);
+CREATE INDEX IF NOT EXISTS organization_assignments_organization
+    ON organization_assignments(organization_id, scope_key);
+";
+
+const MIGRATION_36: &str = r"
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    project_id TEXT,
+    state TEXT NOT NULL,
+    legacy_thread_id TEXT UNIQUE,
+    conversation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS conversations_state_time
+    ON conversations(state, updated_at DESC, conversation_id);
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    turn_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    codex_thread_id TEXT,
+    codex_turn_id TEXT,
+    turn_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_turns_conversation_time
+    ON conversation_turns(conversation_id, created_at, turn_id);
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    message_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    message_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(turn_id) REFERENCES conversation_turns(turn_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_messages_conversation_time
+    ON conversation_messages(conversation_id, created_at, message_id);
+CREATE TABLE IF NOT EXISTS codex_thread_bindings (
+    binding_key TEXT PRIMARY KEY,
+    conversation_id TEXT,
+    conversation_turn_id TEXT,
+    run_id TEXT,
+    agent_instance_id TEXT,
+    codex_thread_id TEXT NOT NULL,
+    binding_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(conversation_turn_id) REFERENCES conversation_turns(turn_id),
+    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id),
+    FOREIGN KEY(agent_instance_id) REFERENCES agent_instances(instance_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS codex_bindings_conversation
+    ON codex_thread_bindings(conversation_id) WHERE conversation_id IS NOT NULL;
+";
+
+const MIGRATION_37: &str = r"
+CREATE TABLE IF NOT EXISTS conversation_activities (
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    codex_item_id TEXT NOT NULL,
+    activity_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(turn_id, codex_item_id),
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(turn_id) REFERENCES conversation_turns(turn_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_activities_conversation_time
+    ON conversation_activities(conversation_id, started_at, codex_item_id);
+";
+
+const MIGRATION_38: &str = r"
+CREATE TABLE IF NOT EXISTS conversation_agent_sessions (
+    session_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    session_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_agent_sessions_conversation
+    ON conversation_agent_sessions(conversation_id, kind, created_at, session_id);
+CREATE TABLE IF NOT EXISTS agent_delegations (
+    delegation_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    delegation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+);
+CREATE INDEX IF NOT EXISTS agent_delegations_conversation
+    ON agent_delegations(conversation_id, created_at, delegation_id);
+CREATE TABLE IF NOT EXISTS agent_messages (
+    message_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    delegation_id TEXT,
+    message_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id)
+);
+CREATE INDEX IF NOT EXISTS agent_messages_conversation
+    ON agent_messages(conversation_id, created_at, message_id);
+CREATE TABLE IF NOT EXISTS blackboard_entries (
+    entry_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    delegation_id TEXT,
+    entry_json TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id)
+);
+CREATE INDEX IF NOT EXISTS blackboard_entries_conversation
+    ON blackboard_entries(conversation_id, created_at, entry_id);
+CREATE TABLE IF NOT EXISTS managed_worktrees (
+    worktree_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    delegation_id TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    worktree_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id),
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS managed_worktrees_project_state
+    ON managed_worktrees(project_id, state, updated_at, worktree_id);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1269,6 +1423,10 @@ pub enum StorageError {
     InvalidData(String),
     #[error("task {0} was not found")]
     TaskNotFound(TaskId),
+    #[error("conversation {0} was not found")]
+    ConversationNotFound(ConversationId),
+    #[error("conversation turn {0} was not found")]
+    ConversationTurnNotFound(ConversationTurnId),
     #[error("project {0} was not found")]
     ProjectNotFound(ProjectId),
     #[error("memory claim {0} was not found")]
@@ -1422,6 +1580,10 @@ impl SqliteEventStore {
             (32_i64, MIGRATION_32),
             (33_i64, MIGRATION_33),
             (34_i64, MIGRATION_34),
+            (35_i64, MIGRATION_35),
+            (36_i64, MIGRATION_36),
+            (37_i64, MIGRATION_37),
+            (38_i64, MIGRATION_38),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1436,6 +1598,498 @@ impl SqliteEventStore {
             }
         }
         Ok(())
+    }
+
+    /// Persists a chat independently of task/run workflows and records it on the global event log.
+    pub fn create_conversation(
+        &mut self,
+        conversation: &Conversation,
+        legacy_thread_id: Option<&str>,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationCreated,
+            None,
+            serde_json::json!({"conversation_id": conversation.id, "conversation": conversation}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversations(conversation_id, project_id, state, legacy_thread_id, conversation_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                conversation.id.to_string(),
+                conversation.project_id.map(|id| id.to_string()),
+                conversation_state_name(conversation.state),
+                legacy_thread_id,
+                serde_json::to_string(conversation)?,
+                conversation.created_at.to_rfc3339(),
+                conversation.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn update_conversation(
+        &mut self,
+        conversation: &Conversation,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationUpdated,
+            None,
+            serde_json::json!({"conversation_id": conversation.id, "conversation": conversation}),
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE conversations SET project_id = ?2, state = ?3, conversation_json = ?4, updated_at = ?5 WHERE conversation_id = ?1",
+            params![
+                conversation.id.to_string(),
+                conversation.project_id.map(|id| id.to_string()),
+                conversation_state_name(conversation.state),
+                serde_json::to_string(conversation)?,
+                conversation.updated_at.to_rfc3339(),
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::ConversationNotFound(conversation.id));
+        }
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn save_conversation_turn(
+        &mut self,
+        turn: &ConversationTurn,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationTurnUpdated,
+            turn.task_id,
+            serde_json::json!({"conversation_id": turn.conversation_id, "turn": turn}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversation_turns(turn_id, conversation_id, state, codex_thread_id, codex_turn_id, turn_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(turn_id) DO UPDATE SET state=excluded.state, codex_thread_id=excluded.codex_thread_id,
+             codex_turn_id=excluded.codex_turn_id, turn_json=excluded.turn_json, updated_at=excluded.updated_at",
+            params![
+                turn.id.to_string(), turn.conversation_id.to_string(), conversation_turn_state_name(turn.state),
+                turn.codex_thread_id.as_deref(), turn.codex_turn_id.as_deref(), serde_json::to_string(turn)?,
+                turn.created_at.to_rfc3339(), turn.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn append_conversation_message(
+        &mut self,
+        message: &ConversationMessage,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationMessageRecorded,
+            None,
+            serde_json::json!({"conversation_id": message.conversation_id, "message": message}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversation_messages(message_id, conversation_id, turn_id, role, message_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                message.id.to_string(), message.conversation_id.to_string(), message.turn_id.to_string(),
+                conversation_role_name(message.role), serde_json::to_string(message)?, message.created_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Persists a conversation message, replacing its projection when streamed
+    /// assistant content grows while retaining the stable message identity.
+    pub fn save_conversation_message(
+        &mut self,
+        message: &ConversationMessage,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationMessageRecorded,
+            None,
+            serde_json::json!({"conversation_id": message.conversation_id, "message": message}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversation_messages(message_id, conversation_id, turn_id, role, message_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(message_id) DO UPDATE SET conversation_id=excluded.conversation_id,
+             turn_id=excluded.turn_id, role=excluded.role, message_json=excluded.message_json",
+            params![
+                message.id.to_string(), message.conversation_id.to_string(), message.turn_id.to_string(),
+                conversation_role_name(message.role), serde_json::to_string(message)?, message.created_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn save_conversation_activity(
+        &mut self,
+        activity: &ConversationActivity,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationActivityUpdated,
+            None,
+            serde_json::json!({"conversation_id": activity.conversation_id, "activity": activity}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversation_activities(conversation_id, turn_id, codex_item_id, activity_json, started_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(turn_id, codex_item_id) DO UPDATE SET activity_json=excluded.activity_json, updated_at=excluded.updated_at",
+            params![
+                activity.conversation_id.to_string(), activity.turn_id.to_string(), activity.codex_item_id,
+                serde_json::to_string(activity)?, activity.started_at.to_rfc3339(), activity.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Records one raw Codex app-server notification for ordered replay and audit.
+    pub fn record_codex_harness_event(
+        &mut self,
+        payload: serde_json::Value,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(EventKind::CodexHarnessEvent, None, payload);
+        let transaction = self.connection.transaction()?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn save_conversation_agent_session(
+        &mut self,
+        session: &ConversationAgentSession,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationAgentSessionUpdated,
+            None,
+            serde_json::json!({"conversation_id": session.conversation_id, "session": session}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversation_agent_sessions(session_id, conversation_id, kind, state, session_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(session_id) DO UPDATE SET state=excluded.state, session_json=excluded.session_json, updated_at=excluded.updated_at",
+            params![session.id.to_string(), session.conversation_id.to_string(), serde_json::to_string(&session.kind)?, serde_json::to_string(&session.state)?, serde_json::to_string(session)?, session.created_at.to_rfc3339(), session.updated_at.to_rfc3339()],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn save_agent_delegation(
+        &mut self,
+        delegation: &AgentDelegation,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::AgentDelegationUpdated,
+            delegation.task_id,
+            serde_json::json!({"conversation_id": delegation.conversation_id, "delegation": delegation}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_delegations(delegation_id, conversation_id, state, delegation_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(delegation_id) DO UPDATE SET state=excluded.state, delegation_json=excluded.delegation_json, updated_at=excluded.updated_at",
+            params![delegation.id.to_string(), delegation.conversation_id.to_string(), serde_json::to_string(&delegation.state)?, serde_json::to_string(delegation)?, delegation.created_at.to_rfc3339(), delegation.updated_at.to_rfc3339()],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn append_agent_message(
+        &mut self,
+        message: &AgentMessage,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::AgentMessageRecorded,
+            None,
+            serde_json::json!({"conversation_id": message.conversation_id, "message": message}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_messages(message_id, conversation_id, delegation_id, message_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![message.id.to_string(), message.conversation_id.to_string(), message.delegation_id.map(|id| id.to_string()), serde_json::to_string(message)?, message.created_at.to_rfc3339()],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn append_blackboard_entry(
+        &mut self,
+        entry: &BlackboardEntry,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::BlackboardEntryRecorded,
+            None,
+            serde_json::json!({"conversation_id": entry.conversation_id, "entry": entry}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO blackboard_entries(entry_id, conversation_id, delegation_id, entry_json, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![entry.id.to_string(), entry.conversation_id.to_string(), entry.delegation_id.map(|id| id.to_string()), serde_json::to_string(entry)?, entry.content, entry.created_at.to_rfc3339()],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn save_managed_worktree(
+        &mut self,
+        worktree: &ManagedWorktree,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ManagedWorktreeUpdated,
+            None,
+            serde_json::json!({"conversation_id": worktree.conversation_id, "worktree": worktree}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO managed_worktrees(worktree_id, conversation_id, delegation_id, project_id, state, worktree_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(worktree_id) DO UPDATE SET state=excluded.state, worktree_json=excluded.worktree_json, updated_at=excluded.updated_at",
+            params![worktree.id.to_string(), worktree.conversation_id.to_string(), worktree.delegation_id.to_string(), worktree.project_id.to_string(), serde_json::to_string(&worktree.state)?, serde_json::to_string(worktree)?, worktree.created_at.to_rfc3339(), worktree.updated_at.to_rfc3339()],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn conversation_team_state(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ConversationTeamState, StorageError> {
+        fn rows<T: serde::de::DeserializeOwned>(
+            connection: &Connection,
+            sql: &str,
+            conversation_id: ConversationId,
+        ) -> Result<Vec<T>, StorageError> {
+            let mut statement = connection.prepare(sql)?;
+            statement
+                .query_map([conversation_id.to_string()], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect()
+        }
+        Ok(ConversationTeamState {
+            sessions: rows(
+                &self.connection,
+                "SELECT session_json FROM conversation_agent_sessions WHERE conversation_id=?1 ORDER BY kind, created_at, session_id",
+                conversation_id,
+            )?,
+            delegations: rows(
+                &self.connection,
+                "SELECT delegation_json FROM agent_delegations WHERE conversation_id=?1 ORDER BY created_at, delegation_id",
+                conversation_id,
+            )?,
+            messages: rows(
+                &self.connection,
+                "SELECT message_json FROM agent_messages WHERE conversation_id=?1 ORDER BY created_at, message_id",
+                conversation_id,
+            )?,
+            blackboard: rows(
+                &self.connection,
+                "SELECT entry_json FROM blackboard_entries WHERE conversation_id=?1 ORDER BY created_at, entry_id",
+                conversation_id,
+            )?,
+            worktrees: rows(
+                &self.connection,
+                "SELECT worktree_json FROM managed_worktrees WHERE conversation_id=?1 ORDER BY created_at, worktree_id",
+                conversation_id,
+            )?,
+        })
+    }
+
+    pub fn save_codex_thread_binding(
+        &mut self,
+        binding: &CodexThreadBinding,
+    ) -> Result<(), StorageError> {
+        let binding_key = binding.delegation_id.map_or_else(
+            || {
+                binding.conversation_id.map_or_else(
+                    || format!("thread:{}", binding.codex_thread_id),
+                    |conversation_id| format!("conversation:{conversation_id}"),
+                )
+            },
+            |delegation_id| format!("delegation:{delegation_id}"),
+        );
+        self.connection.execute(
+            "INSERT INTO codex_thread_bindings(binding_key, conversation_id, conversation_turn_id, run_id, agent_instance_id, codex_thread_id, binding_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(binding_key) DO UPDATE SET conversation_turn_id=excluded.conversation_turn_id, run_id=excluded.run_id,
+             agent_instance_id=excluded.agent_instance_id, codex_thread_id=excluded.codex_thread_id,
+             binding_json=excluded.binding_json, updated_at=excluded.updated_at",
+            params![
+                binding_key,
+                binding.conversation_id.map(|id| id.to_string()),
+                binding.conversation_turn_id.map(|id| id.to_string()),
+                binding.run_id.map(|id| id.to_string()),
+                binding.agent_instance_id.map(|id| id.to_string()),
+                binding.codex_thread_id,
+                serde_json::to_string(binding)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn codex_thread_binding_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<CodexThreadBinding>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT binding_json FROM codex_thread_bindings WHERE binding_key = ?1",
+                [format!("conversation:{conversation_id}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn codex_thread_bindings(&self) -> Result<Vec<CodexThreadBinding>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT binding_json FROM codex_thread_bindings ORDER BY updated_at DESC")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                let json = row?;
+                serde_json::from_str(&json).map_err(StorageError::from)
+            })
+            .collect()
+    }
+
+    pub fn conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<Conversation>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT conversation_json FROM conversations WHERE conversation_id = ?1",
+                [conversation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn conversations(&self, include_archived: bool) -> Result<Vec<Conversation>, StorageError> {
+        let sql = if include_archived {
+            "SELECT conversation_json FROM conversations ORDER BY updated_at DESC, conversation_id"
+        } else {
+            "SELECT conversation_json FROM conversations WHERE state = 'active' ORDER BY updated_at DESC, conversation_id"
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+            .collect()
+    }
+
+    pub fn conversation_view(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ConversationView>, StorageError> {
+        let Some(conversation) = self.conversation(conversation_id)? else {
+            return Ok(None);
+        };
+        let mut turn_statement = self.connection.prepare(
+            "SELECT turn_json FROM conversation_turns WHERE conversation_id = ?1 ORDER BY created_at, turn_id"
+        )?;
+        let turns = turn_statement
+            .query_map([conversation_id.to_string()], |row| row.get::<_, String>(0))?
+            .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut message_statement = self.connection.prepare(
+            "SELECT message_json FROM conversation_messages WHERE conversation_id = ?1 ORDER BY created_at, message_id"
+        )?;
+        let messages = message_statement
+            .query_map([conversation_id.to_string()], |row| row.get::<_, String>(0))?
+            .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut activity_statement = self.connection.prepare(
+            "SELECT activity_json FROM conversation_activities WHERE conversation_id = ?1 ORDER BY started_at, codex_item_id"
+        )?;
+        let activities = activity_statement
+            .query_map([conversation_id.to_string()], |row| row.get::<_, String>(0))?
+            .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(ConversationView {
+            conversation,
+            turns,
+            messages,
+            activities,
+            team: self.conversation_team_state(conversation_id)?,
+        }))
+    }
+
+    /// Idempotently projects pre-v0.2 task-backed chat threads into conversations.
+    pub fn migrate_legacy_task_chats(&mut self) -> Result<u64, StorageError> {
+        let tasks = self.tasks()?;
+        let mut migrated = 0_u64;
+        for task in tasks.into_iter().filter(|task| task.thread_id.is_some()) {
+            let legacy = task.thread_id.expect("filtered thread id").to_string();
+            let exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE legacy_thread_id = ?1)",
+                [&legacy],
+                |row| row.get(0),
+            )?;
+            if exists {
+                continue;
+            }
+            let conversation = Conversation::new(task.goal.clone(), task.project_id);
+            self.create_conversation(&conversation, Some(&legacy))?;
+            let now = Utc::now();
+            let turn = ConversationTurn {
+                schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                id: ConversationTurnId::new(),
+                conversation_id: conversation.id,
+                state: if task.state == TaskState::Completed {
+                    mcg_domain::ConversationTurnState::Completed
+                } else {
+                    mcg_domain::ConversationTurnState::Recovering
+                },
+                execution_preferences: Default::default(),
+                codex_thread_id: None,
+                codex_turn_id: None,
+                task_id: Some(task.id),
+                run_id: None,
+                error: None,
+                created_at: task.created_at,
+                updated_at: now,
+            };
+            self.save_conversation_turn(&turn)?;
+            self.append_conversation_message(&ConversationMessage {
+                schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                id: ConversationMessageId::new(),
+                conversation_id: conversation.id,
+                turn_id: turn.id,
+                role: mcg_domain::ConversationRole::User,
+                content: task.goal,
+                codex_item_id: None,
+                created_at: task.created_at,
+            })?;
+            migrated = migrated.saturating_add(1);
+        }
+        Ok(migrated)
     }
 
     /// Atomically appends `task_created` and writes its task projection.
@@ -2889,6 +3543,34 @@ const fn approval_state_name(state: ApprovalState) -> &'static str {
     }
 }
 
+const fn conversation_state_name(state: mcg_domain::ConversationState) -> &'static str {
+    match state {
+        mcg_domain::ConversationState::Active => "active",
+        mcg_domain::ConversationState::Archived => "archived",
+    }
+}
+
+const fn conversation_turn_state_name(state: mcg_domain::ConversationTurnState) -> &'static str {
+    match state {
+        mcg_domain::ConversationTurnState::Pending => "pending",
+        mcg_domain::ConversationTurnState::Streaming => "streaming",
+        mcg_domain::ConversationTurnState::WaitingForApproval => "waiting_for_approval",
+        mcg_domain::ConversationTurnState::Recovering => "recovering",
+        mcg_domain::ConversationTurnState::Indeterminate => "indeterminate",
+        mcg_domain::ConversationTurnState::Completed => "completed",
+        mcg_domain::ConversationTurnState::Failed => "failed",
+        mcg_domain::ConversationTurnState::Interrupted => "interrupted",
+    }
+}
+
+const fn conversation_role_name(role: mcg_domain::ConversationRole) -> &'static str {
+    match role {
+        mcg_domain::ConversationRole::User => "user",
+        mcg_domain::ConversationRole::Assistant => "assistant",
+        mcg_domain::ConversationRole::System => "system",
+    }
+}
+
 const fn lease_state_name(state: LeaseState) -> &'static str {
     match state {
         LeaseState::Active => "active",
@@ -2971,6 +3653,166 @@ mod tests {
         assert_eq!(recovered, task);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].task_id, Some(task.id));
+    }
+
+    #[test]
+    fn conversation_activity_is_upserted_and_returned_with_the_view() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        let conversation = Conversation::new("show command activity", None);
+        store
+            .create_conversation(&conversation, None)
+            .expect("conversation should persist");
+        let now = Utc::now();
+        let turn = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: conversation.id,
+            state: mcg_domain::ConversationTurnState::Streaming,
+            execution_preferences: mcg_domain::ExecutionPreferences::default(),
+            codex_thread_id: Some("thread-1".into()),
+            codex_turn_id: Some("turn-1".into()),
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .save_conversation_turn(&turn)
+            .expect("turn should persist");
+        let mut activity = ConversationActivity {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            conversation_id: conversation.id,
+            turn_id: turn.id,
+            codex_item_id: "command-1".into(),
+            kind: mcg_domain::ConversationActivityKind::Command,
+            state: mcg_domain::ConversationActivityState::Running,
+            command: Some("cargo check".into()),
+            cwd: Some("C:\\workspace".into()),
+            output: Some("Checking".into()),
+            exit_code: None,
+            duration_ms: None,
+            started_at: now,
+            updated_at: now,
+        };
+        store
+            .save_conversation_activity(&activity)
+            .expect("activity should persist");
+        activity.state = mcg_domain::ConversationActivityState::Completed;
+        activity.output = Some("Finished".into());
+        activity.exit_code = Some(0);
+        store
+            .save_conversation_activity(&activity)
+            .expect("activity update should persist");
+
+        let view = store
+            .conversation_view(conversation.id)
+            .expect("view should load")
+            .expect("conversation should exist");
+        assert_eq!(view.activities, vec![activity]);
+    }
+
+    #[test]
+    fn conversation_team_mailbox_and_blackboard_are_durable_and_scoped() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        let first = Conversation::new("two agent chat", None);
+        let second = Conversation::new("unrelated chat", None);
+        store.create_conversation(&first, None).expect("first chat");
+        store
+            .create_conversation(&second, None)
+            .expect("second chat");
+        let now = Utc::now();
+        let chat = ConversationAgentSession {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::ConversationAgentSessionId::new(),
+            conversation_id: first.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: mcg_domain::OrganizationRevisionId::new(),
+            kind: mcg_domain::ConversationAgentKind::Chat,
+            state: mcg_domain::ConversationAgentSessionState::Ready,
+            codex_thread_id: Some("chat-thread".into()),
+            model: Some("fixture".into()),
+            prompt_revision: 3,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut coder = chat.clone();
+        coder.id = mcg_domain::ConversationAgentSessionId::new();
+        coder.role_id = mcg_domain::RoleId::new();
+        coder.kind = mcg_domain::ConversationAgentKind::Coder;
+        coder.codex_thread_id = Some("coder-thread".into());
+        store
+            .save_conversation_agent_session(&chat)
+            .expect("chat session");
+        store
+            .save_conversation_agent_session(&coder)
+            .expect("coder session");
+        let delegation = AgentDelegation {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::AgentDelegationId::new(),
+            conversation_id: first.id,
+            source_session_id: chat.id,
+            coder_session_id: Some(coder.id),
+            project_id: ProjectId::new(),
+            organization_revision_id: chat.organization_revision_id,
+            state: mcg_domain::AgentDelegationState::Running,
+            brief: mcg_domain::CodingDelegationBrief {
+                objective: "change code".into(),
+                scope: vec![],
+                constraints: vec![],
+                success_conditions: vec![],
+                context_references: vec![],
+            },
+            task_id: None,
+            run_id: None,
+            worktree_id: None,
+            summary: None,
+            changed_files: vec![],
+            checks: vec![],
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .save_agent_delegation(&delegation)
+            .expect("delegation");
+        let message = AgentMessage {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::AgentMessageId::new(),
+            conversation_id: first.id,
+            delegation_id: Some(delegation.id),
+            from_session_id: chat.id,
+            to_session_id: coder.id,
+            kind: mcg_domain::AgentMessageKind::Delegation,
+            content: "bounded brief".into(),
+            created_at: now,
+        };
+        store.append_agent_message(&message).expect("message");
+        let entry = BlackboardEntry {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::BlackboardEntryId::new(),
+            conversation_id: first.id,
+            delegation_id: Some(delegation.id),
+            author_session_id: chat.id,
+            kind: mcg_domain::BlackboardEntryKind::Goal,
+            content: "shared goal".into(),
+            source_references: vec![],
+            supersedes_id: None,
+            created_at: now,
+        };
+        store.append_blackboard_entry(&entry).expect("blackboard");
+
+        let first_team = store.conversation_team_state(first.id).expect("first team");
+        assert_eq!(first_team.sessions, vec![chat, coder]);
+        assert_eq!(first_team.delegations, vec![delegation]);
+        assert_eq!(first_team.messages, vec![message]);
+        assert_eq!(first_team.blackboard, vec![entry]);
+        assert_eq!(
+            store
+                .conversation_team_state(second.id)
+                .expect("second team"),
+            ConversationTeamState::default()
+        );
     }
 
     #[test]

@@ -46,6 +46,14 @@ macro_rules! domain_id {
 
 domain_id!(ProjectId);
 domain_id!(ThreadId);
+domain_id!(ConversationId);
+domain_id!(ConversationMessageId);
+domain_id!(ConversationTurnId);
+domain_id!(ConversationAgentSessionId);
+domain_id!(AgentDelegationId);
+domain_id!(AgentMessageId);
+domain_id!(BlackboardEntryId);
+domain_id!(ManagedWorktreeId);
 domain_id!(TaskId);
 domain_id!(RunId);
 domain_id!(ToolRequestId);
@@ -112,6 +120,16 @@ impl TaskId {
     ///
     /// This is reserved for durable authority subjects that are task-shaped in
     /// the current storage schema but must not collide with caller-owned UUIDs.
+    #[must_use]
+    pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+}
+
+impl SiteId {
+    /// Creates a stable imported-Site identity from a 128-bit digest.
     #[must_use]
     pub fn from_stable_bytes(mut bytes: [u8; 16]) -> Self {
         bytes[6] = (bytes[6] & 0x0f) | 0x50;
@@ -1124,6 +1142,468 @@ pub struct PluginInvocationRecord {
     pub result_sha256: Option<String>,
     pub error_code: Option<String>,
     pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAgentKind {
+    Chat,
+    Coder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAgentSessionState {
+    Starting,
+    Ready,
+    Working,
+    Waiting,
+    Failed,
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationAgentSession {
+    pub schema_version: u16,
+    pub id: ConversationAgentSessionId,
+    pub conversation_id: ConversationId,
+    pub role_id: RoleId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub kind: ConversationAgentKind,
+    pub state: ConversationAgentSessionState,
+    pub codex_thread_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt_revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDelegationState {
+    Requested,
+    Preparing,
+    Running,
+    Waiting,
+    Blocked,
+    Reported,
+    Integrating,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl AgentDelegationState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingDelegationBrief {
+    pub objective: String,
+    #[serde(default)]
+    pub scope: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub success_conditions: Vec<String>,
+    #[serde(default)]
+    pub context_references: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDelegation {
+    pub schema_version: u16,
+    pub id: AgentDelegationId,
+    pub conversation_id: ConversationId,
+    pub source_session_id: ConversationAgentSessionId,
+    pub coder_session_id: Option<ConversationAgentSessionId>,
+    pub project_id: ProjectId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub state: AgentDelegationState,
+    pub brief: CodingDelegationBrief,
+    pub task_id: Option<TaskId>,
+    pub run_id: Option<RunId>,
+    pub worktree_id: Option<ManagedWorktreeId>,
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessageKind {
+    Delegation,
+    Update,
+    Question,
+    Answer,
+    Amendment,
+    Report,
+    Cancellation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub schema_version: u16,
+    pub id: AgentMessageId,
+    pub conversation_id: ConversationId,
+    pub delegation_id: Option<AgentDelegationId>,
+    pub from_session_id: ConversationAgentSessionId,
+    pub to_session_id: ConversationAgentSessionId,
+    pub kind: AgentMessageKind,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlackboardEntryKind {
+    Goal,
+    Context,
+    Decision,
+    Status,
+    Evidence,
+    Question,
+    Answer,
+    Result,
+    Blocker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlackboardEntry {
+    pub schema_version: u16,
+    pub id: BlackboardEntryId,
+    pub conversation_id: ConversationId,
+    pub delegation_id: Option<AgentDelegationId>,
+    pub author_session_id: ConversationAgentSessionId,
+    pub kind: BlackboardEntryKind,
+    pub content: String,
+    #[serde(default)]
+    pub source_references: Vec<String>,
+    pub supersedes_id: Option<BlackboardEntryId>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedWorktreeState {
+    Preparing,
+    Ready,
+    Dirty,
+    Integrating,
+    Integrated,
+    Conflict,
+    Retained,
+    Removed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedWorktree {
+    pub schema_version: u16,
+    pub id: ManagedWorktreeId,
+    pub conversation_id: ConversationId,
+    pub delegation_id: AgentDelegationId,
+    pub project_id: ProjectId,
+    pub root: String,
+    pub branch: String,
+    pub base_head: String,
+    pub baseline_sha256: String,
+    pub state: ManagedWorktreeState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ConversationTeamState {
+    #[serde(default)]
+    pub sessions: Vec<ConversationAgentSession>,
+    #[serde(default)]
+    pub delegations: Vec<AgentDelegation>,
+    #[serde(default)]
+    pub messages: Vec<AgentMessage>,
+    #[serde(default)]
+    pub blackboard: Vec<BlackboardEntry>,
+    #[serde(default)]
+    pub worktrees: Vec<ManagedWorktree>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationState {
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRole {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationTurnState {
+    Pending,
+    Streaming,
+    WaitingForApproval,
+    Recovering,
+    Indeterminate,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationActivityKind {
+    Working,
+    Waiting,
+    ReasoningSummary,
+    Plan,
+    Command,
+    FileChange,
+    McpCall,
+    CollaborationCall,
+    WebSearch,
+    ImageView,
+    Approval,
+    Elicitation,
+    ContextCompaction,
+    Usage,
+    Recovery,
+    Interruption,
+    Failure,
+    Completion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationActivityState {
+    Running,
+    Completed,
+    Failed,
+    Declined,
+}
+
+/// A durable, user-visible projection of Codex work performed during a chat turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationActivity {
+    pub schema_version: u16,
+    pub conversation_id: ConversationId,
+    pub turn_id: ConversationTurnId,
+    pub codex_item_id: String,
+    pub kind: ConversationActivityKind,
+    pub state: ConversationActivityState,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub output: Option<String>,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    #[default]
+    Ask,
+    AutoReview,
+    FullAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ExecutionPreferences {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Conversation {
+    pub schema_version: u16,
+    pub id: ConversationId,
+    pub title: String,
+    pub project_id: Option<ProjectId>,
+    pub state: ConversationState,
+    pub execution_preferences: ExecutionPreferences,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Conversation {
+    #[must_use]
+    pub fn new(title: impl Into<String>, project_id: Option<ProjectId>) -> Self {
+        let now = Utc::now();
+        Self {
+            schema_version: CONVERSATION_SCHEMA_VERSION,
+            id: ConversationId::new(),
+            title: title.into(),
+            project_id,
+            state: ConversationState::Active,
+            execution_preferences: ExecutionPreferences::default(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub schema_version: u16,
+    pub id: ConversationMessageId,
+    pub conversation_id: ConversationId,
+    pub turn_id: ConversationTurnId,
+    pub role: ConversationRole,
+    pub content: String,
+    pub codex_item_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationTurn {
+    pub schema_version: u16,
+    pub id: ConversationTurnId,
+    pub conversation_id: ConversationId,
+    pub state: ConversationTurnState,
+    pub execution_preferences: ExecutionPreferences,
+    pub codex_thread_id: Option<String>,
+    pub codex_turn_id: Option<String>,
+    pub task_id: Option<TaskId>,
+    pub run_id: Option<RunId>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationView {
+    pub conversation: Conversation,
+    pub turns: Vec<ConversationTurn>,
+    pub messages: Vec<ConversationMessage>,
+    #[serde(default)]
+    pub activities: Vec<ConversationActivity>,
+    #[serde(default)]
+    pub team: ConversationTeamState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexThreadBinding {
+    pub conversation_id: Option<ConversationId>,
+    pub conversation_turn_id: Option<ConversationTurnId>,
+    pub run_id: Option<RunId>,
+    pub agent_instance_id: Option<AgentInstanceId>,
+    #[serde(default)]
+    pub agent_session_id: Option<ConversationAgentSessionId>,
+    #[serde(default)]
+    pub delegation_id: Option<AgentDelegationId>,
+    #[serde(default)]
+    pub role_id: Option<RoleId>,
+    #[serde(default)]
+    pub organization_revision_id: Option<OrganizationRevisionId>,
+    #[serde(default)]
+    pub workspace_id: Option<ManagedWorktreeId>,
+    pub codex_thread_id: String,
+    pub codex_turn_id: Option<String>,
+    pub codex_item_id: Option<String>,
+    pub codex_session_id: Option<String>,
+    pub binary_version: String,
+    pub protocol_version: String,
+    #[serde(default)]
+    pub ownership_source: Option<String>,
+    #[serde(default)]
+    pub manageable: bool,
+    #[serde(default)]
+    pub last_reconciled_item_id: Option<String>,
+    #[serde(default)]
+    pub recovery_state: CodexRecoveryState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexRecoveryState {
+    #[default]
+    Healthy,
+    Retryable,
+    Recovering,
+    Indeterminate,
+    Resumed,
+    Forked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexOwnedThread {
+    pub conversation_id: ConversationId,
+    pub codex_thread_id: String,
+    pub ownership_source: String,
+    pub manageable: bool,
+    pub recovery_state: CodexRecoveryState,
+    pub last_reconciled_item_id: Option<String>,
+    pub binary_version: String,
+    pub protocol_version: String,
+}
+
+impl TryFrom<CodexThreadBinding> for CodexOwnedThread {
+    type Error = &'static str;
+
+    fn try_from(binding: CodexThreadBinding) -> Result<Self, Self::Error> {
+        let conversation_id = binding
+            .conversation_id
+            .ok_or("binding is not associated with a conversation")?;
+        let ownership_source = binding
+            .ownership_source
+            .ok_or("binding ownership cannot be proven")?;
+        Ok(Self {
+            conversation_id,
+            codex_thread_id: binding.codex_thread_id,
+            ownership_source,
+            manageable: binding.manageable,
+            recovery_state: binding.recovery_state,
+            last_reconciled_item_id: binding.last_reconciled_item_id,
+            binary_version: binding.binary_version,
+            protocol_version: binding.protocol_version,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexItemEvent {
+    pub conversation_id: ConversationId,
+    pub conversation_turn_id: ConversationTurnId,
+    pub codex_thread_id: String,
+    pub codex_turn_id: Option<String>,
+    pub codex_item_id: String,
+    pub event_kind: String,
+    pub sequence: u64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexPendingRequestRecord {
+    pub request_id: String,
+    pub method: String,
+    pub supported: bool,
+    pub state: String,
+    pub received_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 

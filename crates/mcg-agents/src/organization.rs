@@ -48,11 +48,33 @@ impl OrganizationGenome {
                 to,
                 kind: RelationshipKind::DelegatesTo,
             })
-            .chain([RoleRelationship {
-                from: evaluator.id,
-                to: executive.id,
-                kind: RelationshipKind::ReportsTo,
-            }])
+            .chain([
+                RoleRelationship {
+                    from: evaluator.id,
+                    to: executive.id,
+                    kind: RelationshipKind::ReportsTo,
+                },
+                RoleRelationship {
+                    from: conversation.id,
+                    to: coder.id,
+                    kind: RelationshipKind::DelegatesTo,
+                },
+                RoleRelationship {
+                    from: conversation.id,
+                    to: coder.id,
+                    kind: RelationshipKind::SharesInformationWith,
+                },
+                RoleRelationship {
+                    from: coder.id,
+                    to: conversation.id,
+                    kind: RelationshipKind::SharesInformationWith,
+                },
+                RoleRelationship {
+                    from: coder.id,
+                    to: conversation.id,
+                    kind: RelationshipKind::ReportsTo,
+                },
+            ])
             .collect();
 
         Self {

@@ -11,6 +11,17 @@ pub const EVENT_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    ConversationCreated,
+    ConversationUpdated,
+    ConversationMessageRecorded,
+    ConversationTurnUpdated,
+    ConversationActivityUpdated,
+    ConversationAgentSessionUpdated,
+    AgentDelegationUpdated,
+    AgentMessageRecorded,
+    BlackboardEntryRecorded,
+    ManagedWorktreeUpdated,
+    CodexHarnessEvent,
     TaskCreated,
     TaskStarted,
     TaskStateChanged,
@@ -70,6 +81,17 @@ impl EventKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ConversationCreated => "conversation_created",
+            Self::ConversationUpdated => "conversation_updated",
+            Self::ConversationMessageRecorded => "conversation_message_recorded",
+            Self::ConversationTurnUpdated => "conversation_turn_updated",
+            Self::ConversationActivityUpdated => "conversation_activity_updated",
+            Self::ConversationAgentSessionUpdated => "conversation_agent_session_updated",
+            Self::AgentDelegationUpdated => "agent_delegation_updated",
+            Self::AgentMessageRecorded => "agent_message_recorded",
+            Self::BlackboardEntryRecorded => "blackboard_entry_recorded",
+            Self::ManagedWorktreeUpdated => "managed_worktree_updated",
+            Self::CodexHarnessEvent => "codex_harness_event",
             Self::TaskCreated => "task_created",
             Self::TaskStarted => "task_started",
             Self::TaskStateChanged => "task_state_changed",
@@ -134,6 +156,31 @@ impl EventKind {
     #[allow(clippy::too_many_lines)] // Exhaustive compatibility parser for the stable event registry.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "conversation_created" | "ConversationCreated" => Ok(Self::ConversationCreated),
+            "conversation_updated" | "ConversationUpdated" => Ok(Self::ConversationUpdated),
+            "conversation_message_recorded" | "ConversationMessageRecorded" => {
+                Ok(Self::ConversationMessageRecorded)
+            }
+            "conversation_turn_updated" | "ConversationTurnUpdated" => {
+                Ok(Self::ConversationTurnUpdated)
+            }
+            "conversation_activity_updated" | "ConversationActivityUpdated" => {
+                Ok(Self::ConversationActivityUpdated)
+            }
+            "conversation_agent_session_updated" | "ConversationAgentSessionUpdated" => {
+                Ok(Self::ConversationAgentSessionUpdated)
+            }
+            "agent_delegation_updated" | "AgentDelegationUpdated" => {
+                Ok(Self::AgentDelegationUpdated)
+            }
+            "agent_message_recorded" | "AgentMessageRecorded" => Ok(Self::AgentMessageRecorded),
+            "blackboard_entry_recorded" | "BlackboardEntryRecorded" => {
+                Ok(Self::BlackboardEntryRecorded)
+            }
+            "managed_worktree_updated" | "ManagedWorktreeUpdated" => {
+                Ok(Self::ManagedWorktreeUpdated)
+            }
+            "codex_harness_event" | "CodexHarnessEvent" => Ok(Self::CodexHarnessEvent),
             "task_created" | "TaskCreated" => Ok(Self::TaskCreated),
             "task_started" | "TaskStarted" => Ok(Self::TaskStarted),
             "task_state_changed" | "TaskStateChanged" => Ok(Self::TaskStateChanged),

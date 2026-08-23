@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    AgentInstanceId, AgentLeaseId, EvaluationId, OrganizationId, OrganizationRevisionId, RoleId,
-    RunId, TaskBudget, TaskId, ToolExecutionId, UsageRecordId, WorkItemId,
+    AgentInstanceId, AgentLeaseId, EvaluationId, OrganizationId, OrganizationRevisionId, ProjectId,
+    RoleId, RunId, TaskBudget, TaskId, ToolExecutionId, UsageRecordId, WorkItemId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,6 +12,27 @@ pub const ORGANIZATION_SCHEMA_VERSION: u16 = 2;
 const LEGACY_ORGANIZATION_SCHEMA_VERSION: u16 = 1;
 pub const AGENT_RUN_SCHEMA_VERSION: u16 = 1;
 pub const PROVIDER_PROXY_TURN_SCHEMA_VERSION: u16 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationAssignments {
+    pub global_organization_id: OrganizationId,
+    #[serde(default)]
+    pub project_overrides: BTreeMap<ProjectId, OrganizationId>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl OrganizationAssignments {
+    #[must_use]
+    pub fn resolve(
+        &self,
+        project_id: Option<ProjectId>,
+        task_override: Option<OrganizationId>,
+    ) -> OrganizationId {
+        task_override
+            .or_else(|| project_id.and_then(|id| self.project_overrides.get(&id).copied()))
+            .unwrap_or(self.global_organization_id)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrganizationGenome {
@@ -705,5 +726,25 @@ mod tests {
             ..OrganizationalMetrics::default()
         };
         assert!((metrics.overhead_ratio() - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn organization_assignment_resolution_has_explicit_precedence() {
+        let global = OrganizationId::new();
+        let project_choice = OrganizationId::new();
+        let task_choice = OrganizationId::new();
+        let project = ProjectId::new();
+        let assignments = OrganizationAssignments {
+            global_organization_id: global,
+            project_overrides: BTreeMap::from([(project, project_choice)]),
+            updated_at: Utc::now(),
+        };
+
+        assert_eq!(assignments.resolve(None, None), global);
+        assert_eq!(assignments.resolve(Some(project), None), project_choice);
+        assert_eq!(
+            assignments.resolve(Some(project), Some(task_choice)),
+            task_choice
+        );
     }
 }

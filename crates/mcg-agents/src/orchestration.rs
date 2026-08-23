@@ -61,6 +61,10 @@ pub struct AgentTurnRequest {
     pub external_tools: Vec<ExternalToolBinding>,
     pub estimated_output_tokens: u64,
     pub max_model_calls: u16,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,15 +601,21 @@ fn reasoning_control_for_route(
     route: &PlannedRoute,
     candidates: &[RouteCandidate],
 ) -> Option<ReasoningConfig> {
-    (!request.tools.is_empty()
-        && candidates.iter().any(|candidate| {
-            candidate.target == route.target
-                && candidate.model.capabilities.reasoning_control == Some(true)
-        }))
-    .then(|| ReasoningConfig {
-        effort: Some("none".into()),
-        summary: None,
-    })
+    let supports_control = candidates.iter().any(|candidate| {
+        candidate.target == route.target
+            && candidate.model.capabilities.reasoning_control == Some(true)
+    });
+    if !supports_control {
+        return None;
+    }
+    request
+        .reasoning_effort
+        .clone()
+        .or_else(|| (!request.tools.is_empty()).then(|| "none".into()))
+        .map(|effort| ReasoningConfig {
+            effort: Some(effort),
+            summary: None,
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -794,6 +804,7 @@ fn initial_model_request(request: &AgentTurnRequest) -> ModelRequest {
             "task_id": request.instance.task_id,
             "work_item_id": request.lease.work_item_id,
             "agent_lease_id": request.lease.id,
+            "service_tier": request.service_tier,
         }),
     }
 }
@@ -1142,6 +1153,8 @@ mod tests {
             external_tools: Vec::new(),
             estimated_output_tokens: 200,
             max_model_calls: 4,
+            reasoning_effort: None,
+            service_tier: None,
         }
     }
 
@@ -1200,6 +1213,12 @@ mod tests {
             reasoning_control_for_route(&request, &route, &request.route_candidates)
                 .and_then(|reasoning| reasoning.effort),
             Some("none".into())
+        );
+        request.reasoning_effort = Some("high".into());
+        assert_eq!(
+            reasoning_control_for_route(&request, &route, &request.route_candidates)
+                .and_then(|reasoning| reasoning.effort),
+            Some("high".into())
         );
     }
 
