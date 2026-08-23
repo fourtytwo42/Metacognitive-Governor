@@ -2435,6 +2435,60 @@ impl SqliteEventStore {
         Ok(recovered)
     }
 
+    /// Settles ordinary Chat turns and Chat-agent session states left active by a prior
+    /// service process. The restarted process cannot prove completion for an accepted Codex
+    /// turn and must never resend it automatically; a turn that was never durably accepted is
+    /// safe for the owner to retry.
+    pub fn recover_conversation_chat_work(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let turns = {
+            let mut statement = self.connection.prepare(
+                "SELECT turn_json FROM conversation_turns WHERE state IN ('pending', 'streaming', 'waiting_for_approval', 'recovering') ORDER BY created_at, turn_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect::<Result<Vec<ConversationTurn>, _>>()?
+        };
+        let mut recovered = 0_u64;
+        for mut turn in turns {
+            if turn.codex_turn_id.is_some() {
+                turn.state = mcg_domain::ConversationTurnState::Indeterminate;
+                turn.error = Some(
+                    "MCG restarted after Codex accepted this conversation turn, but completion could not be proven. It was not replayed automatically; retry as a new message if needed."
+                        .into(),
+                );
+            } else {
+                turn.state = mcg_domain::ConversationTurnState::Failed;
+                turn.error = Some(
+                    "MCG restarted before this conversation turn was durably accepted. It is safe to retry."
+                        .into(),
+                );
+            }
+            turn.updated_at = now;
+            self.save_conversation_turn(&turn)?;
+            recovered = recovered.saturating_add(1);
+        }
+
+        let sessions = {
+            let mut statement = self.connection.prepare(
+                "SELECT session_json FROM conversation_agent_sessions WHERE json_extract(session_json, '$.kind') = 'chat' AND json_extract(session_json, '$.state') IN ('starting', 'working', 'waiting') ORDER BY created_at, session_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect::<Result<Vec<ConversationAgentSession>, _>>()?
+        };
+        for mut session in sessions {
+            session.state = mcg_domain::ConversationAgentSessionState::Ready;
+            session.updated_at = now;
+            self.save_conversation_agent_session(&session)?;
+        }
+        Ok(recovered)
+    }
+
     pub fn save_codex_thread_binding(
         &mut self,
         binding: &CodexThreadBinding,
@@ -4278,6 +4332,105 @@ mod tests {
             .expect("view should load")
             .expect("conversation should exist");
         assert_eq!(view.activities, vec![activity]);
+    }
+
+    #[test]
+    fn restart_recovery_settles_orphaned_chat_turns_and_releases_chat_session() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        let conversation = Conversation::new("recover chat", None);
+        store
+            .create_conversation(&conversation, None)
+            .expect("conversation should persist");
+        let started_at = Utc::now();
+        let pending = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: conversation.id,
+            state: mcg_domain::ConversationTurnState::Streaming,
+            execution_preferences: mcg_domain::ExecutionPreferences::default(),
+            codex_thread_id: Some("chat-thread".into()),
+            codex_turn_id: None,
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: started_at,
+            updated_at: started_at,
+        };
+        let mut accepted = pending.clone();
+        accepted.id = ConversationTurnId::new();
+        accepted.codex_turn_id = Some("accepted-turn".into());
+        store
+            .save_conversation_turn(&pending)
+            .expect("pending turn");
+        store
+            .save_conversation_turn(&accepted)
+            .expect("accepted turn");
+        let chat = ConversationAgentSession {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::ConversationAgentSessionId::new(),
+            conversation_id: conversation.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: mcg_domain::OrganizationRevisionId::new(),
+            kind: mcg_domain::ConversationAgentKind::Chat,
+            state: mcg_domain::ConversationAgentSessionState::Working,
+            codex_thread_id: Some("chat-thread".into()),
+            model: Some("fixture".into()),
+            prompt_revision: 1,
+            created_at: started_at,
+            updated_at: started_at,
+        };
+        store
+            .save_conversation_agent_session(&chat)
+            .expect("chat session");
+
+        let recovered_at = started_at + chrono::Duration::seconds(1);
+        assert_eq!(
+            store
+                .recover_conversation_chat_work(recovered_at)
+                .expect("chat recovery"),
+            2
+        );
+        let view = store
+            .conversation_view(conversation.id)
+            .expect("view")
+            .expect("conversation");
+        let retryable = view
+            .turns
+            .iter()
+            .find(|turn| turn.codex_turn_id.is_none())
+            .expect("retryable turn");
+        let indeterminate = view
+            .turns
+            .iter()
+            .find(|turn| turn.codex_turn_id.is_some())
+            .expect("accepted turn");
+        assert_eq!(retryable.state, mcg_domain::ConversationTurnState::Failed);
+        assert!(
+            retryable
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("safe to retry"))
+        );
+        assert_eq!(
+            indeterminate.state,
+            mcg_domain::ConversationTurnState::Indeterminate
+        );
+        assert!(
+            indeterminate
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("not replayed"))
+        );
+        assert_eq!(
+            view.team.sessions[0].state,
+            mcg_domain::ConversationAgentSessionState::Ready
+        );
+        assert_eq!(
+            store
+                .recover_conversation_chat_work(recovered_at)
+                .expect("idempotent chat recovery"),
+            0
+        );
     }
 
     #[test]

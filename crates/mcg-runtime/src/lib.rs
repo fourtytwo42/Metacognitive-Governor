@@ -1461,6 +1461,21 @@ enum ChatAgentDecision {
     },
 }
 
+fn parse_chat_agent_decision(value: &str) -> Option<ChatAgentDecision> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    serde_json::from_str(value).ok().or_else(|| {
+        let fenced = value
+            .strip_prefix("```json")
+            .or_else(|| value.strip_prefix("```"))?
+            .strip_suffix("```")?
+            .trim();
+        serde_json::from_str(fenced).ok()
+    })
+}
+
 fn chat_agent_decision_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1819,6 +1834,7 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        store.recover_conversation_chat_work(Utc::now())?;
         let recovered_conversation_delegations = store.recover_conversation_team_work(Utc::now())?;
         let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
         let startup_now = Utc::now();
@@ -1921,6 +1937,7 @@ impl AppRuntime {
         let recovery = store.recover_projections()?;
         let recovered_tool_leases = store.recover_tool_leases()?;
         let agent_recovery = store.recover_agent_work(Utc::now())?;
+        store.recover_conversation_chat_work(Utc::now())?;
         let recovered_conversation_delegations = store.recover_conversation_team_work(Utc::now())?;
         let recovered_schedule_occurrences = store.recover_schedule_claims(Utc::now())?;
         let startup_now = Utc::now();
@@ -4872,77 +4889,77 @@ impl AppRuntime {
                     response: result.text.clone(),
                 })
             } else {
-                serde_json::from_str::<ChatAgentDecision>(&result.text).ok()
+                parse_chat_agent_decision(&result.text)
             };
-            let Some(decision) = decision else {
-                return Err(StorageError::InvalidData(
-                    "schema-39 Chat decision was not valid structured output".into(),
-                )
-                .into());
-            };
-            turn.codex_turn_id = Some(result.turn_id);
-            let response = match decision {
-                ChatAgentDecision::Respond { response } => response,
-                ChatAgentDecision::DelegateCode {
-                    objective,
-                    scope,
-                    constraints,
-                    success_conditions,
-                    context_references,
-                } => {
-                    let brief = CodingDelegationBrief {
+            // A pinned Codex build can complete an output-schema turn without publishing an
+            // assistant item. An empty or malformed compatibility decision must fall through
+            // to the ordinary Chat turn. Returning here used to leak a durable `streaming`
+            // state and surface a generic 400 after Codex had already completed the attempt.
+            if let Some(decision) = decision {
+                turn.codex_turn_id = Some(result.turn_id);
+                let response = match decision {
+                    ChatAgentDecision::Respond { response } => response,
+                    ChatAgentDecision::DelegateCode {
                         objective,
                         scope,
                         constraints,
                         success_conditions,
                         context_references,
-                    };
-                    match self
-                        .launch_coding_delegation(
-                            conversation.clone(),
-                            chat_session.clone(),
-                            thread_id.clone(),
-                            codex_preferences.clone(),
-                            brief,
-                            turn.id,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await
-                    {
-                        Ok((_, response)) => response,
-                        Err(error) => format!(
-                            "I could not start another Coding Agent safely: {error}. No project files were changed."
-                        ),
+                    } => {
+                        let brief = CodingDelegationBrief {
+                            objective,
+                            scope,
+                            constraints,
+                            success_conditions,
+                            context_references,
+                        };
+                        match self
+                            .launch_coding_delegation(
+                                conversation.clone(),
+                                chat_session.clone(),
+                                thread_id.clone(),
+                                codex_preferences.clone(),
+                                brief,
+                                turn.id,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok((_, response)) => response,
+                            Err(error) => format!(
+                                "I could not start another Coding Agent safely: {error}. No project files were changed."
+                            ),
+                        }
                     }
-                }
-            };
-            let assistant_message = ConversationMessage {
-                schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
-                id: ConversationMessageId::new(),
-                conversation_id,
-                turn_id: turn.id,
-                role: ConversationRole::Assistant,
-                content: response,
-                codex_item_id: None,
-                created_at: Utc::now(),
-            };
-            let event = self
-                .store()?
-                .save_conversation_message(&assistant_message)?;
-            let _ = self.event_sender.send(event);
-            turn.state = ConversationTurnState::Completed;
-            turn.updated_at = Utc::now();
-            let event = self.store()?.save_conversation_turn(&turn)?;
-            let _ = self.event_sender.send(event);
-            chat_session.state = ConversationAgentSessionState::Ready;
-            chat_session.updated_at = Utc::now();
-            let event = self
-                .store()?
-                .save_conversation_agent_session(&chat_session)?;
-            let _ = self.event_sender.send(event);
-            return self.conversation(conversation_id);
+                };
+                let assistant_message = ConversationMessage {
+                    schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                    id: ConversationMessageId::new(),
+                    conversation_id,
+                    turn_id: turn.id,
+                    role: ConversationRole::Assistant,
+                    content: response,
+                    codex_item_id: None,
+                    created_at: Utc::now(),
+                };
+                let event = self
+                    .store()?
+                    .save_conversation_message(&assistant_message)?;
+                let _ = self.event_sender.send(event);
+                turn.state = ConversationTurnState::Completed;
+                turn.updated_at = Utc::now();
+                let event = self.store()?.save_conversation_turn(&turn)?;
+                let _ = self.event_sender.send(event);
+                chat_session.state = ConversationAgentSessionState::Ready;
+                chat_session.updated_at = Utc::now();
+                let event = self
+                    .store()?
+                    .save_conversation_agent_session(&chat_session)?;
+                let _ = self.event_sender.send(event);
+                return self.conversation(conversation_id);
+            }
         }
 
         let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -18534,6 +18551,22 @@ mod tests {
     };
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn schema39_chat_decision_parser_falls_back_on_empty_or_invalid_output() {
+        assert!(parse_chat_agent_decision("").is_none());
+        assert!(parse_chat_agent_decision("not structured output").is_none());
+        assert!(matches!(
+            parse_chat_agent_decision(r#"{"action":"respond","response":"Ready"}"#),
+            Some(ChatAgentDecision::Respond { response }) if response == "Ready"
+        ));
+        assert!(matches!(
+            parse_chat_agent_decision(
+                "```json\n{\"action\":\"respond\",\"response\":\"Ready\"}\n```"
+            ),
+            Some(ChatAgentDecision::Respond { response }) if response == "Ready"
+        ));
+    }
 
     #[test]
     fn published_site_result_extracts_nested_site_url_and_name() {

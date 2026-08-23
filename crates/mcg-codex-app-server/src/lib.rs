@@ -29,6 +29,7 @@ pub use protocol_generated::{
 
 pub const CODEX_BINARY_VERSION: &str = protocol_generated::GENERATED_CODEX_VERSION;
 pub const CODEX_PROTOCOL_VERSION: &str = protocol_generated::GENERATED_PROTOCOL_VERSION;
+const WINDOWS_SANDBOX_READINESS_METHOD: &str = "windowsSandbox/readiness";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexTurnProgress {
@@ -1330,7 +1331,7 @@ impl CodexAppServerHarness {
     }
 
     pub async fn windows_sandbox_readiness(&self) -> Result<Value, CodexHarnessError> {
-        self.request("windowsSandbox/readiness/read", json!({}))
+        self.request(WINDOWS_SANDBOX_READINESS_METHOD, json!({}))
             .await
     }
 
@@ -1606,6 +1607,10 @@ mod tests {
             protocol_generated::GENERATED_PROTOCOL_VERSION,
             CODEX_PROTOCOL_VERSION
         );
+        assert_eq!(WINDOWS_SANDBOX_READINESS_METHOD, "windowsSandbox/readiness");
+        let schema_text = String::from_utf8_lossy(schema);
+        assert!(schema_text.contains(r#""windowsSandbox/readiness""#));
+        assert!(!schema_text.contains(r#""windowsSandbox/readiness/read""#));
         assert!(protocol_generated::SERVER_NOTIFICATION_METHODS.contains(&"item/started"));
         assert!(
             protocol_generated::SERVER_REQUEST_METHODS.contains(&"mcpServer/elicitation/request")
