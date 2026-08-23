@@ -11,6 +11,18 @@ export interface LocalServiceStatus {
   detail: string;
 }
 
+export interface OpenInApplication {
+  id: string;
+  label: string;
+  available: boolean;
+}
+
+export interface TerminalCommandResult {
+  working_directory: string;
+  output: string;
+  exit_code: number;
+}
+
 export interface UpdateConfiguration {
   schema_version: number;
   configured: boolean;
@@ -257,9 +269,296 @@ export interface ProviderModelCatalog {
   discovered_at: string;
 }
 
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | (string & {});
+export type ExecutionSpeed = "standard" | "fast";
+export type ApprovalMode = "ask" | "auto_review" | "full_access";
+
+export interface ChatRunPreferences {
+  provider_id?: string;
+  model_id?: string;
+  model_label?: string;
+  reasoning_effort: ReasoningEffort;
+  speed: ExecutionSpeed;
+  service_tier?: string;
+  approval_mode: ApprovalMode;
+}
+
+export interface ExecutionPreferences {
+  model_id?: string;
+  reasoning_effort?: string;
+  service_tier?: string;
+  approval_mode?: ApprovalMode;
+}
+
+export type ConversationState = "active" | "archived";
+export type ConversationRole = "user" | "assistant" | "system";
+export type ConversationTurnState = "pending" | "streaming" | "waiting_for_approval" | "recovering" | "indeterminate" | "completed" | "failed" | "interrupted";
+
+export interface Conversation {
+  schema_version: number;
+  id: string;
+  title: string;
+  project_id?: string;
+  state: ConversationState;
+  execution_preferences: ExecutionPreferences;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationMessage {
+  schema_version: number;
+  id: string;
+  conversation_id: string;
+  turn_id: string;
+  role: ConversationRole;
+  content: string;
+  codex_item_id?: string;
+  created_at: string;
+}
+
+export interface ConversationTurn {
+  schema_version: number;
+  id: string;
+  conversation_id: string;
+  state: ConversationTurnState;
+  execution_preferences: ExecutionPreferences;
+  codex_thread_id?: string;
+  codex_turn_id?: string;
+  task_id?: string;
+  run_id?: string;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ConversationActivityKind =
+  | "working" | "waiting" | "reasoning_summary" | "plan" | "command" | "file_change"
+  | "mcp_call" | "collaboration_call" | "web_search" | "image_view" | "approval"
+  | "elicitation" | "context_compaction" | "usage" | "recovery" | "interruption"
+  | "failure" | "completion";
+export type ConversationActivityState = "running" | "completed" | "failed" | "declined";
+
+export interface ConversationActivity {
+  schema_version: number;
+  conversation_id: string;
+  turn_id: string;
+  codex_item_id: string;
+  kind: ConversationActivityKind;
+  state: ConversationActivityState;
+  command?: string;
+  cwd?: string;
+  output?: string;
+  exit_code?: number;
+  duration_ms?: number;
+  started_at: string;
+  updated_at: string;
+}
+
+export type ConversationAgentKind = "chat" | "coder";
+export type ConversationAgentSessionState = "starting" | "ready" | "working" | "waiting" | "failed" | "retired";
+export interface ConversationAgentSession {
+  schema_version: number;
+  id: string;
+  conversation_id: string;
+  role_id: string;
+  organization_revision_id: string;
+  kind: ConversationAgentKind;
+  state: ConversationAgentSessionState;
+  codex_thread_id?: string;
+  model?: string;
+  prompt_revision: number;
+  created_at: string;
+  updated_at: string;
+}
+export type AgentDelegationState = "requested" | "preparing" | "running" | "waiting" | "blocked" | "reported" | "integrating" | "completed" | "failed" | "cancelled";
+export interface AgentDelegation {
+  schema_version: number;
+  id: string;
+  conversation_id: string;
+  source_session_id: string;
+  coder_session_id?: string;
+  project_id: string;
+  organization_revision_id: string;
+  state: AgentDelegationState;
+  brief: { objective: string; scope: string[]; constraints: string[]; success_conditions: string[]; context_references: string[] };
+  task_id?: string;
+  run_id?: string;
+  worktree_id?: string;
+  summary?: string;
+  changed_files: string[];
+  checks: string[];
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface AgentMessage {
+  schema_version: number; id: string; conversation_id: string; delegation_id?: string;
+  from_session_id: string; to_session_id: string;
+  kind: "delegation" | "update" | "question" | "answer" | "amendment" | "report" | "cancellation";
+  content: string; created_at: string;
+}
+export interface BlackboardEntry {
+  schema_version: number; id: string; conversation_id: string; delegation_id?: string;
+  author_session_id: string; kind: "goal" | "context" | "decision" | "status" | "evidence" | "question" | "answer" | "result" | "blocker";
+  content: string; source_references: string[]; supersedes_id?: string; created_at: string;
+}
+export interface ManagedWorktree {
+  schema_version: number; id: string; conversation_id: string; delegation_id: string; project_id: string;
+  root: string; branch: string; base_head: string; baseline_sha256: string;
+  state: "preparing" | "ready" | "dirty" | "integrating" | "integrated" | "conflict" | "retained" | "removed" | "failed";
+  created_at: string; updated_at: string;
+}
+export interface ConversationTeamState {
+  sessions: ConversationAgentSession[];
+  delegations: AgentDelegation[];
+  messages: AgentMessage[];
+  blackboard: BlackboardEntry[];
+  worktrees: ManagedWorktree[];
+}
+
+export interface ConversationView {
+  conversation: Conversation;
+  turns: ConversationTurn[];
+  messages: ConversationMessage[];
+  activities: ConversationActivity[];
+  team?: ConversationTeamState;
+}
+
+export interface ConversationListResponse { conversations: Conversation[]; }
+export interface CreateConversationRequest { title?: string; project_id?: string; execution_preferences: ExecutionPreferences; }
+export interface UpdateConversationRequest { title: string; project_id?: string; }
+export interface SendConversationMessageRequest { content: string; execution_preferences?: ExecutionPreferences; }
+
+export interface CodexReasoningEffort { reasoningEffort: string; description: string; }
+export interface CodexServiceTier { id: string; name: string; description: string; }
+export interface CodexModel {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: CodexReasoningEffort[];
+  inputModalities: string[];
+  serviceTiers: CodexServiceTier[];
+  defaultServiceTier?: string;
+}
+export interface CodexAccount { authenticated: boolean; account_type?: string; email?: string; plan_type?: string; requires_openai_auth: boolean; }
+export interface CodexLoginStart { loginId: string; authUrl: string; }
+export interface CodexRateLimitWindow { used_percent: number; remaining_percent: number; resets_at?: number; }
+export interface CodexRateLimitBucket extends CodexRateLimitWindow { limit_id: string; limit_name?: string; }
+export interface CodexRateLimits {
+  plan_type?: string;
+  primary?: CodexRateLimitWindow;
+  secondary?: CodexRateLimitWindow;
+  buckets: Record<string, CodexRateLimitBucket>;
+  credits?: unknown;
+  refreshed_at: string;
+}
+export interface CodexHarnessStatus {
+  bundled_version: string;
+  protocol_version: string;
+  schema_sha256: string;
+  process_state: "stopped" | "starting" | "ready" | "failed";
+  initialized: boolean;
+  account_state: string;
+  active_threads: number;
+  pending_approvals: number;
+  pending_requests: number;
+  unsupported_requests: number;
+  last_unsupported_request?: string;
+  last_event?: string;
+  last_notification?: string;
+  last_unknown_notification?: string;
+  restart_count: number;
+  configuration_state: string;
+  windows_sandbox_state: string;
+  mcp_bridge_state: string;
+  recovery_state: string;
+}
+
+export interface CodexConfigurationStatus {
+  requirements: unknown;
+  provider_capabilities: unknown;
+  windows_sandbox: unknown;
+}
+
+export interface CodexPendingRequest {
+  request_id: number | string;
+  method: string;
+  params: unknown;
+  supported: boolean;
+  received_at: string;
+}
+
+export interface CodexOwnedThread {
+  conversation_id: string;
+  codex_thread_id: string;
+  ownership_source: string;
+  manageable: boolean;
+  recovery_state: string;
+  last_reconciled_item_id?: string;
+}
+
+export interface CodexStableDiscovery {
+  skills: unknown[];
+  hooks: unknown[];
+  appsAvailable: boolean;
+  appsUnavailableReason?: string;
+  refreshedAt: string;
+}
+
+export type CodexReviewTarget =
+  | { type: "uncommittedChanges" }
+  | { type: "baseBranch"; branch: string }
+  | { type: "commit"; sha: string; title?: string }
+  | { type: "custom"; instructions: string };
+export type CodexReviewDelivery = "inline" | "detached";
+export interface CodexReviewResult { reviewThreadId: string; turn: unknown; delivery: CodexReviewDelivery; }
+export interface CodexCommandExecRequest { command: string[]; cwd?: string; timeoutMs?: number; writable?: boolean; }
+export interface CodexCommandExecResult { exitCode: number; stdout: string; stderr: string; }
+export interface CodexFsWatch { watchId: string; path: string; }
+
 export interface ProviderListItem {
   connection: ProviderConnection;
   catalog?: ProviderModelCatalog;
+  profile?: OAuthAccountProfile;
+}
+
+export interface OAuthAccountProfile {
+  display_name?: string;
+  username?: string;
+  email?: string;
+  avatar_url?: string;
+  plan_type?: string;
+  account_structure?: string;
+  account_role?: string;
+  usage?: CodexUsageSummary;
+}
+
+export interface CodexUsageWindow {
+  used_percent: number;
+  remaining_percent: number;
+  window_seconds?: number;
+  reset_at?: number;
+}
+
+export interface CodexAdditionalRateLimit {
+  name: string;
+  primary_window?: CodexUsageWindow;
+  secondary_window?: CodexUsageWindow;
+}
+
+export interface CodexUsageSummary {
+  primary_window?: CodexUsageWindow;
+  secondary_window?: CodexUsageWindow;
+  additional_rate_limits: CodexAdditionalRateLimit[];
+  allowed?: boolean;
+  limit_reached?: boolean;
+  credits_unlimited?: boolean;
+  has_credits?: boolean;
+  overage_limit_reached?: boolean;
 }
 
 export interface ProviderListResponse {
@@ -387,7 +686,15 @@ export interface OrganizationGenome {
     kind: string;
     name: string;
     purpose: string;
+    prompt_policy: string;
+    model_policy: {
+      capability_class: string;
+      preferred_models: string[];
+      allow_fallback: boolean;
+      max_escalation_tier: number;
+    };
     tool_capabilities: string[];
+    memory_namespace: string;
   }>;
   relationships: Array<{ from: string; to: string; kind: string }>;
   policy: {
@@ -408,9 +715,106 @@ export interface OrganizationGenome {
 
 export interface OrganizationListResponse { organizations: OrganizationGenome[] }
 export interface OrganizationHistoryResponse { revisions: OrganizationGenome[] }
+export interface OrganizationAssignments {
+  global_organization_id: string;
+  project_overrides: Record<string, string>;
+  updated_at: string;
+}
+export interface OrganizationAssignmentResponse { assignments: OrganizationAssignments }
+export interface OrganizationRevisionPreview {
+  organization: OrganizationGenome;
+  changes: string[];
+  warnings: string[];
+}
 export interface OrganizationMutationResponse {
   organization: OrganizationGenome;
   event: { sequence: number; kind: string; occurred_at: string; payload?: Record<string, unknown> };
+}
+
+export interface AgentRunView {
+  run: {
+    schema_version: number;
+    id: string;
+    task_id: string;
+    organization_revision_id: string;
+    state: "planned" | "running" | "waiting" | "recovering" | "completed" | "failed" | "cancelled";
+    metrics: Record<string, number>;
+    created_at: string;
+    updated_at: string;
+    completed_at?: string;
+  };
+  plan: {
+    run_id: string;
+    task_id: string;
+    organization_revision_id: string;
+    items: Array<{ id: string; goal: string; assigned_role: string; state: string; dependencies: string[]; budget: Record<string, unknown>; risk_notes: string[] }>;
+    selected_roles: string[];
+    selection_reason: string;
+    estimated_organizational_overhead: number;
+    created_at: string;
+  };
+  instances: Array<{
+    id: string; role_id: string; state: string;
+    model?: { provider_connection_id: string; model_id: string; route_reason: string };
+    confidence: { basis_points: number; sample_size?: number };
+    created_at: string; updated_at: string;
+  }>;
+  leases: Array<{
+    id: string; instance_id: string; work_item_id: string; goal: string; state: string;
+    budget: { limit: Record<string, number | null>; consumed_tokens: number; consumed_cost_usd: number; elapsed_seconds: number };
+    tool_permissions: string[]; expires_at: string; heartbeat_at: string;
+  }>;
+  usage: Array<{ id: string; instance_id?: string; kind: string; model_id?: string; input_tokens: number; cached_input_tokens: number; output_tokens: number; cost_usd?: number; duration_ms: number; occurred_at: string }>;
+  evaluations: Array<{ id: string; outcome: string; confidence: { basis_points: number }; evidence: Array<{ method: string; passed: boolean; detail: string }> }>;
+  results: Array<{
+    pinned_route: Record<string, unknown>;
+    response: {
+      contract_version: number;
+      id: string;
+      model: string;
+      status?: string;
+      output: Array<
+        | { type: "message"; role: string; content: Array<{ type: "text"; text: string } | Record<string, unknown>> }
+        | { type: "refusal"; text: string }
+        | Record<string, unknown>
+      >;
+      usage: Record<string, number>;
+      provider_metadata?: unknown;
+    };
+    model_calls: Array<Record<string, unknown>>;
+    tool_outcomes: Array<Record<string, unknown>>;
+  }>;
+}
+
+export interface GovernorOverview {
+  status: RuntimeStatus;
+  autonomy: AutonomyPreset;
+  assignments: OrganizationAssignments;
+  active_organization: OrganizationGenome;
+  active_runs: number;
+  recent_runs: number;
+  subsystems: Array<{ id: string; label: string; state: string; detail: string }>;
+}
+
+export interface AgentRunListResponse { runs: AgentRunView[] }
+
+export interface RuntimeStatus {
+  service: string;
+  version: string;
+  state: string;
+  advanced_mode: boolean;
+  autonomy: AutonomyPreset;
+  shadow_experiments: boolean;
+  recovered_events: number;
+  recovered_tasks: number;
+  recovered_tool_leases: number;
+  recovered_agent_runs: number;
+  recovered_agent_instances: number;
+  recovered_agent_leases: number;
+  recovered_schedule_occurrences: number;
+  recovered_platform_sessions: number;
+  expired_platform_sessions: number;
+  recovered_computer_action_batches: number;
 }
 
 export interface PortableOrganizationGenome {
@@ -576,6 +980,7 @@ export interface TaskEnvelope {
 export interface CreateTaskRequest {
   goal: string;
   project_id?: string;
+  thread_id?: string;
   constraints: string[];
   success_conditions: string[];
   risk?: RiskLevel;
@@ -862,6 +1267,17 @@ export interface Site {
   created_at: string;
   updated_at: string;
 }
+export interface CodexSiteInventoryItem {
+  id: string;
+  display_name: string;
+  description?: string;
+  public_url: string;
+  screenshot_url?: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface CodexSiteInventory { sites: CodexSiteInventoryItem[]; }
 export interface SiteRevision { id: string; site_id: string; revision: number; definition_hash: string; reason: string; created_at: string; }
 export interface SiteHealthCheck { id: string; site_id: string; state: "healthy" | "degraded" | "unavailable"; status_code?: number; latency_ms?: number; detail: string; response_artifact_sha256?: string; checked_at: string; }
 export interface SiteDeployment { id: string; site_id: string; site_revision: number; state: "executing" | "succeeded" | "failed" | "uncertain"; detail: string; log_artifact_sha256: string[]; requested_at: string; finished_at?: string; }
@@ -1088,7 +1504,7 @@ export interface ToolAuditResponse {
 export interface LaunchTaskResponse {
   task: TaskEnvelope;
   replayed: boolean;
-  run: { run: { id: string; state: string } };
+  run: AgentRunView;
   execution: {
     state: "not_started" | "awaiting_approval" | "awaiting_evaluation" | "blocked" | "completed" | "failed";
     detail: string;
@@ -1278,11 +1694,66 @@ export function listTasks(): Promise<TaskListResponse> {
   return invoke("list_tasks");
 }
 
+export function listConversations(): Promise<ConversationListResponse> {
+  return invoke("list_conversations", { includeArchived: true });
+}
+
+export function createConversation(request: CreateConversationRequest): Promise<Conversation> {
+  return invoke("create_conversation", { request });
+}
+
+export function getConversation(conversationId: string): Promise<ConversationView> {
+  return invoke("get_conversation", { conversationId });
+}
+
+export function updateConversation(conversationId: string, request: UpdateConversationRequest): Promise<Conversation> {
+  return invoke("update_conversation", { conversationId, request });
+}
+
+export function archiveConversation(conversationId: string, archived = true): Promise<Conversation> {
+  return invoke("archive_conversation", { conversationId, archived });
+}
+
+export function sendConversationMessage(conversationId: string, request: SendConversationMessageRequest): Promise<ConversationView> {
+  return invoke("send_conversation_message", { conversationId, request });
+}
+
+export function interruptConversationTurn(conversationId: string, turnId: string): Promise<ConversationTurn> {
+  return invoke("interrupt_conversation_turn", { conversationId, turnId });
+}
+
+export function steerConversationTurn(conversationId: string, turnId: string, content: string): Promise<ConversationView> {
+  return invoke("steer_conversation_turn", { conversationId, turnId, content });
+}
+
+export function getCodexModels(): Promise<CodexModel[]> { return invoke("codex_models"); }
+export function getCodexAccount(): Promise<CodexAccount> { return invoke("codex_account"); }
+export function getCodexRateLimits(): Promise<CodexRateLimits> { return invoke("codex_rate_limits"); }
+export function getCodexHarnessStatus(): Promise<CodexHarnessStatus> { return invoke("codex_harness_status"); }
+export function getCodexAccountUsage(): Promise<unknown> { return invoke("codex_account_usage"); }
+export function getCodexStableDiscovery(cwds: string[] = [], forceReload = false): Promise<CodexStableDiscovery> { return invoke("codex_stable_discovery", { cwds, forceReload }); }
+export function getCodexConfigurationStatus(): Promise<CodexConfigurationStatus> { return invoke("codex_configuration_status"); }
+export function getCodexPendingRequests(): Promise<CodexPendingRequest[]> { return invoke("codex_pending_requests"); }
+export function getCodexOwnedThreads(): Promise<CodexOwnedThread[]> { return invoke("codex_owned_threads"); }
+export function reconcileOwnedCodexThread(conversationId: string): Promise<unknown> { return invoke("reconcile_owned_codex_thread", { conversationId }); }
+export function forkOwnedCodexThread(conversationId: string): Promise<unknown> { return invoke("fork_owned_codex_thread", { conversationId }); }
+export function compactOwnedCodexThread(conversationId: string): Promise<unknown> { return invoke("compact_owned_codex_thread", { conversationId }); }
+export function unsubscribeOwnedCodexThread(conversationId: string): Promise<unknown> { return invoke("unsubscribe_owned_codex_thread", { conversationId }); }
+export function getOwnedCodexThreadHistory(conversationId: string): Promise<unknown> { return invoke("owned_codex_thread_history", { conversationId }); }
+export function startOwnedCodexReview(conversationId: string, target: CodexReviewTarget, delivery: CodexReviewDelivery): Promise<CodexReviewResult> { return invoke("start_owned_codex_review", { conversationId, target, delivery }); }
+export function execGovernedCodexCommand(conversationId: string, request: CodexCommandExecRequest): Promise<CodexCommandExecResult> { return invoke("exec_governed_codex_command", { conversationId, request }); }
+export function watchConversationProject(conversationId: string): Promise<CodexFsWatch> { return invoke("watch_conversation_project", { conversationId }); }
+export function unwatchConversationProject(conversationId: string): Promise<unknown> { return invoke("unwatch_conversation_project", { conversationId }); }
+export function startCodexLogin(): Promise<CodexLoginStart> { return invoke("start_codex_login"); }
+export function cancelCodexLogin(loginId: string): Promise<unknown> { return invoke("cancel_codex_login", { loginId }); }
+export function logoutCodexAccount(): Promise<unknown> { return invoke("logout_codex_account"); }
+
 export function listSchedules(): Promise<ScheduleListResponse> {
   return invoke("list_schedules");
 }
 
 export function listSites(): Promise<SiteListResponse> { return invoke("list_sites"); }
+export function listCodexSites(): Promise<CodexSiteInventory> { return invoke("list_codex_sites"); }
 export function registerSite(request: CreateSiteRequest): Promise<Site> { return invoke("register_site", { request }); }
 export function updateSite(siteId: string, request: UpdateSiteRequest): Promise<SiteMutation> { return invoke("update_site", { siteId, request }); }
 export function loadSiteRevisions(siteId: string): Promise<SiteRevisionListResponse> { return invoke("site_revisions", { siteId }); }
@@ -1292,6 +1763,13 @@ export function getSiteMonitor(siteId: string): Promise<SiteMonitor> { return in
 export function createSiteMonitor(siteId: string, request: CreateSiteMonitorRequest): Promise<SiteMonitorMutation> { return invoke("create_site_monitor", { siteId, request }); }
 export function loadSiteDeployments(siteId: string): Promise<SiteDeploymentListResponse> { return invoke("site_deployment_history", { siteId }); }
 export function deploySite(siteId: string, deploymentId: string): Promise<SiteDeploymentMutation> { return invoke("deploy_site", { siteId, request: { deployment_id: deploymentId } }); }
+export interface SiteBrowserBounds { x: number; y: number; width: number; height: number; }
+export type SiteBrowserAction = "back" | "forward" | "reload";
+export function openSiteInAppBrowser(tabId: string, url: string, bounds: SiteBrowserBounds): Promise<void> { return invoke("open_site_in_app_browser", { tabId, url, bounds }); }
+export function updateSiteInAppBrowser(tabId: string, bounds: SiteBrowserBounds | null, visible: boolean): Promise<void> { return invoke("update_site_in_app_browser", { tabId, bounds, visible }); }
+export function closeSiteInAppBrowser(tabId: string): Promise<void> { return invoke("close_site_in_app_browser", { tabId }); }
+export function controlSiteInAppBrowser(tabId: string, action: SiteBrowserAction): Promise<void> { return invoke("control_site_in_app_browser", { tabId, action }); }
+export function openSiteExternalUrl(url: string): Promise<void> { return invoke("open_site_external_url", { url }); }
 export function listSshHosts(): Promise<SshHostListResponse> { return invoke("list_ssh_hosts"); }
 export function registerSshHost(request: CreateSshHostRequest): Promise<SshHost> { return invoke("register_ssh_host", { request }); }
 export function updateSshHost(hostId: string, request: UpdateSshHostRequest): Promise<SshHostMutation> { return invoke("update_ssh_host", { hostId, request }); }
@@ -1393,39 +1871,38 @@ export function transitionTask(taskId: string, state: TaskState): Promise<TaskEn
   return invoke("transition_task", { taskId, request: { state } });
 }
 
-export function launchTask(taskId: string): Promise<LaunchTaskResponse> {
+function launchRequest(preferences?: ChatRunPreferences, organizationId?: string) {
+  return {
+    organization_id: organizationId || null,
+    context_token_budget: 8192,
+    requested_tools: [],
+    estimated_output_tokens: 8192,
+    max_model_calls: 16,
+    provider_id: preferences?.provider_id || null,
+    model_id: preferences?.model_id || null,
+    reasoning_effort: preferences?.reasoning_effort ?? "medium",
+    service_tier: preferences?.speed === "fast" ? "priority" : null
+  };
+}
+
+export function launchTask(taskId: string, organizationId?: string, preferences?: ChatRunPreferences): Promise<LaunchTaskResponse> {
   return invoke("launch_task", {
     taskId,
-    request: {
-      context_token_budget: 8192,
-      requested_tools: [],
-      estimated_output_tokens: 8192,
-      max_model_calls: 16
-    }
+    request: launchRequest(preferences, organizationId)
   });
 }
 
-export function retryTask(taskId: string): Promise<LaunchTaskResponse> {
+export function retryTask(taskId: string, preferences?: ChatRunPreferences): Promise<LaunchTaskResponse> {
   return invoke("retry_task", {
     taskId,
-    request: {
-      context_token_budget: 8192,
-      requested_tools: [],
-      estimated_output_tokens: 8192,
-      max_model_calls: 16
-    }
+    request: launchRequest(preferences)
   });
 }
 
-export function resumeTask(taskId: string): Promise<LaunchTaskResponse> {
+export function resumeTask(taskId: string, preferences?: ChatRunPreferences): Promise<LaunchTaskResponse> {
   return invoke("resume_task", {
     taskId,
-    request: {
-      context_token_budget: 8192,
-      requested_tools: [],
-      estimated_output_tokens: 8192,
-      max_model_calls: 16
-    }
+    request: launchRequest(preferences)
   });
 }
 
@@ -1577,12 +2054,82 @@ export function loadManagedProjectMemory(projectId: string): Promise<ManagedMemo
   return invoke("managed_project_memory", { projectId });
 }
 
+export function listOpenInApplications(): Promise<OpenInApplication[]> {
+  return invoke("list_open_in_applications");
+}
+
+export function openWorkspaceIn(application: string, workingDirectory: string): Promise<void> {
+  return invoke("open_workspace_in", { application, workingDirectory });
+}
+
+export function runTerminalCommand(workingDirectory: string, command: string): Promise<TerminalCommandResult> {
+  return invoke("run_terminal_command", { request: { working_directory: workingDirectory, command } });
+}
+
 export function listSupervisionObservations(): Promise<SupervisionObservationListResponse> {
   return invoke("list_supervision_observations");
 }
 
 export function listOrganizations(): Promise<OrganizationListResponse> {
   return invoke("list_organizations");
+}
+
+export function getGovernorOverview(): Promise<GovernorOverview> {
+  return invoke("governor_overview");
+}
+
+export function getOrganizationAssignments(): Promise<OrganizationAssignmentResponse> {
+  return invoke("organization_assignments");
+}
+
+export function setGlobalOrganizationAssignment(organizationId: string): Promise<OrganizationAssignmentResponse> {
+  return invoke("set_global_organization_assignment", { request: { organization_id: organizationId } });
+}
+
+export function setProjectOrganizationAssignment(projectId: string, organizationId?: string): Promise<OrganizationAssignmentResponse> {
+  return invoke("set_project_organization_assignment", { projectId, request: { organization_id: organizationId || null } });
+}
+
+export function previewOrganizationRevision(organizationId: string, organization: OrganizationGenome): Promise<OrganizationRevisionPreview> {
+  return invoke("preview_organization_revision", {
+    organizationId,
+    request: {
+      expected_parent_revision_id: organization.revision_id,
+      name: organization.name,
+      roles: organization.roles.map((role) => ({ ...role, id: role.id || null })),
+      relationships: organization.relationships,
+      policy: organization.policy,
+      evaluation: organization.evaluation
+    }
+  });
+}
+
+export function publishOrganizationRevision(preview: OrganizationRevisionPreview, changeSummary: string): Promise<OrganizationMutationResponse> {
+  const organization = preview.organization;
+  return invoke("publish_organization_revision", {
+    organizationId: organization.organization_id,
+    request: {
+      expected_parent_revision_id: organization.parent_revision_id,
+      name: organization.name,
+      roles: organization.roles,
+      relationships: organization.relationships,
+      policy: organization.policy,
+      evaluation: organization.evaluation,
+      change_summary: changeSummary.trim()
+    }
+  });
+}
+
+export function listAgentRuns(): Promise<AgentRunListResponse> {
+  return invoke("list_agent_runs");
+}
+
+export function getAgentRun(runId: string): Promise<AgentRunView> {
+  return invoke("get_agent_run", { runId });
+}
+
+export function cancelAgentRun(runId: string): Promise<AgentRunView> {
+  return invoke("cancel_agent_run", { runId });
 }
 
 export function loadOrganizationHistory(organizationId: string): Promise<OrganizationHistoryResponse> {

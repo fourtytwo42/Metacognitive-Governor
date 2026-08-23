@@ -16,7 +16,7 @@ use tauri::AppHandle;
 use tauri_plugin_updater::{Update, UpdaterExt};
 use uuid::Uuid;
 
-use super::{LOCAL_DAEMON, daemon_token, response_error, service_bootstrap};
+use super::{LOCAL_DAEMON, daemon_token, portable_runtime, response_error, service_bootstrap};
 
 const UPDATE_ENDPOINT: Option<&str> = option_env!("MCG_UPDATER_ENDPOINT");
 const UPDATE_PUBLIC_KEY: Option<&str> = option_env!("MCG_UPDATER_PUBKEY");
@@ -376,7 +376,9 @@ fn launch_windows_update_supervisor(
     let parent = current.parent().ok_or_else(|| {
         "The MCG desktop executable has no containing installation directory.".to_owned()
     })?;
-    let supervisor = parent.join("mcg-updater.exe");
+    let supervisor =
+        portable_runtime::packaged_executable(&config.data_directory, "mcg-updater.exe")?
+            .unwrap_or_else(|| parent.join("mcg-updater.exe"));
     let metadata = fs::symlink_metadata(&supervisor).map_err(|error| {
         format!("The packaged update supervisor is missing. Repair or reinstall MCG: {error}")
     })?;

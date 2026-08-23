@@ -10,10 +10,15 @@ use std::{
 };
 
 use mcg_config::AppConfig;
+use semver::Version;
 use serde::{Deserialize, Serialize};
+
+use super::portable_runtime;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_HEALTH_RESPONSE_BYTES: u64 = 64 * 1024;
 
@@ -65,20 +70,70 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
     let config = AppConfig::default();
     let address = endpoint_address(endpoint)?;
     match probe(address)? {
-        ProbeResult::Ready(health) => return ready_status(health, false, &config, address),
+        ProbeResult::Ready(health) => {
+            let token = authenticate_running_service(&health, &config, address)?;
+            match compare_service_version(&health.version)? {
+                std::cmp::Ordering::Equal => {
+                    return Ok(ready_status(health, false));
+                }
+                std::cmp::Ordering::Less => {
+                    request_authenticated_shutdown(address, &token)?;
+                    wait_for_service_stop(address, SHUTDOWN_TIMEOUT).map_err(|error| {
+                        format!(
+                            "The authenticated MCG service version {} could not be replaced: {error}",
+                            health.version
+                        )
+                    })?;
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(format!(
+                        "The running MCG service is version {}, which is newer than this desktop version {}. Open the newer MCG desktop instead.",
+                        health.version,
+                        env!("CARGO_PKG_VERSION")
+                    ));
+                }
+            }
+        }
         ProbeResult::Unreachable => {}
     }
 
-    let executable = packaged_daemon_path(&std::env::current_exe().map_err(|error| {
-        format!("The MCG desktop executable location could not be determined: {error}")
-    })?)?;
-    launch_daemon(&executable, address, &config)?;
+    let executable = portable_runtime::packaged_executable(
+        &config.data_directory,
+        if cfg!(windows) {
+            "mcg-service.exe"
+        } else {
+            "mcg-service"
+        },
+    )?
+    .map_or_else(
+        || {
+            packaged_daemon_path(&std::env::current_exe().map_err(|error| {
+                format!("The MCG desktop executable location could not be determined: {error}")
+            })?)
+        },
+        Ok,
+    )?;
+    let codex_executable = portable_runtime::packaged_executable(
+        &config.data_directory,
+        "codex-runtime/bin/codex.exe",
+    )?;
+    launch_daemon(&executable, address, &config, codex_executable.as_deref())?;
 
     let started = Instant::now();
     while started.elapsed() < STARTUP_TIMEOUT {
         thread::sleep(RETRY_DELAY);
         match probe(address)? {
-            ProbeResult::Ready(health) => return ready_status(health, true, &config, address),
+            ProbeResult::Ready(health) => {
+                authenticate_running_service(&health, &config, address)?;
+                if compare_service_version(&health.version)? != std::cmp::Ordering::Equal {
+                    return Err(format!(
+                        "The packaged MCG service started as version {}, but desktop version {} was required.",
+                        health.version,
+                        env!("CARGO_PKG_VERSION")
+                    ));
+                }
+                return Ok(ready_status(health, true));
+            }
             ProbeResult::Unreachable => {}
         }
     }
@@ -89,21 +144,13 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
     ))
 }
 
-fn ready_status(
-    health: HealthDocument,
-    launched: bool,
+fn authenticate_running_service(
+    health: &HealthDocument,
     config: &AppConfig,
     address: SocketAddr,
-) -> Result<LocalServiceStatus, String> {
+) -> Result<String, String> {
     if health.status != "ok" || health.service != "mcg-daemon" {
         return Err("The loopback port answered with an invalid MCG health contract".into());
-    }
-    if health.version != env!("CARGO_PKG_VERSION") {
-        return Err(format!(
-            "The running MCG service is version {}, but this desktop is version {}. Stop the old service and reopen MCG to finish the upgrade.",
-            health.version,
-            env!("CARGO_PKG_VERSION")
-        ));
     }
     let token_path = config.auth_token_path();
     let token = fs::read_to_string(&token_path).map_err(|error| {
@@ -129,7 +176,11 @@ fn ready_status(
             "The authenticated local MCG status does not match its public health identity".into(),
         );
     }
-    Ok(LocalServiceStatus {
+    Ok(token.to_owned())
+}
+
+fn ready_status(health: HealthDocument, launched: bool) -> LocalServiceStatus {
+    LocalServiceStatus {
         ready: true,
         launched,
         service: health.service,
@@ -139,7 +190,90 @@ fn ready_status(
         } else {
             "The existing local service passed identity and version checks.".into()
         },
-    })
+    }
+}
+
+fn compare_service_version(version: &str) -> Result<std::cmp::Ordering, String> {
+    let running = Version::parse(version).map_err(|_| {
+        format!("The authenticated MCG service reported an invalid version: {version}")
+    })?;
+    let desktop = Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| "The MCG desktop has an invalid build version".to_owned())?;
+    Ok(running.cmp(&desktop))
+}
+
+/// Stops the authenticated local service and waits briefly for its loopback listener to close.
+///
+/// # Errors
+/// Returns an error when the endpoint is unsafe, the listener cannot prove its MCG identity, the
+/// authenticated shutdown request is rejected, or the listener remains active past the timeout.
+pub fn shutdown_local_service(endpoint: &str) -> Result<(), String> {
+    let config = AppConfig::default();
+    let address = endpoint_address(endpoint)?;
+    let ProbeResult::Ready(health) = probe(address)? else {
+        return Ok(());
+    };
+    let token = authenticate_running_service(&health, &config, address)?;
+    request_authenticated_shutdown(address, &token)?;
+    wait_for_service_stop(address, SHUTDOWN_TIMEOUT)
+}
+
+fn request_authenticated_shutdown(address: SocketAddr, token: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+        .map_err(|error| format!("The local MCG shutdown request could not connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(SHUTDOWN_REQUEST_TIMEOUT))
+        .map_err(|error| format!("The local MCG shutdown timeout could not be set: {error}"))?;
+    stream
+        .set_write_timeout(Some(SHUTDOWN_REQUEST_TIMEOUT))
+        .map_err(|error| format!("The local MCG shutdown timeout could not be set: {error}"))?;
+    write!(
+        stream,
+        "POST /api/v1/system/shutdown HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| format!("The local MCG shutdown request failed: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .take(MAX_HEALTH_RESPONSE_BYTES)
+        .read_to_end(&mut response)
+        .map_err(|error| format!("The local MCG shutdown response failed: {error}"))?;
+    parse_success_response(&response, "shutdown")
+}
+
+fn parse_success_response(response: &[u8], operation: &str) -> Result<(), String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| format!("The local MCG {operation} response was malformed"))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| format!("The local MCG {operation} response headers were not UTF-8"))?;
+    let successful = headers.lines().next().is_some_and(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(|status| (200..300).contains(&status))
+    });
+    if successful {
+        Ok(())
+    } else {
+        Err(format!(
+            "The authenticated local MCG {operation} request was rejected"
+        ))
+    }
+}
+
+fn wait_for_service_stop(address: SocketAddr, timeout: Duration) -> Result<(), String> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        thread::sleep(RETRY_DELAY);
+        if TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).is_err() {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "The local MCG service did not stop within {} seconds",
+        timeout.as_secs()
+    ))
 }
 
 fn endpoint_address(endpoint: &str) -> Result<SocketAddr, String> {
@@ -296,7 +430,12 @@ fn packaged_daemon_path(current_executable: &Path) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
-fn launch_daemon(executable: &Path, address: SocketAddr, config: &AppConfig) -> Result<(), String> {
+fn launch_daemon(
+    executable: &Path,
+    address: SocketAddr,
+    config: &AppConfig,
+    codex_executable: Option<&Path>,
+) -> Result<(), String> {
     let mut command = Command::new(executable);
     command
         .env("MCG_BIND_ADDRESS", address.to_string())
@@ -304,6 +443,9 @@ fn launch_daemon(executable: &Path, address: SocketAddr, config: &AppConfig) -> 
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(codex_executable) = codex_executable {
+        command.env("MCG_CODEX_APP_SERVER_EXECUTABLE", codex_executable);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -352,6 +494,51 @@ fn spawn_reaped_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_versions_allow_only_equal_or_older_daemons() {
+        assert_eq!(
+            compare_service_version(env!("CARGO_PKG_VERSION")).expect("current version"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_service_version("0.0.0").expect("older version"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_service_version("999.0.0").expect("newer version"),
+            std::cmp::Ordering::Greater
+        );
+        assert!(compare_service_version("not-a-version").is_err());
+    }
+
+    #[test]
+    fn shutdown_request_is_authenticated_and_requires_success() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("shutdown connection");
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 512];
+                let size = stream.read(&mut chunk).expect("shutdown request");
+                assert!(size > 0, "shutdown request ended before its headers");
+                request.extend_from_slice(&chunk[..size]);
+            }
+            let request = std::str::from_utf8(&request).expect("HTTP request");
+            assert!(request.starts_with("POST /api/v1/system/shutdown HTTP/1.1\r\n"));
+            assert!(request.contains("\r\nAuthorization: Bearer test-token\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .expect("shutdown response");
+        });
+        request_authenticated_shutdown(address, "test-token").expect("accepted shutdown");
+        server.join().expect("fixture server");
+
+        assert!(parse_success_response(b"HTTP/1.1 401 Nope\r\n\r\n", "shutdown").is_err());
+    }
 
     #[test]
     fn health_parser_requires_exact_successful_mcg_document() {

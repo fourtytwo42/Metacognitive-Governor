@@ -1,42 +1,48 @@
 use mcg_agents::{
-    ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, OrganizationGenome,
-    OrganizationShareReview, PortableOrganizationComparison, PortableOrganizationGenome,
-    ShadowExecutionReceipt, SupervisionObservation, TrustedOrganizationPublisher,
+    AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
+    OrganizationGenome, OrganizationShareReview, PortableOrganizationComparison,
+    PortableOrganizationGenome, ShadowExecutionReceipt, SupervisionObservation,
+    TrustedOrganizationPublisher,
 };
 use mcg_api::{
-    ApplyComputerActionsRequest, ApprovalListResponse, AttachBrowserSessionRequest,
-    BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
-    CorrectMemoryClaimRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
-    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
-    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DecideSharedOrganizationRequest, DeploySiteRequest, DiscoverProjectRequest,
+    AgentRunListResponse, ApplyComputerActionsRequest, ApprovalListResponse,
+    ArchiveConversationRequest, AttachBrowserSessionRequest, BackupListResponse,
+    BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
+    CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
+    CreateTaskRequest, DecideSharedOrganizationRequest, DeploySiteRequest, DiscoverProjectRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
-    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
-    OrganizationHistoryResponse, OrganizationListResponse, OrganizationMutationResponse,
-    OrganizationPublisherListResponse, OrganizationShareReviewListResponse,
+    GovernorOverviewResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
+    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    NavigateBrowserSessionRequest, OrganizationAssignmentResponse, OrganizationHistoryResponse,
+    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
+    OrganizationRevisionPreview, OrganizationShareReviewListResponse,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
-    PluginListResponse, ProjectListResponse, ProjectMemoryTransferListResponse,
-    ProjectTopologyPlan, ProviderListResponse, ResolveApprovalRequest,
-    ReviewSharedOrganizationRequest, ReviewedTopologyPlan, ReviewedTopologyPlanListResponse,
-    RevokeOrganizationPublisherRequest, RunSshOperationRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
-    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
+    PluginListResponse, PreviewOrganizationRevisionRequest, ProjectListResponse,
+    ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
+    PublishOrganizationRevisionRequest, ResolveApprovalRequest, ReviewSharedOrganizationRequest,
+    ReviewedTopologyPlan, ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest,
+    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SendConversationMessageRequest,
+    SetOrganizationAssignmentRequest, SetPluginEnabledRequest, SetPluginGrantsRequest,
+    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
+    StartOpenAiOAuthRequest, SteerConversationTurnRequest, SupervisionObservationListResponse,
     TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransferProjectMemoryRequest, TransitionExperimentRequest, TransitionMemoryClaimRequest,
-    TransitionTaskRequest, TrustOrganizationPublisherRequest, UpdateSiteRequest,
-    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
-    WakeScheduleRequest,
+    TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
+    UpdateConversationRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
-    PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ScheduleDefinition,
-    SchedulerNotification, Site, SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
+    Conversation, ConversationView, PlatformCapabilitySnapshot, PlatformSession,
+    PluginInstallation, ScheduleDefinition, SchedulerNotification, Site, SiteMonitor, SshHost,
+    SshWorkflow, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -44,12 +50,12 @@ use mcg_providers::{
     ProviderConnection, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
-    CandidateRevisionMutation, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
-    MemoryClaimMutation, OAuthLoginStart, OrganizationPublisherMutation,
-    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
-    PlatformComputerActionMutation, PlatformComputerMutation, PluginInvocationMutation,
-    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
-    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    AgentRunView, CandidateRevisionMutation, CodexSiteInventory, DiagnosticReport,
+    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
+    OrganizationPublisherMutation, OrganizationShareImportMutation,
+    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
+    ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
     ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
     SiteMutation, SshHostMutation, SshOperationMutation, SshWorkflowCreateRequest,
@@ -57,10 +63,15 @@ use mcg_runtime::{
 };
 use mcg_tools::{ApprovalRequest, ComputerUseFrame, PersistentBrowserObservation};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use tauri::Manager as _;
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+mod portable_runtime;
 mod service_bootstrap;
 mod updater;
 
@@ -88,6 +99,26 @@ struct ConfigureProviderCommand {
 #[derive(Deserialize, Serialize)]
 struct ProxyConversationListResponse {
     conversations: Vec<ProxyConversation>,
+}
+
+#[derive(Deserialize)]
+struct TerminalCommandRequest {
+    working_directory: String,
+    command: String,
+}
+
+#[derive(Serialize)]
+struct TerminalCommandResult {
+    working_directory: String,
+    output: String,
+    exit_code: i32,
+}
+
+#[derive(Serialize)]
+struct OpenInApplication {
+    id: &'static str,
+    label: &'static str,
+    available: bool,
 }
 
 impl Drop for ConfigureProviderCommand {
@@ -717,11 +748,486 @@ async fn list_tasks() -> Result<TaskListResponse, String> {
 }
 
 #[tauri::command]
+async fn list_conversations(
+    include_archived: Option<bool>,
+) -> Result<mcg_api::ConversationListResponse, String> {
+    let include_archived = include_archived.unwrap_or(false);
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations?include_archived={include_archived}"
+        )),
+        None::<&()>,
+        "Conversation listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_conversation(request: CreateConversationRequest) -> Result<Conversation, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/conversations")),
+        Some(&request),
+        "Conversation creation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_conversation(conversation_id: String) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}"
+        )),
+        None::<&()>,
+        "Conversation loading",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn update_conversation(
+    conversation_id: String,
+    request: UpdateConversationRequest,
+) -> Result<Conversation, String> {
+    daemon_json(
+        reqwest::Client::new().put(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}"
+        )),
+        Some(&request),
+        "Conversation update",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn archive_conversation(
+    conversation_id: String,
+    archived: bool,
+) -> Result<Conversation, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/archive"
+        )),
+        Some(&ArchiveConversationRequest { archived }),
+        if archived {
+            "Conversation archive"
+        } else {
+            "Conversation restore"
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn send_conversation_message(
+    conversation_id: String,
+    request: SendConversationMessageRequest,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/messages"
+        )),
+        Some(&request),
+        "Conversation message",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn interrupt_conversation_turn(
+    conversation_id: String,
+    turn_id: String,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/turns/{turn_id}/interrupt"
+        )),
+        None::<&()>,
+        "Conversation interruption",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn steer_conversation_turn(
+    conversation_id: String,
+    turn_id: String,
+    content: String,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/turns/{turn_id}/steer"
+        )),
+        Some(&SteerConversationTurnRequest { content }),
+        "Conversation steer",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_models() -> Result<Vec<mcg_codex_app_server::CodexModel>, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/models")),
+        None::<&()>,
+        "Codex model discovery",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_account() -> Result<mcg_codex_app_server::CodexAccount, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/account")),
+        None::<&()>,
+        "Codex account",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_rate_limits() -> Result<mcg_codex_app_server::CodexRateLimits, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/rate-limits")),
+        None::<&()>,
+        "Codex rate limits",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_harness_status() -> Result<mcg_codex_app_server::CodexHarnessStatus, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/harness")),
+        None::<&()>,
+        "Codex harness status",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_account_usage() -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/account/usage")),
+        None::<&()>,
+        "Codex account usage",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_stable_discovery(
+    cwds: Vec<String>,
+    force_reload: bool,
+) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/discovery")),
+        Some(&serde_json::json!({ "cwds": cwds, "force_reload": force_reload })),
+        "Codex stable discovery",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_configuration_status() -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/configuration")),
+        None::<&()>,
+        "Codex configuration status",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_pending_requests() -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/pending-requests")),
+        None::<&()>,
+        "Codex pending requests",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn codex_owned_threads() -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/owned-threads")),
+        None::<&()>,
+        "Codex owned threads",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reconcile_owned_codex_thread(
+    conversation_id: String,
+) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/owned-threads/{conversation_id}/reconcile"
+        )),
+        None::<&()>,
+        "Codex thread reconciliation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn fork_owned_codex_thread(conversation_id: String) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/owned-threads/{conversation_id}/fork"
+        )),
+        None::<&()>,
+        "Codex thread fork",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn compact_owned_codex_thread(conversation_id: String) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/owned-threads/{conversation_id}/compact"
+        )),
+        None::<&()>,
+        "Codex thread compaction",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn unsubscribe_owned_codex_thread(
+    conversation_id: String,
+) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/owned-threads/{conversation_id}/unsubscribe"
+        )),
+        None::<&()>,
+        "Codex thread unsubscribe",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn owned_codex_thread_history(conversation_id: String) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/owned-threads/{conversation_id}/history"
+        )),
+        None::<&()>,
+        "Codex thread history",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn start_owned_codex_review(
+    conversation_id: String,
+    target: serde_json::Value,
+    delivery: String,
+) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/owned-threads/{conversation_id}/review"
+        )),
+        Some(&serde_json::json!({ "target": target, "delivery": delivery })),
+        "Codex review",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn exec_governed_codex_command(
+    conversation_id: String,
+    request: mcg_codex_app_server::CodexCommandExecRequest,
+) -> Result<mcg_codex_app_server::CodexCommandExecResult, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/codex/command"
+        )),
+        Some(&request),
+        "Governed Codex command",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn watch_conversation_project(conversation_id: String) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/codex/watch"
+        )),
+        None::<&()>,
+        "Codex project watch",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn unwatch_conversation_project(
+    conversation_id: String,
+) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().delete(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/codex/watch"
+        )),
+        None::<&()>,
+        "Codex project unwatch",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn start_codex_login() -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/account/login")),
+        None::<&()>,
+        "Codex login",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_codex_login(login_id: String) -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/account/login/cancel")),
+        Some(&serde_json::json!({ "login_id": login_id })),
+        "Codex login cancellation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn logout_codex_account() -> Result<serde_json::Value, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/account/logout")),
+        None::<&()>,
+        "Codex logout",
+    )
+    .await
+}
+
+#[tauri::command]
 async fn list_organizations() -> Result<OrganizationListResponse, String> {
     daemon_json(
         reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/organizations")),
         None::<&()>,
         "Organization listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn governor_overview() -> Result<GovernorOverviewResponse, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/agents/overview")),
+        None::<&()>,
+        "Agent governor overview",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn organization_assignments() -> Result<OrganizationAssignmentResponse, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/agents/assignments")),
+        None::<&()>,
+        "Organization assignments",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_global_organization_assignment(
+    request: SetOrganizationAssignmentRequest,
+) -> Result<OrganizationAssignmentResponse, String> {
+    daemon_json(
+        reqwest::Client::new().put(format!("{LOCAL_DAEMON}/api/v1/agents/assignments")),
+        Some(&request),
+        "Global organization assignment",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_project_organization_assignment(
+    project_id: String,
+    request: SetOrganizationAssignmentRequest,
+) -> Result<OrganizationAssignmentResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_json(
+        reqwest::Client::new().put(format!(
+            "{LOCAL_DAEMON}/api/v1/agents/assignments/projects/{project_id}"
+        )),
+        Some(&request),
+        "Project organization assignment",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn preview_organization_revision(
+    organization_id: String,
+    request: PreviewOrganizationRevisionRequest,
+) -> Result<OrganizationRevisionPreview, String> {
+    let organization_id = canonical_uuid(&organization_id, "Organization identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/organizations/{organization_id}/revisions/preview"
+        )),
+        Some(&request),
+        "Organization revision preview",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn publish_organization_revision(
+    organization_id: String,
+    request: PublishOrganizationRevisionRequest,
+) -> Result<OrganizationMutationResponse, String> {
+    let organization_id = canonical_uuid(&organization_id, "Organization identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/organizations/{organization_id}/revisions"
+        )),
+        Some(&request),
+        "Organization revision publish",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_agent_runs() -> Result<AgentRunListResponse, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/runs?limit=50")),
+        None::<&()>,
+        "Agent run listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_agent_run(run_id: String) -> Result<AgentRunView, String> {
+    let run_id = canonical_uuid(&run_id, "Agent run identity")?;
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/runs/{run_id}")),
+        None::<&()>,
+        "Agent run detail",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_agent_run(run_id: String) -> Result<AgentRunView, String> {
+    let run_id = canonical_uuid(&run_id, "Agent run identity")?;
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/runs/{run_id}/transition")),
+        Some(&TransitionAgentRunRequest {
+            state: AgentRunState::Cancelled,
+        }),
+        "Agent run cancellation",
     )
     .await
 }
@@ -1104,6 +1610,11 @@ where
 #[tauri::command]
 async fn list_sites() -> Result<SiteListResponse, String> {
     site_get("", "Site listing").await
+}
+
+#[tauri::command]
+async fn list_codex_sites() -> Result<CodexSiteInventory, String> {
+    site_get("/codex", "OpenAI Sites listing").await
 }
 
 #[tauri::command]
@@ -2304,6 +2815,177 @@ fn open_external_url(url: String) -> Result<(), String> {
         .map_err(|error| format!("The system browser could not be opened: {error}"))
 }
 
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
+fn open_site_external_url(url: String) -> Result<(), String> {
+    let parsed = validate_site_external_url(&url)?;
+    webbrowser::open(parsed.as_str())
+        .map_err(|error| format!("The system browser could not be opened: {error}"))
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
+async fn open_site_in_app_browser(
+    app: tauri::AppHandle,
+    tab_id: String,
+    url: String,
+    bounds: SiteBrowserBounds,
+) -> Result<(), String> {
+    let target = validate_site_external_url(&url)?;
+    let (position, size) = validate_site_browser_bounds(&bounds)?;
+    let label = site_browser_label(&tab_id)?;
+
+    if let Some(webview) = app.get_webview(&label) {
+        webview
+            .navigate(target)
+            .map_err(|error| format!("The MCG browser could not navigate to the Site: {error}"))?;
+        webview
+            .set_position(position)
+            .map_err(|error| format!("The MCG browser could not be positioned: {error}"))?;
+        webview
+            .set_size(size)
+            .map_err(|error| format!("The MCG browser could not be resized: {error}"))?;
+        webview
+            .show()
+            .map_err(|error| format!("The MCG browser could not be shown: {error}"))?;
+        webview
+            .set_focus()
+            .map_err(|error| format!("The MCG browser could not be focused: {error}"))?;
+        return Ok(());
+    }
+
+    let profile_directory = AppConfig::default()
+        .data_directory
+        .join("site-browser-profile");
+    std::fs::create_dir_all(&profile_directory)
+        .map_err(|error| format!("The MCG browser profile could not be prepared: {error}"))?;
+
+    let parent = app
+        .get_window("main")
+        .ok_or_else(|| "The main MCG window is unavailable".to_string())?;
+    let popup_app = app.clone();
+    let popup_label = label.clone();
+    let builder = tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External(target))
+        .data_directory(profile_directory)
+        .enable_clipboard_access()
+        .on_navigation(site_browser_navigation_allowed)
+        .on_new_window(move |candidate, _features| {
+            if site_browser_navigation_allowed(&candidate) {
+                if let Some(webview) = popup_app.get_webview(&popup_label) {
+                    std::thread::spawn(move || {
+                        let _ = webview.navigate(candidate);
+                    });
+                }
+            }
+            tauri::webview::NewWindowResponse::Deny
+        });
+    parent
+        .add_child(builder, position, size)
+        .map_err(|error| format!("The MCG browser could not be opened: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri deserializes owned command arguments.
+async fn update_site_in_app_browser(
+    app: tauri::AppHandle,
+    tab_id: String,
+    bounds: Option<SiteBrowserBounds>,
+    visible: bool,
+) -> Result<(), String> {
+    let label = site_browser_label(&tab_id)?;
+    let Some(webview) = app.get_webview(&label) else {
+        return Ok(());
+    };
+    if !visible {
+        return webview
+            .hide()
+            .map_err(|error| format!("The MCG browser could not be hidden: {error}"));
+    }
+    let bounds = bounds.ok_or_else(|| "Visible MCG browser bounds are required".to_string())?;
+    let (position, size) = validate_site_browser_bounds(&bounds)?;
+    webview
+        .set_position(position)
+        .map_err(|error| format!("The MCG browser could not be positioned: {error}"))?;
+    webview
+        .set_size(size)
+        .map_err(|error| format!("The MCG browser could not be resized: {error}"))?;
+    webview
+        .show()
+        .map_err(|error| format!("The MCG browser could not be shown: {error}"))
+}
+
+#[tauri::command]
+async fn close_site_in_app_browser(app: tauri::AppHandle, tab_id: String) -> Result<(), String> {
+    let label = site_browser_label(&tab_id)?;
+    let Some(webview) = app.get_webview(&label) else {
+        return Ok(());
+    };
+    webview
+        .close()
+        .map_err(|error| format!("The MCG browser tab could not be closed: {error}"))
+}
+
+#[tauri::command]
+async fn control_site_in_app_browser(
+    app: tauri::AppHandle,
+    tab_id: String,
+    action: String,
+) -> Result<(), String> {
+    let label = site_browser_label(&tab_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "The MCG browser tab is unavailable".to_string())?;
+    match action.as_str() {
+        "back" => webview.eval("history.back()"),
+        "forward" => webview.eval("history.forward()"),
+        "reload" => webview.reload(),
+        _ => return Err("Unsupported MCG browser action".to_string()),
+    }
+    .map_err(|error| format!("The MCG browser action failed: {error}"))
+}
+
+fn site_browser_label(tab_id: &str) -> Result<String, String> {
+    if tab_id.is_empty()
+        || tab_id.len() > 64
+        || !tab_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("The MCG browser tab identity is invalid".to_string());
+    }
+    Ok(format!("site-browser-{tab_id}"))
+}
+
+#[derive(Deserialize)]
+struct SiteBrowserBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+fn validate_site_browser_bounds(
+    bounds: &SiteBrowserBounds,
+) -> Result<(tauri::LogicalPosition<f64>, tauri::LogicalSize<f64>), String> {
+    if !bounds.x.is_finite()
+        || !bounds.y.is_finite()
+        || !bounds.width.is_finite()
+        || !bounds.height.is_finite()
+        || bounds.x < 0.0
+        || bounds.y < 0.0
+        || !(1.0..=10_000.0).contains(&bounds.width)
+        || !(1.0..=10_000.0).contains(&bounds.height)
+    {
+        return Err("The MCG browser panel bounds are invalid".into());
+    }
+    Ok((
+        tauri::LogicalPosition::new(bounds.x, bounds.y),
+        tauri::LogicalSize::new(bounds.width, bounds.height),
+    ))
+}
+
 fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|error| format!("The verification URL is invalid: {error}"))?;
@@ -2311,6 +2993,299 @@ fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
         return Err("Only the official OpenAI authorization site may be opened".into());
     }
     Ok(parsed)
+}
+
+fn validate_site_external_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("The Site URL is invalid: {error}"))?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.host_str().is_none()
+    {
+        return Err("Only credential-free HTTPS Site URLs may be opened".into());
+    }
+    Ok(parsed)
+}
+
+fn site_browser_navigation_allowed(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn canonical_directory(value: &str) -> Result<PathBuf, String> {
+    let requested = Path::new(value);
+    let canonical = requested
+        .canonicalize()
+        .map_err(|error| format!("The workspace directory could not be opened: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("The workspace location is not a directory".into());
+    }
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn command_available(command: &str) -> bool {
+    std::process::Command::new("where.exe")
+        .arg(command)
+        .creation_flags(0x0800_0000)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(not(windows))]
+fn command_available(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", "command -v -- \"$1\" >/dev/null 2>&1", "sh", command])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[tauri::command]
+fn list_open_in_applications() -> Vec<OpenInApplication> {
+    #[cfg(windows)]
+    {
+        vec![
+            OpenInApplication {
+                id: "vscode",
+                label: "VS Code",
+                available: command_available("code.cmd") || command_available("code.exe"),
+            },
+            OpenInApplication {
+                id: "visual_studio",
+                label: "Visual Studio",
+                available: command_available("devenv.exe"),
+            },
+            OpenInApplication {
+                id: "cursor",
+                label: "Cursor",
+                available: command_available("cursor.cmd") || command_available("cursor.exe"),
+            },
+            OpenInApplication {
+                id: "file_explorer",
+                label: "File Explorer",
+                available: true,
+            },
+            OpenInApplication {
+                id: "terminal",
+                label: "Terminal",
+                available: command_available("wt.exe") || command_available("powershell.exe"),
+            },
+            OpenInApplication {
+                id: "git_bash",
+                label: "Git Bash",
+                available: Path::new(r"C:\Program Files\Git\git-bash.exe").is_file(),
+            },
+        ]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            OpenInApplication {
+                id: "vscode",
+                label: "VS Code",
+                available: command_available("code"),
+            },
+            OpenInApplication {
+                id: "cursor",
+                label: "Cursor",
+                available: command_available("cursor"),
+            },
+            OpenInApplication {
+                id: "file_explorer",
+                label: "Finder",
+                available: true,
+            },
+            OpenInApplication {
+                id: "terminal",
+                label: "Terminal",
+                available: true,
+            },
+        ]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        vec![
+            OpenInApplication {
+                id: "vscode",
+                label: "VS Code",
+                available: command_available("code"),
+            },
+            OpenInApplication {
+                id: "cursor",
+                label: "Cursor",
+                available: command_available("cursor"),
+            },
+            OpenInApplication {
+                id: "file_explorer",
+                label: "File Manager",
+                available: command_available("xdg-open"),
+            },
+            OpenInApplication {
+                id: "terminal",
+                label: "Terminal",
+                available: command_available("x-terminal-emulator"),
+            },
+        ]
+    }
+}
+
+#[tauri::command]
+fn open_workspace_in(application: String, working_directory: String) -> Result<(), String> {
+    let root = canonical_directory(&working_directory)?;
+    #[cfg(windows)]
+    if application == "terminal"
+        && !command_available("wt.exe")
+        && command_available("powershell.exe")
+    {
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .args(["-NoExit", "-Command", "Set-Location -LiteralPath $args[0]"])
+            .arg(&root)
+            .current_dir(&root);
+        return command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("The workspace could not be opened: {error}"));
+    }
+    #[cfg(windows)]
+    if application == "git_bash" && Path::new(r"C:\Program Files\Git\git-bash.exe").is_file() {
+        let mut command = std::process::Command::new(r"C:\Program Files\Git\git-bash.exe");
+        command
+            .arg(format!("--cd={}", root.to_string_lossy()))
+            .current_dir(&root);
+        return command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("The workspace could not be opened: {error}"));
+    }
+    #[cfg(windows)]
+    let mut command = match application.as_str() {
+        "vscode" if command_available("code.cmd") => std::process::Command::new("code.cmd"),
+        "vscode" if command_available("code.exe") => std::process::Command::new("code.exe"),
+        "visual_studio" if command_available("devenv.exe") => {
+            std::process::Command::new("devenv.exe")
+        }
+        "cursor" if command_available("cursor.cmd") => std::process::Command::new("cursor.cmd"),
+        "cursor" if command_available("cursor.exe") => std::process::Command::new("cursor.exe"),
+        "file_explorer" => std::process::Command::new("explorer.exe"),
+        "terminal" if command_available("wt.exe") => {
+            let mut command = std::process::Command::new("wt.exe");
+            command.arg("-d");
+            command
+        }
+        _ => return Err("That application is not installed or is not available on PATH".into()),
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = match application.as_str() {
+        "vscode" if command_available("code") => std::process::Command::new("code"),
+        "cursor" if command_available("cursor") => std::process::Command::new("cursor"),
+        "file_explorer" => std::process::Command::new("open"),
+        "terminal" => {
+            let mut command = std::process::Command::new("open");
+            command.args(["-a", "Terminal"]);
+            command
+        }
+        _ => return Err("That application is not installed or is not available on PATH".into()),
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = match application.as_str() {
+        "vscode" if command_available("code") => std::process::Command::new("code"),
+        "cursor" if command_available("cursor") => std::process::Command::new("cursor"),
+        "file_explorer" if command_available("xdg-open") => std::process::Command::new("xdg-open"),
+        "terminal" if command_available("x-terminal-emulator") => {
+            std::process::Command::new("x-terminal-emulator")
+        }
+        _ => return Err("That application is not installed or is not available on PATH".into()),
+    };
+    command.arg(&root).current_dir(&root);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("The workspace could not be opened: {error}"))
+}
+
+#[tauri::command]
+async fn run_terminal_command(
+    request: TerminalCommandRequest,
+) -> Result<TerminalCommandResult, String> {
+    let mut root = canonical_directory(&request.working_directory)?;
+    let input = request.command.trim();
+    if input.is_empty() {
+        return Ok(TerminalCommandResult {
+            working_directory: root.to_string_lossy().into_owned(),
+            output: String::new(),
+            exit_code: 0,
+        });
+    }
+    if input.len() > 4096 {
+        return Err("Terminal commands are limited to 4096 characters".into());
+    }
+    if input.eq_ignore_ascii_case("cd") {
+        return Ok(TerminalCommandResult {
+            working_directory: root.to_string_lossy().into_owned(),
+            output: root.to_string_lossy().into_owned(),
+            exit_code: 0,
+        });
+    }
+    if let Some(destination) = input.strip_prefix("cd ") {
+        let destination = destination.trim().trim_matches(['\"', '\'']);
+        let requested = Path::new(destination);
+        let destination = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+        root = canonical_directory(
+            destination
+                .to_str()
+                .ok_or("The destination path is not valid Unicode")?,
+        )?;
+        return Ok(TerminalCommandResult {
+            working_directory: root.to_string_lossy().into_owned(),
+            output: String::new(),
+            exit_code: 0,
+        });
+    }
+
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            input,
+        ]);
+        command.creation_flags(0x0800_0000);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-lc", input]);
+        command
+    };
+    command.current_dir(&root).kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
+        .await
+        .map_err(|_| "The terminal command timed out after 2 minutes".to_string())?
+        .map_err(|error| format!("The terminal command could not run: {error}"))?;
+    let mut combined = output.stdout;
+    combined.extend_from_slice(&output.stderr);
+    const MAX_OUTPUT_BYTES: usize = 1_048_576;
+    if combined.len() > MAX_OUTPUT_BYTES {
+        combined.truncate(MAX_OUTPUT_BYTES);
+        combined.extend_from_slice(b"\n[output truncated at 1 MiB]\n");
+    }
+    Ok(TerminalCommandResult {
+        working_directory: root.to_string_lossy().into_owned(),
+        output: String::from_utf8_lossy(&combined).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2323,6 +3298,7 @@ fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
 pub fn run() {
     let service_status = service_bootstrap::ensure_local_service(LOCAL_DAEMON)
         .unwrap_or_else(LocalServiceStatus::failed);
+    let shutdown_service_on_exit = service_status.ready;
     let _ = LOCAL_SERVICE_STATUS.set(service_status);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2376,6 +3352,7 @@ pub fn run() {
             list_experiment_decisions,
             decide_experiment,
             list_sites,
+            list_codex_sites,
             get_site,
             register_site,
             update_site,
@@ -2386,6 +3363,11 @@ pub fn run() {
             create_site_monitor,
             site_deployment_history,
             deploy_site,
+            open_site_in_app_browser,
+            update_site_in_app_browser,
+            close_site_in_app_browser,
+            control_site_in_app_browser,
+            open_site_external_url,
             list_ssh_hosts,
             get_ssh_host,
             register_ssh_host,
@@ -2419,6 +3401,44 @@ pub fn run() {
             list_scheduler_notifications,
             acknowledge_scheduler_notification,
             list_tasks,
+            list_conversations,
+            create_conversation,
+            get_conversation,
+            update_conversation,
+            archive_conversation,
+            send_conversation_message,
+            interrupt_conversation_turn,
+            steer_conversation_turn,
+            codex_models,
+            codex_account,
+            codex_rate_limits,
+            codex_harness_status,
+            codex_account_usage,
+            codex_stable_discovery,
+            codex_configuration_status,
+            codex_pending_requests,
+            codex_owned_threads,
+            reconcile_owned_codex_thread,
+            fork_owned_codex_thread,
+            compact_owned_codex_thread,
+            unsubscribe_owned_codex_thread,
+            owned_codex_thread_history,
+            start_owned_codex_review,
+            exec_governed_codex_command,
+            watch_conversation_project,
+            unwatch_conversation_project,
+            start_codex_login,
+            cancel_codex_login,
+            logout_codex_account,
+            governor_overview,
+            organization_assignments,
+            set_global_organization_assignment,
+            set_project_organization_assignment,
+            preview_organization_revision,
+            publish_organization_revision,
+            list_agent_runs,
+            get_agent_run,
+            cancel_agent_run,
             list_organizations,
             organization_history,
             create_organization,
@@ -2461,16 +3481,27 @@ pub fn run() {
             list_project_memory_transfers,
             project_memory_history,
             managed_project_memory,
-            open_external_url
+            open_external_url,
+            list_open_in_applications,
+            open_workspace_in,
+            run_terminal_command
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running MCG desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building MCG desktop application")
+        .run(move |_app, event| {
+            if shutdown_service_on_exit && matches!(event, tauri::RunEvent::Exit) {
+                let _ = service_bootstrap::shutdown_local_service(LOCAL_DAEMON);
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_api_error_code, canonical_uuid, validate_external_url, validate_local_daemon,
+        SiteBrowserBounds, TerminalCommandRequest, bounded_api_error_code, canonical_directory,
+        canonical_uuid, run_terminal_command, site_browser_label, site_browser_navigation_allowed,
+        validate_external_url, validate_local_daemon, validate_site_browser_bounds,
+        validate_site_external_url,
     };
 
     #[test]
@@ -2493,6 +3524,77 @@ mod tests {
     }
 
     #[test]
+    fn site_launcher_allows_credential_free_https_only() {
+        assert!(validate_site_external_url("https://springfield-it-support.example/").is_ok());
+        assert!(validate_site_external_url("http://example.com/").is_err());
+        assert!(validate_site_external_url("https://user:secret@example.com/").is_err());
+        assert!(validate_site_external_url("file:///C:/secret").is_err());
+    }
+
+    #[test]
+    fn site_browser_allows_https_auth_redirects_but_rejects_unsafe_navigation() {
+        assert!(site_browser_navigation_allowed(
+            &reqwest::Url::parse("https://auth.openai.com/authorize").expect("OpenAI auth URL")
+        ));
+        assert!(site_browser_navigation_allowed(
+            &reqwest::Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
+                .expect("Google auth URL")
+        ));
+        assert!(!site_browser_navigation_allowed(
+            &reqwest::Url::parse("http://example.com/").expect("HTTP URL")
+        ));
+        assert!(!site_browser_navigation_allowed(
+            &reqwest::Url::parse("https://user:secret@example.com/").expect("credential URL")
+        ));
+        assert!(!site_browser_navigation_allowed(
+            &reqwest::Url::parse("file:///C:/secret").expect("file URL")
+        ));
+    }
+
+    #[test]
+    fn site_browser_tab_labels_are_scoped_and_bounded() {
+        assert_eq!(
+            site_browser_label("9ea1e248-0fa0-4b4f-a210-584454d4fcdd")
+                .expect("valid browser tab identity"),
+            "site-browser-9ea1e248-0fa0-4b4f-a210-584454d4fcdd"
+        );
+        assert!(site_browser_label("").is_err());
+        assert!(site_browser_label("../../main").is_err());
+        assert!(site_browser_label(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn site_browser_bounds_are_finite_positive_and_bounded() {
+        assert!(
+            validate_site_browser_bounds(&SiteBrowserBounds {
+                x: 800.0,
+                y: 160.0,
+                width: 340.0,
+                height: 520.0,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_site_browser_bounds(&SiteBrowserBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 520.0,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_site_browser_bounds(&SiteBrowserBounds {
+                x: f64::NAN,
+                y: 0.0,
+                width: 340.0,
+                height: 520.0,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn daemon_endpoint_allows_only_explicit_http_loopback() {
         assert!(validate_local_daemon("http://127.0.0.1:7777").is_ok());
         assert!(validate_local_daemon("http://[::1]:7788").is_ok());
@@ -2507,5 +3609,31 @@ mod tests {
         assert!(canonical_uuid("00000000-0000-4000-8000-000000000001", "id").is_ok());
         assert!(canonical_uuid("../providers", "id").is_err());
         assert!(canonical_uuid("id?revision=other", "id").is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_changes_only_to_an_existing_directory() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let child = workspace.path().join("child");
+        std::fs::create_dir(&child).expect("child directory");
+        let result = run_terminal_command(TerminalCommandRequest {
+            working_directory: workspace.path().to_string_lossy().into_owned(),
+            command: "cd child".into(),
+        })
+        .await
+        .expect("change directory");
+        assert_eq!(
+            canonical_directory(&result.working_directory).expect("canonical result"),
+            child.canonicalize().expect("canonical child")
+        );
+
+        assert!(
+            run_terminal_command(TerminalCommandRequest {
+                working_directory: workspace.path().to_string_lossy().into_owned(),
+                command: "cd missing".into(),
+            })
+            .await
+            .is_err()
+        );
     }
 }

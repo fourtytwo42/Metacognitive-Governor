@@ -3784,11 +3784,16 @@ async fn run_task(
             &organization,
             &reservation.view,
             &LaunchTaskRequest {
+                organization_id: None,
                 target_path: request.target_path,
                 context_token_budget: request.context_token_budget,
                 requested_tools: request.requested_tools,
                 estimated_output_tokens: request.estimated_output_tokens,
                 max_model_calls: request.max_model_calls,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                service_tier: None,
             },
             false,
         )
@@ -3820,11 +3825,16 @@ async fn continue_task(
     validate_continue_task_arguments(&request)?;
     let task_id = request.task_id;
     let launch = LaunchTaskRequest {
+        organization_id: None,
         target_path: request.target_path,
         context_token_budget: request.context_token_budget,
         requested_tools: request.requested_tools,
         estimated_output_tokens: request.estimated_output_tokens,
         max_model_calls: request.max_model_calls,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        service_tier: None,
     };
     let response = match request.action {
         ContinueTaskAction::Retry => {
@@ -4264,6 +4274,10 @@ async fn run_agent(
             requested_tools: request.requested_tools,
             estimated_output_tokens: request.estimated_output_tokens,
             max_model_calls: request.max_model_calls,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .await;
     match execution {

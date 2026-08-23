@@ -1949,11 +1949,16 @@ fn print_consumer_event(event: &EventEnvelope) -> Result<(), Box<dyn std::error:
 
 fn default_launch_request() -> LaunchTaskRequest {
     LaunchTaskRequest {
+        organization_id: None,
         target_path: None,
         context_token_budget: 8_192,
         requested_tools: Vec::new(),
         estimated_output_tokens: 8_192,
         max_model_calls: 16,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        service_tier: None,
     }
 }
 

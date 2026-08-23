@@ -6,6 +6,10 @@ const client = vi.hoisted(() => ({
   complete: vi.fn(),
   cancel: vi.fn(),
   open: vi.fn(),
+  openInApp: vi.fn(),
+  updateInApp: vi.fn(),
+  closeInApp: vi.fn(),
+  controlInApp: vi.fn(),
   listProviders: vi.fn(),
   proxyUsage: vi.fn(),
   proxyConversations: vi.fn(),
@@ -23,6 +27,28 @@ const client = vi.hoisted(() => ({
   configureMcp: vi.fn(),
   discoverMcp: vi.fn(),
   listTasks: vi.fn(),
+  listConversations: vi.fn(),
+  createConversation: vi.fn(),
+  updateConversation: vi.fn(),
+  archiveConversation: vi.fn(),
+  getConversation: vi.fn(),
+  sendConversationMessage: vi.fn(),
+  steerConversationTurn: vi.fn(),
+  getCodexModels: vi.fn(),
+  getCodexAccount: vi.fn(),
+  getCodexRateLimits: vi.fn(),
+  getCodexHarnessStatus: vi.fn(),
+  getCodexConfigurationStatus: vi.fn(),
+  getCodexPendingRequests: vi.fn(),
+  getCodexStableDiscovery: vi.fn(),
+  reconcileOwnedCodexThread: vi.fn(),
+  forkOwnedCodexThread: vi.fn(),
+  startOwnedCodexReview: vi.fn(),
+  watchConversationProject: vi.fn(),
+  unwatchConversationProject: vi.fn(),
+  startCodexLogin: vi.fn(),
+  cancelCodexLogin: vi.fn(),
+  logoutCodexAccount: vi.fn(),
   createTask: vi.fn(),
   launchTask: vi.fn(),
   retryTask: vi.fn(),
@@ -52,6 +78,13 @@ const client = vi.hoisted(() => ({
   loadProjectMemoryHistory: vi.fn(),
   loadManagedProjectMemory: vi.fn(),
   listOrganizations: vi.fn(),
+  getGovernorOverview: vi.fn(),
+  listAgentRuns: vi.fn(),
+  setGlobalOrganizationAssignment: vi.fn(),
+  setProjectOrganizationAssignment: vi.fn(),
+  previewOrganizationRevision: vi.fn(),
+  publishOrganizationRevision: vi.fn(),
+  cancelAgentRun: vi.fn(),
   loadOrganizationHistory: vi.fn(),
   createOrganization: vi.fn(),
   inheritOrganization: vi.fn(),
@@ -87,6 +120,7 @@ const client = vi.hoisted(() => ({
   handoffComputerSession: vi.fn(),
   reclaimComputerSession: vi.fn(),
   listSites: vi.fn(),
+  listCodexSites: vi.fn(),
   registerSite: vi.fn(),
   loadSiteHealth: vi.fn(),
   checkSiteHealth: vi.fn(),
@@ -125,6 +159,9 @@ const client = vi.hoisted(() => ({
   ,checkForUpdate: vi.fn()
   ,installUpdate: vi.fn()
   ,localServiceStatus: vi.fn()
+  ,listOpenInApplications: vi.fn()
+  ,openWorkspaceIn: vi.fn()
+  ,runTerminalCommand: vi.fn()
 }));
 
 vi.mock("./desktop-client", () => ({
@@ -132,6 +169,11 @@ vi.mock("./desktop-client", () => ({
   completeOpenAiOAuth: client.complete,
   cancelOpenAiOAuth: client.cancel,
   openExternalUrl: client.open,
+  openSiteInAppBrowser: client.openInApp,
+  updateSiteInAppBrowser: client.updateInApp,
+  closeSiteInAppBrowser: client.closeInApp,
+  controlSiteInAppBrowser: client.controlInApp,
+  openSiteExternalUrl: client.open,
   listProviders: client.listProviders,
   providerProxyUsage: client.proxyUsage,
   providerProxyConversations: client.proxyConversations,
@@ -149,6 +191,28 @@ vi.mock("./desktop-client", () => ({
   configureMcpConnection: client.configureMcp,
   discoverMcpConnection: client.discoverMcp,
   listTasks: client.listTasks,
+  listConversations: client.listConversations,
+  createConversation: client.createConversation,
+  updateConversation: client.updateConversation,
+  archiveConversation: client.archiveConversation,
+  getConversation: client.getConversation,
+  sendConversationMessage: client.sendConversationMessage,
+  steerConversationTurn: client.steerConversationTurn,
+  getCodexModels: client.getCodexModels,
+  getCodexAccount: client.getCodexAccount,
+  getCodexRateLimits: client.getCodexRateLimits,
+  getCodexHarnessStatus: client.getCodexHarnessStatus,
+  getCodexConfigurationStatus: client.getCodexConfigurationStatus,
+  getCodexPendingRequests: client.getCodexPendingRequests,
+  getCodexStableDiscovery: client.getCodexStableDiscovery,
+  reconcileOwnedCodexThread: client.reconcileOwnedCodexThread,
+  forkOwnedCodexThread: client.forkOwnedCodexThread,
+  startOwnedCodexReview: client.startOwnedCodexReview,
+  watchConversationProject: client.watchConversationProject,
+  unwatchConversationProject: client.unwatchConversationProject,
+  startCodexLogin: client.startCodexLogin,
+  cancelCodexLogin: client.cancelCodexLogin,
+  logoutCodexAccount: client.logoutCodexAccount,
   createTask: client.createTask,
   launchTask: client.launchTask,
   retryTask: client.retryTask,
@@ -178,6 +242,13 @@ vi.mock("./desktop-client", () => ({
   loadProjectMemoryHistory: client.loadProjectMemoryHistory,
   loadManagedProjectMemory: client.loadManagedProjectMemory,
   listOrganizations: client.listOrganizations,
+  getGovernorOverview: client.getGovernorOverview,
+  listAgentRuns: client.listAgentRuns,
+  setGlobalOrganizationAssignment: client.setGlobalOrganizationAssignment,
+  setProjectOrganizationAssignment: client.setProjectOrganizationAssignment,
+  previewOrganizationRevision: client.previewOrganizationRevision,
+  publishOrganizationRevision: client.publishOrganizationRevision,
+  cancelAgentRun: client.cancelAgentRun,
   loadOrganizationHistory: client.loadOrganizationHistory,
   createOrganization: client.createOrganization,
   inheritOrganization: client.inheritOrganization,
@@ -213,6 +284,7 @@ vi.mock("./desktop-client", () => ({
   handoffComputerSession: client.handoffComputerSession,
   reclaimComputerSession: client.reclaimComputerSession,
   listSites: client.listSites,
+  listCodexSites: client.listCodexSites,
   registerSite: client.registerSite,
   loadSiteHealth: client.loadSiteHealth,
   checkSiteHealth: client.checkSiteHealth,
@@ -250,18 +322,26 @@ vi.mock("./desktop-client", () => ({
   getUpdateConfiguration: client.getUpdateConfiguration,
   checkForUpdate: client.checkForUpdate,
   installUpdate: client.installUpdate,
-  getLocalServiceStatus: client.localServiceStatus
+  getLocalServiceStatus: client.localServiceStatus,
+  listOpenInApplications: client.listOpenInApplications,
+  openWorkspaceIn: client.openWorkspaceIn,
+  runTerminalCommand: client.runTerminalCommand
 }));
 
-import { App } from "./App";
+import { App, isChatViewportNearBottom } from "./App";
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/");
   window.localStorage.clear();
   client.localServiceStatus.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
   client.cancel.mockReset();
   client.open.mockReset();
+  client.openInApp.mockReset();
+  client.updateInApp.mockReset();
+  client.closeInApp.mockReset();
+  client.controlInApp.mockReset();
   client.listProviders.mockReset();
   client.proxyUsage.mockReset();
   client.proxyConversations.mockReset();
@@ -279,6 +359,28 @@ beforeEach(() => {
   client.configureMcp.mockReset();
   client.discoverMcp.mockReset();
   client.listTasks.mockReset();
+  client.listConversations.mockReset();
+  client.createConversation.mockReset();
+  client.updateConversation.mockReset();
+  client.archiveConversation.mockReset();
+  client.getConversation.mockReset();
+  client.sendConversationMessage.mockReset();
+  client.steerConversationTurn.mockReset();
+  client.getCodexModels.mockReset();
+  client.getCodexAccount.mockReset();
+  client.getCodexRateLimits.mockReset();
+  client.getCodexHarnessStatus.mockReset();
+  client.getCodexConfigurationStatus.mockReset();
+  client.getCodexPendingRequests.mockReset();
+  client.getCodexStableDiscovery.mockReset();
+  client.reconcileOwnedCodexThread.mockReset();
+  client.forkOwnedCodexThread.mockReset();
+  client.startOwnedCodexReview.mockReset();
+  client.watchConversationProject.mockReset();
+  client.unwatchConversationProject.mockReset();
+  client.startCodexLogin.mockReset();
+  client.cancelCodexLogin.mockReset();
+  client.logoutCodexAccount.mockReset();
   client.createTask.mockReset();
   client.launchTask.mockReset();
   client.retryTask.mockReset();
@@ -308,6 +410,13 @@ beforeEach(() => {
   client.loadProjectMemoryHistory.mockReset();
   client.loadManagedProjectMemory.mockReset();
   client.listOrganizations.mockReset();
+  client.getGovernorOverview.mockReset();
+  client.listAgentRuns.mockReset();
+  client.setGlobalOrganizationAssignment.mockReset();
+  client.setProjectOrganizationAssignment.mockReset();
+  client.previewOrganizationRevision.mockReset();
+  client.publishOrganizationRevision.mockReset();
+  client.cancelAgentRun.mockReset();
   client.loadOrganizationHistory.mockReset();
   client.createOrganization.mockReset();
   client.inheritOrganization.mockReset();
@@ -343,6 +452,7 @@ beforeEach(() => {
   client.handoffComputerSession.mockReset();
   client.reclaimComputerSession.mockReset();
   client.listSites.mockReset();
+  client.listCodexSites.mockReset();
   client.registerSite.mockReset();
   client.loadSiteHealth.mockReset();
   client.checkSiteHealth.mockReset();
@@ -380,8 +490,20 @@ beforeEach(() => {
   client.getUpdateConfiguration.mockReset();
   client.checkForUpdate.mockReset();
   client.installUpdate.mockReset();
+  client.listOpenInApplications.mockReset();
+  client.openWorkspaceIn.mockReset();
+  client.runTerminalCommand.mockReset();
   client.open.mockResolvedValue(undefined);
+  client.openInApp.mockResolvedValue(undefined);
+  client.updateInApp.mockResolvedValue(undefined);
+  client.closeInApp.mockResolvedValue(undefined);
+  client.controlInApp.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
+  client.discoverProvider.mockImplementation(async (connectionId: string) => ({
+    connection_id: connectionId,
+    models: [],
+    discovered_at: new Date().toISOString()
+  }));
   client.proxyUsage.mockResolvedValue({
     conversation_count: 0,
     call_count: 0,
@@ -393,6 +515,97 @@ beforeEach(() => {
   client.listMcp.mockResolvedValue({ connections: [] });
   client.listPlugins.mockResolvedValue({ plugins: [] });
   client.listTasks.mockResolvedValue({ tasks: [] });
+  client.listConversations.mockResolvedValue({ conversations: [] });
+  client.createConversation.mockImplementation(async (request: { title?: string; project_id?: string; execution_preferences: Record<string, unknown> }) => ({
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000c01",
+    title: request.title ?? "New chat",
+    project_id: request.project_id,
+    state: "active",
+    execution_preferences: request.execution_preferences,
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:00Z"
+  }));
+  client.updateConversation.mockImplementation(async (conversationId: string, request: { title: string; project_id?: string }) => ({
+    schema_version: 1,
+    id: conversationId,
+    title: request.title,
+    project_id: request.project_id,
+    state: "active",
+    execution_preferences: {},
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:01:00Z"
+  }));
+  client.archiveConversation.mockImplementation(async (conversationId: string, archived: boolean) => ({
+    schema_version: 1,
+    id: conversationId,
+    title: "Archived chat",
+    state: archived ? "archived" : "active",
+    execution_preferences: {},
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:01:00Z"
+  }));
+  client.getConversation.mockResolvedValue({
+    conversation: {
+      schema_version: 1,
+      id: "00000000-0000-4000-8000-000000000c01",
+      title: "New chat",
+      state: "active",
+      execution_preferences: {},
+      created_at: "2026-08-22T00:00:00Z",
+      updated_at: "2026-08-22T00:00:00Z"
+    },
+    turns: [],
+    messages: [],
+    activities: []
+  });
+  client.sendConversationMessage.mockImplementation(async (conversationId: string, request: { content: string; execution_preferences?: Record<string, unknown> }) => {
+    const conversation = await client.createConversation({ title: request.content.slice(0, 96), execution_preferences: request.execution_preferences ?? {} });
+    return {
+      conversation: { ...conversation, id: conversationId },
+      turns: [{ schema_version: 1, id: "00000000-0000-4000-8000-000000000c02", conversation_id: conversationId, state: "completed", execution_preferences: request.execution_preferences ?? {}, created_at: "2026-08-22T00:00:00Z", updated_at: "2026-08-22T00:00:01Z" }],
+      messages: [
+        { schema_version: 1, id: "00000000-0000-4000-8000-000000000c03", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000c02", role: "user", content: request.content, created_at: "2026-08-22T00:00:00Z" },
+        { schema_version: 1, id: "00000000-0000-4000-8000-000000000c04", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000c02", role: "assistant", content: "Fixture response", created_at: "2026-08-22T00:00:01Z" }
+      ],
+      activities: []
+    };
+  });
+  client.steerConversationTurn.mockImplementation(async () => client.getConversation());
+  client.getCodexModels.mockResolvedValue([]);
+  client.getCodexAccount.mockResolvedValue({ authenticated: false, requires_openai_auth: true });
+  client.getCodexRateLimits.mockResolvedValue({ refreshed_at: "2026-08-22T00:00:00Z" });
+  client.getCodexHarnessStatus.mockResolvedValue({
+    bundled_version: "0.144.6",
+    protocol_version: "0.144.6",
+    schema_sha256: "e710974af2ef773a512e039f7b38b6040f533035465ad899929f4cc52ce7a2a4",
+    process_state: "ready",
+    initialized: true,
+    account_state: "signed_out",
+    active_threads: 0,
+    pending_approvals: 0,
+    pending_requests: 0,
+    unsupported_requests: 0,
+    restart_count: 0
+    ,configuration_state: "ready"
+    ,windows_sandbox_state: "ready"
+    ,mcp_bridge_state: "ready"
+    ,recovery_state: "healthy"
+  });
+  client.getCodexConfigurationStatus.mockResolvedValue({ requirements: {}, provider_capabilities: {}, windows_sandbox: {} });
+  client.getCodexPendingRequests.mockResolvedValue([]);
+  client.getCodexStableDiscovery.mockResolvedValue({
+    skills: [],
+    hooks: [],
+    appsAvailable: false,
+    appsUnavailableReason: "Installed-app discovery is experimental in bundled Codex 0.144.6",
+    refreshedAt: "2026-08-22T00:00:00Z"
+  });
+  client.reconcileOwnedCodexThread.mockResolvedValue({});
+  client.forkOwnedCodexThread.mockResolvedValue({});
+  client.startOwnedCodexReview.mockResolvedValue({ reviewThreadId: "review-thread", turn: {}, delivery: "inline" });
+  client.watchConversationProject.mockResolvedValue({ watchId: "mcg-conversation-test", path: "C:\\workspace" });
+  client.unwatchConversationProject.mockResolvedValue({});
   client.listProjects.mockResolvedValue({ projects: [] });
   client.projectTopologyPlan.mockResolvedValue({
     schema_version: 2,
@@ -408,6 +621,29 @@ beforeEach(() => {
   client.listProjectMemoryTransfers.mockResolvedValue({ transfers: [] });
   client.loadManagedProjectMemory.mockResolvedValue({ markdown: "# Managed Project Memory\n" });
   client.listOrganizations.mockResolvedValue({ organizations: [] });
+  const defaultOrganization = {
+    schema_version: 1,
+    organization_id: "00000000-0000-4000-8000-000000000901",
+    revision_id: "00000000-0000-4000-8000-000000000902",
+    revision: 1,
+    name: "MCG Consumer Default",
+    roles: [],
+    relationships: [],
+    policy: { prefer_minimal_organization: true, max_parallel_agents: 2, max_total_agents: 8, max_organizational_overhead_ratio: 0.25, default_lease_seconds: 900 },
+    evaluation: { require_independent_evaluation: true, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+    created_at: "2026-08-21T00:00:00Z"
+  };
+  const assignments = { global_organization_id: defaultOrganization.organization_id, project_overrides: {}, updated_at: "2026-08-21T00:00:00Z" };
+  client.getGovernorOverview.mockResolvedValue({
+    status: { service: "mcg-daemon", version: "0.1.2", state: "ready", advanced_mode: false, autonomy: "autonomous", shadow_experiments: true, recovered_events: 0, recovered_tasks: 0, recovered_tool_leases: 0, recovered_agent_runs: 0, recovered_agent_instances: 0, recovered_agent_leases: 0, recovered_schedule_occurrences: 0, recovered_platform_sessions: 0, expired_platform_sessions: 0, recovered_computer_action_batches: 0 },
+    autonomy: "autonomous",
+    assignments,
+    active_organization: defaultOrganization,
+    active_runs: 0,
+    recent_runs: 0,
+    subsystems: []
+  });
+  client.listAgentRuns.mockResolvedValue({ runs: [] });
   client.listOrganizationPublishers.mockResolvedValue([]);
   client.listOrganizationShareReviews.mockResolvedValue([]);
   client.listApprovals.mockResolvedValue({ approvals: [] });
@@ -427,6 +663,7 @@ beforeEach(() => {
   });
   client.listPlatformSessions.mockResolvedValue({ sessions: [] });
   client.listSites.mockResolvedValue({ sites: [] });
+  client.listCodexSites.mockResolvedValue({ sites: [] });
   client.listSshHosts.mockResolvedValue({ hosts: [] });
   client.listSshWorkflows.mockResolvedValue({ workflows: [] });
   client.listSupervisionObservations.mockResolvedValue({ observations: [] });
@@ -474,6 +711,9 @@ beforeEach(() => {
     recovery_notice: null
   });
   client.installUpdate.mockResolvedValue(undefined);
+  client.listOpenInApplications.mockResolvedValue([]);
+  client.openWorkspaceIn.mockResolvedValue(undefined);
+  client.runTerminalCommand.mockResolvedValue({ working_directory: "C:\\Projects\\sample", output: "ok", exit_code: 0 });
   client.localServiceStatus.mockResolvedValue({
     ready: true,
     launched: true,
@@ -503,6 +743,98 @@ async function enableSimpleMode() {
   fireEvent.click(button);
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
 }
+
+test("workspace toolbar toggles the docked side panel and project terminal", async () => {
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Toggle side panel" }));
+  expect(screen.getByRole("complementary", { name: "Workspace side panel" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Browser", selected: true })).toBeInTheDocument();
+  expect(window.localStorage.getItem("mcg.workspace-side-panel")).toBe("true");
+  const sidePanelResizer = screen.getByRole("separator", { name: "Resize side panel" });
+  expect(sidePanelResizer).toHaveAttribute("aria-valuenow", "520");
+  fireEvent.pointerDown(sidePanelResizer, { clientX: 500, pointerId: 1 });
+  fireEvent.pointerMove(sidePanelResizer, { clientX: 600, pointerId: 1 });
+  fireEvent.pointerUp(sidePanelResizer, { pointerId: 1 });
+  expect(sidePanelResizer).toHaveAttribute("aria-valuenow", "420");
+
+  fireEvent.keyDown(window, { key: "b", ctrlKey: true, altKey: true });
+  expect(screen.queryByRole("complementary", { name: "Workspace side panel" })).not.toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+  expect(screen.getByRole("region", { name: "Terminal" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Terminal command" })).toBeInTheDocument();
+  expect(window.localStorage.getItem("mcg.workspace-bottom-panel")).toBe("true");
+});
+
+test("active governed browser sessions render a live page preview in the side panel", async () => {
+  const active = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000099",
+    definition_hash: "c".repeat(64),
+    kind: "browser",
+    state: "active",
+    owner: "mcg",
+    display_name: "Browser · localhost",
+    allowed_origins: ["http://localhost:3000"],
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:00Z",
+    expires_at: "2026-08-22T01:00:00Z",
+    recovery_count: 0
+  };
+  client.listPlatformSessions.mockResolvedValue({ sessions: [active] });
+  client.navigateBrowserSession.mockResolvedValue({
+    session_id: active.id,
+    mode: "headless",
+    safe_url: "http://localhost:3000/about",
+    title: "PrairieOps",
+    handed_off: false,
+    denied_requests: 0
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Toggle side panel" }));
+  const panel = screen.getByRole("complementary", { name: "Workspace side panel" });
+  const preview = await within(panel).findByTitle("Browser preview · Browser · localhost");
+  expect(preview).toHaveAttribute("data-preview-url", "http://localhost:3000");
+  expect(within(panel).getByRole("status")).toHaveTextContent("Live preview");
+
+  const url = within(panel).getByLabelText("URL for Browser · localhost");
+  fireEvent.change(url, { target: { value: "http://localhost:3000/about?private=value" } });
+  fireEvent.click(within(panel).getByRole("button", { name: "Go" }));
+  expect(await within(panel).findByTitle("Browser preview · PrairieOps")).toHaveAttribute("data-preview-url", "http://localhost:3000/about");
+  expect(client.navigateBrowserSession).toHaveBeenCalledWith(active.id, "http://localhost:3000/about?private=value");
+});
+
+test("Agents exposes the governor topology and assignments as a first-class surface", async () => {
+  const organization = {
+    schema_version: 1,
+    organization_id: "00000000-0000-4000-8000-000000000921",
+    revision_id: "00000000-0000-4000-8000-000000000922",
+    revision: 3,
+    name: "Product team",
+    roles: [
+      { id: "00000000-0000-4000-8000-000000000923", kind: "executive", name: "Executive", purpose: "Coordinates work", prompt_policy: "Stay bounded", model_policy: { capability_class: "general", preferred_models: [], allow_fallback: true, max_escalation_tier: 2 }, tool_capabilities: [], memory_namespace: "team" },
+      { id: "00000000-0000-4000-8000-000000000924", kind: "coder", name: "Builder", purpose: "Implements changes", prompt_policy: "Verify changes", model_policy: { capability_class: "coding", preferred_models: [], allow_fallback: true, max_escalation_tier: 2 }, tool_capabilities: ["filesystem"], memory_namespace: "project" }
+    ],
+    relationships: [{ from: "00000000-0000-4000-8000-000000000923", to: "00000000-0000-4000-8000-000000000924", kind: "delegates_to" }],
+    policy: { prefer_minimal_organization: true, max_parallel_agents: 2, max_total_agents: 4, max_organizational_overhead_ratio: 0.25, default_lease_seconds: 900 },
+    evaluation: { require_independent_evaluation: true, require_objective_evidence: true, minimum_confidence: 0.8, calibration_window: 100 },
+    created_at: "2026-08-21T00:00:00Z"
+  };
+  const assignments = { global_organization_id: organization.organization_id, project_overrides: {}, updated_at: "2026-08-21T00:00:00Z" };
+  client.listOrganizations.mockResolvedValue({ organizations: [organization] });
+  client.getGovernorOverview.mockResolvedValue({ status: { service: "mcg-daemon", version: "0.1.2", state: "ready", advanced_mode: false, autonomy: "reviewed", shadow_experiments: true, recovered_events: 1, recovered_tasks: 0, recovered_tool_leases: 0, recovered_agent_runs: 0, recovered_agent_instances: 0, recovered_agent_leases: 0, recovered_schedule_occurrences: 0, recovered_platform_sessions: 0, expired_platform_sessions: 0, recovered_computer_action_batches: 0 }, autonomy: "reviewed", assignments, active_organization: organization, active_runs: 0, recent_runs: 0, subsystems: [{ id: "policy", label: "Policy enforcement", state: "ready", detail: "Owner policy active" }] });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+  expect(await screen.findByRole("heading", { name: "MCG Governor" })).toBeInTheDocument();
+  expect(screen.getByText("Product team · revision 3")).toBeInTheDocument();
+  expect(screen.getByText("Policy enforcement")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Teams" }));
+  expect(screen.getByRole("combobox", { name: "Global default team" })).toHaveValue(organization.organization_id);
+  expect(screen.queryByRole("button", { name: "Improvement" })).not.toBeInTheDocument();
+});
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {
   const project = {
@@ -539,10 +871,11 @@ test("Codex-style sidebar groups project chats, searches them, and persists pins
   expect(within(projectTree).getByRole("button", { name: "New chat in consumer-app" })).toBeInTheDocument();
   expect(within(projectTree).getByRole("button", { name: task.goal })).toBeInTheDocument();
 
+  fireEvent.click(within(projectTree).getByRole("button", { name: task.goal }));
   fireEvent.click(await screen.findByRole("button", { name: "Pin" }));
   const pinned = screen.getByLabelText("Pinned chats");
   expect(within(pinned).getByRole("button", { name: task.goal })).toBeInTheDocument();
-  expect(JSON.parse(window.localStorage.getItem("mcg.pinned-task-ids") ?? "[]")).toEqual([task.id]);
+  expect(JSON.parse(window.localStorage.getItem("mcg.pinned-chat-ids") ?? "[]")).toEqual([task.id]);
 
   fireEvent.change(screen.getByRole("textbox", { name: "Search chats" }), { target: { value: "missing" } });
   expect(within(projectTree).queryByRole("button", { name: task.goal })).not.toBeInTheDocument();
@@ -550,7 +883,102 @@ test("Codex-style sidebar groups project chats, searches them, and persists pins
 
   fireEvent.change(screen.getByRole("textbox", { name: "Search chats" }), { target: { value: "dashboard" } });
   fireEvent.click(within(pinned).getByRole("button", { name: task.goal }));
-  expect(screen.getByRole("heading", { name: task.goal, level: 1 })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: task.goal, level: 3 })).toBeInTheDocument();
+});
+
+test("project and pinned chat menus pin, archive, and expose the expected distinct actions", async () => {
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000710",
+    project_id: "00000000-0000-4000-8000-000000000711",
+    root: "C:\\Projects\\menu-app",
+    observed_at: "2026-08-22T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: [], build_systems: [], test_systems: [], instructions: { conflicts: [] }
+  };
+  const conversation = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000712",
+    title: "Plan the launch",
+    project_id: project.project_id,
+    state: "active" as const,
+    execution_preferences: {},
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:00Z"
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.listConversations.mockResolvedValue({ conversations: [conversation] });
+  client.getConversation.mockResolvedValue({ conversation, turns: [], messages: [], activities: [] });
+  client.archiveConversation.mockResolvedValue({ ...conversation, state: "archived", updated_at: "2026-08-22T00:01:00Z" });
+
+  render(<App />);
+  const projectTree = screen.getByLabelText("Projects");
+  const projectChat = await within(projectTree).findByRole("button", { name: conversation.title });
+  fireEvent.contextMenu(projectChat, { clientX: 220, clientY: 200 });
+
+  const projectMenu = screen.getByRole("menu", { name: "Project chat menu" });
+  expect(within(projectMenu).getByRole("menuitem", { name: "Pin" })).toBeInTheDocument();
+  expect(within(projectMenu).queryByRole("menuitem", { name: "Move up" })).not.toBeInTheDocument();
+  fireEvent.click(within(projectMenu).getByRole("menuitem", { name: "Pin" }));
+
+  const pinned = screen.getByLabelText("Pinned chats");
+  const pinnedChat = within(pinned).getByRole("button", { name: conversation.title });
+  expect(within(pinned).getByRole("button", { name: `Unpin ${conversation.title}` })).toBeInTheDocument();
+  fireEvent.contextMenu(pinnedChat, { clientX: 230, clientY: 180 });
+
+  const pinnedMenu = screen.getByRole("menu", { name: "Pinned chat menu" });
+  expect(within(pinnedMenu).getByRole("menuitem", { name: "Move up" })).toBeDisabled();
+  expect(within(pinnedMenu).getByRole("menuitem", { name: "Unpin" })).toBeInTheDocument();
+  fireEvent.click(within(pinnedMenu).getByRole("menuitem", { name: "Archive" }));
+
+  await waitFor(() => expect(client.archiveConversation).toHaveBeenCalledWith(conversation.id, true));
+  await waitFor(() => expect(within(projectTree).queryByRole("button", { name: conversation.title })).not.toBeInTheDocument());
+  expect(within(pinned).queryByRole("button", { name: conversation.title })).not.toBeInTheDocument();
+});
+
+test("sidebar shows recent chats newest first and restores chats from a collapsible archive", async () => {
+  const older = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000721",
+    title: "Older active chat",
+    state: "active" as const,
+    execution_preferences: {},
+    created_at: "2026-08-20T00:00:00Z",
+    updated_at: "2026-08-20T00:00:00Z"
+  };
+  const newer = {
+    ...older,
+    id: "00000000-0000-4000-8000-000000000722",
+    title: "Newest active chat",
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:00Z"
+  };
+  const archived = {
+    ...older,
+    id: "00000000-0000-4000-8000-000000000723",
+    title: "Archived launch notes",
+    state: "archived" as const,
+    updated_at: "2026-08-21T00:00:00Z"
+  };
+  client.listConversations.mockResolvedValue({ conversations: [older, archived, newer] });
+  client.archiveConversation.mockResolvedValue({ ...archived, state: "active", updated_at: "2026-08-22T00:01:00Z" });
+
+  render(<App />);
+
+  const recents = screen.getByLabelText("Recent chats");
+  const recentLinks = await within(recents).findAllByRole("button", { name: /active chat \(recent\)/ });
+  expect(recentLinks.map((link) => link.textContent).filter(Boolean)).toEqual(["Newest active chat", "Older active chat"]);
+
+  const archive = screen.getByLabelText("Archived chats");
+  expect(within(archive).getByRole("button", { name: "Archived" })).toHaveAttribute("aria-expanded", "false");
+  expect(within(archive).queryByRole("button", { name: archived.title })).not.toBeInTheDocument();
+
+  fireEvent.click(within(archive).getByRole("button", { name: "Archived" }));
+  expect(within(archive).getByRole("button", { name: archived.title })).toBeInTheDocument();
+  fireEvent.click(within(archive).getByRole("button", { name: `Restore ${archived.title}` }));
+
+  await waitFor(() => expect(client.archiveConversation).toHaveBeenCalledWith(archived.id, false));
+  await waitFor(() => expect(within(archive).queryByRole("button", { name: archived.title })).not.toBeInTheDocument());
 });
 
 test("packaged local service readiness is visible and failures are not disguised", async () => {
@@ -1108,7 +1536,118 @@ test("simple Sites starts a project-aware website chat without exposing deployme
   fireEvent.change(within(panel).getByLabelText("Starting point"), { target: { value: project.project_id } });
   fireEvent.click(within(panel).getByRole("button", { name: "New site" }));
   expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
-  expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Build a website");
+  expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Build a website");
+});
+
+test("opening Sites refreshes AI-published sites from the durable library", async () => {
+  const publishedSite = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000119",
+    definition_hash: "a".repeat(64),
+    revision: 1,
+    project_id: "00000000-0000-4000-8000-000000000112",
+    display_name: "Springfield IT Support",
+    environment: "production" as const,
+    public_url: "https://springfield-it.hendo420.chatgpt.site/",
+    health_url: "https://springfield-it.hendo420.chatgpt.site/",
+    hosting_provider: "OpenAI Sites",
+    state: "active" as const,
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:00Z"
+  };
+  client.listSites
+    .mockResolvedValueOnce({ sites: [] })
+    .mockResolvedValue({ sites: [publishedSite] });
+
+  render(<App />);
+  await waitFor(() => expect(client.listSites).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("link", { name: "Sites" }));
+
+  const panel = await screen.findByRole("region", { name: "Sites" });
+  expect(await within(panel).findByRole("heading", { name: "Springfield IT Support" })).toBeVisible();
+  expect(within(panel).getByRole("button", { name: "Open in MCG browser" })).toBeVisible();
+  fireEvent.click(within(panel).getByRole("button", { name: "More options for Springfield IT Support" }));
+  expect(screen.getByRole("menuitem", { name: "Open in MCG browser" })).toBeVisible();
+  expect(client.listSites).toHaveBeenCalledTimes(2);
+});
+
+test("simple Sites merges the account inventory, renders thumbnails, and offers browser actions", async () => {
+  const accountSites = [
+    {
+      id: "site-1",
+      display_name: "Springfield's Best IT",
+      description: "Local IT support",
+      public_url: "https://springfields-best-it.hendo420.chatgpt.site/",
+      screenshot_url: "https://example.test/screens/site-1.png",
+      status: "live",
+      created_at: "2026-08-22T00:00:00Z",
+      updated_at: "2026-08-22T00:00:00Z"
+    },
+    {
+      id: "site-2",
+      display_name: "Springfield IT Support",
+      description: null,
+      public_url: "https://springfield-it-support.hendo420.chatgpt.site/",
+      screenshot_url: "https://example.test/screens/site-2.png",
+      status: "live",
+      created_at: "2026-08-22T00:00:00Z",
+      updated_at: "2026-08-22T00:00:00Z"
+    },
+    {
+      id: "site-3",
+      display_name: "PrairieOps ITSM",
+      description: null,
+      public_url: "https://prairieops-itsm.hendo420.chatgpt.site/",
+      screenshot_url: null,
+      status: "live",
+      created_at: "2026-08-22T00:00:00Z",
+      updated_at: "2026-08-22T00:00:00Z"
+    }
+  ];
+  client.listCodexSites.mockResolvedValue({ sites: accountSites });
+
+  render(<App />);
+  fireEvent.click(screen.getByRole("link", { name: "Sites" }));
+
+  const panel = await screen.findByRole("region", { name: "Sites" });
+  expect(await within(panel).findByText("3", { selector: ".count-badge" })).toBeVisible();
+  expect(within(panel).getByRole("heading", { name: "Springfield's Best IT" })).toBeVisible();
+  expect(within(panel).getByRole("heading", { name: "Springfield IT Support" })).toBeVisible();
+  expect(within(panel).getByRole("heading", { name: "PrairieOps ITSM" })).toBeVisible();
+  expect(within(panel).getByRole("img", { name: "Preview of Springfield's Best IT" })).toHaveAttribute(
+    "src",
+    accountSites[0].screenshot_url
+  );
+
+  const card = within(panel).getByRole("heading", { name: "Springfield's Best IT" }).closest("article");
+  expect(card).not.toBeNull();
+  fireEvent.contextMenu(card!);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open in MCG browser" }));
+  const browserPanel = await screen.findByRole("region", { name: "Browser" });
+  expect(within(browserPanel).getByRole("tab", { name: /Springfield's Best IT/ })).toBeVisible();
+  expect(within(browserPanel).getByRole("textbox", { name: "Address" })).toHaveValue(accountSites[0].public_url);
+  await waitFor(() => expect(client.openInApp).toHaveBeenCalledWith(
+    expect.any(String),
+    accountSites[0].public_url,
+    expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) })
+  ));
+  fireEvent.click(within(browserPanel).getByRole("button", { name: "Close Springfield's Best IT" }));
+  await waitFor(() => expect(client.closeInApp).toHaveBeenCalledWith(expect.any(String)));
+  fireEvent.contextMenu(card!);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open in external browser" }));
+  expect(client.open).toHaveBeenCalledWith(accountSites[0].public_url);
+});
+
+test("simple Sites makes an account inventory failure visible while preserving local Sites", async () => {
+  client.listCodexSites.mockRejectedValue(new Error("Account inventory unavailable"));
+
+  render(<App />);
+  fireEvent.click(screen.getByRole("link", { name: "Sites" }));
+
+  const panel = await screen.findByRole("region", { name: "Sites" });
+  expect(await within(panel).findByRole("alert")).toHaveTextContent(
+    "The OpenAI Sites library could not refresh: Account inventory unavailable"
+  );
 });
 
 test("simple Pull requests starts a read-only repository review instead of exposing runtime approvals", async () => {
@@ -1136,6 +1675,14 @@ test("simple Pull requests starts a read-only repository review instead of expos
   render(<App />);
 
   const panel = await screen.findByRole("region", { name: "Pull requests" });
+  expect(within(panel).getByRole("tab", { name: "All" })).toHaveAttribute("aria-selected", "true");
+  expect(within(panel).getByRole("tab", { name: "Reviewing" })).toBeVisible();
+  expect(within(panel).getByRole("tab", { name: "Authored" })).toBeVisible();
+  expect(within(panel).getByRole("searchbox", { name: "Search pull requests" })).toBeVisible();
+  expect(within(panel).getByRole("button", { name: "Filter pull requests" })).toBeVisible();
+  expect(within(panel).getByRole("region", { name: "Pull request details" })).toBeVisible();
+  expect(within(panel).getByText("Select a review to view")).toBeVisible();
+  fireEvent.click(within(panel).getByRole("button", { name: "Start local review" }));
   expect(within(panel).getByText("Review is read-only. It will not modify files.")).toBeVisible();
   expect(within(panel).queryByRole("heading", { name: "Governed approvals" })).not.toBeInTheDocument();
   fireEvent.change(within(panel).getByLabelText("Repository"), { target: { value: project.project_id } });
@@ -1143,7 +1690,7 @@ test("simple Pull requests starts a read-only repository review instead of expos
   fireEvent.click(within(panel).getByRole("button", { name: "Start review" }));
 
   expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
-  const goal = (screen.getByLabelText("Goal") as HTMLTextAreaElement).value;
+  const goal = (screen.getByLabelText("Message") as HTMLTextAreaElement).value;
   expect(goal).toContain("Review code changes in review-me");
   expect(goal).toContain("all staged, unstaged, and untracked changes");
   expect(goal).toContain("Do not modify the working tree during the review");
@@ -1297,8 +1844,8 @@ test("simple Scheduled starts a project-aware setup chat and Advanced retains ex
   fireEvent.change(within(scheduler).getByLabelText("Each run"), { target: { value: "chat" } });
   fireEvent.click(within(scheduler).getByRole("button", { name: "Set up in chat" }));
   expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
-  expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Summarize important changes every morning");
-  expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toContain("Return to this setup chat on each run");
+  expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Summarize important changes every morning");
+  expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Return to this setup chat on each run");
 
   await enableAdvancedMode();
   expect(within(scheduler).getByRole("heading", { name: "Scheduler administration" })).toBeVisible();
@@ -1628,35 +2175,60 @@ test("mode persistence restores keyboard focus after the temporarily disabled co
   await waitFor(() => expect(simple).toHaveFocus());
 });
 
-test("OpenAI subscription browser login is the clear default and confirms connection", async () => {
-  client.start.mockResolvedValue({
-    session_id: "fixture-session",
-    connection_id: "openai-subscription",
-    auth_mode: "chat_gpt_browser_oauth",
-    verification_url: "https://auth.openai.com/oauth/authorize"
-  });
-  client.complete.mockResolvedValue({
-    connection: {
-      id: "openai-subscription",
-      display_name: "OpenAI Subscription",
-      auth_mode: "chat_gpt_browser_oauth"
-    },
-    catalog: { models: [] }
-  });
+test("OpenAI subscription browser login completes automatically after the callback", async () => {
+  client.startCodexLogin.mockResolvedValue({ loginId: "fixture-session", authUrl: "https://auth.openai.com/oauth/authorize" });
   render(<App />);
 
   const providerPanel = document.querySelector("#providers") as HTMLElement;
   expect(within(providerPanel).getByText(/No CLI pairing code\./)).toBeInTheDocument();
+  client.getCodexAccount.mockResolvedValue({ authenticated: true, email: "hendo@example.com", plan_type: "plus", requires_openai_auth: true });
   fireEvent.click(within(providerPanel).getByRole("button", { name: "Continue with OpenAI" }));
-  expect(await within(providerPanel).findByText("Finish signing in with OpenAI in your browser, then return here.")).toBeInTheDocument();
-  expect(within(providerPanel).getByRole("button", { name: "Open sign-in page" })).toBeInTheDocument();
-  expect(within(providerPanel).queryByText("Code:", { exact: false })).not.toBeInTheDocument();
-  expect(client.start).toHaveBeenCalledWith("browser");
-  expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/oauth/authorize");
+  await waitFor(() => expect(client.startCodexLogin).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/oauth/authorize"));
+  expect(await within(providerPanel).findByText("Using shared Codex account")).toBeInTheDocument();
+  expect(client.complete).not.toHaveBeenCalled();
+  expect(within(providerPanel).queryByRole("button", { name: "Finish connection" })).not.toBeInTheDocument();
+});
 
-  fireEvent.click(within(providerPanel).getByRole("button", { name: "Finish connection" }));
-  expect(await within(providerPanel).findByText("OpenAI Subscription connected")).toBeInTheDocument();
-  expect(client.complete).toHaveBeenCalledWith("fixture-session");
+test("empty provider catalogs are discovered automatically and populate the chat model selector", async () => {
+  const connection = {
+    contract_version: 1,
+    id: "openai-subscription",
+    display_name: "OpenAI Subscription",
+    kind: "open_ai",
+    base_url: "https://chatgpt.com/backend-api/codex",
+    auth_mode: "chat_gpt_browser_oauth"
+  };
+  client.listProviders.mockResolvedValue({ providers: [{
+    connection,
+    catalog: { connection_id: connection.id, models: [], discovered_at: "2026-08-22T00:00:00Z" }
+  }] });
+  client.discoverProvider.mockResolvedValue({
+    connection_id: connection.id,
+    discovered_at: "2026-08-22T12:00:00Z",
+    models: [{ id: "gpt-5.6-sol", display_name: "5.6 Sol", capabilities: { reasoning_control: true } }]
+  });
+  render(<App />);
+
+  await waitFor(() => expect(client.discoverProvider).toHaveBeenCalledWith(connection.id));
+  const selector = document.querySelector('summary[aria-label="New chat model, effort, and speed"]') as HTMLElement;
+  fireEvent.click(selector);
+  expect(await screen.findByRole("option", { name: "5.6 Sol · OpenAI Subscription" })).toBeInTheDocument();
+  expect(screen.getByText("1 available model")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Model"), { target: { value: `${connection.id}\u0000gpt-5.6-sol` } });
+  expect(selector).toHaveTextContent("5.6 Sol");
+});
+
+test("OpenAI subscription browser login resets after its callback timeout", async () => {
+  client.startCodexLogin.mockRejectedValue(
+    new Error("Sign-in timed out after 3 minutes. Start sign-in again when you’re ready.")
+  );
+  render(<App />);
+
+  const providerPanel = document.querySelector("#providers") as HTMLElement;
+  fireEvent.click(within(providerPanel).getByRole("button", { name: "Continue with OpenAI" }));
+  expect(await within(providerPanel).findByRole("alert")).toHaveTextContent("Sign-in timed out after 3 minutes");
+  await waitFor(() => expect(within(providerPanel).getByRole("button", { name: "Continue with OpenAI" })).toBeEnabled());
 });
 
 test("account menu stays compact and logs out only ChatGPT OAuth connections", async () => {
@@ -1677,23 +2249,83 @@ test("account menu stays compact and logs out only ChatGPT OAuth connections", a
     auth_mode: "api_key"
   };
   client.listProviders.mockResolvedValue({ providers: [
-    { connection: oauth, catalog: { connection_id: oauth.id, models: [], discovered_at: "2026-08-21T00:00:00Z" } },
+    { connection: oauth, profile: {
+      display_name: "Hendo",
+      username: "hendo420",
+      email: "hendo@example.com",
+      avatar_url: "https://example.com/avatar.png",
+      plan_type: "plus",
+      account_structure: "personal",
+      account_role: "owner",
+      usage: {
+        primary_window: { used_percent: 24, remaining_percent: 76, window_seconds: 18000, reset_at: 1800000000 },
+        secondary_window: { used_percent: 80, remaining_percent: 20, window_seconds: 604800, reset_at: 1800500000 },
+        additional_rate_limits: [{
+          name: "Codex Spark",
+          primary_window: { used_percent: 1, remaining_percent: 99, window_seconds: 18000, reset_at: 1800100000 }
+        }]
+      }
+    }, catalog: { connection_id: oauth.id, models: [], discovered_at: "2026-08-21T00:00:00Z" } },
     { connection: api, catalog: { connection_id: api.id, models: [], discovered_at: "2026-08-21T00:00:00Z" } }
   ] });
   client.disconnectProvider.mockResolvedValue(undefined);
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: /OpenAI account/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Hendo/ }));
   const menu = screen.getByLabelText("Owner menu");
+  expect(within(menu).getByText("hendo420")).toBeInTheDocument();
+  expect(document.querySelector('img[src="https://example.com/avatar.png"]')).toBeInTheDocument();
   expect(within(menu).getByRole("button", { name: /Usage/ })).toBeInTheDocument();
+  expect(within(menu).getByText("76% left")).toBeInTheDocument();
+  const expectedResetDate = new Date(1_800_000_000 * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
+  expect(within(menu).getByText(`Next Reset: ${expectedResetDate}`)).toBeInTheDocument();
+  expect(within(menu).queryByText(/Non-Spark models|Resets/)).not.toBeInTheDocument();
+  expect(within(menu).getByRole("progressbar", { name: "Usage remaining" })).toHaveAttribute("aria-valuenow", "76");
+  expect(within(menu).queryByText("99% left")).not.toBeInTheDocument();
   expect(within(menu).getByRole("button", { name: /Settings/ })).toBeInTheDocument();
   expect(within(menu).queryByText("Show pet")).not.toBeInTheDocument();
   expect(within(menu).queryByText("Invite a friend")).not.toBeInTheDocument();
+  fireEvent.click(within(menu).getByRole("button", { name: /Usage/ }));
+  expect((await screen.findAllByText("ChatGPT Plus")).length).toBeGreaterThan(0);
+  expect(screen.getByText("76%")).toBeInTheDocument();
+  expect(screen.getByText("20%")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Hendo/ }));
   fireEvent.click(within(menu).getByRole("button", { name: "Log out" }));
 
   await waitFor(() => expect(client.disconnectProvider).toHaveBeenCalledWith(oauth.id));
   expect(client.disconnectProvider).not.toHaveBeenCalledWith(api.id);
   expect(await screen.findByRole("button", { name: /Local owner/ })).toBeInTheDocument();
+});
+
+test("a locally chosen account photo persists for the matching ChatGPT profile", async () => {
+  const oauth = {
+    contract_version: 1,
+    id: "openai-subscription",
+    display_name: "OpenAI Subscription",
+    kind: "open_ai",
+    base_url: "https://chatgpt.com/backend-api/codex",
+    auth_mode: "chat_gpt_browser_oauth"
+  };
+  const dataUrl = "data:image/png;base64,iVBORw0KGgo=";
+  window.localStorage.setItem("mcg.account-avatar", JSON.stringify({ accountKey: "person@example.com", dataUrl }));
+  client.listProviders.mockResolvedValue({ providers: [
+    { connection: oauth, profile: { display_name: "Person", email: "person@example.com" }, catalog: { connection_id: oauth.id, models: [], discovered_at: "2026-08-21T00:00:00Z" } }
+  ] });
+  render(<App />);
+
+  await screen.findAllByText("person@example.com");
+  const identityButton = document.querySelector(".owner-menu-button");
+  expect(identityButton).not.toBeNull();
+  fireEvent.click(identityButton as HTMLButtonElement);
+  expect(document.querySelector(`img[src="${dataUrl}"]`)).toBeInTheDocument();
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Profile" }));
+  expect(screen.getByRole("button", { name: "Change photo" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Use OpenAI photo" })).toBeInTheDocument();
 });
 
 test("Settings follows the grouped Codex navigation and filters sections", async () => {
@@ -1705,10 +2337,35 @@ test("Settings follows the grouped Codex navigation and filters sections", async
   expect(within(navigation).getByText("Personal")).toBeInTheDocument();
   expect(within(navigation).getByText("Integrations")).toBeInTheDocument();
   expect(within(navigation).getByText("Coding")).toBeInTheDocument();
+  const settingsResizer = screen.getByRole("separator", { name: "Resize settings navigation" });
+  expect(settingsResizer).toHaveAttribute("aria-valuenow", "244");
+  fireEvent.pointerDown(settingsResizer, { clientX: 200, pointerId: 2 });
+  fireEvent.pointerMove(settingsResizer, { clientX: 300, pointerId: 2 });
+  fireEvent.pointerUp(settingsResizer, { pointerId: 2 });
+  expect(settingsResizer).toHaveAttribute("aria-valuenow", "344");
   expect(within(navigation).queryByText("Pets")).not.toBeInTheDocument();
   fireEvent.change(screen.getByRole("textbox", { name: "Search settings" }), { target: { value: "archived" } });
   expect(within(navigation).getByRole("button", { name: "Archived chats" })).toBeInTheDocument();
   expect(within(navigation).queryByRole("button", { name: "General" })).not.toBeInTheDocument();
+});
+
+test("integration and coding settings expose sectioned Codex-style controls", async () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  const settingsNavigation = screen.getByRole("navigation", { name: "Settings sections" });
+
+  fireEvent.click(within(settingsNavigation).getByRole("button", { name: "Plugins" }));
+  expect(screen.getByRole("tablist", { name: "Plugin categories" })).toBeInTheDocument();
+  expect(screen.getByText("No plugins installed")).toBeInTheDocument();
+
+  fireEvent.click(within(settingsNavigation).getByRole("button", { name: "Browser" }));
+  expect(screen.getByText("Browser automation")).toBeInTheDocument();
+  expect(screen.getByText("Site permissions", { exact: true })).toBeInTheDocument();
+
+  fireEvent.click(within(settingsNavigation).getByRole("button", { name: "Git" }));
+  expect(screen.getByText("Branch prefix")).toBeInTheDocument();
+  expect(screen.getByText("codex/")).toBeInTheDocument();
 });
 
 test("Appearance applies a durable theme and reduced-motion preference", async () => {
@@ -1746,6 +2403,7 @@ test("advanced mode keeps device-code login an explicit headless fallback", asyn
     verification_url: "https://auth.openai.com/codex/device",
     user_code: "ABCD-1234"
   });
+  client.complete.mockReturnValue(new Promise(() => undefined));
   render(<App />);
 
   await enableAdvancedMode();
@@ -1754,7 +2412,8 @@ test("advanced mode keeps device-code login an explicit headless fallback", asyn
 
   expect(await screen.findByText("Code:", { exact: false })).toHaveTextContent("ABCD-1234");
   expect(screen.getByRole("button", { name: "Open device authorization page" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "I've entered the code" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "I've entered the code" })).not.toBeInTheDocument();
+  expect(screen.getByText(/connect automatically/i)).toBeInTheDocument();
   expect(client.start).toHaveBeenCalledWith("device_code");
   expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
 });
@@ -1776,7 +2435,7 @@ test("consumer provider setup discovers a local endpoint and advanced mode shows
       capabilities: { responses: true, streaming: true },
       metadata: {}
     }],
-    discovered_at: "2026-08-14T00:00:00Z"
+    discovered_at: new Date().toISOString()
   };
   client.configureProvider.mockResolvedValue({ connection, catalog });
   render(<App />);
@@ -1932,7 +2591,7 @@ test("advanced MCP setup passes stdio executable arguments without a credential"
   );
 });
 
-test("consumer task flow creates, starts, and reveals durable history", async () => {
+test("new chat opens immediately as a conversation without creating a project or durable task", async () => {
   const project = {
     id: "00000000-0000-4000-8000-000000000010",
     project_id: "00000000-0000-4000-8000-000000000011",
@@ -1944,128 +2603,418 @@ test("consumer task flow creates, starts, and reveals durable history", async ()
     test_systems: ["vitest"],
     instructions: { conflicts: [] }
   };
-  const pendingTask = {
-    schema_version: 1,
-    id: "00000000-0000-4000-8000-000000000001",
-    project_id: project.project_id,
-    goal: "Build a durable site",
-    constraints: [],
-    success_conditions: [],
-    risk: "medium",
-    budget: {},
-    state: "pending",
-    created_at: "2026-08-14T00:00:00Z",
-    updated_at: "2026-08-14T00:00:00Z"
-  };
-  client.createTask.mockResolvedValue({
-    task: pendingTask,
-    event: { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at }
-  });
   client.listProjects.mockResolvedValue({ projects: [project] });
-  client.launchTask.mockResolvedValue({
-    task: { ...pendingTask, state: "active" },
-    replayed: false,
-    run: { run: { id: "00000000-0000-4000-8000-000000000020", state: "running" } },
-    execution: { state: "awaiting_evaluation", detail: "Objective evaluation is still required." }
-  });
-  client.taskEvents.mockResolvedValue({
-    events: [
-      { sequence: 1, kind: "task_created", occurred_at: pendingTask.created_at },
-      { sequence: 2, kind: "task_transitioned", occurred_at: pendingTask.created_at },
-      {
-        sequence: 3,
-        kind: "evaluation_recorded",
-        occurred_at: pendingTask.created_at,
-        payload: {
-          outcome: "passed",
-          conditions: [
-            { passed: true, detail: "npm test exited with code 0" },
-            { passed: true, detail: "npm run build exited with code 0" }
-          ],
-          evidence: [{ method: "governed_process_exit", detail: "exit code 0" }]
-        }
-      }
-    ]
-  });
-  client.taskAudit.mockResolvedValue({
-    records: [{
-      schema_version: 1,
-      execution_id: "00000000-0000-4000-8000-000000000060",
-      request_id: "00000000-0000-4000-8000-000000000061",
-      task_id: pendingTask.id,
-      tool: "browser.workflow",
-      resource: "http://127.0.0.1:3000",
-      request_fingerprint: "fixture",
-      phase: "completion",
-      decision: "allow",
-      result: "succeeded",
-      artifacts: [{
-        id: "00000000-0000-4000-8000-000000000062",
-        sha256: "a".repeat(64),
-        media_type: "image/png",
-        size_bytes: 2048,
-        relative_path: "aa/fixture"
-      }],
-      verification: [{ method: "browser.workflow_step", passed: true, detail: "step=1; matched" }],
-      recorded_at: pendingTask.created_at
-    }]
-  });
-  client.replayRun.mockResolvedValue({
-    schema_version: 1,
-    run_id: "00000000-0000-4000-8000-000000000020",
-    task_id: pendingTask.id,
-    organization_revision_id: "00000000-0000-4000-8000-000000000021",
-    terminal: false,
-    side_effect_free: true,
-    evidence_sha256: "b".repeat(64),
-    counts: { events: 3, tool_audit_records: 1, work_items: 1, instances: 1, leases: 1, usage_records: 1, evaluations: 1, turn_results: 1 },
-    invariants: [
-      { code: "identity_coherent", passed: true, detail: "identities agree" },
-      { code: "observation_only", passed: true, detail: "no execution" }
-    ],
-    evidence: {}
-  });
   render(<App />);
 
   await waitFor(() => expect(within(screen.getByLabelText("Project")).getByRole("option", { name: "sample" })).toBeInTheDocument());
   fireEvent.change(screen.getByLabelText("Project"), {
     target: { value: project.project_id }
   });
-  fireEvent.change(screen.getByLabelText("Goal"), { target: { value: pendingTask.goal } });
-  fireEvent.click(screen.getByRole("button", { name: "Create task" }));
-  expect(await screen.findByRole("heading", { name: pendingTask.goal })).toBeInTheDocument();
-  expect(client.createTask).toHaveBeenCalledWith({
-    goal: pendingTask.goal,
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Explain this repository" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByRole("heading", { name: "Explain this repository" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Chat conversation")).toBeInTheDocument();
+  expect(client.createConversation).toHaveBeenCalledWith({
+    title: "Explain this repository",
     project_id: project.project_id,
-    constraints: [],
-    success_conditions: [],
-    risk: undefined,
-    budget: undefined
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask" }
+  });
+  expect(client.sendConversationMessage).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000c01", {
+    content: "Explain this repository",
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask" }
+  });
+  expect(client.createTask).not.toHaveBeenCalled();
+  expect(client.launchTask).not.toHaveBeenCalled();
+  expect(screen.getByText("Fixture response")).toBeInTheDocument();
+});
+
+test("active chats queue Enter messages in a drawer and allow immediate steering", async () => {
+  const conversation = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000c01",
+    title: "Active chat",
+    state: "active" as const,
+    execution_preferences: {},
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:01Z"
+  };
+  const turn = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000c02",
+    conversation_id: conversation.id,
+    state: "streaming" as const,
+    execution_preferences: {},
+    codex_thread_id: "codex-thread-1",
+    codex_turn_id: "codex-turn-1",
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:01Z"
+  };
+  const activeView = {
+    conversation,
+    turns: [turn],
+    messages: [{
+      schema_version: 1,
+      id: "00000000-0000-4000-8000-000000000c03",
+      conversation_id: conversation.id,
+      turn_id: turn.id,
+      role: "user" as const,
+      content: "Start working",
+      created_at: turn.created_at
+    }],
+    activities: []
+  };
+  client.getConversation.mockResolvedValue(activeView);
+  client.sendConversationMessage.mockReturnValue(new Promise(() => undefined));
+  client.steerConversationTurn.mockResolvedValue(activeView);
+  render(<App />);
+
+  const composer = screen.getByLabelText("Message");
+  fireEvent.change(composer, { target: { value: "Start working" } });
+  fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+  expect(await screen.findByRole("heading", { name: "Start working" })).toBeInTheDocument();
+
+  const activeComposer = screen.getByLabelText("Message");
+  fireEvent.change(activeComposer, { target: { value: "Use the blue design" } });
+  fireEvent.keyDown(activeComposer, { key: "Enter", code: "Enter" });
+  expect(screen.getByLabelText("Queued messages")).toHaveTextContent("Use the blue design");
+  expect(screen.getByRole("button", { name: "Queue" })).toBeInTheDocument();
+
+  await waitFor(() => expect(client.getConversation).toHaveBeenCalledWith(conversation.id), { timeout: 1500 });
+  fireEvent.click(screen.getByRole("button", { name: /Steer/ }));
+  await waitFor(() => expect(client.steerConversationTurn).toHaveBeenCalledWith(
+    conversation.id,
+    turn.id,
+    "Use the blue design"
+  ));
+  expect(screen.queryByLabelText("Queued messages")).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Keep the current structure" } });
+  fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter", code: "Enter", ctrlKey: true });
+  await waitFor(() => expect(client.steerConversationTurn).toHaveBeenLastCalledWith(
+    conversation.id,
+    turn.id,
+    "Keep the current structure"
+  ));
+  expect(screen.getByLabelText("Message")).toHaveValue("");
+});
+
+test("permission mode is selected before prompting and sent with the conversation turn", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  render(<App />);
+
+  await waitFor(() => expect(within(screen.getByLabelText("Project")).getByRole("option", { name: "sample" })).toBeInTheDocument());
+  fireEvent.change(screen.getByLabelText("Project"), { target: { value: project.project_id } });
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /Approve for me/ }));
+  expect(screen.getByLabelText("Change permissions")).toHaveTextContent("Approve for me");
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Review this repository" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ approval_mode: "auto_review" }) })
+  ));
+});
+
+test("project-free chats allow elevated permission selection while explaining the read-only boundary", async () => {
+  render(<App />);
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  const approveForMe = screen.getByRole("menuitemradio", { name: /Approve for me/ });
+  expect(approveForMe).toBeEnabled();
+  fireEvent.click(approveForMe);
+  expect(screen.getByLabelText("Change permissions")).toHaveTextContent("Approve for me");
+
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  const fullAccess = screen.getByRole("menuitemradio", { name: /Full access/ });
+  expect(fullAccess).toBeEnabled();
+  expect(screen.getByText("Your selection is saved. Project-free turns stay read-only until you attach a project.")).toBeInTheDocument();
+  fireEvent.click(fullAccess);
+  expect(screen.getByLabelText("Change permissions")).toHaveTextContent("Full access");
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Explain this safely" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ approval_mode: "full_access" }) })
+  ));
+});
+
+test("chat follow threshold treats a few lines from the bottom as live", () => {
+  expect(isChatViewportNearBottom({ scrollHeight: 1_000, scrollTop: 410, clientHeight: 500 } as HTMLElement)).toBe(true);
+  expect(isChatViewportNearBottom({ scrollHeight: 1_000, scrollTop: 300, clientHeight: 500 } as HTMLElement)).toBe(false);
+});
+
+test("conversation streaming follows near the bottom and pauses after the user scrolls up", async () => {
+  const conversation = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000c01",
+    title: "Explain streaming",
+    state: "active" as const,
+    execution_preferences: {},
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  const turn = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000c02",
+    conversation_id: conversation.id,
+    state: "streaming" as "streaming" | "completed",
+    execution_preferences: {},
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  const streamedView = {
+    conversation,
+    turns: [turn],
+    messages: [
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000c03", conversation_id: conversation.id, turn_id: turn.id, role: "user" as const, content: "Explain streaming", created_at: turn.created_at },
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000c04", conversation_id: conversation.id, turn_id: turn.id, role: "assistant" as const, content: "Here is a partial", created_at: turn.created_at }
+    ],
+    activities: []
+  };
+  let finishSend: ((view: typeof streamedView) => void) | undefined;
+  client.getConversation.mockResolvedValue(streamedView);
+  client.sendConversationMessage.mockReturnValue(new Promise((resolve) => { finishSend = resolve; }));
+  const { container } = render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Toggle side panel" }));
+  const workspace = container.querySelector<HTMLElement>(".workspace");
+  expect(workspace).not.toBeNull();
+  let scrollTop = 0;
+  Object.defineProperties(workspace!, {
+    scrollHeight: { configurable: true, get: () => 1_000 },
+    clientHeight: { configurable: true, get: () => 500 },
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.min(value, 500); }
+    }
   });
 
-  fireEvent.click(screen.getByRole("button", { name: "Start task" }));
-  expect(await screen.findByText("active")).toBeInTheDocument();
-  expect(client.launchTask).toHaveBeenCalledWith(pendingTask.id);
-  expect(screen.getByText("Objective evaluation is still required.")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Explain streaming" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
-  expect(await screen.findByText("passed")).toBeInTheDocument();
-  expect(screen.getByText("2 / 2")).toBeInTheDocument();
-  expect(screen.getAllByText("1", { selector: ".evidence-overview strong" })).toHaveLength(2);
-  expect(client.taskEvents).toHaveBeenCalledWith(pendingTask.id);
-  expect(client.taskAudit).toHaveBeenCalledWith(pendingTask.id);
-  fireEvent.click(screen.getByRole("button", { name: "Verify replay" }));
-  expect(await screen.findByText("Durable replay verified")).toBeInTheDocument();
-  expect(screen.getByText("No provider or tool side effects")).toBeInTheDocument();
-  expect(screen.getByTitle("b".repeat(64))).toBeInTheDocument();
-  expect(client.replayRun).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000020");
+  expect(await screen.findByText("Here is a partial", {}, { timeout: 5000 })).toBeInTheDocument();
+  expect(screen.getByText(/^Responding ·/)).toBeInTheDocument();
+  await waitFor(() => expect(scrollTop).toBe(500));
 
-  await enableAdvancedMode();
-  expect(screen.getByText("task transitioned")).toBeInTheDocument();
-  expect(screen.getByText("Governed tool activity")).toBeInTheDocument();
-  expect(screen.getByText("browser.workflow")).toBeInTheDocument();
-  expect(screen.getByText("image/png · 2.0 KiB")).toBeInTheDocument();
-  expect(screen.getByTitle("a".repeat(64))).toBeInTheDocument();
+  scrollTop = 250;
+  fireEvent.scroll(workspace!);
+  client.getConversation.mockResolvedValue({
+    ...streamedView,
+    messages: [{ ...streamedView.messages[0] }, { ...streamedView.messages[1], content: "A second partial response" }]
+  });
+  expect(await screen.findByText("A second partial response", {}, { timeout: 5000 })).toBeInTheDocument();
+  expect(scrollTop).toBe(250);
+
+  scrollTop = 450;
+  fireEvent.scroll(workspace!);
+  client.getConversation.mockResolvedValue({
+    ...streamedView,
+    messages: [{ ...streamedView.messages[0] }, { ...streamedView.messages[1], content: "The latest partial response" }]
+  });
+  expect(await screen.findByText("The latest partial response", {}, { timeout: 5000 })).toBeInTheDocument();
+  await waitFor(() => expect(scrollTop).toBe(500));
+
+  finishSend?.({
+    ...streamedView,
+    turns: [{ ...turn, state: "completed" as const }],
+    messages: [{ ...streamedView.messages[0] }, { ...streamedView.messages[1], content: "Here is the complete response." }]
+  });
+  expect(await screen.findByText("Here is the complete response.")).toBeInTheDocument();
+  expect(screen.queryByText(/^Responding ·/)).not.toBeInTheDocument();
+  expect(scrollTop).toBe(500);
+});
+
+test("conversation activity shows command lifecycle, details, and context compaction", async () => {
+  const conversation = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000e01",
+    title: "Inspect activity",
+    state: "active" as const,
+    execution_preferences: {},
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:02Z"
+  };
+  const turn = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000e02",
+    conversation_id: conversation.id,
+    state: "completed" as const,
+    execution_preferences: {},
+    created_at: "2026-08-22T00:00:00Z",
+    updated_at: "2026-08-22T00:00:02Z"
+  };
+  const activityView = {
+    conversation,
+    turns: [turn],
+    messages: [
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000e03", conversation_id: conversation.id, turn_id: turn.id, role: "user" as const, content: "Inspect activity", created_at: turn.created_at },
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000e04", conversation_id: conversation.id, turn_id: turn.id, role: "assistant" as const, content: "I will inspect the workspace.", codex_item_id: "message-1", created_at: "2026-08-22T00:00:01Z" },
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000e05", conversation_id: conversation.id, turn_id: turn.id, role: "assistant" as const, content: "The first checks passed.", codex_item_id: "message-2", created_at: "2026-08-22T00:00:04Z" },
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000e06", conversation_id: conversation.id, turn_id: turn.id, role: "assistant" as const, content: "Finished inspecting.", codex_item_id: "message-3", created_at: "2026-08-22T00:00:07Z" }
+    ],
+    activities: [
+      {
+        schema_version: 1,
+        conversation_id: conversation.id,
+        turn_id: turn.id,
+        codex_item_id: "command-1",
+        kind: "command" as const,
+        state: "completed" as const,
+        command: "Get-Content README.md",
+        cwd: "C:\\workspace",
+        output: "# MCG",
+        exit_code: 0,
+        duration_ms: 1250,
+        started_at: "2026-08-22T00:00:02Z",
+        updated_at: "2026-08-22T00:00:02Z"
+      },
+      {
+        schema_version: 1,
+        conversation_id: conversation.id,
+        turn_id: turn.id,
+        codex_item_id: "command-2",
+        kind: "command" as const,
+        state: "completed" as const,
+        command: "npm test",
+        started_at: "2026-08-22T00:00:03Z",
+        updated_at: "2026-08-22T00:00:03Z"
+      },
+      {
+        schema_version: 1,
+        conversation_id: conversation.id,
+        turn_id: turn.id,
+        codex_item_id: "usage-1",
+        kind: "usage" as const,
+        state: "completed" as const,
+        command: "Usage updated: 1,240 tokens",
+        output: "1,240 tokens used",
+        started_at: "2026-08-22T00:00:04.500Z",
+        updated_at: "2026-08-22T00:00:04.500Z"
+      },
+      {
+        schema_version: 1,
+        conversation_id: conversation.id,
+        turn_id: turn.id,
+        codex_item_id: "compact-1",
+        kind: "context_compaction" as const,
+        state: "completed" as const,
+        started_at: "2026-08-22T00:00:05Z",
+        updated_at: "2026-08-22T00:00:05Z"
+      },
+      {
+        schema_version: 1,
+        conversation_id: conversation.id,
+        turn_id: turn.id,
+        codex_item_id: "command-3",
+        kind: "command" as const,
+        state: "running" as const,
+        command: "cargo check --workspace",
+        started_at: "2026-08-22T00:00:06Z",
+        updated_at: "2026-08-22T00:00:06Z"
+      }
+    ]
+  };
+  client.getConversation.mockResolvedValue(activityView);
+  client.sendConversationMessage.mockReturnValue(new Promise(() => undefined));
+  render(<App />);
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Inspect activity" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  const completedGroup = await screen.findByText("Ran commands", {}, { timeout: 1500 });
+  const runningGroup = screen.getByText("Running commands");
+  expect(completedGroup.closest("details")).not.toHaveAttribute("open");
+  expect(runningGroup.closest("details")).not.toHaveAttribute("open");
+  expect(screen.getByTitle("npm test")).toBeInTheDocument();
+  expect(screen.getByTitle("cargo check --workspace")).toBeInTheDocument();
+  expect(screen.getByText("2 commands")).toBeInTheDocument();
+  expect(screen.getByText("1 command")).toBeInTheDocument();
+  expect(screen.getByText("Context automatically compacted")).toBeInTheDocument();
+  expect(screen.queryByText(/Usage updated/)).not.toBeInTheDocument();
+  expect(screen.queryByText("1,240 tokens used")).not.toBeInTheDocument();
+  const timelineText = Array.from(screen.getByLabelText("Turn activity").children).map((element) => element.textContent);
+  expect(timelineText).toEqual([
+    "Chat AgentI will inspect the workspace.",
+    expect.stringContaining("Ran commands2 commandsnpm test"),
+    "Chat AgentThe first checks passed.",
+    "≡Context automatically compacted",
+    expect.stringContaining("Running commands1 commandcargo check --workspace"),
+    "Chat AgentFinished inspecting."
+  ]);
+  fireEvent.click(completedGroup.closest("summary")!);
+  fireEvent.click(screen.getByText("Ran Get-Content README.md").closest("summary")!);
+  expect(screen.getByText("C:\\workspace")).toBeInTheDocument();
+  expect(screen.getByText("Exit code 0")).toBeInTheDocument();
+  expect(screen.getByText("# MCG")).toBeInTheDocument();
+});
+
+test("conversation approval is shown in chat and resolves without restarting the task", async () => {
+  const conversation = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000d01",
+    project_id: "00000000-0000-4000-8000-000000000d02",
+    title: "Install the Sites starter",
+    state: "active" as const,
+    execution_preferences: {},
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  const turn = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000d03",
+    conversation_id: conversation.id,
+    task_id: "00000000-0000-4000-8000-000000000d04",
+    state: "waiting_for_approval" as const,
+    execution_preferences: {},
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  const approval = {
+    id: "00000000-0000-4000-8000-000000000d05",
+    task_id: turn.task_id,
+    action: "item/commandExecution/requestApproval",
+    resource: "npm package download for the Sites starter",
+    reason: "The starter package requires network access.",
+    state: "pending"
+  };
+  const waitingView = {
+    conversation,
+    turns: [turn],
+    messages: [
+      { schema_version: 1, id: "00000000-0000-4000-8000-000000000d06", conversation_id: conversation.id, turn_id: turn.id, role: "user" as const, content: "Build the site", created_at: turn.created_at }
+    ],
+    activities: []
+  };
+  let finishSend: ((view: typeof waitingView) => void) | undefined;
+  client.getConversation.mockResolvedValue(waitingView);
+  client.listApprovals.mockResolvedValue({ approvals: [approval] });
+  client.approveRequest.mockResolvedValue({ ...approval, state: "approved" });
+  client.sendConversationMessage.mockReturnValue(new Promise((resolve) => { finishSend = resolve; }));
+  render(<App />);
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build the site" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(await screen.findByText("Permission needed to continue", {}, { timeout: 1500 })).toBeInTheDocument();
+  expect(screen.getByText(approval.reason)).toBeInTheDocument();
+  expect(screen.getByText(approval.resource)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Allow once" }));
+
+  await waitFor(() => expect(client.approveRequest).toHaveBeenCalledWith(approval.id));
+  expect(client.resumeTask).not.toHaveBeenCalled();
+  finishSend?.(waitingView);
 });
 
 test("blocked task retry is explicit and reports durable progress", async () => {
@@ -2091,8 +3040,13 @@ test("blocked task retry is explicit and reports durable progress", async () => 
   });
   render(<App />);
 
+  fireEvent.click(await screen.findByRole("button", { name: blockedTask.goal }));
   fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
-  expect(client.retryTask).toHaveBeenCalledWith(blockedTask.id);
+  expect(client.retryTask).toHaveBeenCalledWith(blockedTask.id, {
+    approval_mode: "ask",
+    reasoning_effort: "medium",
+    speed: "standard",
+  });
   expect(await screen.findByText("Objective checks are next.")).toBeInTheDocument();
   expect(screen.getByText("active")).toBeInTheDocument();
 });
@@ -2130,10 +3084,17 @@ test("pending approval can be reviewed and resumed from the task card", async ()
   });
   render(<App />);
 
+  fireEvent.click(await screen.findByRole("button", { name: waitingTask.goal }));
   expect(await screen.findByText(approval.reason)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Approve and continue" }));
   expect(client.approveRequest).toHaveBeenCalledWith(approval.id);
-  await waitFor(() => expect(client.resumeTask).toHaveBeenCalledWith(waitingTask.id));
+  await waitFor(() =>
+    expect(client.resumeTask).toHaveBeenCalledWith(waitingTask.id, {
+      approval_mode: "ask",
+      reasoning_effort: "medium",
+      speed: "standard",
+    }),
+  );
   expect(await screen.findByText("Approved work finished; checks are next.")).toBeInTheDocument();
 });
 
@@ -2166,6 +3127,7 @@ test("pending approval can be denied into a retryable blocked task", async () =>
   client.denyRequest.mockResolvedValue({ ...approval, state: "denied" });
   render(<App />);
 
+  fireEvent.click(await screen.findByRole("button", { name: waitingTask.goal }));
   fireEvent.click(await screen.findByRole("button", { name: "Deny" }));
   expect(client.denyRequest).toHaveBeenCalledWith(approval.id);
   expect(await screen.findByText("blocked")).toBeInTheDocument();
@@ -2173,7 +3135,7 @@ test("pending approval can be denied into a retryable blocked task", async () =>
   expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
 });
 
-test("native project selection discovers the folder and associates the new task", async () => {
+test("native project selection discovers the folder and associates the new conversation", async () => {
   const root = "C:\\Projects\\sample";
   const project = {
     id: "00000000-0000-4000-8000-000000000010",
@@ -2188,22 +3150,6 @@ test("native project selection discovers the folder and associates the new task"
   };
   client.pickProject.mockResolvedValue(root);
   client.discoverProject.mockResolvedValue({ project });
-  client.createTask.mockResolvedValue({
-    task: {
-      schema_version: 1,
-      id: "00000000-0000-4000-8000-000000000012",
-      project_id: project.project_id,
-      goal: "Improve the sample",
-      constraints: [],
-      success_conditions: [],
-      risk: "medium",
-      budget: {},
-      state: "pending",
-      created_at: project.observed_at,
-      updated_at: project.observed_at
-    },
-    event: { sequence: 1, kind: "task_created", occurred_at: project.observed_at }
-  });
   render(<App />);
 
   const folderButton = screen.getByRole("button", { name: "Open folder" });
@@ -2212,14 +3158,15 @@ test("native project selection discovers the folder and associates the new task"
   expect((await screen.findAllByText("sample")).length).toBeGreaterThan(0);
   expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
   expect(document.querySelector(".selected-project")).toBeNull();
-  fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "Improve the sample" } });
-  fireEvent.click(screen.getByRole("button", { name: "Create task" }));
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Improve the sample" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByRole("heading", { name: "Improve the sample" })).toBeInTheDocument();
   expect(client.discoverProject).toHaveBeenCalledWith(root);
-  expect(client.createTask).toHaveBeenCalledWith(expect.objectContaining({
+  expect(client.createConversation).toHaveBeenCalledWith(expect.objectContaining({
     project_id: project.project_id
   }));
+  expect(client.createTask).not.toHaveBeenCalled();
 });
 
 test("Ctrl+O registers a global folder without creating a project", async () => {
@@ -2271,7 +3218,7 @@ test("desktop menus follow the Codex command structure with MCG branding", async
   fireEvent.click(screen.getByRole("button", { name: "View" }));
   menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
   expect(menu.getByRole("button", { name: /Toggle Sidebar.*Ctrl\+B/ })).toBeInTheDocument();
-  expect(menu.getByRole("button", { name: /Open Terminal/ })).toBeDisabled();
+  expect(menu.getByRole("button", { name: /Open Terminal/ })).toBeEnabled();
   expect(menu.getByRole("button", { name: /Toggle Full Screen.*F11/ })).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Help" }));
@@ -2590,6 +3537,7 @@ test("task evidence uses the durable blocked state when no evaluation exists", a
   client.taskAudit.mockResolvedValue({ records: [] });
   render(<App />);
 
+  fireEvent.click(await screen.findByRole("button", { name: blockedTask.goal }));
   fireEvent.click(await screen.findByRole("button", { name: "Evidence" }));
 
   expect(within(await screen.findByRole("region", { name: "Task evidence" })).getByText("Blocked")).toBeInTheDocument();
@@ -2664,5 +3612,5 @@ test("simple Plugins reviews access, enables an extension, and starts a new chat
   fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
   await waitFor(() => expect(client.setPluginEnabled).toHaveBeenCalledWith("example.weather", 2, true));
   fireEvent.click(await screen.findByRole("button", { name: "Start new chat" }));
-  expect(screen.getByLabelText("Goal")).toHaveValue("Use @Weather helper to ");
+  expect(screen.getByLabelText("Message")).toHaveValue("Use @Weather helper to ");
 });

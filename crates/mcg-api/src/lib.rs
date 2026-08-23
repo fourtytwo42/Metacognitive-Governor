@@ -23,21 +23,23 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use mcg_agents::{
-    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationReport,
-    ExecutivePlanner, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
-    ExperimentState, OrganizationGenome, OrganizationSharePackage, OrganizationShareReview,
+    AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationPolicy,
+    EvaluationReport, ExecutivePlanner, ExperimentBenchmark, ExperimentDecision,
+    ExperimentDefinition, ExperimentState, ModelPolicy, OrganizationAssignments,
+    OrganizationGenome, OrganizationPolicy, OrganizationSharePackage, OrganizationShareReview,
     OrganizationalMetrics, PlannedWork, PlanningRequest, PortableOrganizationComparison,
-    PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition,
-    SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
+    PortableOrganizationGenome, RoleDefinition, RoleKind, RoleRelationship, ShadowExecutionReceipt,
+    SuccessCondition, SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
 };
 use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
-    ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, ExperimentId,
+    ApprovalId, ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, Conversation,
+    ConversationId, ConversationTurnId, ConversationView, ExecutionPreferences, ExperimentId,
     MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
     OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
     PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
     PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
-    ReviewedTopologyPlanId, RiskLevel, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
     ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, Site, SiteDeployment, SiteDeploymentCommand,
     SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
@@ -54,12 +56,12 @@ use mcg_projects::{
 };
 pub use mcg_projects::{ProjectTopologyPlan, ReviewedTopologyPlan};
 use mcg_providers::{
-    ModelProbeReport, ProviderAuthMode, ProviderConnection, ProviderCredential,
-    ProviderModelCatalog,
+    ModelProbeReport, OAuthAccountProfile, ProviderAuthMode, ProviderConnection,
+    ProviderCredential, ProviderModelCatalog,
 };
 use mcg_runtime::{
     AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, BackupBundleManifest,
-    BackupBundleSummary, BackupPassphrase, CandidateRevisionMutation,
+    BackupBundleSummary, BackupPassphrase, CandidateRevisionMutation, CodexSiteInventory,
     ConsumerEvaluationCheckpointState, ConsumerEvaluationProgress, DiagnosticReport,
     EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
     OpenAiOAuthMethod, OrganizationPublisherMutation, OrganizationShareImportMutation,
@@ -158,6 +160,71 @@ pub struct TaskMutationResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskListResponse {
     pub tasks: Vec<TaskEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateConversationRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+    #[serde(default)]
+    pub execution_preferences: ExecutionPreferences,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendConversationMessageRequest {
+    pub content: String,
+    #[serde(default)]
+    pub execution_preferences: Option<ExecutionPreferences>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteerConversationTurnRequest {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveConversationRequest {
+    #[serde(default = "default_true")]
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateConversationRequest {
+    pub title: String,
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationListResponse {
+    pub conversations: Vec<Conversation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ConversationListQuery {
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelCodexLoginRequest {
+    pub login_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodexDiscoveryRequest {
+    #[serde(default)]
+    pub cwds: Vec<String>,
+    #[serde(default)]
+    pub force_reload: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexReviewRequest {
+    pub target: mcg_codex_app_server::CodexReviewTarget,
+    pub delivery: mcg_codex_app_server::CodexReviewDelivery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,6 +504,82 @@ pub struct OrganizationHistoryResponse {
     pub revisions: Vec<OrganizationGenome>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationAssignmentResponse {
+    pub assignments: OrganizationAssignments,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetOrganizationAssignmentRequest {
+    pub organization_id: Option<OrganizationId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditableRoleDefinition {
+    #[serde(default)]
+    pub id: Option<RoleId>,
+    pub kind: RoleKind,
+    pub name: String,
+    pub purpose: String,
+    pub prompt_policy: String,
+    pub model_policy: ModelPolicy,
+    #[serde(default)]
+    pub tool_capabilities: Vec<String>,
+    pub memory_namespace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewOrganizationRevisionRequest {
+    pub expected_parent_revision_id: OrganizationRevisionId,
+    pub name: String,
+    pub roles: Vec<EditableRoleDefinition>,
+    pub relationships: Vec<RoleRelationship>,
+    pub policy: OrganizationPolicy,
+    pub evaluation: EvaluationPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishOrganizationRevisionRequest {
+    pub expected_parent_revision_id: OrganizationRevisionId,
+    pub name: String,
+    pub roles: Vec<RoleDefinition>,
+    pub relationships: Vec<RoleRelationship>,
+    pub policy: OrganizationPolicy,
+    pub evaluation: EvaluationPolicy,
+    pub change_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationRevisionPreview {
+    pub organization: OrganizationGenome,
+    pub changes: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunListResponse {
+    pub runs: Vec<AgentRunView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GovernorSubsystem {
+    pub id: String,
+    pub label: String,
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GovernorOverviewResponse {
+    pub status: RuntimeStatus,
+    pub autonomy: AutonomyPreset,
+    pub assignments: OrganizationAssignments,
+    pub active_organization: OrganizationGenome,
+    pub active_runs: usize,
+    pub recent_runs: usize,
+    pub subsystems: Vec<GovernorSubsystem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanAgentRunRequest {
     pub organization_revision_id: OrganizationRevisionId,
@@ -485,6 +628,8 @@ pub struct ExecuteAgentWorkRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchTaskRequest {
     #[serde(default)]
+    pub organization_id: Option<OrganizationId>,
+    #[serde(default)]
     pub target_path: Option<String>,
     #[serde(default = "default_context_token_budget")]
     pub context_token_budget: u32,
@@ -494,6 +639,17 @@ pub struct LaunchTaskRequest {
     pub estimated_output_tokens: u64,
     #[serde(default = "default_max_model_calls")]
     pub max_model_calls: u16,
+    /// Optional exact provider/model selection made in the chat composer.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Provider-native reasoning effort (`none`, `low`, `medium`, `high`, or `xhigh`).
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// OpenAI Responses service tier. The desktop maps Standard/Fast to default/priority.
+    #[serde(default)]
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -836,6 +992,8 @@ impl Drop for ConfigureProviderRequest {
 pub struct ProviderListItem {
     pub connection: ProviderConnection,
     pub catalog: Option<ProviderModelCatalog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<OAuthAccountProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1175,6 +1333,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             get(list_experiment_decisions).post(decide_experiment),
         )
         .route("/api/v1/sites", get(list_sites).post(create_site))
+        .route("/api/v1/sites/codex", get(list_codex_sites))
         .route("/api/v1/sites/{site_id}", get(get_site).put(update_site))
         .route("/api/v1/sites/{site_id}/revisions", get(site_revisions))
         .route(
@@ -1241,6 +1400,83 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         )
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route(
+            "/api/v1/conversations",
+            get(list_conversations).post(create_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}",
+            get(get_conversation).put(update_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/archive",
+            post(archive_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/messages",
+            post(send_conversation_message),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/turns/{turn_id}/interrupt",
+            post(interrupt_conversation_turn),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/turns/{turn_id}/steer",
+            post(steer_conversation_turn),
+        )
+        .route("/api/v1/codex/harness", get(codex_harness_status))
+        .route("/api/v1/codex/models", get(codex_models))
+        .route("/api/v1/codex/account", get(codex_account))
+        .route("/api/v1/codex/rate-limits", get(codex_rate_limits))
+        .route("/api/v1/codex/account/usage", get(codex_account_usage))
+        .route("/api/v1/codex/discovery", post(codex_stable_discovery))
+        .route(
+            "/api/v1/codex/configuration",
+            get(codex_configuration_status),
+        )
+        .route(
+            "/api/v1/codex/pending-requests",
+            get(codex_pending_requests),
+        )
+        .route("/api/v1/codex/owned-threads", get(codex_owned_threads))
+        .route(
+            "/api/v1/codex/owned-threads/{conversation_id}/reconcile",
+            post(reconcile_owned_codex_thread),
+        )
+        .route(
+            "/api/v1/codex/owned-threads/{conversation_id}/fork",
+            post(fork_owned_codex_thread),
+        )
+        .route(
+            "/api/v1/codex/owned-threads/{conversation_id}/compact",
+            post(compact_owned_codex_thread),
+        )
+        .route(
+            "/api/v1/codex/owned-threads/{conversation_id}/unsubscribe",
+            post(unsubscribe_owned_codex_thread),
+        )
+        .route(
+            "/api/v1/codex/owned-threads/{conversation_id}/history",
+            get(owned_codex_thread_history),
+        )
+        .route(
+            "/api/v1/codex/owned-threads/{conversation_id}/review",
+            post(start_owned_codex_review),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/command",
+            post(exec_governed_codex_command),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/watch",
+            post(watch_conversation_project).delete(unwatch_conversation_project),
+        )
+        .route("/api/v1/codex/account/login", post(start_codex_login))
+        .route(
+            "/api/v1/codex/account/login/cancel",
+            post(cancel_codex_login),
+        )
+        .route("/api/v1/codex/account/logout", post(logout_codex_account))
+        .route(
             "/api/v1/tasks/{task_id}",
             get(get_task).post(transition_task),
         )
@@ -1250,6 +1486,15 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route("/api/v1/tasks/{task_id}/launch", post(launch_task))
         .route("/api/v1/tasks/{task_id}/retry", post(retry_task))
         .route("/api/v1/tasks/{task_id}/resume", post(resume_task))
+        .route("/api/v1/agents/overview", get(governor_overview))
+        .route(
+            "/api/v1/agents/assignments",
+            get(get_organization_assignments).put(set_global_organization_assignment),
+        )
+        .route(
+            "/api/v1/agents/assignments/projects/{project_id}",
+            axum::routing::put(set_project_organization_assignment),
+        )
         .route(
             "/api/v1/organizations",
             get(list_organizations).post(create_default_organization),
@@ -1261,6 +1506,14 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/organizations/{organization_id}/history",
             get(organization_history),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/revisions/preview",
+            post(preview_organization_revision),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/revisions",
+            post(publish_organization_revision),
         )
         .route("/api/v1/organizations/import", post(import_organization))
         .route(
@@ -1295,6 +1548,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             "/api/v1/organization-revisions/{left_revision_id}/compare/{right_revision_id}",
             get(compare_organizations),
         )
+        .route("/api/v1/runs", get(list_agent_runs))
         .route("/api/v1/runs/{run_id}", get(get_agent_run))
         .route("/api/v1/runs/{run_id}/replay", get(replay_agent_run))
         .route("/api/v1/runs/{run_id}/evaluations", post(record_evaluation))
@@ -1645,11 +1899,16 @@ pub async fn run_scheduler_tick_at(
         return run_site_monitor_claim(runtime, claim, monitor, &lease_owner).await;
     }
     let request = LaunchTaskRequest {
+        organization_id: None,
         target_path: claim.schedule.target_path.clone(),
         context_token_budget: claim.schedule.context_token_budget,
         requested_tools: claim.schedule.requested_tools.clone(),
         estimated_output_tokens: claim.schedule.estimated_output_tokens,
         max_model_calls: claim.schedule.max_model_calls,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        service_tier: None,
     };
     let launched = launch_task(
         State(ApiState::new(runtime.clone(), None)),
@@ -2515,6 +2774,18 @@ async fn list_sites(State(state): State<ApiState>) -> Result<Json<SiteListRespon
     }))
 }
 
+async fn list_codex_sites(
+    State(state): State<ApiState>,
+) -> Result<Json<CodexSiteInventory>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_sites_inventory()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
 async fn get_site(
     State(state): State<ApiState>,
     Path(site_id): Path<String>,
@@ -3084,6 +3355,410 @@ async fn acknowledge_scheduler_notification(
     ))
 }
 
+async fn create_conversation(
+    State(state): State<ApiState>,
+    Json(request): Json<CreateConversationRequest>,
+) -> Result<(StatusCode, Json<Conversation>), ApiError> {
+    let conversation = state
+        .runtime
+        .create_conversation(
+            request.title,
+            request.project_id,
+            request.execution_preferences,
+        )
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(conversation)))
+}
+
+async fn list_conversations(
+    State(state): State<ApiState>,
+    Query(query): Query<ConversationListQuery>,
+) -> Result<Json<ConversationListResponse>, ApiError> {
+    Ok(Json(ConversationListResponse {
+        conversations: state
+            .runtime
+            .conversations(query.include_archived)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .conversation(conversation_id)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn update_conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<UpdateConversationRequest>,
+) -> Result<Json<Conversation>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    state
+        .runtime
+        .rename_owned_codex_thread(conversation_id, &request.title)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(
+        state
+            .runtime
+            .update_conversation(conversation_id, request.title, request.project_id)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn archive_conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<ArchiveConversationRequest>,
+) -> Result<Json<Conversation>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    state
+        .runtime
+        .set_owned_codex_thread_archived(conversation_id, request.archived)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(
+        state
+            .runtime
+            .archive_conversation(conversation_id, request.archived)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn send_conversation_message(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<SendConversationMessageRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .send_conversation_message(
+                conversation_id,
+                request.content,
+                request.execution_preferences,
+            )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn interrupt_conversation_turn(
+    State(state): State<ApiState>,
+    Path((conversation_id, turn_id)): Path<(String, String)>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    let turn_id = turn_id
+        .parse::<ConversationTurnId>()
+        .map_err(|_| ApiError::bad_request("conversation turn id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .interrupt_conversation_turn(conversation_id, turn_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn steer_conversation_turn(
+    State(state): State<ApiState>,
+    Path((conversation_id, turn_id)): Path<(String, String)>,
+    Json(request): Json<SteerConversationTurnRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    let turn_id = turn_id
+        .parse::<ConversationTurnId>()
+        .map_err(|_| ApiError::bad_request("conversation turn id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .steer_conversation_turn(conversation_id, turn_id, request.content)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_harness_status(
+    State(state): State<ApiState>,
+) -> Json<mcg_codex_app_server::CodexHarnessStatus> {
+    Json(state.runtime.codex_harness_status().await)
+}
+
+async fn codex_models(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<mcg_codex_app_server::CodexModel>>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_models()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_account(
+    State(state): State<ApiState>,
+) -> Result<Json<mcg_codex_app_server::CodexAccount>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_account()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_rate_limits(
+    State(state): State<ApiState>,
+) -> Result<Json<mcg_codex_app_server::CodexRateLimits>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_rate_limits()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_account_usage(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_account_usage()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_stable_discovery(
+    State(state): State<ApiState>,
+    Json(request): Json<CodexDiscoveryRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexStableDiscovery>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_stable_discovery(&request.cwds, request.force_reload)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_configuration_status(
+    State(state): State<ApiState>,
+) -> Result<Json<mcg_codex_app_server::CodexConfigurationStatus>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_configuration_status()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_pending_requests(
+    State(state): State<ApiState>,
+) -> Json<Vec<mcg_codex_app_server::CodexPendingRequest>> {
+    Json(state.runtime.codex_pending_requests().await)
+}
+
+async fn codex_owned_threads(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<mcg_domain::CodexOwnedThread>>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_owned_threads()
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+fn parse_conversation_id(value: &str) -> Result<ConversationId, ApiError> {
+    value
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))
+}
+
+async fn reconcile_owned_codex_thread(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .reconcile_owned_codex_thread(parse_conversation_id(&conversation_id)?)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn fork_owned_codex_thread(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<mcg_domain::CodexThreadBinding>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .fork_owned_codex_thread(parse_conversation_id(&conversation_id)?)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn compact_owned_codex_thread(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<mcg_domain::CodexThreadBinding>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .compact_owned_codex_thread(parse_conversation_id(&conversation_id)?)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn unsubscribe_owned_codex_thread(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .unsubscribe_owned_codex_thread(parse_conversation_id(&conversation_id)?)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(serde_json::json!({ "unsubscribed": true })))
+}
+
+async fn owned_codex_thread_history(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .owned_codex_thread_history(parse_conversation_id(&conversation_id)?)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn start_owned_codex_review(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<CodexReviewRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexReviewResult>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .start_owned_codex_review(
+                parse_conversation_id(&conversation_id)?,
+                request.target,
+                request.delivery,
+            )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn exec_governed_codex_command(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<mcg_codex_app_server::CodexCommandExecRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexCommandExecResult>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .exec_governed_codex_command(parse_conversation_id(&conversation_id)?, request)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn watch_conversation_project(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<mcg_codex_app_server::CodexFsWatch>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .watch_conversation_project(parse_conversation_id(&conversation_id)?)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn unwatch_conversation_project(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .unwatch_conversation_project(parse_conversation_id(&conversation_id)?)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(serde_json::json!({ "unwatched": true })))
+}
+
+async fn start_codex_login(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .start_codex_login()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn cancel_codex_login(
+    State(state): State<ApiState>,
+    Json(request): Json<CancelCodexLoginRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .cancel_codex_login(&request.login_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn logout_codex_account(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .logout_codex_account()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
 async fn create_task(
     State(state): State<ApiState>,
     Json(request): Json<CreateTaskRequest>,
@@ -3206,6 +3881,330 @@ async fn list_organizations(
     Ok(Json(OrganizationListResponse {
         organizations: state.runtime.organizations().map_err(map_runtime_error)?,
     }))
+}
+
+async fn get_organization_assignments(
+    State(state): State<ApiState>,
+) -> Result<Json<OrganizationAssignmentResponse>, ApiError> {
+    state
+        .runtime
+        .organization_assignments()
+        .map(|assignments| Json(OrganizationAssignmentResponse { assignments }))
+        .map_err(map_runtime_error)
+}
+
+async fn set_global_organization_assignment(
+    State(state): State<ApiState>,
+    Json(request): Json<SetOrganizationAssignmentRequest>,
+) -> Result<Json<OrganizationAssignmentResponse>, ApiError> {
+    let organization_id = request
+        .organization_id
+        .ok_or_else(|| ApiError::bad_request("global organization assignment cannot be cleared"))?;
+    state
+        .runtime
+        .set_global_organization_assignment(organization_id)
+        .map(|assignments| Json(OrganizationAssignmentResponse { assignments }))
+        .map_err(map_runtime_error)
+}
+
+async fn set_project_organization_assignment(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<SetOrganizationAssignmentRequest>,
+) -> Result<Json<OrganizationAssignmentResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .set_project_organization_assignment(project_id, request.organization_id)
+        .map(|assignments| Json(OrganizationAssignmentResponse { assignments }))
+        .map_err(map_runtime_error)
+}
+
+#[allow(clippy::too_many_lines)] // Keep the complete subsystem health projection auditable together.
+async fn governor_overview(
+    State(state): State<ApiState>,
+) -> Result<Json<GovernorOverviewResponse>, ApiError> {
+    let status = state.runtime.status();
+    let assignments = state
+        .runtime
+        .organization_assignments()
+        .map_err(map_runtime_error)?;
+    let active_organization = state
+        .runtime
+        .organization(assignments.global_organization_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| ApiError::internal("global organization assignment is missing"))?;
+    let runs = state
+        .runtime
+        .agent_run_views(50)
+        .map_err(map_runtime_error)?;
+    let providers = state
+        .runtime
+        .provider_connections()
+        .map_err(map_runtime_error)?;
+    let projects = state.runtime.projects().map_err(map_runtime_error)?;
+    let active_runs = runs
+        .iter()
+        .filter(|view| !view.run.state.is_terminal())
+        .count();
+    let active_leases = runs
+        .iter()
+        .flat_map(|view| &view.leases)
+        .filter(|lease| lease.state == mcg_agents::AgentLeaseState::Active)
+        .count();
+    let evaluations = runs
+        .iter()
+        .map(|view| view.evaluations.len())
+        .sum::<usize>();
+    let capability_count = active_organization
+        .roles
+        .iter()
+        .flat_map(|role| &role.tool_capabilities)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let subsystems = vec![
+        GovernorSubsystem {
+            id: "policy".into(),
+            label: "Policy enforcement".into(),
+            state: "ready".into(),
+            detail: format!(
+                "{} active organization rules",
+                active_organization.roles.len()
+            ),
+        },
+        GovernorSubsystem {
+            id: "permissions".into(),
+            label: "Permissions".into(),
+            state: "governed".into(),
+            detail: format!("{capability_count} bounded capabilities"),
+        },
+        GovernorSubsystem {
+            id: "leases".into(),
+            label: "Budgets and leases".into(),
+            state: if active_leases > 0 { "active" } else { "ready" }.into(),
+            detail: format!("{active_leases} active leases"),
+        },
+        GovernorSubsystem {
+            id: "tools".into(),
+            label: "Tool broker".into(),
+            state: "ready".into(),
+            detail: "Constitutional capability checks enabled".into(),
+        },
+        GovernorSubsystem {
+            id: "memory".into(),
+            label: "Project memory".into(),
+            state: "ready".into(),
+            detail: format!("{} discovered projects", projects.len()),
+        },
+        GovernorSubsystem {
+            id: "audit".into(),
+            label: "Audit and evaluation".into(),
+            state: "recording".into(),
+            detail: format!("{evaluations} recent evaluations"),
+        },
+        GovernorSubsystem {
+            id: "providers".into(),
+            label: "Model providers".into(),
+            state: if providers.is_empty() {
+                "setup_required"
+            } else {
+                "connected"
+            }
+            .into(),
+            detail: format!("{} configured connections", providers.len()),
+        },
+    ];
+    Ok(Json(GovernorOverviewResponse {
+        autonomy: status.autonomy,
+        status,
+        assignments,
+        active_organization,
+        active_runs,
+        recent_runs: runs.len(),
+        subsystems,
+    }))
+}
+
+fn revision_changes(current: &OrganizationGenome, candidate: &OrganizationGenome) -> Vec<String> {
+    let mut changes = Vec::new();
+    if current.name != candidate.name {
+        changes.push(format!("Rename {} to {}", current.name, candidate.name));
+    }
+    if current.roles != candidate.roles {
+        changes.push(format!(
+            "Update roles ({} to {})",
+            current.roles.len(),
+            candidate.roles.len()
+        ));
+    }
+    if current.relationships != candidate.relationships {
+        changes.push("Update role relationships".into());
+    }
+    if current.policy != candidate.policy {
+        changes.push("Update organization limits and lease policy".into());
+    }
+    if current.evaluation != candidate.evaluation {
+        changes.push("Update evaluation policy".into());
+    }
+    changes
+}
+
+fn validate_consumer_organization(
+    organization: &OrganizationGenome,
+) -> Result<Vec<String>, ApiError> {
+    organization
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    for required in [RoleKind::Executive, RoleKind::Coder, RoleKind::Evaluator] {
+        if !organization.roles.iter().any(|role| role.kind == required) {
+            return Err(ApiError::bad_request(format!(
+                "consumer organizations require a {required:?} role"
+            )));
+        }
+    }
+    let mut warnings = Vec::new();
+    for role in &organization.roles {
+        if role.name.trim().is_empty()
+            || role.purpose.trim().is_empty()
+            || role.prompt_policy.trim().is_empty()
+            || role.memory_namespace.trim().is_empty()
+        {
+            return Err(ApiError::bad_request(
+                "role names, purposes, prompt policies, and memory namespaces cannot be empty",
+            ));
+        }
+        if role.model_policy.preferred_models.is_empty() {
+            warnings.push(format!("{} uses automatic model routing", role.name));
+        }
+    }
+    Ok(warnings)
+}
+
+async fn preview_organization_revision(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+    Json(request): Json<PreviewOrganizationRevisionRequest>,
+) -> Result<Json<OrganizationRevisionPreview>, ApiError> {
+    let organization_id = parse_organization_id(&organization_id)?;
+    let current = state
+        .runtime
+        .organization(organization_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("organization {organization_id} was not found"))
+        })?;
+    if current.revision_id != request.expected_parent_revision_id {
+        return Err(ApiError::conflict(
+            "organization changed while it was being edited",
+        ));
+    }
+    let candidate = OrganizationGenome {
+        schema_version: mcg_agents::ORGANIZATION_SCHEMA_VERSION,
+        organization_id,
+        revision_id: OrganizationRevisionId::new(),
+        revision: current.revision.saturating_add(1),
+        parent_revision_id: Some(current.revision_id),
+        inherited_from_revision_id: current.inherited_from_revision_id,
+        name: request.name.trim().into(),
+        roles: request
+            .roles
+            .into_iter()
+            .map(|role| RoleDefinition {
+                id: role.id.unwrap_or_else(RoleId::new),
+                kind: role.kind,
+                name: role.name.trim().into(),
+                purpose: role.purpose.trim().into(),
+                prompt_policy: role.prompt_policy.trim().into(),
+                model_policy: role.model_policy,
+                tool_capabilities: role.tool_capabilities,
+                memory_namespace: role.memory_namespace.trim().into(),
+            })
+            .collect(),
+        relationships: request.relationships,
+        policy: request.policy,
+        evaluation: request.evaluation,
+        created_at: Utc::now(),
+    };
+    let warnings = validate_consumer_organization(&candidate)?;
+    let changes = revision_changes(&current, &candidate);
+    if changes.is_empty() {
+        return Err(ApiError::bad_request(
+            "organization revision has no changes",
+        ));
+    }
+    Ok(Json(OrganizationRevisionPreview {
+        organization: candidate,
+        changes,
+        warnings,
+    }))
+}
+
+async fn publish_organization_revision(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+    Json(request): Json<PublishOrganizationRevisionRequest>,
+) -> Result<(StatusCode, Json<OrganizationMutationResponse>), ApiError> {
+    let organization_id = parse_organization_id(&organization_id)?;
+    let current = state
+        .runtime
+        .organization(organization_id)
+        .map_err(map_runtime_error)?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("organization {organization_id} was not found"))
+        })?;
+    if current.revision_id != request.expected_parent_revision_id {
+        return Err(ApiError::conflict(
+            "organization changed while it was being edited",
+        ));
+    }
+    let summary = request.change_summary.trim();
+    if summary.is_empty() || summary.len() > 512 || summary.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "change summary must be 1-512 printable bytes",
+        ));
+    }
+    let organization = OrganizationGenome {
+        schema_version: mcg_agents::ORGANIZATION_SCHEMA_VERSION,
+        organization_id,
+        revision_id: OrganizationRevisionId::new(),
+        revision: current.revision.saturating_add(1),
+        parent_revision_id: Some(current.revision_id),
+        inherited_from_revision_id: current.inherited_from_revision_id,
+        name: request.name.trim().into(),
+        roles: request.roles,
+        relationships: request.relationships,
+        policy: request.policy,
+        evaluation: request.evaluation,
+        created_at: Utc::now(),
+    };
+    validate_consumer_organization(&organization)?;
+    let event = state
+        .runtime
+        .record_organization_revision(&organization)
+        .map_err(map_runtime_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(OrganizationMutationResponse {
+            organization,
+            event,
+        }),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct AgentRunListQuery {
+    limit: Option<usize>,
+}
+
+async fn list_agent_runs(
+    State(state): State<ApiState>,
+    Query(query): Query<AgentRunListQuery>,
+) -> Result<Json<AgentRunListResponse>, ApiError> {
+    state
+        .runtime
+        .agent_run_views(query.limit.unwrap_or(30))
+        .map(|runs| Json(AgentRunListResponse { runs }))
+        .map_err(map_runtime_error)
 }
 
 async fn get_organization(
@@ -3552,7 +4551,10 @@ async fn launch_task(
         .map_err(map_runtime_error)?
         .ok_or_else(|| ApiError::not_found(format!("project {project_id} was not found")))?;
     let now = Utc::now();
-    let organization = OrganizationGenome::consumer_default(now);
+    let organization = state
+        .runtime
+        .resolve_organization(Some(project_id), request.organization_id)
+        .map_err(map_runtime_error)?;
     let conditions = consumer_success_conditions(&task, &project)?;
     let run_id = RunId::new();
     let planning = PlanningRequest {
@@ -3792,6 +4794,10 @@ async fn advance_consumer_run(
             requested_tools,
             estimated_output_tokens: request.estimated_output_tokens,
             max_model_calls: request.max_model_calls,
+            provider_id: request.provider_id.clone(),
+            model_id: request.model_id.clone(),
+            reasoning_effort: request.reasoning_effort.clone(),
+            service_tier: request.service_tier.clone(),
         };
         let result = if explicit_owner_retry {
             state
@@ -4428,6 +5434,10 @@ async fn execute_agent_work(
             requested_tools: request.requested_tools,
             estimated_output_tokens: request.estimated_output_tokens,
             max_model_calls: request.max_model_calls,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .await
         .map(Json)
@@ -4501,22 +5511,27 @@ async fn cancel_openai_oauth(
 async fn list_providers(
     State(state): State<ApiState>,
 ) -> Result<Json<ProviderListResponse>, ApiError> {
-    let providers = state
+    let connections = state
         .runtime
         .provider_connections()
-        .map_err(map_runtime_error)?
-        .into_iter()
-        .map(|connection| {
-            let catalog = state
-                .runtime
-                .provider_catalog(&connection.id)
-                .map_err(map_runtime_error)?;
-            Ok(ProviderListItem {
-                connection,
-                catalog,
-            })
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
+        .map_err(map_runtime_error)?;
+    let mut providers = Vec::with_capacity(connections.len());
+    for connection in connections {
+        let profile = state
+            .runtime
+            .openai_oauth_profile(&connection)
+            .await
+            .map_err(map_runtime_error)?;
+        let catalog = state
+            .runtime
+            .provider_catalog(&connection.id)
+            .map_err(map_runtime_error)?;
+        providers.push(ProviderListItem {
+            connection,
+            catalog,
+            profile,
+        });
+    }
     Ok(Json(ProviderListResponse { providers }))
 }
 
@@ -6976,6 +7991,23 @@ form.addEventListener('submit', (event) => {
                         "id_token": "fixture-id-secret",
                         "access_token": "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.sig",
                         "refresh_token": "fixture-refresh-secret"
+                    }))
+                }),
+            )
+            .route(
+                "/api/accounts/oauth/userinfo",
+                get(|headers: HeaderMap| async move {
+                    assert!(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|value| value.starts_with("Bearer e30."))
+                    );
+                    Json(serde_json::json!({
+                        "name": "Hendo",
+                        "preferred_username": "hendo420",
+                        "email": "hendo@example.com",
+                        "picture": "https://images.example.com/avatar.png"
                     }))
                 }),
             );
@@ -9775,6 +10807,38 @@ form.addEventListener('submit', (event) => {
         assert!(!response_text.contains("fixture-refresh-secret"));
         assert!(!response_text.contains("account-123"));
         assert_eq!(runtime.provider_connections().expect("providers").len(), 1);
+        let providers = app
+            .clone()
+            .oneshot(
+                authorized(Request::get("/api/v1/providers"))
+                    .body(Body::empty())
+                    .expect("provider list request"),
+            )
+            .await
+            .expect("provider list response");
+        assert_eq!(providers.status(), StatusCode::OK);
+        let providers_bytes = providers
+            .into_body()
+            .collect()
+            .await
+            .expect("provider list body")
+            .to_bytes();
+        let providers: ProviderListResponse =
+            serde_json::from_slice(&providers_bytes).expect("provider list");
+        let profile = providers.providers[0]
+            .profile
+            .as_ref()
+            .expect("userinfo profile");
+        assert_eq!(profile.display_name.as_deref(), Some("Hendo"));
+        assert_eq!(profile.username.as_deref(), Some("hendo420"));
+        assert_eq!(
+            profile.avatar_url.as_deref(),
+            Some("https://images.example.com/avatar.png")
+        );
+        let providers_text =
+            String::from_utf8(providers_bytes.to_vec()).expect("UTF-8 provider list");
+        assert!(!providers_text.contains("fixture-refresh-secret"));
+        assert!(!providers_text.contains("account-123"));
         let consumed = app
             .clone()
             .oneshot(
@@ -10734,11 +11798,16 @@ form.addEventListener('submit', (event) => {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&LaunchTaskRequest {
+                            organization_id: None,
                             target_path: None,
                             context_token_budget: 2_048,
                             requested_tools: Vec::new(),
                             estimated_output_tokens: 512,
                             max_model_calls: 4,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            service_tier: None,
                         })
                         .expect("resume body"),
                     ))
@@ -10831,11 +11900,16 @@ form.addEventListener('submit', (event) => {
         runtime.create_task(&task).expect("create task");
         let app = router(runtime.clone());
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 2,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let launch_path = format!("/api/v1/tasks/{}/launch", task.id);
@@ -10906,11 +11980,16 @@ form.addEventListener('submit', (event) => {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&LaunchTaskRequest {
+                            organization_id: None,
                             target_path: None,
                             context_token_budget: 2_048,
                             requested_tools: Vec::new(),
                             estimated_output_tokens: 512,
                             max_model_calls: 2,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            service_tier: None,
                         })
                         .expect("retry body"),
                     ))
@@ -10987,11 +12066,16 @@ form.addEventListener('submit', (event) => {
         task.project_id = Some(project.project_id);
         runtime.create_task(&task).expect("task");
         let request = LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 2,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         };
         let body = serde_json::to_vec(&request).expect("request body");
         let mut latest = None;
@@ -11041,6 +12125,10 @@ form.addEventListener('submit', (event) => {
                 requested_tools: Vec::new(),
                 estimated_output_tokens: 512,
                 max_model_calls: 2,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                service_tier: None,
             })
             .await
             .expect_err("automatic dispatch remains bounded");
@@ -11094,11 +12182,16 @@ form.addEventListener('submit', (event) => {
         task.success_conditions = vec!["approved.txt exists with the requested content".into()];
         runtime.create_task(&task).expect("task");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -11488,11 +12581,16 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("provider");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let mut passing_task = TaskEnvelope::new("Run the objective project gates");
@@ -11669,11 +12767,16 @@ form.addEventListener('submit', (event) => {
             .expect("provider");
         let target = format!("{}/expected-missing", objective_http_fixture().await);
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -11866,11 +12969,16 @@ form.addEventListener('submit', (event) => {
         task.success_conditions = vec![format!("PORT LISTENING {endpoint}")];
         runtime.create_task(&task).expect("task");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime);
@@ -11972,11 +13080,16 @@ form.addEventListener('submit', (event) => {
         let health_hits = Arc::new(AtomicUsize::new(0));
         let target = service_health_fixture(health_hits.clone()).await;
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -12205,11 +13318,16 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("provider");
         let launch_body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -12455,11 +13573,16 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("provider");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -12649,11 +13772,16 @@ form.addEventListener('submit', (event) => {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&LaunchTaskRequest {
+                            organization_id: None,
                             target_path: None,
                             context_token_budget: 2_048,
                             requested_tools: Vec::new(),
                             estimated_output_tokens: 512,
                             max_model_calls: 4,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            service_tier: None,
                         })
                         .expect("launch body"),
                     ))
@@ -12762,11 +13890,16 @@ form.addEventListener('submit', (event) => {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&LaunchTaskRequest {
+                        organization_id: None,
                         target_path: None,
                         context_token_budget: 2_048,
                         requested_tools: Vec::new(),
                         estimated_output_tokens: 512,
                         max_model_calls: 4,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        service_tier: None,
                     })
                     .expect("launch body"),
                 ))
@@ -12819,11 +13952,16 @@ form.addEventListener('submit', (event) => {
         let page_hits = Arc::new(AtomicUsize::new(0));
         let target = accessibility_fixture(page_hits.clone()).await;
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -13028,11 +14166,16 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("provider");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -13210,11 +14353,16 @@ form.addEventListener('submit', (event) => {
         task.project_id = Some(project.project_id);
         runtime.create_task(&task).expect("task");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: Vec::new(),
             estimated_output_tokens: 512,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -13429,11 +14577,20 @@ form.addEventListener('submit', (event) => {
         runtime
             .create_task(&TaskEnvelope::new("replay event"))
             .expect("task should commit");
+        let task_event = runtime
+            .events_after(0)
+            .expect("events")
+            .into_iter()
+            .find(|event| event.kind == mcg_events::EventKind::TaskCreated)
+            .expect("task-created event");
         let response = router(runtime)
             .oneshot(
-                authorized(Request::get("/api/v1/events/stream?after=0"))
-                    .body(Body::empty())
-                    .expect("request"),
+                authorized(Request::get(format!(
+                    "/api/v1/events/stream?after={}",
+                    task_event.sequence - 1
+                )))
+                .body(Body::empty())
+                .expect("request"),
             )
             .await
             .expect("response");
@@ -13450,7 +14607,7 @@ form.addEventListener('submit', (event) => {
                 .to_vec(),
         )
         .expect("SSE should be UTF-8");
-        assert!(text.contains("id: 1"));
+        assert!(text.contains(&format!("id: {}", task_event.sequence)));
         assert!(text.contains("event: task_created"));
     }
 
@@ -18689,11 +19846,16 @@ form.addEventListener('submit', (event) => {
         task.success_conditions = vec!["Review the durable remote evidence".into()];
         runtime.create_task(&task).expect("task");
         let body = serde_json::to_vec(&LaunchTaskRequest {
+            organization_id: None,
             target_path: None,
             context_token_budget: 2_048,
             requested_tools: vec!["mcp::approval_mcp::lookup".into()],
             estimated_output_tokens: 256,
             max_model_calls: 4,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
         .expect("launch body");
         let app = router(runtime.clone());
@@ -18803,5 +19965,93 @@ form.addEventListener('submit', (event) => {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn agents_overview_assignment_and_stale_revision_are_enforced() {
+        let runtime = test_runtime();
+        let now = Utc::now();
+        let mut alternative = OrganizationGenome::consumer_default(now);
+        alternative.name = "Reviewed specialists".into();
+        runtime
+            .record_organization_revision(&alternative)
+            .expect("record alternative organization");
+        let app = router(runtime.clone());
+
+        let assignment = app
+            .clone()
+            .oneshot(
+                authorized(Request::put("/api/v1/agents/assignments"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&SetOrganizationAssignmentRequest {
+                            organization_id: Some(alternative.organization_id),
+                        })
+                        .expect("assignment body"),
+                    ))
+                    .expect("assignment request"),
+            )
+            .await
+            .expect("assignment response");
+        assert_eq!(assignment.status(), StatusCode::OK);
+
+        let overview = response_json(
+            app.clone()
+                .oneshot(
+                    authorized(Request::get("/api/v1/agents/overview"))
+                        .body(Body::empty())
+                        .expect("overview request"),
+                )
+                .await
+                .expect("overview response"),
+        )
+        .await;
+        assert_eq!(
+            overview.pointer("/active_organization/organization_id"),
+            Some(&serde_json::json!(alternative.organization_id))
+        );
+        assert!(
+            overview["subsystems"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+
+        let roles = alternative
+            .roles
+            .iter()
+            .map(|role| EditableRoleDefinition {
+                id: Some(role.id),
+                kind: role.kind,
+                name: role.name.clone(),
+                purpose: role.purpose.clone(),
+                prompt_policy: role.prompt_policy.clone(),
+                model_policy: role.model_policy.clone(),
+                tool_capabilities: role.tool_capabilities.clone(),
+                memory_namespace: role.memory_namespace.clone(),
+            })
+            .collect();
+        let stale = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/organizations/{}/revisions/preview",
+                    alternative.organization_id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&PreviewOrganizationRevisionRequest {
+                        expected_parent_revision_id: OrganizationRevisionId::new(),
+                        name: alternative.name.clone(),
+                        roles,
+                        relationships: alternative.relationships.clone(),
+                        policy: alternative.policy.clone(),
+                        evaluation: alternative.evaluation.clone(),
+                    })
+                    .expect("preview body"),
+                ))
+                .expect("preview request"),
+            )
+            .await
+            .expect("preview response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
     }
 }
