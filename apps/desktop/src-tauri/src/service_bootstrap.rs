@@ -117,7 +117,21 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
         &config.data_directory,
         "codex-runtime/bin/codex.exe",
     )?;
-    launch_daemon(&executable, address, &config, codex_executable.as_deref())?;
+    let agent_mcp_executable = portable_runtime::packaged_executable(
+        &config.data_directory,
+        if cfg!(windows) {
+            "mcg-agent-mcp.exe"
+        } else {
+            "mcg-agent-mcp"
+        },
+    )?;
+    launch_daemon(
+        &executable,
+        address,
+        &config,
+        codex_executable.as_deref(),
+        agent_mcp_executable.as_deref(),
+    )?;
 
     let started = Instant::now();
     while started.elapsed() < STARTUP_TIMEOUT {
@@ -435,6 +449,7 @@ fn launch_daemon(
     address: SocketAddr,
     config: &AppConfig,
     codex_executable: Option<&Path>,
+    agent_mcp_executable: Option<&Path>,
 ) -> Result<(), String> {
     let mut command = Command::new(executable);
     command
@@ -445,6 +460,9 @@ fn launch_daemon(
         .stderr(Stdio::null());
     if let Some(codex_executable) = codex_executable {
         command.env("MCG_CODEX_APP_SERVER_EXECUTABLE", codex_executable);
+    }
+    if let Some(agent_mcp_executable) = agent_mcp_executable {
+        command.env("MCG_AGENT_MCP_EXECUTABLE", agent_mcp_executable);
     }
     #[cfg(windows)]
     {

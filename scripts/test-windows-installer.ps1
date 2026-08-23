@@ -288,7 +288,7 @@ try {
     }
     $installationRemoved = $false
 
-    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
+    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
     $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File
     foreach ($name in $requiredPayload) {
         if ($installed.Name -notcontains $name) {

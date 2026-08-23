@@ -386,10 +386,19 @@ export interface AgentDelegation {
   brief: { objective: string; scope: string[]; constraints: string[]; success_conditions: string[]; context_references: string[] };
   task_id?: string;
   run_id?: string;
+  agent_instance_id?: string;
+  agent_lease_id?: string;
   worktree_id?: string;
+  retry_of_id?: string;
+  idempotency_key?: string;
   summary?: string;
   changed_files: string[];
   checks: string[];
+  evidence?: string[];
+  unresolved_issues?: string[];
+  integration_ready?: boolean;
+  report_sha256?: string;
+  accepted_codex_item_id?: string;
   error?: string;
   created_at: string;
   updated_at: string;
@@ -408,11 +417,17 @@ export interface BlackboardEntry {
 export interface ManagedWorktree {
   schema_version: number; id: string; conversation_id: string; delegation_id: string; project_id: string;
   root: string; branch: string; base_head: string; baseline_head?: string; baseline_sha256: string;
+  workspace_mode?: "git_worktree" | "direct_workspace";
+  baseline_confidence?: "verified" | "review_required";
+  baseline_entries?: Array<{ normalized_path: string; source_kind: "tracked" | "untracked"; size: number; mode: number; sha256: string }>;
+  baseline_exclusions?: Array<{ normalized_path: string; reason: string; review_blocker: boolean }>;
+  integration_journal?: { id: string; state: string; live_head?: string; touched_paths: Array<{ normalized_path: string; live_sha256?: string; preimage_sha256?: string; preimage_path?: string }>; error?: string; created_at: string; updated_at: string };
   state: "preparing" | "ready" | "dirty" | "integrating" | "integrated" | "conflict" | "retained" | "removed" | "failed";
   revision: number; retained_reason?: string; storage_bytes: number;
   created_at: string; updated_at: string;
 }
 export interface DelegationReview { delegation: AgentDelegation; worktree?: ManagedWorktree; patch: string; }
+export interface DelegationRetryMutation { delegation_id: string; retry_of_id: string; replayed: boolean; acknowledgement: string; }
 export interface ConversationTeamState {
   sessions: ConversationAgentSession[];
   delegations: AgentDelegation[];
@@ -1733,6 +1748,10 @@ export function reviewConversationDelegation(conversationId: string, delegationI
 
 export function cancelConversationDelegation(conversationId: string, delegationId: string, expectedRevision: number): Promise<ConversationView> {
   return invoke("cancel_conversation_delegation", { conversationId, delegationId, expectedRevision });
+}
+
+export function retryConversationDelegation(conversationId: string, delegationId: string, expectedRevision: number, idempotencyKey: string): Promise<DelegationRetryMutation> {
+  return invoke("retry_conversation_delegation", { conversationId, delegationId, expectedRevision, idempotencyKey });
 }
 
 export function applyConversationDelegation(conversationId: string, delegationId: string, expectedRevision: number): Promise<ConversationView> {

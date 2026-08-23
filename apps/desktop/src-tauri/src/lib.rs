@@ -12,32 +12,32 @@ use mcg_api::{
     CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
     CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
     CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
-    DeploySiteRequest, DiscoverProjectRequest, ExperimentBenchmarkListResponse,
-    ExperimentDecisionListResponse, ExperimentListResponse, GovernorOverviewResponse,
-    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
-    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
-    OrganizationAssignmentResponse, OrganizationHistoryResponse, OrganizationListResponse,
-    OrganizationMutationResponse, OrganizationPublisherListResponse, OrganizationRevisionPreview,
-    OrganizationShareReviewListResponse, PlatformSessionHistoryResponse,
-    PlatformSessionListResponse, PluginInvocationHistoryResponse, PluginListResponse,
-    PreviewOrganizationRevisionRequest, ProjectListResponse, ProjectMemoryTransferListResponse,
-    ProjectTopologyPlan, ProviderListResponse, PublishOrganizationRevisionRequest,
-    ResolveApprovalRequest, ReviewSharedOrganizationRequest, ReviewedTopologyPlan,
-    ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest, RunSshOperationRequest,
-    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
-    SendConversationMessageRequest, SetOrganizationAssignmentRequest, SetPluginEnabledRequest,
-    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    SshWorkflowListResponse, StartOpenAiOAuthRequest, SteerConversationTurnRequest,
-    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
-    ToolAuditResponse, TransferProjectMemoryRequest, TransitionAgentRunRequest,
-    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    TrustOrganizationPublisherRequest, UpdateConversationRequest, UpdateSiteRequest,
-    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
-    WakeScheduleRequest, WorktreeMutationRequest,
+    DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
+    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    GovernorOverviewResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
+    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    NavigateBrowserSessionRequest, OrganizationAssignmentResponse, OrganizationHistoryResponse,
+    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
+    OrganizationRevisionPreview, OrganizationShareReviewListResponse,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
+    PluginListResponse, PreviewOrganizationRevisionRequest, ProjectListResponse,
+    ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
+    PublishOrganizationRevisionRequest, ResolveApprovalRequest, ReviewSharedOrganizationRequest,
+    ReviewedTopologyPlan, ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest,
+    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
+    SchedulerNotificationListResponse, SendConversationMessageRequest,
+    SetOrganizationAssignmentRequest, SetPluginEnabledRequest, SetPluginGrantsRequest,
+    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
+    StartOpenAiOAuthRequest, SteerConversationTurnRequest, SupervisionObservationListResponse,
+    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
+    TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
+    TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
+    UpdateConversationRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
@@ -51,12 +51,13 @@ use mcg_providers::{
     ProviderConnection, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
-    AgentRunView, CandidateRevisionMutation, CodexSiteInventory, DelegationReview,
-    DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation,
-    OAuthLoginStart, OrganizationPublisherMutation, OrganizationShareImportMutation,
-    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
-    ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    AgentRunView, CandidateRevisionMutation, CodexSiteInventory, DelegationRetryMutation,
+    DelegationReview, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
+    MemoryClaimMutation, OAuthLoginStart, OrganizationPublisherMutation,
+    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
+    PlatformComputerActionMutation, PlatformComputerMutation, PluginInvocationMutation,
+    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
+    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
     ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
     SiteMutation, SshHostMutation, SshOperationMutation, SshWorkflowCreateRequest,
@@ -873,6 +874,26 @@ async fn cancel_conversation_delegation(
         )),
         Some(&DelegationMutationRequest { expected_revision }),
         "Coding delegation cancellation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn retry_conversation_delegation(
+    conversation_id: String,
+    delegation_id: String,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<DelegationRetryMutation, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/retry"
+        )),
+        Some(&DelegationRetryRequest {
+            expected_revision,
+            idempotency_key,
+        }),
+        "Coding delegation retry",
     )
     .await
 }
@@ -3486,6 +3507,7 @@ pub fn run() {
             get_conversation_team,
             review_conversation_delegation,
             cancel_conversation_delegation,
+            retry_conversation_delegation,
             apply_conversation_delegation,
             discard_conversation_delegation,
             interrupt_conversation_turn,

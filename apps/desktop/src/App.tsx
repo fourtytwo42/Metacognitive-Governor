@@ -223,6 +223,7 @@ import {
   sendConversationMessage,
   reviewConversationDelegation,
   cancelConversationDelegation,
+  retryConversationDelegation,
   applyConversationDelegation,
   discardConversationDelegation,
   steerConversationTurn,
@@ -768,7 +769,7 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
   const [errors, setErrors] = useState<Record<string, string>>({});
   if (!team || team.delegations.length === 0) return null;
   const stateLabel = (state: AgentDelegation["state"]) => state.replaceAll("_", " ").replace(/^./, (value) => value.toLocaleUpperCase());
-  async function runAction(delegation: AgentDelegation, action: "review" | "cancel" | "apply" | "discard", worktreeRevision?: number) {
+  async function runAction(delegation: AgentDelegation, action: "review" | "cancel" | "apply" | "discard" | "retry", worktreeRevision?: number) {
     if (!conversationId) return;
     setBusy(`${delegation.id}:${action}`);
     setErrors((current) => ({ ...current, [delegation.id]: "" }));
@@ -781,6 +782,9 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
         onView(await cancelConversationDelegation(conversationId, delegation.id, delegation.revision));
       } else if (action === "apply") {
         onView(await applyConversationDelegation(conversationId, delegation.id, delegation.revision));
+      } else if (action === "retry") {
+        await retryConversationDelegation(conversationId, delegation.id, delegation.revision, crypto.randomUUID());
+        onView(await getConversation(conversationId));
       } else if (worktreeRevision !== undefined) {
         onView(await discardConversationDelegation(conversationId, delegation.id, worktreeRevision));
       }
@@ -802,6 +806,7 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
       const reviewable = Boolean(worktree) && ["reported", "blocked", "failed", "cancelled"].includes(delegation.state);
       const applicable = Boolean(worktree) && ["reported", "blocked"].includes(delegation.state);
       const discardable = Boolean(worktree) && worktree?.state !== "removed" && !["preparing", "running", "integrating"].includes(delegation.state);
+      const retryable = ["failed", "cancelled", "blocked"].includes(delegation.state);
       return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id}>
         <summary>
           <span className="coding-agent-glyph" aria-hidden="true">⌘</span>
@@ -814,14 +819,16 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
             {session?.model && <span>Model <code>{session.model}</code></span>}
             <span>Prompt revision <code>{session?.prompt_revision ?? "—"}</code></span>
             {worktree && <span>Branch <code>{worktree.branch}</code></span>}
+            {delegation.run_id && <span>Run <code>{delegation.run_id}</code></span>}
+            {delegation.agent_lease_id && <span>Lease <code>{delegation.agent_lease_id}</code></span>}
           </div>
           <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
-          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}</section>}
+          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{delegation.retry_of_id && <p>Retry of <code>{delegation.retry_of_id}</code></p>}{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}</section>}
           {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
           {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
           {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch">{patches[delegation.id]}</pre>}</section>}
-          {tab === "evidence" && <section><h4>Evidence</h4>{delegation.checks.length === 0 ? <p>No checks reported yet.</p> : delegation.checks.map((check) => <p key={check}>{check}</p>)}{delegation.summary && <p>{delegation.summary}</p>}</section>}
-          <div className="coding-agent-actions">{cancellable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "cancel")}>Cancel</button>}{reviewable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "review")}>Review</button>}{applicable && <button type="button" className="primary" disabled={busy !== null} onClick={() => void runAction(delegation, "apply")}>Apply</button>}{discardable && <button type="button" className="secondary danger" disabled={busy !== null} onClick={() => void runAction(delegation, "discard", worktree?.revision)}>Discard</button>}</div>
+          {tab === "evidence" && <section><h4>Evidence</h4>{delegation.checks.length === 0 ? <p>No checks reported yet.</p> : delegation.checks.map((check) => <p key={check}>{check}</p>)}{(delegation.evidence ?? []).map((item) => <p key={item}>{item}</p>)}{(delegation.unresolved_issues ?? []).map((item) => <p className="error-message" key={item}>{item}</p>)}{delegation.summary && <p>{delegation.summary}</p>}{worktree?.baseline_exclusions?.map((item) => <p key={item.normalized_path}>{item.normalized_path}: {item.reason}{item.review_blocker ? " (review blocker)" : ""}</p>)}{worktree?.integration_journal && <p>Integration journal: {worktree.integration_journal.state.replaceAll("_", " ")}</p>}</section>}
+          <div className="coding-agent-actions">{cancellable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "cancel")}>Cancel</button>}{reviewable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "review")}>Review</button>}{applicable && <button type="button" className="primary" disabled={busy !== null} onClick={() => void runAction(delegation, "apply")}>Apply</button>}{retryable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "retry")}>Retry</button>}{discardable && <button type="button" className="secondary danger" disabled={busy !== null} onClick={() => void runAction(delegation, "discard", worktree?.revision)}>Discard</button>}</div>
           {(delegation.error || errors[delegation.id]) && <p className="error-message" role="alert">{errors[delegation.id] || delegation.error}</p>}
         </div>
       </details>;
@@ -7819,7 +7826,11 @@ export function App() {
                   <div className="settings-control"><span><strong>Isolation policy</strong><small>Scheduled and coding work must remain within reviewed project boundaries.</small></span><span className="count-badge">Governed</span></div>
                 </div>
                 <div className="settings-section-heading"><strong>Managed worktrees</strong><span>{managedConversationWorktrees.length}</span></div>
-                {managedConversationWorktrees.length === 0 ? <div className="settings-empty-card"><p>No managed coding worktrees have been created in loaded conversations.</p></div> : <div className="settings-card settings-card-stack" aria-label="Managed worktrees">{managedConversationWorktrees.map(({ worktree, conversationId, delegation }) => <div className="settings-control" key={worktree.id}><span><strong>{worktree.branch}</strong><small>{worktree.state}{worktree.retained_reason ? ` · ${worktree.retained_reason}` : ""} · {(worktree.storage_bytes / (1024 * 1024)).toFixed(1)} MiB</small></span><span className="settings-inline-actions"><button className="secondary" type="button" onClick={() => openChat(conversationId)}>Review</button>{worktree.state !== "removed" && delegation && !["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state) && <button className="secondary danger" type="button" onClick={() => void discardConversationDelegation(conversationId, delegation.id, worktree.revision).then((view) => setConversationViews((current) => ({ ...current, [conversationId]: view }))).catch((error) => setTaskError(errorMessage(error)))}>Discard</button>}</span></div>)}</div>}
+                {managedConversationWorktrees.length === 0 ? <div className="settings-empty-card"><p>No managed coding worktrees have been created in loaded conversations.</p></div> : <div className="settings-card settings-card-stack" aria-label="Managed worktrees">{managedConversationWorktrees.map(({ worktree, conversationId, delegation }) => {
+                  const blockingExclusions = worktree.baseline_exclusions?.filter((entry) => entry.review_blocker).length ?? 0;
+                  const journal = worktree.integration_journal;
+                  return <div className="settings-control" key={worktree.id}><span><strong>{worktree.branch}</strong><small>{worktree.state}{worktree.retained_reason ? ` · ${worktree.retained_reason}` : ""} · {(worktree.storage_bytes / (1024 * 1024)).toFixed(1)} MiB</small><small>{(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}{blockingExclusions > 0 ? ` · ${blockingExclusions} review blocker${blockingExclusions === 1 ? "" : "s"}` : ""}{journal ? ` · integration ${journal.state.replaceAll("_", " ")}` : ""}</small></span><span className="settings-inline-actions"><button className="secondary" type="button" onClick={() => openChat(conversationId)}>Review</button>{worktree.state !== "removed" && delegation && !["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state) && <button className="secondary danger" type="button" onClick={() => void discardConversationDelegation(conversationId, delegation.id, worktree.revision).then((view) => setConversationViews((current) => ({ ...current, [conversationId]: view }))).catch((error) => setTaskError(errorMessage(error)))}>Discard</button>}</span></div>;
+                })}</div>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="archived"><h2>Archived chats</h2>{archivedConversations.length === 0 ? <div className="settings-card"><div><strong>No archived chats</strong><p>Chats you archive will appear here and can be restored at any time.</p></div></div> : <div className="settings-card archived-chat-list">{archivedConversations.map((conversation) => <div className="settings-row" key={conversation.id}><div><strong>{conversation.title}</strong><p>{conversation.project_id ? projects.find((project) => project.project_id === conversation.project_id)?.root ?? "Project chat" : "General chat"}</p></div><button className="secondary" type="button" disabled={chatMutationBusy} onClick={() => void setChatArchived(conversation.id, false)}>Restore</button></div>)}</div>}</div>
             </div>
