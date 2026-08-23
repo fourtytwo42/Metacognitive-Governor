@@ -44,7 +44,7 @@ const updaterConfig = JSON.parse(await read("apps/desktop/src-tauri/tauri.update
 if (config.bundle?.active !== true || config.bundle?.targets !== "all") {
   throw new Error("Tauri production bundling must remain active for every native platform target.");
 }
-const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-plugin-runner", "binaries/mcg-shadow-runner", "binaries/mcg-updater"];
+const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-agent-mcp", "binaries/mcg-plugin-runner", "binaries/mcg-shadow-runner", "binaries/mcg-updater"];
 if (JSON.stringify(config.bundle.externalBin) !== JSON.stringify(expectedSidecars)) {
   throw new Error("The installer sidecar contract changed or is incomplete.");
 }
@@ -243,7 +243,7 @@ for (const [source, label] of [[linuxBuilder, "Linux updater config cleanup"], [
   for (const invariant of ["mktemp -d", "trap cleanup_updater_config EXIT", 'rm -rf -- "$updater_config_directory"']) requireText(source, invariant, label);
 }
 for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [linuxPrepare, "Linux sidecar preparer"]]) {
-  for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater"]) requireText(source, binary, label);
+  for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-agent-mcp", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater"]) requireText(source, binary, label);
   requireText(source, "rustc -vV", label);
 }
 for (const invariant of ["target-feature=+crt-static", "VCRUNTIME", "MSVCP", "ReadAllBytes", '"rustc", "-p", "mcg-shadow-runner"']) {
