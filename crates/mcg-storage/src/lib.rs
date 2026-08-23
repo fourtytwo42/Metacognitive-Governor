@@ -3,13 +3,14 @@
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
+use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
 use mcg_domain::{
-    AgentDelegation, AgentMessage, ApprovalId, BlackboardEntry, CodexThreadBinding, Conversation,
-    ConversationActivity, ConversationAgentSession, ConversationId, ConversationMessage,
-    ConversationMessageId, ConversationTeamState, ConversationTurn, ConversationTurnId,
-    ConversationView, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
-    ProjectSnapshotId, SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState,
-    ToolExecutionId, ToolRequestId,
+    AgentCredentialAudit, AgentDelegation, AgentMessage, ApprovalId, BlackboardEntry,
+    CodexThreadBinding, Conversation, ConversationActivity, ConversationAgentSession,
+    ConversationId, ConversationMessage, ConversationMessageId, ConversationTeamState,
+    ConversationTurn, ConversationTurnId, ConversationView, LeaseId, ManagedWorktree,
+    MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId, SharedContextHit,
+    SharedContextSourceKind, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -66,7 +67,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 39;
+pub const STORAGE_SCHEMA_VERSION: i64 = 40;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1444,6 +1445,73 @@ WHERE NOT EXISTS (
 );
 ";
 
+const MIGRATION_40: &str = r"
+CREATE TABLE IF NOT EXISTS delegation_retry_requests (
+    conversation_id TEXT NOT NULL,
+    prior_delegation_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    new_delegation_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(conversation_id, prior_delegation_id, idempotency_key),
+    UNIQUE(new_delegation_id),
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(prior_delegation_id) REFERENCES agent_delegations(delegation_id)
+);
+CREATE TABLE IF NOT EXISTS hidden_delegation_tasks (
+    task_id TEXT PRIMARY KEY,
+    delegation_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id)
+);
+CREATE TABLE IF NOT EXISTS worktree_baseline_entries (
+    worktree_id TEXT NOT NULL,
+    normalized_path TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    file_mode INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    PRIMARY KEY(worktree_id, normalized_path),
+    FOREIGN KEY(worktree_id) REFERENCES managed_worktrees(worktree_id)
+);
+CREATE TABLE IF NOT EXISTS worktree_baseline_exclusions (
+    worktree_id TEXT NOT NULL,
+    normalized_path TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    review_blocker INTEGER NOT NULL,
+    PRIMARY KEY(worktree_id, normalized_path),
+    FOREIGN KEY(worktree_id) REFERENCES managed_worktrees(worktree_id)
+);
+CREATE TABLE IF NOT EXISTS integration_journals (
+    journal_id TEXT PRIMARY KEY,
+    delegation_id TEXT NOT NULL UNIQUE,
+    worktree_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    journal_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id),
+    FOREIGN KEY(worktree_id) REFERENCES managed_worktrees(worktree_id)
+);
+CREATE TABLE IF NOT EXISTS agent_credential_audit (
+    audit_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    delegation_id TEXT,
+    project_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    nonce_sha256 TEXT NOT NULL,
+    audit_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(session_id) REFERENCES conversation_agent_sessions(session_id),
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id),
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS agent_credential_audit_scope
+    ON agent_credential_audit(conversation_id, session_id, occurred_at, audit_id);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1618,6 +1686,7 @@ impl SqliteEventStore {
             (37_i64, MIGRATION_37),
             (38_i64, MIGRATION_38),
             (39_i64, MIGRATION_39),
+            (40_i64, MIGRATION_40),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1866,6 +1935,110 @@ impl SqliteEventStore {
         Ok(event)
     }
 
+    /// Atomically creates the hidden task and complete single-Coder execution authority for a
+    /// delegation. No Executive Agent is involved and no partial authority survives failure.
+    pub fn create_delegation_execution(
+        &mut self,
+        task: &TaskEnvelope,
+        run: &AgentRun,
+        plan: &WorkPlan,
+        instance: &AgentInstance,
+        lease: &AgentLease,
+        delegation: &AgentDelegation,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        if delegation.task_id != Some(task.id)
+            || delegation.run_id != Some(run.id)
+            || delegation.agent_instance_id != Some(instance.id)
+            || delegation.agent_lease_id != Some(lease.id)
+            || run.task_id != task.id
+            || plan.task_id != task.id
+            || plan.run_id != run.id
+            || instance.task_id != task.id
+            || instance.run_id != run.id
+            || instance.role_id
+                != plan
+                    .items
+                    .first()
+                    .map(|item| item.assigned_role)
+                    .ok_or_else(|| StorageError::InvalidData("delegation plan is empty".into()))?
+            || plan.items.len() != 1
+            || lease.instance_id != instance.id
+            || lease.work_item_id != plan.items[0].id
+        {
+            return Err(StorageError::InvalidData(
+                "delegation execution identities are inconsistent".into(),
+            ));
+        }
+        let task_event = EventEnvelope::new(
+            EventKind::TaskCreated,
+            Some(task.id),
+            serde_json::to_value(TaskCreatedPayload { task: task.clone() })?,
+        );
+        let run_event = EventEnvelope::new(
+            EventKind::AgentRunPlanned,
+            Some(task.id),
+            serde_json::json!({"run":run,"plan":plan,"delegation_id":delegation.id}),
+        );
+        let instance_event = EventEnvelope::new(
+            EventKind::AgentInstanceRecorded,
+            Some(task.id),
+            serde_json::to_value(instance)?,
+        );
+        let lease_event = EventEnvelope::new(
+            EventKind::AgentLeaseRecorded,
+            Some(task.id),
+            serde_json::to_value(lease)?,
+        );
+        let delegation_event = EventEnvelope::new(
+            EventKind::AgentDelegationUpdated,
+            Some(task.id),
+            serde_json::json!({"conversation_id":delegation.conversation_id,"delegation":delegation}),
+        );
+        let transaction = self.connection.transaction()?;
+        let task_event = Self::insert_event(&transaction, &task_event)?;
+        Self::upsert_task(&transaction, task, task_event.sequence)?;
+        transaction.execute(
+            "INSERT INTO agent_runs(run_id, task_id, organization_revision_id, state, run_json, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![run.id.to_string(), task.id.to_string(), run.organization_revision_id.to_string(), serde_json::to_string(&run.state)?.trim_matches('"'), serde_json::to_string(run)?, run.created_at.to_rfc3339(), run.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO work_plans(run_id, task_id, plan_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![run.id.to_string(), task.id.to_string(), serde_json::to_string(plan)?, plan.created_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_instances(instance_id, run_id, task_id, role_id, state, instance_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![instance.id.to_string(), run.id.to_string(), task.id.to_string(), instance.role_id.to_string(), serde_json::to_string(&instance.state)?.trim_matches('"'), serde_json::to_string(instance)?, instance.created_at.to_rfc3339(), instance.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_leases(lease_id, instance_id, work_item_id, state, lease_json, acquired_at, expires_at, heartbeat_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![lease.id.to_string(), instance.id.to_string(), lease.work_item_id.to_string(), serde_json::to_string(&lease.state)?.trim_matches('"'), serde_json::to_string(lease)?, lease.acquired_at.to_rfc3339(), lease.expires_at.to_rfc3339(), lease.heartbeat_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_delegations(delegation_id, conversation_id, state, delegation_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![delegation.id.to_string(), delegation.conversation_id.to_string(), serde_json::to_string(&delegation.state)?, serde_json::to_string(delegation)?, delegation.created_at.to_rfc3339(), delegation.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO hidden_delegation_tasks(task_id, delegation_id, created_at) VALUES (?1, ?2, ?3)",
+            params![task.id.to_string(), delegation.id.to_string(), delegation.created_at.to_rfc3339()],
+        )?;
+        let run_event = Self::insert_event(&transaction, &run_event)?;
+        let instance_event = Self::insert_event(&transaction, &instance_event)?;
+        let lease_event = Self::insert_event(&transaction, &lease_event)?;
+        let delegation_event = Self::insert_event(&transaction, &delegation_event)?;
+        transaction.commit()?;
+        Ok(vec![
+            task_event,
+            run_event,
+            instance_event,
+            lease_event,
+            delegation_event,
+        ])
+    }
+
     pub fn append_agent_message(
         &mut self,
         message: &AgentMessage,
@@ -1956,9 +2129,125 @@ impl SqliteEventStore {
              ON CONFLICT(worktree_id) DO UPDATE SET state=excluded.state, worktree_json=excluded.worktree_json, updated_at=excluded.updated_at",
             params![worktree.id.to_string(), worktree.conversation_id.to_string(), worktree.delegation_id.to_string(), worktree.project_id.to_string(), serde_json::to_string(&worktree.state)?, serde_json::to_string(worktree)?, worktree.created_at.to_rfc3339(), worktree.updated_at.to_rfc3339()],
         )?;
+        transaction.execute(
+            "DELETE FROM worktree_baseline_entries WHERE worktree_id=?1",
+            [worktree.id.to_string()],
+        )?;
+        for entry in &worktree.baseline_entries {
+            transaction.execute(
+                "INSERT INTO worktree_baseline_entries(worktree_id, normalized_path, source_kind, size_bytes, file_mode, sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    worktree.id.to_string(),
+                    entry.normalized_path,
+                    serde_json::to_string(&entry.source_kind)?,
+                    i64::try_from(entry.size).map_err(|_| StorageError::InvalidData("baseline file size exceeds SQLite range".into()))?,
+                    i64::from(entry.mode),
+                    entry.sha256,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM worktree_baseline_exclusions WHERE worktree_id=?1",
+            [worktree.id.to_string()],
+        )?;
+        for exclusion in &worktree.baseline_exclusions {
+            transaction.execute(
+                "INSERT INTO worktree_baseline_exclusions(worktree_id, normalized_path, reason, review_blocker)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    worktree.id.to_string(),
+                    exclusion.normalized_path,
+                    exclusion.reason,
+                    exclusion.review_blocker,
+                ],
+            )?;
+        }
+        if let Some(journal) = &worktree.integration_journal {
+            transaction.execute(
+                "INSERT INTO integration_journals(journal_id, delegation_id, worktree_id, state, journal_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(journal_id) DO UPDATE SET state=excluded.state, journal_json=excluded.journal_json, updated_at=excluded.updated_at",
+                params![
+                    journal.id.to_string(),
+                    journal.delegation_id.to_string(),
+                    journal.worktree_id.to_string(),
+                    serde_json::to_string(&journal.state)?,
+                    serde_json::to_string(journal)?,
+                    journal.created_at.to_rfc3339(),
+                    journal.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// Appends secret-free credential lifecycle evidence. Bearer and bootstrap values are never
+    /// accepted by this interface, preventing authority material from entering durable storage.
+    pub fn append_agent_credential_audit(
+        &mut self,
+        audit: &AgentCredentialAudit,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO agent_credential_audit(audit_id, conversation_id, session_id, delegation_id, project_id, kind, nonce_sha256, audit_json, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                audit.id.to_string(),
+                audit.conversation_id.to_string(),
+                audit.session_id.to_string(),
+                audit.delegation_id.map(|id| id.to_string()),
+                audit.project_id.to_string(),
+                serde_json::to_string(&audit.kind)?,
+                audit.nonce_sha256,
+                serde_json::to_string(audit)?,
+                audit.occurred_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Claims a retry idempotency key, returning the first delegation identity for duplicates.
+    pub fn claim_delegation_retry(
+        &mut self,
+        conversation_id: ConversationId,
+        prior_delegation_id: mcg_domain::AgentDelegationId,
+        idempotency_key: &str,
+        new_delegation_id: mcg_domain::AgentDelegationId,
+        created_at: DateTime<Utc>,
+    ) -> Result<mcg_domain::AgentDelegationId, StorageError> {
+        let key = idempotency_key.trim();
+        if key.is_empty() || key.len() > 200 {
+            return Err(StorageError::InvalidData(
+                "retry idempotency key must contain 1 to 200 characters".into(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO delegation_retry_requests(conversation_id, prior_delegation_id, idempotency_key, new_delegation_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(conversation_id, prior_delegation_id, idempotency_key) DO NOTHING",
+            params![
+                conversation_id.to_string(),
+                prior_delegation_id.to_string(),
+                key,
+                new_delegation_id.to_string(),
+                created_at.to_rfc3339(),
+            ],
+        )?;
+        let claimed: String = self.connection.query_row(
+            "SELECT new_delegation_id FROM delegation_retry_requests
+             WHERE conversation_id=?1 AND prior_delegation_id=?2 AND idempotency_key=?3",
+            params![
+                conversation_id.to_string(),
+                prior_delegation_id.to_string(),
+                key
+            ],
+            |row| row.get(0),
+        )?;
+        claimed.parse().map_err(|_| {
+            StorageError::InvalidData("stored retry delegation identity is invalid".into())
+        })
     }
 
     pub fn conversation_team_state(
@@ -2187,6 +2476,21 @@ impl SqliteEventStore {
             .query_row(
                 "SELECT binding_json FROM codex_thread_bindings WHERE binding_key = ?1",
                 [format!("conversation:{conversation_id}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn codex_thread_binding_for_delegation(
+        &self,
+        delegation_id: mcg_domain::AgentDelegationId,
+    ) -> Result<Option<CodexThreadBinding>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT binding_json FROM codex_thread_bindings WHERE binding_key = ?1",
+                [format!("delegation:{delegation_id}")],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -2443,9 +2747,11 @@ impl SqliteEventStore {
     ///
     /// Returns [`StorageError`] when a row cannot be read or decoded.
     pub fn tasks(&self) -> Result<Vec<TaskEnvelope>, StorageError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT task_json FROM tasks ORDER BY updated_at DESC, task_id ASC")?;
+        let mut statement = self.connection.prepare(
+            "SELECT task_json FROM tasks
+                 WHERE task_id NOT IN (SELECT task_id FROM hidden_delegation_tasks)
+                 ORDER BY updated_at DESC, task_id ASC",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| {
             let json = row?;
@@ -4030,10 +4336,19 @@ mod tests {
             },
             task_id: None,
             run_id: None,
+            agent_instance_id: None,
+            agent_lease_id: None,
             worktree_id: None,
+            retry_of_id: None,
+            idempotency_key: None,
             summary: None,
             changed_files: vec![],
             checks: vec![],
+            evidence: vec![],
+            unresolved_issues: vec![],
+            integration_ready: false,
+            report_sha256: None,
+            accepted_codex_item_id: None,
             error: None,
             created_at: now,
             updated_at: now,
@@ -4104,6 +4419,11 @@ mod tests {
             base_head: "abc123".into(),
             baseline_head: Some("abc123".into()),
             baseline_sha256: "fixture-hash".into(),
+            workspace_mode: mcg_domain::ManagedWorkspaceMode::GitWorktree,
+            baseline_confidence: mcg_domain::BaselineConfidence::Verified,
+            baseline_entries: vec![],
+            baseline_exclusions: vec![],
+            integration_journal: None,
             state: mcg_domain::ManagedWorktreeState::Ready,
             revision: 1,
             retained_reason: None,

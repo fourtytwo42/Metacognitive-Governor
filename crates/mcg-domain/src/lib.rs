@@ -54,6 +54,8 @@ domain_id!(AgentDelegationId);
 domain_id!(AgentMessageId);
 domain_id!(BlackboardEntryId);
 domain_id!(ManagedWorktreeId);
+domain_id!(IntegrationJournalId);
+domain_id!(AgentCredentialAuditId);
 domain_id!(TaskId);
 domain_id!(RunId);
 domain_id!(ToolRequestId);
@@ -1146,7 +1148,7 @@ pub struct PluginInvocationRecord {
 }
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
-pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 2;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1236,12 +1238,30 @@ pub struct AgentDelegation {
     pub brief: CodingDelegationBrief,
     pub task_id: Option<TaskId>,
     pub run_id: Option<RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_instance_id: Option<AgentInstanceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_lease_id: Option<AgentLeaseId>,
     pub worktree_id: Option<ManagedWorktreeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of_id: Option<AgentDelegationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub summary: Option<String>,
     #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
     pub checks: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    #[serde(default)]
+    pub unresolved_issues: Vec<String>,
+    #[serde(default)]
+    pub integration_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_codex_item_id: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1315,6 +1335,81 @@ pub enum ManagedWorktreeState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedWorkspaceMode {
+    #[default]
+    GitWorktree,
+    DirectWorkspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BaselineConfidence {
+    #[default]
+    Verified,
+    ReviewRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaselineSourceKind {
+    Tracked,
+    Untracked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeBaselineEntry {
+    pub normalized_path: String,
+    pub source_kind: BaselineSourceKind,
+    pub size: u64,
+    pub mode: u32,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeBaselineExclusion {
+    pub normalized_path: String,
+    pub reason: String,
+    #[serde(default)]
+    pub review_blocker: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationJournalState {
+    Preparing,
+    DryRunPassed,
+    Applying,
+    Applied,
+    RollingBack,
+    RolledBack,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationTouchedPath {
+    pub normalized_path: String,
+    pub live_sha256: Option<String>,
+    pub preimage_sha256: Option<String>,
+    pub preimage_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationJournal {
+    pub schema_version: u16,
+    pub id: IntegrationJournalId,
+    pub delegation_id: AgentDelegationId,
+    pub worktree_id: ManagedWorktreeId,
+    pub state: IntegrationJournalState,
+    pub live_head: Option<String>,
+    #[serde(default)]
+    pub touched_paths: Vec<IntegrationTouchedPath>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedWorktree {
     pub schema_version: u16,
@@ -1328,6 +1423,16 @@ pub struct ManagedWorktree {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_head: Option<String>,
     pub baseline_sha256: String,
+    #[serde(default)]
+    pub workspace_mode: ManagedWorkspaceMode,
+    #[serde(default)]
+    pub baseline_confidence: BaselineConfidence,
+    #[serde(default)]
+    pub baseline_entries: Vec<WorktreeBaselineEntry>,
+    #[serde(default)]
+    pub baseline_exclusions: Vec<WorktreeBaselineExclusion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_journal: Option<IntegrationJournal>,
     pub state: ManagedWorktreeState,
     #[serde(default)]
     pub revision: u64,
@@ -1337,6 +1442,36 @@ pub struct ManagedWorktree {
     pub storage_bytes: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCredentialAuditKind {
+    BootstrapIssued,
+    BootstrapExchanged,
+    CredentialRenewed,
+    CredentialRevoked,
+    CredentialExpired,
+    ToolAllowed,
+    ToolDenied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCredentialAudit {
+    pub schema_version: u16,
+    pub id: AgentCredentialAuditId,
+    pub conversation_id: ConversationId,
+    pub session_id: ConversationAgentSessionId,
+    pub delegation_id: Option<AgentDelegationId>,
+    pub project_id: ProjectId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub role: ConversationAgentKind,
+    pub kind: AgentCredentialAuditKind,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    pub nonce_sha256: String,
+    pub tool_name: Option<String>,
+    pub occurred_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

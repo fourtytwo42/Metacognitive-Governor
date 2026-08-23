@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "apps/mcg-cli",
     "apps/mcg-daemon",
+    "apps/mcg-agent-mcp",
     "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
     "apps/mcg-updater",
@@ -28,6 +29,7 @@ members = [
 default-members = [
     "apps/mcg-cli",
     "apps/mcg-daemon",
+    "apps/mcg-agent-mcp",
     "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
     "apps/mcg-updater",
@@ -96,7 +98,7 @@ tempfile = "3.23.0"
 minisign-verify = "0.2.5"
 object = { version = "0.39.1", default-features = false, features = ["pe", "read_core", "std"] }
 quick-xml = "0.41.0"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 toml = "0.9.12"
 tower = { version = "0.5.3", features = ["util"] }

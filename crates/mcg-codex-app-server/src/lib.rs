@@ -2,7 +2,13 @@
 //!
 //! This is deliberately a conversation/thread harness, not a `ModelProvider`.
 
-use std::{collections::BTreeMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -282,6 +288,104 @@ pub struct CodexExecutionPreferences {
 pub struct CodexThreadInstructions {
     pub base: Option<String>,
     pub developer: Option<String>,
+    /// A pinned, per-thread Codex configuration override. Two-agent callers use this for their
+    /// role-scoped MCP bridge and built-in feature boundary; it is never merged globally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
+}
+
+/// Verifies the exact pinned binary and the feature/config surface required by the two-agent
+/// security boundary. Callers must fail rollout closed on any error.
+pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), CodexHarnessError> {
+    let version = std::process::Command::new(executable)
+        .arg("--version")
+        .output()
+        .map_err(CodexHarnessError::Io)?;
+    if !version.status.success()
+        || !String::from_utf8_lossy(&version.stdout).contains(CODEX_BINARY_VERSION)
+    {
+        return Err(CodexHarnessError::Protocol(format!(
+            "two-agent rollout requires pinned Codex {CODEX_BINARY_VERSION}"
+        )));
+    }
+    let features = std::process::Command::new(executable)
+        .args(["features", "list"])
+        .output()
+        .map_err(CodexHarnessError::Io)?;
+    let features = String::from_utf8_lossy(&features.stdout);
+    for required in [
+        "shell_tool",
+        "unified_exec",
+        "multi_agent",
+        "browser_use",
+        "computer_use",
+        "apps",
+    ] {
+        if !features.lines().any(|line| line.starts_with(required)) {
+            return Err(CodexHarnessError::Protocol(format!(
+                "pinned Codex does not expose required feature boundary {required}"
+            )));
+        }
+    }
+    let schema = include_str!(
+        "../../../protocol/codex-app-server/0.144.6/codex_app_server_protocol.v2.schemas.json"
+    );
+    let thread_start = schema
+        .find("ThreadStartParams")
+        .and_then(|offset| schema.get(offset..offset.saturating_add(20_000)))
+        .ok_or_else(|| {
+            CodexHarnessError::Protocol("pinned schema has no ThreadStartParams".into())
+        })?;
+    if !thread_start.contains("\"config\"") || !thread_start.contains("\"cwd\"") {
+        return Err(CodexHarnessError::Protocol(
+            "pinned thread/start cannot carry per-thread configuration".into(),
+        ));
+    }
+    Ok(())
+}
+
+impl CodexThreadInstructions {
+    /// Builds the fail-closed Chat role configuration. The Chat thread receives only the MCG MCP
+    /// bridge; mutation, browsing, computer use, apps, plugins, skills and nested agents are off.
+    #[must_use]
+    pub fn isolated_chat_config(mcp_command: &str, bootstrap_file: &str) -> Value {
+        role_thread_config(mcp_command, bootstrap_file, false)
+    }
+
+    /// Builds the Coder role configuration. Shell execution remains available inside the
+    /// workspace-write sandbox, while networked/UI tools and nested delegation remain disabled.
+    #[must_use]
+    pub fn isolated_coder_config(mcp_command: &str, bootstrap_file: &str) -> Value {
+        role_thread_config(mcp_command, bootstrap_file, true)
+    }
+}
+
+fn role_thread_config(mcp_command: &str, bootstrap_file: &str, coder: bool) -> Value {
+    json!({
+        "mcp_servers": {
+            "mcg_agent": {
+                "command": mcp_command,
+                "args": ["--bootstrap-file", bootstrap_file],
+                "startup_timeout_sec": 10,
+                "tool_timeout_sec": 60
+            }
+        },
+        "features": {
+            "shell_tool": coder,
+            "unified_exec": false,
+            "multi_agent": false,
+            "enable_fanout": false,
+            "browser_use": false,
+            "browser_use_external": false,
+            "browser_use_full_cdp_access": false,
+            "in_app_browser": false,
+            "computer_use": false,
+            "apps": false,
+            "plugins": false,
+            "image_generation": false,
+            "workspace_dependencies": false
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -800,6 +904,7 @@ impl CodexAppServerHarness {
                     "sandbox": preferences.approval_mode.thread_sandbox(writable),
                     "baseInstructions": instructions.and_then(|value| value.base.as_deref()),
                     "developerInstructions": instructions.and_then(|value| value.developer.as_deref()),
+                    "config": instructions.and_then(|value| value.config.as_ref()),
                     "threadSource": "mcg"
                 }),
             )
@@ -862,6 +967,7 @@ impl CodexAppServerHarness {
                 "sandbox": preferences.approval_mode.thread_sandbox(writable)
                 ,"baseInstructions": instructions.and_then(|value| value.base.as_deref())
                 ,"developerInstructions": instructions.and_then(|value| value.developer.as_deref())
+                ,"config": instructions.and_then(|value| value.config.as_ref())
             }),
         )
         .await
@@ -1575,6 +1681,43 @@ mod tests {
             CodexApprovalMode::FullAccess.turn_sandbox(false),
             json!({"type": "readOnly"})
         );
+    }
+
+    #[test]
+    fn two_agent_role_configs_are_thread_scoped_and_fail_closed() {
+        let chat = CodexThreadInstructions::isolated_chat_config(
+            "C:/MCG/mcg-agent-mcp.exe",
+            "C:/MCG/bootstrap/one-use.json",
+        );
+        assert_eq!(chat["features"]["shell_tool"], false);
+        assert_eq!(chat["features"]["unified_exec"], false);
+        assert_eq!(chat["features"]["multi_agent"], false);
+        assert_eq!(chat["features"]["browser_use"], false);
+        assert_eq!(chat["features"]["computer_use"], false);
+        assert_eq!(chat["features"]["apps"], false);
+        assert_eq!(
+            chat["mcp_servers"]["mcg_agent"]["args"],
+            json!(["--bootstrap-file", "C:/MCG/bootstrap/one-use.json"])
+        );
+
+        let coder = CodexThreadInstructions::isolated_coder_config(
+            "C:/MCG/mcg-agent-mcp.exe",
+            "C:/MCG/bootstrap/coder.json",
+        );
+        assert_eq!(coder["features"]["shell_tool"], true);
+        assert_eq!(coder["features"]["multi_agent"], false);
+        assert_eq!(coder["features"]["browser_use"], false);
+        assert_eq!(coder["features"]["computer_use"], false);
+    }
+
+    #[test]
+    #[ignore = "qualification gate: requires the packaged pinned Codex binary on PATH"]
+    fn installed_pinned_binary_conforms_to_two_agent_boundaries() {
+        let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("codex"));
+        verify_pinned_two_agent_conformance(&executable)
+            .expect("pinned Codex two-agent conformance");
     }
 
     #[test]

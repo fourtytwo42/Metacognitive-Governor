@@ -34,6 +34,10 @@ pub struct AppConfig {
     pub browser_executable: Option<PathBuf>,
     #[serde(default = "default_shadow_experiments")]
     pub shadow_experiments: bool,
+    /// Security rollout gate for the schema-40 Chat/Coder coordinator. This remains disabled by
+    /// default until the pinned Codex conformance and end-to-end qualification gate passes.
+    #[serde(default)]
+    pub two_agent_conversations: bool,
     #[serde(default)]
     pub trusted_plugin_signers: Vec<TrustedPluginSignerConfig>,
 }
@@ -137,6 +141,7 @@ impl Default for AppConfig {
             data_directory: default_data_directory(),
             browser_executable: std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
             shadow_experiments: shadow_experiments_from_environment(),
+            two_agent_conversations: false,
             trusted_plugin_signers: Vec::new(),
         }
     }
@@ -152,6 +157,7 @@ mod tests {
 
         assert_eq!(config.autonomy, AutonomyPreset::Autonomous);
         assert!(!config.advanced_mode);
+        assert!(!config.two_agent_conversations);
         if std::env::var_os("MCG_SHADOW_EXPERIMENTS").is_none() {
             assert_eq!(config.shadow_experiments, cfg!(debug_assertions));
         }

@@ -62,14 +62,15 @@ use mcg_providers::{
     ProviderCredential, ProviderModelCatalog,
 };
 use mcg_runtime::{
-    AgentDispatchSpec, AgentRunView, AgentTurnCommit, AppRuntime, BackupBundleManifest,
-    BackupBundleSummary, BackupPassphrase, CandidateRevisionMutation, CodexSiteInventory,
-    ConsumerEvaluationCheckpointState, ConsumerEvaluationProgress, DelegationReview,
-    DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation,
-    OAuthLoginStart, OpenAiOAuthMethod, OrganizationPublisherMutation,
-    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
-    PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
-    PluginInvocationMutation, PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
+    AgentAccessCredential, AgentAuthorityError, AgentDispatchSpec, AgentRunView, AgentTurnCommit,
+    AppRuntime, BackupBundleManifest, BackupBundleSummary, BackupPassphrase,
+    CandidateRevisionMutation, CodexSiteInventory, ConsumerEvaluationCheckpointState,
+    ConsumerEvaluationProgress, DelegationRetryMutation, DelegationReview, DiagnosticReport,
+    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
+    OpenAiOAuthMethod, OrganizationPublisherMutation, OrganizationShareImportMutation,
+    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation,
+    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
     ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport, RuntimeError,
     RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
@@ -226,9 +227,33 @@ pub struct DelegationMutationRequest {
     pub expected_revision: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationRetryRequest {
+    pub expected_revision: u64,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeMutationRequest {
     pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentBootstrapExchangeRequest {
+    pub bootstrap_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCredentialRenewRequest {
+    pub bearer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentInternalToolCallRequest {
+    pub bearer: String,
+    pub tool_name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1248,6 +1273,13 @@ pub fn router(runtime: Arc<AppRuntime>) -> Router {
 #[allow(clippy::too_many_lines)] // Keeps the complete versioned route map visible in one place.
 fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender<bool>>) -> Router {
     let state = ApiState::new(runtime, shutdown);
+    let internal_agents = Router::new()
+        .route(
+            "/internal/v1/agent/bootstrap",
+            post(exchange_agent_bootstrap),
+        )
+        .route("/internal/v1/agent/renew", post(renew_agent_credential))
+        .route("/internal/v1/agent/call", post(call_internal_agent_tool));
     let protected = Router::new()
         .route("/api/v1/system/status", get(status))
         .route("/api/v1/system/diagnostics", get(diagnostics))
@@ -1470,6 +1502,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/cancel",
             post(cancel_conversation_delegation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/retry",
+            post(retry_conversation_delegation),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/apply",
@@ -1761,9 +1797,61 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
 
     Router::new()
         .route("/api/v1/system/health", get(health))
+        .merge(internal_agents)
         .merge(protected)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+fn agent_authority_response(error: AgentAuthorityError) -> ApiError {
+    let (status, code) = match error {
+        AgentAuthorityError::InvalidBootstrap | AgentAuthorityError::InvalidCredential => {
+            (StatusCode::UNAUTHORIZED, "agent_unauthorized")
+        }
+        AgentAuthorityError::InvalidClaims | AgentAuthorityError::ToolDenied(_) => {
+            (StatusCode::FORBIDDEN, "agent_forbidden")
+        }
+        AgentAuthorityError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent_runtime_error"),
+    };
+    ApiError {
+        status,
+        code,
+        message: error.to_string(),
+    }
+}
+
+async fn exchange_agent_bootstrap(
+    State(state): State<ApiState>,
+    Json(request): Json<AgentBootstrapExchangeRequest>,
+) -> Result<Json<AgentAccessCredential>, ApiError> {
+    state
+        .runtime
+        .exchange_agent_bootstrap(&request.bootstrap_token)
+        .map(Json)
+        .map_err(agent_authority_response)
+}
+
+async fn renew_agent_credential(
+    State(state): State<ApiState>,
+    Json(request): Json<AgentCredentialRenewRequest>,
+) -> Result<Json<AgentAccessCredential>, ApiError> {
+    state
+        .runtime
+        .renew_agent_credential(&request.bearer)
+        .map(Json)
+        .map_err(agent_authority_response)
+}
+
+async fn call_internal_agent_tool(
+    State(state): State<ApiState>,
+    Json(request): Json<AgentInternalToolCallRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .call_agent_tool(&request.bearer, &request.tool_name, request.arguments)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
 }
 
 /// Binds the loopback API and serves until an operating-system shutdown signal.
@@ -3616,6 +3704,26 @@ async fn cancel_conversation_delegation(
         state
             .runtime
             .cancel_delegation(conversation_id, delegation_id, request.expected_revision)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn retry_conversation_delegation(
+    State(state): State<ApiState>,
+    Path((conversation_id, delegation_id)): Path<(String, String)>,
+    Json(request): Json<DelegationRetryRequest>,
+) -> Result<Json<DelegationRetryMutation>, ApiError> {
+    let (conversation_id, delegation_id) = parse_delegation_path(conversation_id, delegation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .retry_delegation(
+                conversation_id,
+                delegation_id,
+                request.expected_revision,
+                request.idempotency_key,
+            )
             .await
             .map_err(map_runtime_error)?,
     ))
