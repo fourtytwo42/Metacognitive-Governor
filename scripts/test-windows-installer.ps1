@@ -244,8 +244,12 @@ if ($existing) {
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $nativeAccessibilityVerifier = Join-Path $PSScriptRoot "test-installed-native-accessibility-windows.ps1"
+$nativeReviewedTopologyVerifier = Join-Path $PSScriptRoot "test-installed-native-reviewed-topology.py"
 if (-not (Test-Path -LiteralPath $nativeAccessibilityVerifier -PathType Leaf)) {
     throw "Windows native accessibility verifier is missing: $nativeAccessibilityVerifier"
+}
+if (-not (Test-Path -LiteralPath $nativeReviewedTopologyVerifier -PathType Leaf)) {
+    throw "Native reviewed-topology verifier is missing: $nativeReviewedTopologyVerifier"
 }
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath = Join-Path $repositoryRoot "target/release/bundle/nsis/MCG_0.1.0_x64-setup.exe"
@@ -269,6 +273,7 @@ $daemon = $null
 $restartedDaemon = $null
 $desktop = $null
 $desktopService = $null
+$nativePrepareService = $null
 $guiHealth = $null
 $screenshot = $null
 $desktopScreenshot = $null
@@ -583,6 +588,19 @@ try {
         # technology is active. Force that same mode for deterministic headless
         # UI Automation qualification without changing the installed payload.
         $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--force-renderer-accessibility"
+        $guiTokenFile = Join-Path $guiDataRoot "local-auth-token"
+        $nativeReviewedTopologyState = Join-Path $uatRoot "native-reviewed-topology-state.json"
+        $nativeReviewedTopologyReport = Join-Path $uatRoot "native-reviewed-topology-prepare.json"
+        $nativePrepareService = Start-Process -FilePath (Join-Path $installRoot "mcg-service.exe") -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $uatRoot "native-prepare-service.stdout.log") `
+            -RedirectStandardError (Join-Path $uatRoot "native-prepare-service.stderr.log")
+        $null = Wait-ForHealth $guiPort (Join-Path $uatRoot "native-prepare-health.json")
+        & $python $nativeReviewedTopologyVerifier --mode prepare --host "http://127.0.0.1:$guiPort" `
+            --token-file $guiTokenFile --workspace $uatRoot --state $nativeReviewedTopologyState `
+            --output $nativeReviewedTopologyReport
+        if ($LASTEXITCODE -ne 0) { throw "Native reviewed-topology preparation failed." }
+        $null = Stop-UatDaemonGracefully $nativePrepareService $cli "http://127.0.0.1:$guiPort" $guiTokenFile $guiDataRoot (Join-Path $uatRoot "native-prepare-service-stop.json")
+        $nativePrepareService = $null
         $desktop = Start-Process -FilePath (Join-Path $installRoot "mcg-desktop.exe") -PassThru
         $guiHealth = Wait-ForHealth $guiPort (Join-Path $uatRoot "gui-health.json")
         for ($attempt = 0; $attempt -lt 100; $attempt++) {
@@ -599,10 +617,19 @@ try {
         $desktopScreenshot = Join-Path $uatRoot "desktop.png"
         $screenshot = Save-DesktopScreenshot $desktopScreenshot
         $nativeAccessibilityReport = Join-Path $uatRoot "desktop-native-accessibility.json"
-        & $nativeAccessibilityVerifier -ProcessId $desktop.Id -OutputPath $nativeAccessibilityReport
+        $nativeReviewedTopologyMarker = Join-Path $uatRoot "native-reviewed-topology-project\execution-count.txt"
+        & $nativeAccessibilityVerifier -ProcessId $desktop.Id -OutputPath $nativeAccessibilityReport `
+            -ReviewedTopologyMarker $nativeReviewedTopologyMarker `
+            -ServiceHost "http://127.0.0.1:$guiPort" -TokenFile $guiTokenFile
+        $nativeReviewedTopologyVerifyReport = Join-Path $uatRoot "native-reviewed-topology-verify.json"
+        & $python $nativeReviewedTopologyVerifier --mode verify --host "http://127.0.0.1:$guiPort" `
+            --token-file $guiTokenFile --workspace $uatRoot --state $nativeReviewedTopologyState `
+            --output $nativeReviewedTopologyVerifyReport
+        if ($LASTEXITCODE -ne 0) { throw "Native reviewed-topology verification failed." }
+        $nativeReviewedTopologyScreenshot = Join-Path $uatRoot "desktop-reviewed-topology.png"
+        $null = Save-DesktopScreenshot $nativeReviewedTopologyScreenshot
         Stop-UatProcess $desktop
         $desktop = $null
-        $guiTokenFile = Join-Path $guiDataRoot "local-auth-token"
         $null = Stop-UatDaemonGracefully $desktopService $cli "http://127.0.0.1:$guiPort" $guiTokenFile $guiDataRoot (Join-Path $uatRoot "desktop-service-graceful-stop.json")
         $desktopService = $null
     }
@@ -666,6 +693,8 @@ try {
         McpToolCount = $toolNames.Count
         DesktopScreenshot = $desktopScreenshot
         NativeAccessibilityReport = $nativeAccessibilityReport
+        NativeReviewedTopologyReport = $nativeReviewedTopologyVerifyReport
+        NativeReviewedTopologyScreenshot = $nativeReviewedTopologyScreenshot
         ScreenshotWidth = if ($null -eq $screenshot) { 0 } else { $screenshot.Width }
         ScreenshotHeight = if ($null -eq $screenshot) { 0 } else { $screenshot.Height }
         ScreenshotSampledColors = if ($null -eq $screenshot) { 0 } else { $screenshot.SampledColors }
@@ -679,6 +708,7 @@ try {
 } finally {
     Stop-UatProcess $desktop
     Stop-UatProcess $desktopService
+    Stop-UatProcess $nativePrepareService
     Stop-UatProcess $daemon
     Stop-UatProcess $restartedDaemon
     if (-not $installationRemoved -and (Test-Path -LiteralPath $installRoot -PathType Container)) {

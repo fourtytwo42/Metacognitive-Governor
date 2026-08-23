@@ -9,7 +9,14 @@ if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
 }
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$portableRoot = Join-Path $repositoryRoot "target\portable\MCG-Portable-Windows-x64"
+$tauriConfigPath = Join-Path $repositoryRoot "apps\desktop\src-tauri\tauri.conf.json"
+$tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
+$version = [string]$tauriConfig.version
+if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+    throw "Tauri version is missing or invalid: $version"
+}
+$portableRoot = Join-Path $repositoryRoot "target\portable\MCG-Portable-Windows-x64-v$version"
+$desktopFileName = "MCG-Desktop-v$version.exe"
 
 Push-Location $repositoryRoot
 try {
@@ -18,37 +25,37 @@ try {
         throw "Portable sidecar preparation failed with exit code $LASTEXITCODE."
     }
 
-    npm run tauri --workspace @mcg/desktop -- build --ci --no-bundle --config src-tauri/tauri.release.conf.json
+    npm run tauri --workspace @mcg/desktop -- build --ci --no-bundle --features single-file-portable --config src-tauri/tauri.release.conf.json
     if ($LASTEXITCODE -ne 0) {
         throw "Portable desktop production build failed with exit code $LASTEXITCODE."
     }
 
-    New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
-    $payload = @{
-        "target\release\mcg-desktop.exe" = "MCG-Desktop.exe"
-        "target\release\mcg-daemon.exe" = "mcg-service.exe"
-        "target\release\mcg.exe" = "MCG.exe"
-        "target\release\mcg-plugin-runner.exe" = "mcg-plugin-runner.exe"
-        "target\release\mcg-shadow-runner.exe" = "mcg-shadow-runner.exe"
-        "target\release\mcg-updater.exe" = "mcg-updater.exe"
-        "THIRD_PARTY_NOTICES.md" = "THIRD_PARTY_NOTICES.md"
-        "licenses\Apache-2.0.txt" = "Apache-2.0.txt"
-        "licenses\Wasmtime-Apache-2.0-WITH-LLVM-exception.txt" = "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt"
-    }
-    foreach ($entry in $payload.GetEnumerator()) {
-        $source = Join-Path $repositoryRoot $entry.Key
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-            throw "Required portable payload is missing: $source"
+    if (Test-Path -LiteralPath $portableRoot) {
+        $resolvedPortableRoot = [System.IO.Path]::GetFullPath($portableRoot)
+        $resolvedExpectedParent = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot "target\portable"))
+        if ([System.IO.Path]::GetDirectoryName($resolvedPortableRoot) -ne $resolvedExpectedParent) {
+            throw "Refusing to refresh an unexpected portable directory: $resolvedPortableRoot"
         }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $portableRoot $entry.Value) -Force
+        Remove-Item -LiteralPath $resolvedPortableRoot -Recurse -Force
     }
+    New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
+    $desktopSource = Join-Path $repositoryRoot "target\release\mcg-desktop.exe"
+    if (-not (Test-Path -LiteralPath $desktopSource -PathType Leaf)) {
+        throw "Required portable desktop is missing: $desktopSource"
+    }
+    Copy-Item -LiteralPath $desktopSource -Destination (Join-Path $portableRoot $desktopFileName) -Force
 
-    $desktop = Join-Path $portableRoot "MCG-Desktop.exe"
+    $desktop = Join-Path $portableRoot $desktopFileName
     $hash = (Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash
     $size = (Get-Item -LiteralPath $desktop).Length
+    $files = @(Get-ChildItem -LiteralPath $portableRoot -File)
+    if ($files.Count -ne 1 -or $files[0].Name -ne $desktopFileName) {
+        throw "The one-file portable output contains unexpected supporting files."
+    }
     Write-Output "Portable directory: $portableRoot"
-    Write-Output "MCG-Desktop.exe bytes: $size"
-    Write-Output "MCG-Desktop.exe SHA-256: $hash"
+    Write-Output "Portable payload: one self-contained executable"
+    Write-Output "$desktopFileName bytes: $size"
+    Write-Output "$desktopFileName SHA-256: $hash"
 } finally {
     Pop-Location
 }

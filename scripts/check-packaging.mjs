@@ -14,6 +14,31 @@ const developmentConfig = JSON.parse(await read("apps/desktop/src-tauri/tauri.co
 if (developmentConfig.bundle?.active !== false || developmentConfig.bundle?.externalBin) {
   throw new Error("Default development and test builds must not depend on generated release sidecars.");
 }
+const [rootPackage, desktopPackage, cargoManifest, desktopHtml, portableWindowsBuilder] = await Promise.all([
+  read("package.json").then(JSON.parse),
+  read("apps/desktop/package.json").then(JSON.parse),
+  read("Cargo.toml"),
+  read("apps/desktop/index.html"),
+  read("scripts/build-portable-windows.ps1")
+]);
+const applicationVersion = developmentConfig.version;
+if (
+  rootPackage.version !== applicationVersion ||
+  desktopPackage.version !== applicationVersion ||
+  !cargoManifest.includes(`version = "${applicationVersion}"`)
+) {
+  throw new Error("Cargo, npm, desktop, and Tauri application versions must remain identical.");
+}
+if (developmentConfig.app?.windows?.[0]?.title !== `MCG v${applicationVersion}`) {
+  throw new Error("The native window title must expose the exact application version.");
+}
+requireText(desktopHtml, `<title>MCG v${applicationVersion}</title>`, "desktop HTML title");
+for (const invariant of [
+  'MCG-Portable-Windows-x64-v$version',
+  'MCG-Desktop-v$version.exe',
+  '--features single-file-portable',
+  'one self-contained executable'
+]) requireText(portableWindowsBuilder, invariant, "Windows portable builder");
 const config = JSON.parse(await read("apps/desktop/src-tauri/tauri.release.conf.json"));
 const updaterConfig = JSON.parse(await read("apps/desktop/src-tauri/tauri.updater.conf.json"));
 if (config.bundle?.active !== true || config.bundle?.targets !== "all") {
@@ -66,7 +91,7 @@ if (JSON.stringify(developmentConfig.plugins?.updater) !== JSON.stringify({ endp
   throw new Error("The base Tauri config must provide a valid inert updater object so unsigned packages start without update authority.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility, nativeReviewedTopology, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
@@ -104,6 +129,7 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("scripts/test-macos-packages.sh"),
   read("scripts/test-installed-native-accessibility-windows.ps1"),
   read("scripts/test-installed-native-accessibility-linux.py"),
+  read("scripts/test-installed-native-reviewed-topology.py"),
   read("scripts/test-installed-native-accessibility-macos.swift"),
   read("scripts/capture-installed-macos-window.swift")
 ]);
@@ -122,10 +148,10 @@ for (const [harness, label] of [
   requireText(harness, "test-installed-organization-sharing.mjs", label);
   requireText(harness, "organization-sharing-restart.json", label);
 }
-for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
+for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY", "Reviewed topology reason", "Run reviewed plan", "Approve and run", "reviewed_topology_terminal_succeeded_visible"]) {
   requireText(windowsNativeAccessibility, invariant, "Windows native accessibility verifier");
 }
-for (const invariant of ["AT-SPI", "password text", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
+for (const invariant of ["AT-SPI", "password text", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY", "Reviewed topology reason", "Run reviewed plan", "Approve and run", "reviewed_topology_terminal_succeeded_visible"]) {
   requireText(linuxNativeAccessibility, invariant, "Linux native accessibility verifier");
 }
 for (const invariant of ["AXIsProcessTrusted", "kAXSecureTextFieldSubrole", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY"]) {
@@ -263,11 +289,11 @@ for (const file of ["scripts/build-release.ps1", "scripts/build-release.sh", "sc
   await access(path.join(root, file), constants.R_OK);
 }
 const installerUat = await read("scripts/test-windows-installer.ps1");
-for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_BIND_ADDRESS", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--force-renderer-accessibility", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "ReviewedTopologyRestartReport", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
+for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_BIND_ADDRESS", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--force-renderer-accessibility", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "ReviewedTopologyRestartReport", "test-installed-native-reviewed-topology.py", "NativeReviewedTopologyReport", "NativeReviewedTopologyScreenshot", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
-for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "Bubblewrap-GPL-2.0-or-later.txt", "bubblewrap-v0.11.2.tar.gz", "metacognitive-governor-unpriv-bwrap", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "REVIEWED_TOPOLOGY_RESTART_REPORT", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
+for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "Bubblewrap-GPL-2.0-or-later.txt", "bubblewrap-v0.11.2.tar.gz", "metacognitive-governor-unpriv-bwrap", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "REVIEWED_TOPOLOGY_RESTART_REPORT", "test-installed-native-reviewed-topology.py", "INSTALLED_NATIVE_REVIEWED_TOPOLOGY", "APPIMAGE_NATIVE_REVIEWED_TOPOLOGY", "INSTALLED_REVIEWED_TOPOLOGY_SCREENSHOT", "APPIMAGE_REVIEWED_TOPOLOGY_SCREENSHOT", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
 const macosPackageUat = await read("scripts/test-macos-packages.sh");
@@ -321,6 +347,9 @@ for (const invariant of ["direct_rest_project_discovery", "responses_completed",
 const installedReviewedTopologyUat = await read("scripts/test-installed-reviewed-topology.py");
 for (const invariant of ["topology_schema_version", "mcg_reviewed_topology_plans", "mcg_reviewed_topology_plan_mutate", 'waiting["plan"]["state"] == "waiting"', "approval_required_and_resolved", "terminal_replay_observation_only", "stale_authority_rejected", "settings_restored", "private_path_persisted", "os.link"]) {
   requireText(installedReviewedTopologyUat, invariant, "installed reviewed-topology UAT");
+}
+for (const invariant of ["native_ui_mutation_pending", "topology_stage_count", "guided_autonomy_pending_native_ui", "PLAN_REASON", "PLAN_DISPLAY_NAME", "command_executions", "approval_resolved", "settings_restored", "private_path_persisted", "os.link"]) {
+  requireText(nativeReviewedTopology, invariant, "installed native reviewed-topology UAT");
 }
 const installedRealProjectUat = await read("scripts/test-installed-real-project.py");
 for (const invariant of ["seeded_regression_failed", "governed_files_written", "independent_evaluation_passed", "browser_rendered", "browser_process_sandboxed", "canonical_viewport", "audit_unchanged", "provider_required_for_replay", "real-project-restart", "token_excluded"]) {

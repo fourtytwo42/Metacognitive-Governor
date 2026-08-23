@@ -728,10 +728,47 @@ launch_and_capture() {
   local data_root="$2"
   local port="$3"
   local label="$4"
+  local attempt
   if ss -ltn "sport = :$port" | grep -q LISTEN; then
     echo "$label requires unused loopback port $port." >&2
     exit 1
   fi
+  local native_topology_workspace="$uat_root/$label-native-topology-workspace"
+  local service_executable="$(dirname "$executable")/mcg-service"
+  if [[ ! -x "$service_executable" && -x "$(dirname "$executable")/usr/bin/mcg-service" ]]; then
+    service_executable="$(dirname "$executable")/usr/bin/mcg-service"
+  fi
+  [[ -x "$service_executable" ]] || {
+    echo "$label is missing the adjacent packaged mcg-service." >&2
+    exit 1
+  }
+  mkdir "$native_topology_workspace"
+  chown "$uat_user":"$(id -gn "$uat_user")" "$native_topology_workspace"
+  runuser -u "$uat_user" -- env \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" \
+    MCG_DATA_DIR="$data_root" MCG_BIND_ADDRESS="127.0.0.1:$port" \
+    "$service_executable" >"$uat_root/$label-prepare-service.log" 2>&1 &
+  local prepare_service_pid=$!
+  background_pids+=("$prepare_service_pid")
+  wait_for_health "$port"
+  runuser -u "$uat_user" -- env \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" \
+    python3 "$repository_root/scripts/test-installed-native-reviewed-topology.py" \
+      --mode prepare --host "http://127.0.0.1:$port" \
+      --token-file "$data_root/local-auth-token" --workspace "$native_topology_workspace" \
+      --state "$uat_root/$label-native-reviewed-topology-state.json" \
+      --output "$uat_root/$label-native-reviewed-topology-prepare.json"
+  stop_tree "$prepare_service_pid"
+  background_pids=("$a11y_dbus_pid" "$xvfb_pid")
+  local stopped=false
+  for attempt in $(seq 1 100); do
+    if ! ss -ltn "sport = :$port" | grep -q LISTEN; then
+      stopped=true
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$stopped" == true ]] || { echo "$label prepare service did not stop." >&2; exit 1; }
   runuser -u "$uat_user" -- env \
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" DISPLAY="$display" \
     DBUS_SESSION_BUS_ADDRESS="$a11y_dbus_address" NO_AT_BRIDGE=0 GTK_MODULES=gail:atk-bridge \
@@ -741,7 +778,6 @@ launch_and_capture() {
   background_pids+=("$desktop_pid")
   wait_for_health "$port"
   local window_id=""
-  local attempt
   for attempt in $(seq 1 100); do
     window_id="$(runuser -u "$uat_user" -- env DISPLAY="$display" xdotool search --name '^MCG$' 2>/dev/null | head -n 1 || true)"
     [[ -n "$window_id" ]] && break
@@ -749,6 +785,8 @@ launch_and_capture() {
   done
   [[ -n "$window_id" ]] || { echo "$label did not expose an MCG desktop window." >&2; exit 1; }
   sleep 2
+  runuser -u "$uat_user" -- env DISPLAY="$display" \
+    xdotool windowfocus --sync "$window_id"
   runuser -u "$uat_user" -- env DISPLAY="$display" import -window "$window_id" "$uat_root/$label.png"
   [[ -s "$uat_root/$label.png" ]] || { echo "$label screenshot is empty." >&2; exit 1; }
   local screenshot_colors
@@ -764,6 +802,7 @@ launch_and_capture() {
     echo "$label loopback listener is not mcg-service." >&2
     exit 1
   }
+  background_pids+=("$service_pid")
   tr '\0' '\n' <"/proc/$service_pid/environ" | grep -Fxq "MCG_DATA_DIR=$data_root" || {
     echo "$label service is not bound to its isolated data directory." >&2
     exit 1
@@ -772,7 +811,23 @@ launch_and_capture() {
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" DISPLAY="$display" \
     DBUS_SESSION_BUS_ADDRESS="$a11y_dbus_address" \
     python3 "$repository_root/scripts/test-installed-native-accessibility-linux.py" \
-      --output "$uat_root/$label-native-accessibility.json"
+      --output "$uat_root/$label-native-accessibility.json" \
+      --host "http://127.0.0.1:$port" \
+      --token-file "$data_root/local-auth-token" \
+      --reviewed-topology-marker "$native_topology_workspace/native-reviewed-topology-project/execution-count.txt"
+  runuser -u "$uat_user" -- env \
+    HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" \
+    python3 "$repository_root/scripts/test-installed-native-reviewed-topology.py" \
+      --mode verify --host "http://127.0.0.1:$port" \
+      --token-file "$data_root/local-auth-token" --workspace "$native_topology_workspace" \
+      --state "$uat_root/$label-native-reviewed-topology-state.json" \
+      --output "$uat_root/$label-native-reviewed-topology-verify.json"
+  runuser -u "$uat_user" -- env DISPLAY="$display" \
+    import -window "$window_id" "$uat_root/$label-reviewed-topology.png"
+  [[ -s "$uat_root/$label-reviewed-topology.png" ]] || {
+    echo "$label reviewed-topology screenshot is empty." >&2
+    exit 1
+  }
   stop_tree "$desktop_pid"
   stop_tree "$service_pid"
   background_pids=("$a11y_dbus_pid" "$xvfb_pid")
@@ -842,6 +897,10 @@ INSTALLED_SCREENSHOT=$uat_root/installed.png
 APPIMAGE_SCREENSHOT=$uat_root/appimage.png
 INSTALLED_NATIVE_ACCESSIBILITY=$uat_root/installed-native-accessibility.json
 APPIMAGE_NATIVE_ACCESSIBILITY=$uat_root/appimage-native-accessibility.json
+INSTALLED_NATIVE_REVIEWED_TOPOLOGY=$uat_root/installed-native-reviewed-topology-verify.json
+APPIMAGE_NATIVE_REVIEWED_TOPOLOGY=$uat_root/appimage-native-reviewed-topology-verify.json
+INSTALLED_REVIEWED_TOPOLOGY_SCREENSHOT=$uat_root/installed-reviewed-topology.png
+APPIMAGE_REVIEWED_TOPOLOGY_SCREENSHOT=$uat_root/appimage-reviewed-topology.png
 DATA_RETAINED=true
 REPAIR_PRESERVED_DATA=true
 REINSTALL_PRESERVED_DATA=true

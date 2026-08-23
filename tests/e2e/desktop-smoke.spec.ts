@@ -482,6 +482,14 @@ test("account menu and Settings follow the compact Codex information architectur
 
   await settings.getByRole("button", { name: "Usage & billing" }).click();
   await expect(page.getByText("MCG does not sell credits, collect subscription payments, or silently move subscription work to API billing.")).toBeVisible();
+
+  await settings.getByRole("button", { name: "Browser" }).click();
+  await expect(page.getByRole("heading", { name: "Browser", level: 2 })).toBeVisible();
+  await expect(page.getByText("Site permissions", { exact: true })).toBeVisible();
+
+  await settings.getByRole("button", { name: "Git" }).click();
+  await expect(page.getByText("Branch prefix")).toBeVisible();
+  await expect(page.getByText("codex/")).toBeVisible();
 });
 
 test("narrow layout keeps the mode switch reachable without page overflow", async ({ page }) => {

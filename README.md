@@ -81,7 +81,10 @@ npm run build:portable:windows
 ```
 
 This command prepares the release sidecars and runs Tauri's production build
-before assembling `target/portable/MCG-Portable-Windows-x64`. Do not substitute
+before assembling a versioned `target/portable/MCG-Portable-Windows-x64-v*/MCG-Desktop-v*.exe`.
+The Windows portable output is one self-contained executable. On first launch it verifies and
+extracts its version-matched private service helpers beneath the normal MCG local data directory;
+no adjacent files are required or searched. Do not substitute
 `cargo build -p mcg-desktop`: a raw Cargo build can retain Tauri's development
 URL instead of embedding the production frontend.
 
