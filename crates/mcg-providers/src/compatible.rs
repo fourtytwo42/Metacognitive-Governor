@@ -575,6 +575,7 @@ fn request_json(
             "strict": format.strict,
         }})
     });
+    let service_tier = request.metadata.get("service_tier").and_then(Value::as_str);
     let mut value = json!({
         "model": request.model,
         "instructions": request.instructions,
@@ -584,6 +585,7 @@ fn request_json(
         "parallel_tool_calls": openai_subscription.then_some(true),
         "text": text,
         "reasoning": request.reasoning,
+        "service_tier": service_tier,
         "temperature": (!openai_subscription).then_some(request.temperature).flatten(),
         "top_p": (!openai_subscription).then_some(request.top_p).flatten(),
         "max_output_tokens": (!openai_subscription).then_some(request.max_output_tokens).flatten(),
@@ -690,6 +692,10 @@ fn parse_codex_model(model: &Value) -> Result<ModelDescriptor, ProviderError> {
         context_window: model.get("context_window").and_then(Value::as_u64),
         capabilities: ModelCapabilities {
             responses: model.get("supported_in_api").and_then(Value::as_bool),
+            // The ChatGPT Codex catalog is already filtered to models supported by
+            // the agent Responses API. That API supports the tool definitions MCG
+            // sends even though the catalog does not repeat a separate tools flag.
+            tools: Some(true),
             reasoning,
             ..ModelCapabilities::default()
         },
@@ -1157,7 +1163,10 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::{ContentPart, Message, ModelRequest};
+    use crate::{
+        ContentPart, Message, ModelRequest, ProviderModelRef, RequiredCapability, RouteCandidate,
+        RoutingPolicy, RoutingRequirements, plan_routes,
+    };
 
     async fn fixture_server() -> String {
         async fn models() -> Json<Value> {
@@ -1315,6 +1324,17 @@ mod tests {
         cloud_connection.kind = ProviderKind::OpenRouter;
         let cloud = OpenAiCompatibleProviderBuilder::new(cloud_connection);
         assert_eq!(cloud.timeout, DEFAULT_CLOUD_TIMEOUT);
+    }
+
+    #[test]
+    fn response_wire_carries_requested_service_tier() {
+        let mut request = request();
+        request.metadata = json!({"service_tier": "priority"});
+        let body = request_json(&request, false, true, None);
+        assert_eq!(
+            body.get("service_tier").and_then(Value::as_str),
+            Some("priority")
+        );
     }
 
     #[test]
@@ -1507,8 +1527,27 @@ mod tests {
         assert_eq!(models[0].display_name, "GPT Visible");
         assert_eq!(models[0].context_window, Some(272_000));
         assert_eq!(models[0].capabilities.responses, Some(true));
+        assert_eq!(models[0].capabilities.tools, Some(true));
         assert_eq!(models[0].capabilities.reasoning, Some(true));
         assert!(models[0].price.is_none());
+        let route = plan_routes(
+            &[RouteCandidate {
+                target: ProviderModelRef {
+                    provider_id: "subscription".into(),
+                    model_id: models[0].id.clone(),
+                },
+                model: models[0].clone(),
+                preference: 0,
+            }],
+            &RoutingRequirements {
+                capabilities: vec![RequiredCapability::Tools],
+            },
+            RoutingPolicy::default(),
+            1_000,
+            1_000,
+        )
+        .expect("subscription model should satisfy governed agent tool routing");
+        assert_eq!(route.pinned.target.model_id, "gpt-visible");
     }
 
     #[tokio::test]

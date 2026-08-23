@@ -35,7 +35,7 @@ impl Default for BrowserAuthorizationConfig {
             issuer: OPENAI_AUTH_ISSUER.into(),
             client_id: OPENAI_CODEX_PUBLIC_CLIENT_ID.into(),
             callback_ports: vec![1455, 1457],
-            timeout: Duration::from_mins(10),
+            timeout: Duration::from_mins(3),
         }
     }
 }
@@ -200,7 +200,12 @@ impl BrowserAuthorizationClient {
             .json()
             .await
             .map_err(|error| ProviderError::Authentication(error.to_string()))?;
-        send_browser_response(&mut socket, 200, "Sign-in complete. You can return to MCG.").await;
+        send_browser_response(
+            &mut socket,
+            200,
+            "Sign-in complete. MCG connected automatically. You can close this tab.",
+        )
+        .await;
         Ok(OAuthTokenSet {
             id_token: ProviderCredential::new(tokens.id)?,
             access_token: ProviderCredential::new(tokens.access)?,

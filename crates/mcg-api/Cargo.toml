@@ -11,6 +11,7 @@ base64.workspace = true
 chrono.workspace = true
 mcg-agents = { path = "../mcg-agents" }
 mcg-config = { path = "../mcg-config" }
+mcg-codex-app-server = { path = "../mcg-codex-app-server" }
 mcg-domain = { path = "../mcg-domain" }
 mcg-events = { path = "../mcg-events" }
 mcg-mcp = { path = "../mcg-mcp" }

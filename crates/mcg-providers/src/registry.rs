@@ -189,10 +189,22 @@ impl ProviderRegistry {
         provider_id: &str,
         mut models: Vec<ModelDescriptor>,
     ) -> Result<(), ProviderError> {
-        if !self.providers.contains_key(provider_id) {
+        let Some(provider) = self.providers.get(provider_id) else {
             return Err(ProviderError::Configuration(format!(
                 "provider connection {provider_id} is not registered"
             )));
+        };
+        let subscription = matches!(
+            provider.connection().auth_mode,
+            ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+        );
+        if subscription {
+            for model in &mut models {
+                if model.capabilities.responses == Some(true) && model.capabilities.tools.is_none()
+                {
+                    model.capabilities.tools = Some(true);
+                }
+            }
         }
         models.sort_by(|left, right| left.id.cmp(&right.id));
         if models.iter().any(|model| model.id.trim().is_empty())
@@ -438,5 +450,47 @@ mod tests {
                 .is_err()
         );
         assert_eq!(registry.provider_ids(), vec!["local"]);
+    }
+
+    #[test]
+    fn restored_subscription_catalogs_gain_the_implicit_codex_tool_capability() {
+        let mut registry = ProviderRegistry::default();
+        registry
+            .register(Arc::new(FixtureProvider {
+                connection: ProviderConnection {
+                    contract_version: CONTRACT_VERSION,
+                    id: "subscription".into(),
+                    display_name: "OpenAI Subscription".into(),
+                    kind: ProviderKind::OpenAi,
+                    base_url: CHATGPT_CODEX_BASE_URL.into(),
+                    auth_mode: ProviderAuthMode::ChatGptBrowserOauth,
+                    organization: None,
+                    project: None,
+                },
+            }))
+            .expect("register subscription fixture");
+        registry
+            .restore_catalog(
+                "subscription",
+                vec![ModelDescriptor {
+                    id: "gpt-codex".into(),
+                    display_name: "GPT Codex".into(),
+                    owned_by: Some("openai".into()),
+                    context_window: Some(272_000),
+                    capabilities: ModelCapabilities {
+                        responses: Some(true),
+                        tools: None,
+                        ..ModelCapabilities::default()
+                    },
+                    price: None,
+                    metadata: Value::Null,
+                }],
+            )
+            .expect("restore old subscription catalog");
+
+        assert_eq!(
+            registry.route_candidates()[0].model.capabilities.tools,
+            Some(true)
+        );
     }
 }

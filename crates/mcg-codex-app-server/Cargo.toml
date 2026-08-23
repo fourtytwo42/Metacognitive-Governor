@@ -1,0 +1,22 @@
+[package]
+name = "mcg-codex-app-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+win32job = "2.0.3"
+
+[dev-dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

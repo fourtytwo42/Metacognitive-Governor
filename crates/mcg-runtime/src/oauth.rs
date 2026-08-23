@@ -9,9 +9,10 @@ use mcg_events::EventEnvelope;
 use mcg_providers::{
     BrowserAuthorization, BrowserAuthorizationClient, BrowserAuthorizationConfig,
     CHATGPT_CODEX_BASE_URL, DeviceAuthorization, DeviceAuthorizationClient,
-    DeviceAuthorizationConfig, OAuthTokenSet, ProviderAuthMode, ProviderConnection,
-    ProviderCredentialStore, ProviderKind, ProviderModelCatalog, ProviderRegistry,
-    clear_provider_credentials, load_oauth_credentials, save_provider_credentials,
+    DeviceAuthorizationConfig, OAuthAccountProfile, OAuthTokenSet, ProviderAuthMode,
+    ProviderConnection, ProviderCredentialStore, ProviderKind, ProviderModelCatalog,
+    ProviderRegistry, clear_provider_credentials, load_oauth_credentials,
+    save_provider_credentials,
 };
 use mcg_storage::SqliteEventStore;
 use serde::{Deserialize, Serialize};
@@ -283,6 +284,44 @@ impl OAuthRuntimeState {
 }
 
 impl AppRuntime {
+    /// Returns a secret-free identity projection for one OAuth connection.
+    ///
+    /// # Errors
+    /// Returns an error when protected credentials or token claims cannot be read.
+    pub async fn openai_oauth_profile(
+        &self,
+        connection: &ProviderConnection,
+    ) -> Result<Option<OAuthAccountProfile>, RuntimeError> {
+        if connection.kind != ProviderKind::OpenAi
+            || !matches!(
+                connection.auth_mode,
+                ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
+            )
+        {
+            return Ok(None);
+        }
+        let tokens = load_oauth_credentials(
+            self.provider_credentials.as_ref(),
+            &connection.id,
+            connection.auth_mode,
+        )?;
+        let token_profile = tokens.account_profile()?;
+        let issuer = match connection.auth_mode {
+            ProviderAuthMode::ChatGptBrowserOauth => &self.oauth_state.browser_config.issuer,
+            ProviderAuthMode::ChatGptDeviceCode => &self.oauth_state.device_config.issuer,
+            _ => unreachable!("non-OAuth modes returned above"),
+        };
+        let userinfo_profile = tokens.fetch_account_profile(issuer).await.ok().flatten();
+        let standards_profile = userinfo_profile
+            .map(|profile| profile.with_fallback(token_profile.clone()))
+            .or(token_profile);
+        let codex_profile = tokens.fetch_codex_account_profile().await.ok().flatten();
+        let profile = codex_profile
+            .map(|profile| profile.with_fallback(standards_profile.clone()))
+            .or(standards_profile);
+        Ok(profile)
+    }
+
     /// Starts a short-lived standalone `ChatGPT` OAuth flow. Only the authorization
     /// handle is retained in memory; no provider metadata or token is persisted yet.
     ///
