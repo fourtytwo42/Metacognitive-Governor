@@ -50,6 +50,13 @@ import {
   deploySite,
   denyRequest,
   discoverProject,
+  githubStatus,
+  startGitHubLogin,
+  completeGitHubLogin,
+  disconnectGitHub,
+  listGitHubRepositories,
+  createGitHubRepository,
+  linkGitHubRepository,
   discoverMcpConnection,
   discoverProvider,
   disconnectProvider,
@@ -57,6 +64,7 @@ import {
   handoffBrowserSession,
   handoffComputerSession,
   inheritOrganization,
+  initializeProjectGit,
   importOrganization,
   importSharedOrganization,
   listMcpConnections,
@@ -166,6 +174,8 @@ import {
   type ProviderModel,
   type ChatRunPreferences,
   type ApprovalMode,
+  type GitHubConnectionStatus,
+  type GitHubRepository,
   type Conversation,
   type ConversationActivity,
   type AgentDelegation,
@@ -1424,6 +1434,12 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderListItem[]>([]);
+  const [githubConnection, setGitHubConnection] = useState<GitHubConnectionStatus | null>(null);
+  const [githubRepositories, setGitHubRepositories] = useState<GitHubRepository[]>([]);
+  const [githubBusy, setGitHubBusy] = useState(false);
+  const [githubError, setGitHubError] = useState<string | null>(null);
+  const [githubRepositoryName, setGitHubRepositoryName] = useState("");
+  const [githubRepositoryPrivate, setGitHubRepositoryPrivate] = useState(true);
   const [modelDiscoveryBusy, setModelDiscoveryBusy] = useState(false);
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
   const [codexUsageBusy, setCodexUsageBusy] = useState(false);
@@ -1719,6 +1735,10 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("mcg.settings-nav-width", String(settingsNavWidth));
   }, [settingsNavWidth]);
+
+  useEffect(() => {
+    if (settingsTab === "git") void refreshGitHub();
+  }, [settingsTab]);
 
   useEffect(() => {
     window.localStorage.setItem("mcg.workspace-side-panel", String(workspaceSidePanelOpen));
@@ -2983,6 +3003,90 @@ export function App() {
           : "Sign-in timed out after 3 minutes. Start sign-in again when you’re ready."
         : message);
       setProviderStatus(/timed out|expired/i.test(message) ? "Sign-in timed out" : "Connection failed");
+    }
+  }
+
+  async function refreshGitHub() {
+    try {
+      const status = await githubStatus();
+      setGitHubConnection(status);
+      setGitHubRepositories(status.connected ? (await listGitHubRepositories()).repositories : []);
+      setGitHubError(null);
+    } catch (error) {
+      setGitHubError(errorMessage(error));
+    }
+  }
+
+  async function signInToGitHub() {
+    setGitHubBusy(true);
+    setGitHubError(null);
+    try {
+      const started = await startGitHubLogin();
+      await openExternalUrl(started.authorization_url);
+      const status = await completeGitHubLogin(started.session_id);
+      setGitHubConnection(status);
+      setGitHubRepositories((await listGitHubRepositories()).repositories);
+    } catch (error) {
+      setGitHubError(errorMessage(error));
+    } finally {
+      setGitHubBusy(false);
+    }
+  }
+
+  async function signOutOfGitHub() {
+    setGitHubBusy(true);
+    try {
+      setGitHubConnection(await disconnectGitHub());
+      setGitHubRepositories([]);
+      setGitHubError(null);
+    } catch (error) {
+      setGitHubError(errorMessage(error));
+    } finally {
+      setGitHubBusy(false);
+    }
+  }
+
+  async function createAndLinkGitHubRepository() {
+    if (!workspaceProject || !githubRepositoryName.trim()) return;
+    setGitHubBusy(true);
+    setGitHubError(null);
+    try {
+      const repository = await createGitHubRepository({ name: githubRepositoryName.trim(), private: githubRepositoryPrivate });
+      await linkGitHubRepository(workspaceProject.project_id, repository.clone_url);
+      setGitHubRepositories((current) => [repository, ...current.filter((item) => item.id !== repository.id)]);
+      setGitHubRepositoryName("");
+    } catch (error) {
+      setGitHubError(errorMessage(error));
+    } finally {
+      setGitHubBusy(false);
+    }
+  }
+
+  async function linkExistingGitHubRepository(repository: GitHubRepository) {
+    if (!workspaceProject) return;
+    setGitHubBusy(true);
+    setGitHubError(null);
+    try {
+      await linkGitHubRepository(workspaceProject.project_id, repository.clone_url);
+    } catch (error) {
+      setGitHubError(errorMessage(error));
+    } finally {
+      setGitHubBusy(false);
+    }
+  }
+
+  async function initializeSelectedProjectGit() {
+    if (!workspaceProject) return;
+    setGitHubBusy(true);
+    setGitHubError(null);
+    try {
+      const mutation = await initializeProjectGit(workspaceProject.project_id);
+      setSelectedProject(mutation.project);
+      setProjects((current) => [mutation.project, ...current.filter((project) => project.project_id !== mutation.project.project_id)]);
+    } catch (error) {
+      setGitHubError(errorMessage(error));
+    } finally {
+      setGitHubBusy(false);
     }
   }
 
@@ -7944,12 +8048,36 @@ export function App() {
               <div className="settings-pane settings-summary-pane" data-settings-pane="connections"><h2>Connections</h2><div className="settings-card"><div><strong>Providers and tools</strong><p>Manage model providers, ChatGPT subscription access, MCP servers, and remote hosts.</p></div><div className="settings-card-actions"><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Providers</button><button className="secondary" type="button" onClick={() => navigateSurface("mcp")}>Tools</button><button className="secondary" type="button" onClick={() => navigateSurface("ssh")}>SSH</button></div></div></div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="git">
                 <div className="settings-page-heading"><h2>Git</h2><p>Choose defaults for governed repository workflows.</p></div>
+                <div className="settings-card account-card">
+                  <span className="settings-app-icon" aria-hidden="true">⑂</span>
+                  <div><strong>{githubConnection?.connected ? githubConnection.account?.name ?? githubConnection.account?.login ?? "GitHub connected" : "Connect GitHub"}</strong><p>{githubConnection?.connected ? `Signed in as @${githubConnection.account?.login}. MCG can list repositories and perform only explicit repository actions.` : githubConnection?.configured ? "Sign in in your browser to grant MCG repository access through its GitHub App." : "This build needs an MCG GitHub App client ID before browser sign-in can start."}</p><small>Tokens are stored in the operating-system credential vault, never the project or SQLite database.</small></div>
+                  {githubConnection?.connected
+                    ? <button className="secondary" type="button" disabled={githubBusy} onClick={() => void signOutOfGitHub()}>Disconnect</button>
+                    : <button className="primary" type="button" disabled={githubBusy || githubConnection?.configured === false} onClick={() => void signInToGitHub()}>{githubBusy ? "Connecting…" : "Sign in to GitHub"}</button>}
+                </div>
+                {githubError && <p className="error-message" role="alert">{githubError}</p>}
                 <div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>Branch prefix</strong><small>Prefix used when MCG creates a task branch.</small></span><span className="settings-value-field">codex/</span></div>
+                  <div className="settings-control"><span><strong>Local Git by default</strong><small>Newly attached plain folders receive an empty local baseline commit. Existing files are not staged automatically.</small></span><span className="count-badge">On</span></div>
+                  {workspaceProject && !workspaceProject.repository.is_git && <div className="settings-control"><span><strong>Selected project is still a folder</strong><small>Initialize its local version history now so managed agents can use isolated worktrees.</small></span><button className="secondary" type="button" disabled={githubBusy} onClick={() => void initializeSelectedProjectGit()}>Initialize local Git</button></div>}
                   <div className="settings-control"><span><strong>Pull request review</strong><small>Reviews are read-only and findings remain separate from fixes.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("pull-requests")}>Open reviews</button></div>
                   <div className="settings-control"><span><strong>Force push</strong><small>MCG does not enable destructive history rewriting by default.</small></span><span className="count-badge">Off</span></div>
                   <div className="settings-control"><span><strong>Review delivery</strong><small>Keep review findings in the current task when possible.</small></span><span className="count-badge">Inline</span></div>
                 </div>
+                {githubConnection?.connected && <>
+                  <div className="settings-section-heading"><span><strong>Publish selected project</strong><small>Create an empty repository and link it as origin. Pushing remains a separate explicit action.</small></span></div>
+                  <div className="settings-card settings-card-stack">
+                    <label><span>Repository name</span><input aria-label="GitHub repository name" value={githubRepositoryName} onChange={(event) => setGitHubRepositoryName(event.target.value)} placeholder={workspaceProjectName.replace(/\s+/g, "-").toLowerCase()} /></label>
+                    <label className="settings-control"><span><strong>Private repository</strong><small>Recommended until the owner reviews the first push.</small></span><input type="checkbox" checked={githubRepositoryPrivate} onChange={(event) => setGitHubRepositoryPrivate(event.target.checked)} /></label>
+                    <button className="primary" type="button" disabled={githubBusy || !workspaceProject || !workspaceProject.repository.is_git || !githubRepositoryName.trim()} onClick={() => void createAndLinkGitHubRepository()}>Create and link repository</button>
+                    {!workspaceProject && <small>Select a project before creating or linking a repository.</small>}
+                  </div>
+                  <div className="settings-section-heading"><span><strong>Accessible repositories</strong><small>{githubRepositories.length} visible to this GitHub authorization.</small></span><button className="secondary" type="button" disabled={githubBusy} onClick={() => void refreshGitHub()}>Refresh</button></div>
+                  <div className="settings-integration-list" aria-label="GitHub repositories">
+                    {githubRepositories.slice(0, 25).map((repository) => <div className="settings-integration-row" key={repository.id}><span className="settings-app-icon" aria-hidden="true">⑂</span><span className="settings-integration-copy"><strong>{repository.full_name}</strong><small>{repository.private ? "Private" : "Public"} · {repository.default_branch}</small></span><button className="secondary" type="button" disabled={githubBusy || !workspaceProject?.repository.is_git} onClick={() => void linkExistingGitHubRepository(repository)}>Link</button></div>)}
+                    {githubRepositories.length === 0 && <div className="settings-empty-card"><p>No accessible repositories were returned.</p></div>}
+                  </div>
+                </>}
                 <div className="settings-section-heading"><span><strong>Commit instructions</strong><small>Project and repository instructions remain the source of commit guidance.</small></span></div>
                 <textarea className="settings-instructions" aria-label="Commit instructions" disabled placeholder="Custom commit guidance is not connected yet." />
               </div>

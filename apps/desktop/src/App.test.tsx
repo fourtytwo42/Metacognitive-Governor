@@ -29,6 +29,13 @@ const client = vi.hoisted(() => ({
   configureProvider: vi.fn(),
   discoverProvider: vi.fn(),
   disconnectProvider: vi.fn(),
+  githubStatus: vi.fn(),
+  startGitHubLogin: vi.fn(),
+  completeGitHubLogin: vi.fn(),
+  disconnectGitHub: vi.fn(),
+  listGitHubRepositories: vi.fn(),
+  createGitHubRepository: vi.fn(),
+  linkGitHubRepository: vi.fn(),
   listMcp: vi.fn(),
   listPlugins: vi.fn(),
   installLocalPlugin: vi.fn(),
@@ -75,6 +82,7 @@ const client = vi.hoisted(() => ({
   replayRun: vi.fn(),
   pickProject: vi.fn(),
   discoverProject: vi.fn(),
+  initializeProjectGit: vi.fn(),
   listProjects: vi.fn(),
   projectTopologyPlan: vi.fn(),
   listReviewedTopologyPlans: vi.fn(),
@@ -193,6 +201,13 @@ vi.mock("./desktop-client", () => ({
   configureProvider: client.configureProvider,
   discoverProvider: client.discoverProvider,
   disconnectProvider: client.disconnectProvider,
+  githubStatus: client.githubStatus,
+  startGitHubLogin: client.startGitHubLogin,
+  completeGitHubLogin: client.completeGitHubLogin,
+  disconnectGitHub: client.disconnectGitHub,
+  listGitHubRepositories: client.listGitHubRepositories,
+  createGitHubRepository: client.createGitHubRepository,
+  linkGitHubRepository: client.linkGitHubRepository,
   listMcpConnections: client.listMcp,
   listPlugins: client.listPlugins,
   installLocalPlugin: client.installLocalPlugin,
@@ -239,6 +254,7 @@ vi.mock("./desktop-client", () => ({
   replayAgentRun: client.replayRun,
   pickProjectDirectory: client.pickProject,
   discoverProject: client.discoverProject,
+  initializeProjectGit: client.initializeProjectGit,
   listProjects: client.listProjects,
   projectTopologyPlan: client.projectTopologyPlan,
   listReviewedTopologyPlans: client.listReviewedTopologyPlans,
@@ -363,6 +379,13 @@ beforeEach(() => {
   client.configureProvider.mockReset();
   client.discoverProvider.mockReset();
   client.disconnectProvider.mockReset();
+  client.githubStatus.mockReset();
+  client.startGitHubLogin.mockReset();
+  client.completeGitHubLogin.mockReset();
+  client.disconnectGitHub.mockReset();
+  client.listGitHubRepositories.mockReset();
+  client.createGitHubRepository.mockReset();
+  client.linkGitHubRepository.mockReset();
   client.listMcp.mockReset();
   client.listPlugins.mockReset();
   client.installLocalPlugin.mockReset();
@@ -409,6 +432,7 @@ beforeEach(() => {
   client.replayRun.mockReset();
   client.pickProject.mockReset();
   client.discoverProject.mockReset();
+  client.initializeProjectGit.mockReset();
   client.listProjects.mockReset();
   client.projectTopologyPlan.mockReset();
   client.listReviewedTopologyPlans.mockReset();
@@ -514,6 +538,8 @@ beforeEach(() => {
   client.closeInApp.mockResolvedValue(undefined);
   client.controlInApp.mockResolvedValue(undefined);
   client.listProviders.mockResolvedValue({ providers: [] });
+  client.githubStatus.mockResolvedValue({ configured: false, connected: false });
+  client.listGitHubRepositories.mockResolvedValue({ repositories: [] });
   client.discoverProvider.mockImplementation(async (connectionId: string) => ({
     connection_id: connectionId,
     models: [],
@@ -2397,6 +2423,23 @@ test("integration and coding settings expose sectioned Codex-style controls", as
   fireEvent.click(within(settingsNavigation).getByRole("button", { name: "Git" }));
   expect(screen.getByText("Branch prefix")).toBeInTheDocument();
   expect(screen.getByText("codex/")).toBeInTheDocument();
+  expect(await screen.findByText("Local Git by default")).toBeInTheDocument();
+});
+
+test("Git settings complete browser sign-in and show accessible repositories", async () => {
+  client.githubStatus.mockResolvedValue({ configured: true, connected: false });
+  client.startGitHubLogin.mockResolvedValue({ session_id: "github-login", authorization_url: "https://github.com/login/oauth/authorize" });
+  client.completeGitHubLogin.mockResolvedValue({ configured: true, connected: true, account: { login: "owner", name: "Owner", html_url: "https://github.com/owner" } });
+  client.listGitHubRepositories.mockResolvedValue({ repositories: [{ id: 1, full_name: "owner/project", private: true, html_url: "https://github.com/owner/project", clone_url: "https://github.com/owner/project.git", default_branch: "main" }] });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Git" }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in to GitHub" }));
+  await waitFor(() => expect(client.completeGitHubLogin).toHaveBeenCalledWith("github-login"));
+  expect(client.open).toHaveBeenCalledWith("https://github.com/login/oauth/authorize");
+  expect(await screen.findByText("owner/project")).toBeInTheDocument();
 });
 
 test("Appearance applies a durable theme and reduced-motion preference", async () => {

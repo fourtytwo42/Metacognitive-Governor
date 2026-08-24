@@ -9,15 +9,16 @@ use mcg_api::{
     ArchiveConversationRequest, AttachBrowserSessionRequest, BackupListResponse,
     BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
     CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
-    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
-    CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
-    DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
+    CreateGitHubRepository, CreateMemoryClaimRequest, CreateOrganizationRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
+    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DecideSharedOrganizationRequest,
+    DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    GitHubConnectionStatus, GitHubLoginStart, GitHubRepository, GitHubRepositoryList,
     GovernorOverviewResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
     InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, LinkGitHubRepository,
+    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     NavigateBrowserSessionRequest, OrganizationAssignmentResponse, OrganizationHistoryResponse,
     OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
     OrganizationRevisionPreview, OrganizationShareReviewListResponse,
@@ -298,6 +299,75 @@ async fn cancel_openai_oauth(session_id: Uuid) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn github_status() -> Result<GitHubConnectionStatus, String> {
+    daemon_get("/api/v1/github", "GitHub connection").await
+}
+
+#[tauri::command]
+async fn start_github_login() -> Result<GitHubLoginStart, String> {
+    daemon_post(
+        "/api/v1/github/login/start",
+        &serde_json::json!({}),
+        "GitHub sign-in",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn complete_github_login(session_id: Uuid) -> Result<GitHubConnectionStatus, String> {
+    daemon_post(
+        &format!("/api/v1/github/login/{session_id}/complete"),
+        &serde_json::json!({}),
+        "GitHub sign-in completion",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn disconnect_github() -> Result<GitHubConnectionStatus, String> {
+    let response = reqwest::Client::new()
+        .delete(format!("{LOCAL_DAEMON}/api/v1/github"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("GitHub disconnect failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "GitHub disconnect").await);
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("GitHub disconnect response was invalid: {error}"))
+}
+
+#[tauri::command]
+async fn list_github_repositories() -> Result<GitHubRepositoryList, String> {
+    daemon_get("/api/v1/github/repositories", "GitHub repositories").await
+}
+
+#[tauri::command]
+async fn create_github_repository(
+    request: CreateGitHubRepository,
+) -> Result<GitHubRepository, String> {
+    daemon_post(
+        "/api/v1/github/repositories",
+        &request,
+        "GitHub repository creation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn link_github_repository(request: LinkGitHubRepository) -> Result<(), String> {
+    daemon_post_empty(
+        "/api/v1/github/repositories/link",
+        &request,
+        "GitHub repository link",
+    )
+    .await
+}
+
+#[tauri::command]
 async fn refresh_openai_oauth(connection_id: String) -> Result<EventEnvelope, String> {
     let response = reqwest::Client::new()
         .post(format!(
@@ -539,6 +609,25 @@ async fn daemon_post<T: serde::de::DeserializeOwned>(
         .json()
         .await
         .map_err(|error| format!("{label} response was invalid: {error}"))
+}
+
+async fn daemon_post_empty(
+    path: &str,
+    request: &impl Serialize,
+    label: &str,
+) -> Result<(), String> {
+    let response = reqwest::Client::new()
+        .post(format!("{LOCAL_DAEMON}{path}"))
+        .bearer_auth(daemon_token()?)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| format!("{label} could not be completed: {error}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(response_error(response, label).await)
+    }
 }
 
 #[tauri::command]
@@ -2656,6 +2745,17 @@ async fn discover_project(request: DiscoverProjectRequest) -> Result<ProjectMuta
 }
 
 #[tauri::command]
+async fn initialize_project_git(project_id: String) -> Result<ProjectMutation, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/initialize-git"),
+        &serde_json::json!({}),
+        "Local Git initialization",
+    )
+    .await
+}
+
+#[tauri::command]
 async fn list_projects() -> Result<ProjectListResponse, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/projects"))
@@ -3411,6 +3511,13 @@ pub fn run() {
             complete_openai_oauth,
             cancel_openai_oauth,
             refresh_openai_oauth,
+            github_status,
+            start_github_login,
+            complete_github_login,
+            disconnect_github,
+            list_github_repositories,
+            create_github_repository,
+            link_github_repository,
             disconnect_provider,
             list_providers,
             get_user_settings,
@@ -3568,6 +3675,7 @@ pub fn run() {
             replay_agent_run,
             pick_project_directory,
             discover_project,
+            initialize_project_git,
             list_projects,
             project_topology_plan,
             list_reviewed_topology_plans,

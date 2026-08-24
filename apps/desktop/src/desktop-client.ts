@@ -273,6 +273,30 @@ export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | (st
 export type ExecutionSpeed = "standard" | "fast";
 export type ApprovalMode = "ask" | "auto_review" | "full_access";
 
+export interface GitHubAccount {
+  login: string;
+  name?: string;
+  avatar_url?: string;
+  html_url: string;
+}
+
+export interface GitHubConnectionStatus {
+  configured: boolean;
+  connected: boolean;
+  account?: GitHubAccount;
+}
+
+export interface GitHubLoginStart { session_id: string; authorization_url: string; }
+export interface GitHubRepository {
+  id: number;
+  full_name: string;
+  private: boolean;
+  html_url: string;
+  clone_url: string;
+  default_branch: string;
+}
+export interface GitHubRepositoryList { repositories: GitHubRepository[]; }
+
 export interface ChatRunPreferences {
   provider_id?: string;
   model_id?: string;
@@ -1996,7 +2020,22 @@ export function pickProjectDirectory(): Promise<string | null> {
 }
 
 export function discoverProject(root: string, projectId?: string): Promise<ProjectMutation> {
-  return invoke("discover_project", { request: { root, project_id: projectId ?? null } });
+  return invoke("discover_project", { request: { root, project_id: projectId ?? null, initialize_git: true } });
+}
+export function initializeProjectGit(projectId: string): Promise<ProjectMutation> {
+  return invoke("initialize_project_git", { projectId });
+}
+
+export function githubStatus(): Promise<GitHubConnectionStatus> { return invoke("github_status"); }
+export function startGitHubLogin(): Promise<GitHubLoginStart> { return invoke("start_github_login"); }
+export function completeGitHubLogin(sessionId: string): Promise<GitHubConnectionStatus> { return invoke("complete_github_login", { sessionId }); }
+export function disconnectGitHub(): Promise<GitHubConnectionStatus> { return invoke("disconnect_github"); }
+export function listGitHubRepositories(): Promise<GitHubRepositoryList> { return invoke("list_github_repositories"); }
+export function createGitHubRepository(request: { name: string; description?: string; private: boolean }): Promise<GitHubRepository> {
+  return invoke("create_github_repository", { request });
+}
+export function linkGitHubRepository(projectId: string, cloneUrl: string): Promise<void> {
+  return invoke("link_github_repository", { request: { project_id: projectId, clone_url: cloneUrl } });
 }
 
 export function listProjects(): Promise<ProjectListResponse> {

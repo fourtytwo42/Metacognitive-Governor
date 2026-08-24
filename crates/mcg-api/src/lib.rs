@@ -78,6 +78,10 @@ use mcg_runtime::{
     SiteUpdateRequest, SshHostMutation, SshHostRegistrationRequest, SshHostUpdateRequest,
     SshOperationMutation, SshWorkflowCreateRequest, SshWorkflowMutation, SupervisionMutation,
 };
+pub use mcg_runtime::{
+    CreateGitHubRepository, GitHubAccount, GitHubConnectionStatus, GitHubLoginStart,
+    GitHubRepository, GitHubRepositoryList, LinkGitHubRepository,
+};
 use mcg_tools::{
     ApprovalRequest, ApprovalResolution, ApprovalState, BrowserWorkflowDocument, ComputerUseAction,
     ComputerUseFrame, PersistentBrowserMode, PersistentBrowserObservation, ToolAuditRecord,
@@ -408,6 +412,10 @@ pub struct DiscoverProjectRequest {
     pub root: String,
     #[serde(default)]
     pub project_id: Option<ProjectId>,
+    /// Initialize an eligible plain folder as a local Git repository before discovery.
+    /// Existing repositories are never rewritten.
+    #[serde(default)]
+    pub initialize_git: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1715,10 +1723,31 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             post(cancel_openai_oauth),
         )
         .route(
+            "/api/v1/github",
+            get(github_status).delete(disconnect_github),
+        )
+        .route("/api/v1/github/login/start", post(start_github_login))
+        .route(
+            "/api/v1/github/login/{session_id}/complete",
+            post(complete_github_login),
+        )
+        .route(
+            "/api/v1/github/repositories",
+            get(github_repositories).post(create_github_repository),
+        )
+        .route(
+            "/api/v1/github/repositories/link",
+            post(link_github_repository),
+        )
+        .route(
             "/api/v1/projects",
             get(list_projects).post(discover_project),
         )
         .route("/api/v1/projects/{project_id}", get(get_project))
+        .route(
+            "/api/v1/projects/{project_id}/initialize-git",
+            post(initialize_project_git),
+        )
         .route(
             "/api/v1/projects/{project_id}/refresh",
             post(refresh_project),
@@ -5965,6 +5994,85 @@ async fn probe_provider_model(
         .map_err(map_runtime_error)
 }
 
+async fn github_status(
+    State(state): State<ApiState>,
+) -> Result<Json<GitHubConnectionStatus>, ApiError> {
+    state
+        .runtime
+        .github_status()
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn start_github_login(
+    State(state): State<ApiState>,
+) -> Result<Json<GitHubLoginStart>, ApiError> {
+    state
+        .runtime
+        .start_github_login()
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn complete_github_login(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<GitHubConnectionStatus>, ApiError> {
+    let session_id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| ApiError::bad_request("GitHub login session id is invalid"))?;
+    state
+        .runtime
+        .complete_github_login(session_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn disconnect_github(
+    State(state): State<ApiState>,
+) -> Result<Json<GitHubConnectionStatus>, ApiError> {
+    state
+        .runtime
+        .disconnect_github()
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn github_repositories(
+    State(state): State<ApiState>,
+) -> Result<Json<GitHubRepositoryList>, ApiError> {
+    state
+        .runtime
+        .github_repositories()
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn create_github_repository(
+    State(state): State<ApiState>,
+    Json(request): Json<CreateGitHubRepository>,
+) -> Result<(StatusCode, Json<GitHubRepository>), ApiError> {
+    state
+        .runtime
+        .create_github_repository(request)
+        .await
+        .map(|repository| (StatusCode::CREATED, Json(repository)))
+        .map_err(map_runtime_error)
+}
+
+async fn link_github_repository(
+    State(state): State<ApiState>,
+    Json(request): Json<LinkGitHubRepository>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .runtime
+        .link_github_repository(&request)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(map_runtime_error)
+}
+
 async fn discover_project(
     State(state): State<ApiState>,
     Json(request): Json<DiscoverProjectRequest>,
@@ -5975,8 +6083,24 @@ async fn discover_project(
     let project_id = request.project_id.unwrap_or_default();
     state
         .runtime
-        .discover_project(std::path::Path::new(request.root.trim()), project_id)
+        .discover_project_with_git(
+            std::path::Path::new(request.root.trim()),
+            project_id,
+            request.initialize_git,
+        )
         .map(|mutation| (StatusCode::CREATED, Json(mutation)))
+        .map_err(map_runtime_error)
+}
+
+async fn initialize_project_git(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectMutation>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .initialize_project_git(project_id)
+        .map(Json)
         .map_err(map_runtime_error)
 }
 
@@ -15057,6 +15181,7 @@ form.addEventListener('submit', (event) => {
         let discover_body = serde_json::to_vec(&DiscoverProjectRequest {
             root: project_root.path().to_string_lossy().into_owned(),
             project_id: None,
+            initialize_git: false,
         })
         .expect("discover body");
         let discovered = app
@@ -15163,6 +15288,7 @@ form.addEventListener('submit', (event) => {
                         serde_json::to_vec(&DiscoverProjectRequest {
                             root: project_root.path().to_string_lossy().into_owned(),
                             project_id: None,
+                            initialize_git: false,
                         })
                         .expect("body"),
                     ))
@@ -15319,6 +15445,7 @@ form.addEventListener('submit', (event) => {
         let discover_body = serde_json::to_vec(&DiscoverProjectRequest {
             root: project_root.path().to_string_lossy().into_owned(),
             project_id: None,
+            initialize_git: false,
         })
         .expect("discover body");
         let discovered = app

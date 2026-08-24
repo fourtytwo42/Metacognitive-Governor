@@ -1,10 +1,12 @@
 //! Dependency wiring, durable task orchestration, and local authentication.
 
 mod conversation_team;
+mod github;
 mod oauth;
 mod shadow_verification;
 
 pub use conversation_team::*;
+pub use github::*;
 pub use oauth::*;
 
 use std::{
@@ -484,6 +486,8 @@ pub enum RuntimeError {
     AgentTurn(#[from] AgentTurnError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    #[error("GitHub integration failed: {0}")]
+    GitHub(String),
     #[error(transparent)]
     Mcp(#[from] McpError),
     #[error(transparent)]
@@ -540,6 +544,7 @@ impl RuntimeError {
                 | Self::AgentTurn(AgentTurnError::Invalid(_))
                 | Self::Tool(ToolError::Invalid(_))
                 | Self::PluginTrust(_)
+                | Self::GitHub(_)
         )
     }
 
@@ -551,6 +556,84 @@ impl RuntimeError {
                 | Self::Memory(MemoryError::InvalidTransition(_, _, _))
         )
     }
+}
+
+fn initialize_local_git_repository(root: &Path) -> Result<(), RuntimeError> {
+    let canonical_root = fs::canonicalize(root)?;
+    if !canonical_root.is_dir() {
+        return Err(StorageError::InvalidData("project root must be a directory".into()).into());
+    }
+
+    let existing = Command::new("git")
+        .args([
+            "-C",
+            canonical_root.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if existing.success() {
+        return Ok(());
+    }
+
+    let git_directory = canonical_root.join(".git");
+    if git_directory.exists() {
+        return Err(StorageError::InvalidData(
+            "project contains Git metadata that Git cannot read; MCG left it unchanged".into(),
+        )
+        .into());
+    }
+
+    let init = Command::new("git")
+        .args([
+            "-C",
+            canonical_root.to_string_lossy().as_ref(),
+            "init",
+            "-b",
+            "main",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if !init.status.success() {
+        return Err(StorageError::InvalidData(format!(
+            "local Git initialization failed: {}",
+            String::from_utf8_lossy(&init.stderr).trim()
+        ))
+        .into());
+    }
+
+    let commit = Command::new("git")
+        .args([
+            "-C",
+            canonical_root.to_string_lossy().as_ref(),
+            "-c",
+            "user.name=MCG",
+            "-c",
+            "user.email=mcg@local.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initialize local version history",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if commit.status.success() {
+        return Ok(());
+    }
+
+    // Roll back only the exact metadata directory created above. Source files
+    // were never staged or modified by this operation.
+    if git_directory.parent() == Some(canonical_root.as_path()) && git_directory.is_dir() {
+        fs::remove_dir_all(&git_directory)?;
+    }
+    Err(StorageError::InvalidData(format!(
+        "local Git initialization could not create its empty baseline commit: {}",
+        String::from_utf8_lossy(&commit.stderr).trim()
+    ))
+    .into())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1999,6 +2082,7 @@ pub struct AppRuntime {
     browser_sessions: Arc<PersistentBrowserManager>,
     computer_sessions: Arc<ComputerUseManager>,
     provider_credentials: Arc<dyn ProviderCredentialStore>,
+    github: Arc<GitHubIntegration>,
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     codex_harness: CodexAppServerHarness,
@@ -2283,6 +2367,10 @@ impl AppRuntime {
             device_config.clone(),
             event_sender.clone(),
         ));
+        let github = Arc::new(GitHubIntegration::new(
+            &config.data_directory,
+            provider_credentials.clone(),
+        )?);
         Ok(Self {
             config,
             data_lock,
@@ -2308,6 +2396,7 @@ impl AppRuntime {
             browser_sessions,
             computer_sessions,
             provider_credentials,
+            github,
             mcp_credentials,
             provider_registry,
             codex_harness,
@@ -9214,6 +9303,20 @@ impl AppRuntime {
         root: &Path,
         project_id: ProjectId,
     ) -> Result<ProjectMutation, RuntimeError> {
+        self.discover_project_with_git(root, project_id, false)
+    }
+
+    /// Discovers a project and, when explicitly requested, safely creates local
+    /// Git metadata for an eligible plain folder before taking the snapshot.
+    pub fn discover_project_with_git(
+        &self,
+        root: &Path,
+        project_id: ProjectId,
+        initialize_git: bool,
+    ) -> Result<ProjectMutation, RuntimeError> {
+        if initialize_git {
+            initialize_local_git_repository(root)?;
+        }
         let previous = self.store()?.project(project_id)?;
         let project = ProjectDiscoverer::discover(root, project_id)?;
         let invalidation = previous
@@ -9226,6 +9329,66 @@ impl AppRuntime {
             event,
             invalidation,
         })
+    }
+
+    /// Initializes the current project root as a local Git repository and
+    /// records a fresh durable project snapshot.
+    pub fn initialize_project_git(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<ProjectMutation, RuntimeError> {
+        let project = self
+            .project(project_id)?
+            .ok_or_else(|| StorageError::ProjectNotFound(project_id))?;
+        self.discover_project_with_git(Path::new(&project.root), project_id, true)
+    }
+
+    /// Returns the non-secret GitHub connection projection.
+    pub fn github_status(&self) -> Result<GitHubConnectionStatus, RuntimeError> {
+        self.github.status()
+    }
+
+    /// Starts browser-based GitHub App authorization with PKCE and loopback state validation.
+    pub async fn start_github_login(&self) -> Result<GitHubLoginStart, RuntimeError> {
+        self.github.start_login().await
+    }
+
+    /// Completes one pending GitHub browser authorization session.
+    pub async fn complete_github_login(
+        &self,
+        session_id: Uuid,
+    ) -> Result<GitHubConnectionStatus, RuntimeError> {
+        self.github.complete_login(session_id).await
+    }
+
+    /// Removes the GitHub token from the OS vault and its non-secret profile projection.
+    pub fn disconnect_github(&self) -> Result<GitHubConnectionStatus, RuntimeError> {
+        self.github.disconnect()
+    }
+
+    /// Lists repositories visible to the connected GitHub account.
+    pub async fn github_repositories(&self) -> Result<GitHubRepositoryList, RuntimeError> {
+        self.github.repositories().await
+    }
+
+    /// Creates an empty owner repository. Linking and publishing remain explicit.
+    pub async fn create_github_repository(
+        &self,
+        request: CreateGitHubRepository,
+    ) -> Result<GitHubRepository, RuntimeError> {
+        self.github.create_repository(request).await
+    }
+
+    /// Adds an origin only when one does not already exist.
+    pub fn link_github_repository(
+        &self,
+        request: &LinkGitHubRepository,
+    ) -> Result<(), RuntimeError> {
+        let project = self
+            .project(request.project_id)?
+            .ok_or_else(|| StorageError::ProjectNotFound(request.project_id))?;
+        self.github
+            .link_repository(Path::new(&project.root), &request.clone_url)
     }
 
     /// Lists current durable project projections.
@@ -20503,6 +20666,41 @@ mod tests {
         ResearchClaimEvidence, TOOL_SCHEMA_VERSION, ToolBroker, ToolExecutor, ToolOutcome,
         ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
     };
+
+    #[test]
+    fn local_git_initialization_is_idempotent_and_never_stages_owner_files() {
+        let project = tempfile::tempdir().expect("project");
+        fs::write(project.path().join("index.html"), "owner source").expect("source");
+
+        initialize_local_git_repository(project.path()).expect("initialize Git");
+        initialize_local_git_repository(project.path()).expect("idempotent initialize");
+
+        let head = Command::new("git")
+            .args([
+                "-C",
+                project.path().to_string_lossy().as_ref(),
+                "rev-list",
+                "--count",
+                "HEAD",
+            ])
+            .output()
+            .expect("head");
+        assert!(head.status.success());
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "1");
+        let status = Command::new("git")
+            .args([
+                "-C",
+                project.path().to_string_lossy().as_ref(),
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .expect("status");
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "?? index.html"
+        );
+    }
 
     #[test]
     fn generated_coder_names_are_human_readable_and_collision_safe() {

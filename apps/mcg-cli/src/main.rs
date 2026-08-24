@@ -1847,6 +1847,7 @@ async fn resolve_consumer_project(
         .json(&DiscoverProjectRequest {
             root: canonical_root.to_owned(),
             project_id: None,
+            initialize_git: false,
         })
         .send()
         .await?
@@ -5359,6 +5360,7 @@ async fn run_project(
                 .json(&DiscoverProjectRequest {
                     root: root.to_string_lossy().into_owned(),
                     project_id,
+                    initialize_git: false,
                 })
                 .send()
                 .await?
