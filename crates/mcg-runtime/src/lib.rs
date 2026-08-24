@@ -1503,6 +1503,17 @@ fn parse_chat_agent_decision(value: &str) -> Option<ChatAgentDecision> {
         })
 }
 
+fn parse_completed_compatibility_fallback(
+    two_agent_conversations: bool,
+    turn_state: ConversationTurnState,
+    value: &str,
+) -> Option<ChatAgentDecision> {
+    if two_agent_conversations || turn_state != ConversationTurnState::Completed {
+        return None;
+    }
+    parse_chat_agent_decision(value)
+}
+
 fn chat_agent_decision_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -4992,6 +5003,10 @@ impl AppRuntime {
         let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut activities = BTreeMap::<String, ConversationActivity>::new();
         let mut assistant_messages = BTreeMap::<String, ConversationMessage>::new();
+        // The schema-39 fallback may carry an internal `respond` or `delegate_code`
+        // envelope. Buffer its text until completion so protocol content is classified
+        // before anything becomes owner-visible. Schema-40 MCP turns retain live streaming.
+        let defer_compatibility_text = !self.config.two_agent_conversations;
         let mut last_timeline_at = Utc::now();
         let mut accepted = false;
         let turn_future = self.codex_harness.start_turn_with_progress(
@@ -5025,8 +5040,10 @@ impl AppRuntime {
                             created_at: next_conversation_timeline_at(&mut last_timeline_at),
                         });
                         assistant_message.content.push_str(&delta);
-                        let event = self.store()?.save_conversation_message(assistant_message)?;
-                        let _ = self.event_sender.send(event);
+                        if !defer_compatibility_text {
+                            let event = self.store()?.save_conversation_message(assistant_message)?;
+                            let _ = self.event_sender.send(event);
+                        }
                     }
                     Some(CodexTurnProgress::ItemStarted { item }) => {
                         if let Some(mut activity) = conversation_activity_from_codex_item(
@@ -5114,7 +5131,86 @@ impl AppRuntime {
                     ));
                 }
                 turn.updated_at = Utc::now();
-                if assistant_messages.is_empty() && !result.text.is_empty() {
+                let compatibility_response = match parse_completed_compatibility_fallback(
+                    self.config.two_agent_conversations,
+                    turn.state,
+                    &result.text,
+                ) {
+                    Some(ChatAgentDecision::Respond { response }) => Some(response),
+                    Some(ChatAgentDecision::DelegateCode {
+                        objective,
+                        scope,
+                        constraints,
+                        success_conditions,
+                        context_references,
+                    }) => {
+                        let brief = CodingDelegationBrief {
+                            objective,
+                            scope,
+                            constraints,
+                            success_conditions,
+                            context_references,
+                        };
+                        Some(
+                            match self
+                                .launch_coding_delegation(
+                                    conversation.clone(),
+                                    chat_session.clone(),
+                                    thread_id.clone(),
+                                    codex_preferences.clone(),
+                                    brief,
+                                    turn.id,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok((_, acknowledgement)) => acknowledgement,
+                                Err(error) => format!(
+                                    "I could not start another Coding Agent safely: {error}. No project files were changed."
+                                ),
+                            },
+                        )
+                    }
+                    None => None,
+                };
+                if let Some(response) = compatibility_response {
+                    // The compatibility fallback streams before MCG knows whether the first
+                    // line is a protocol marker. Replace that internal envelope at completion
+                    // so it never remains as owner-facing Chat text. Normally Codex publishes
+                    // one assistant item; clearing any extras fails closed against duplicate
+                    // user-visible protocol output.
+                    if assistant_messages.is_empty() {
+                        let assistant_message = ConversationMessage {
+                            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                            id: ConversationMessageId::new(),
+                            conversation_id,
+                            turn_id: turn.id,
+                            role: ConversationRole::Assistant,
+                            content: response,
+                            codex_item_id: None,
+                            created_at: next_conversation_timeline_at(&mut last_timeline_at),
+                        };
+                        let event = self
+                            .store()?
+                            .save_conversation_message(&assistant_message)?;
+                        let _ = self.event_sender.send(event);
+                    } else {
+                        let mut first = true;
+                        for assistant_message in assistant_messages.values_mut() {
+                            assistant_message.content = if first {
+                                first = false;
+                                response.clone()
+                            } else {
+                                String::new()
+                            };
+                            let event =
+                                self.store()?.save_conversation_message(assistant_message)?;
+                            let _ = self.event_sender.send(event);
+                        }
+                    }
+                } else if assistant_messages.is_empty() && !result.text.is_empty() {
                     let assistant_message = ConversationMessage {
                         schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
                         id: ConversationMessageId::new(),
@@ -5129,6 +5225,11 @@ impl AppRuntime {
                         .store()?
                         .save_conversation_message(&assistant_message)?;
                     let _ = self.event_sender.send(event);
+                } else if defer_compatibility_text {
+                    for assistant_message in assistant_messages.values() {
+                        let event = self.store()?.save_conversation_message(assistant_message)?;
+                        let _ = self.event_sender.send(event);
+                    }
                 }
                 self.store()?
                     .save_codex_thread_binding(&CodexThreadBinding {
@@ -18618,6 +18719,43 @@ mod tests {
                 && success_conditions.is_empty()
                 && context_references.is_empty()
         ));
+    }
+
+    #[test]
+    fn schema39_completed_fallback_routes_exact_line_envelopes_only() {
+        assert!(matches!(
+            parse_completed_compatibility_fallback(
+                false,
+                ConversationTurnState::Completed,
+                "delegate_code\n\nBuild the linked project."
+            ),
+            Some(ChatAgentDecision::DelegateCode { objective, .. })
+                if objective == "Build the linked project."
+        ));
+        assert!(
+            parse_completed_compatibility_fallback(
+                true,
+                ConversationTurnState::Completed,
+                "delegate_code\n\nBuild the linked project."
+            )
+            .is_none()
+        );
+        assert!(
+            parse_completed_compatibility_fallback(
+                false,
+                ConversationTurnState::Interrupted,
+                "delegate_code\n\nBuild the linked project."
+            )
+            .is_none()
+        );
+        assert!(
+            parse_completed_compatibility_fallback(
+                false,
+                ConversationTurnState::Completed,
+                "The owner discussed delegate_code\nwithout selecting it."
+            )
+            .is_none()
+        );
     }
 
     #[test]
