@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-24 - v0.3.17 packaged-service startup recovery
+
+- Context: On first v0.3.17 launch, desktop reported that the packaged service did not become ready within eight seconds.
+- Diagnosis: The v0.3.16 desktop parent no longer existed, but its deadlocked `mcg-service.exe` and bundled Codex child remained orphaned. Its listener had closed after authenticated shutdown, so bootstrap considered shutdown complete and launched v0.3.17 while the orphan still held live database/runtime resources.
+- Decision: Validate the exact orphan paths, parent/child identities, and missing desktop parent before stopping only those two v0.3.16 processes. Do not edit or delete live data.
+- Commands/tests: Exact process-tree validation and termination passed; port 7777 was free afterward. Direct v0.3.17 startup with the packaged bind/data/Codex/MCP environment succeeded. Public health and authenticated status both report `mcg-daemon` v0.3.17 `ready`; recovery reports one agent run, one instance, and one lease.
+- Result: The verified v0.3.17 service is running against the existing data. The startup failure was an orphan left by the v0.3.16 delegation deadlock, not a corrupt v0.3.17 package or migration.
+- Follow-up: Owner reopen the exact v0.3.17 portable so it attaches to the ready service. Future launcher hardening should distinguish listener closure from complete prior-process exit during version replacement; do not kill an unauthenticated or path-unverified process.
+
 ### 2026-08-24 - Live Coding Agent progress and delegation deadlock fix v0.3.17
 
 - Context: v0.3.16 owner UAT produced the correct clean delegation acknowledgement, but no Coding Agent card or progress appeared.
