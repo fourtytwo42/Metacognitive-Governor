@@ -19,6 +19,7 @@ pub enum EventKind {
     ConversationAgentSessionUpdated,
     AgentDelegationUpdated,
     AgentMessageRecorded,
+    AgentContextCheckpointUpdated,
     BlackboardEntryRecorded,
     ManagedWorktreeUpdated,
     CodexHarnessEvent,
@@ -89,6 +90,7 @@ impl EventKind {
             Self::ConversationAgentSessionUpdated => "conversation_agent_session_updated",
             Self::AgentDelegationUpdated => "agent_delegation_updated",
             Self::AgentMessageRecorded => "agent_message_recorded",
+            Self::AgentContextCheckpointUpdated => "agent_context_checkpoint_updated",
             Self::BlackboardEntryRecorded => "blackboard_entry_recorded",
             Self::ManagedWorktreeUpdated => "managed_worktree_updated",
             Self::CodexHarnessEvent => "codex_harness_event",
@@ -174,6 +176,9 @@ impl EventKind {
                 Ok(Self::AgentDelegationUpdated)
             }
             "agent_message_recorded" | "AgentMessageRecorded" => Ok(Self::AgentMessageRecorded),
+            "agent_context_checkpoint_updated" | "AgentContextCheckpointUpdated" => {
+                Ok(Self::AgentContextCheckpointUpdated)
+            }
             "blackboard_entry_recorded" | "BlackboardEntryRecorded" => {
                 Ok(Self::BlackboardEntryRecorded)
             }

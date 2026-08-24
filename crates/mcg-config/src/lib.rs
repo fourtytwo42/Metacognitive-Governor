@@ -34,8 +34,8 @@ pub struct AppConfig {
     pub browser_executable: Option<PathBuf>,
     #[serde(default = "default_shadow_experiments")]
     pub shadow_experiments: bool,
-    /// Security rollout gate for the schema-40 Chat/Coder coordinator. This remains disabled by
-    /// default until the pinned Codex conformance and end-to-end qualification gate passes.
+    /// Coordinator-led conversation rollout. Release builds enable it by default after the
+    /// schema-42 security/E2E gate; debug builds stay opt-in for deterministic unit fixtures.
     #[serde(default)]
     pub two_agent_conversations: bool,
     #[serde(default)]
@@ -131,13 +131,23 @@ fn shadow_experiments_from_environment() -> bool {
     )
 }
 
+const fn default_multi_agent_conversations() -> bool {
+    !cfg!(debug_assertions)
+}
+
 fn two_agent_conversations_from_environment() -> bool {
-    std::env::var("MCG_TWO_AGENT_CONVERSATIONS").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    for key in [
+        "MCG_MULTI_AGENT_CONVERSATIONS",
+        "MCG_TWO_AGENT_CONVERSATIONS",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            return matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+    }
+    default_multi_agent_conversations()
 }
 
 impl Default for AppConfig {
@@ -166,8 +176,13 @@ mod tests {
 
         assert_eq!(config.autonomy, AutonomyPreset::Autonomous);
         assert!(!config.advanced_mode);
-        if std::env::var_os("MCG_TWO_AGENT_CONVERSATIONS").is_none() {
-            assert!(!config.two_agent_conversations);
+        if std::env::var_os("MCG_MULTI_AGENT_CONVERSATIONS").is_none()
+            && std::env::var_os("MCG_TWO_AGENT_CONVERSATIONS").is_none()
+        {
+            assert_eq!(
+                config.two_agent_conversations,
+                default_multi_agent_conversations()
+            );
         }
         if std::env::var_os("MCG_SHADOW_EXPERIMENTS").is_none() {
             assert_eq!(config.shadow_experiments, cfg!(debug_assertions));

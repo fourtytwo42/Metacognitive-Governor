@@ -5,12 +5,13 @@ use std::{collections::HashMap, path::Path, time::Duration};
 use chrono::{DateTime, Utc};
 use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
 use mcg_domain::{
-    AgentCredentialAudit, AgentDelegation, AgentMessage, ApprovalId, BlackboardEntry,
-    CodexThreadBinding, Conversation, ConversationActivity, ConversationAgentSession,
-    ConversationId, ConversationMessage, ConversationMessageId, ConversationTeamState,
-    ConversationTurn, ConversationTurnId, ConversationView, LeaseId, ManagedWorktree,
-    MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId, SharedContextHit,
-    SharedContextSourceKind, TaskEnvelope, TaskId, TaskState, ToolExecutionId, ToolRequestId,
+    AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, ApprovalId,
+    BlackboardEntry, CodexThreadBinding, Conversation, ConversationActivity,
+    ConversationAgentSession, ConversationId, ConversationMessage, ConversationMessageId,
+    ConversationTeamState, ConversationTurn, ConversationTurnId, ConversationView, LeaseId,
+    ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId,
+    SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
+    ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -67,7 +68,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 41;
+pub const STORAGE_SCHEMA_VERSION: i64 = 42;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1522,6 +1523,23 @@ CREATE INDEX IF NOT EXISTS codex_bindings_conversation_lookup
     ON codex_thread_bindings(conversation_id, updated_at DESC, binding_key);
 ";
 
+const MIGRATION_42: &str = r"
+CREATE TABLE IF NOT EXISTS agent_context_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    room TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(conversation_id, session_id, room, revision),
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(session_id) REFERENCES conversation_agent_sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS agent_context_checkpoints_scope
+    ON agent_context_checkpoints(conversation_id, session_id, room, revision DESC);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1698,6 +1716,7 @@ impl SqliteEventStore {
             (39_i64, MIGRATION_39),
             (40_i64, MIGRATION_40),
             (41_i64, MIGRATION_41),
+            (42_i64, MIGRATION_42),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -2087,6 +2106,37 @@ impl SqliteEventStore {
         Ok(event)
     }
 
+    pub fn save_agent_context_checkpoint(
+        &mut self,
+        checkpoint: &AgentContextCheckpoint,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::AgentContextCheckpointUpdated,
+            None,
+            serde_json::json!({
+                "conversation_id": checkpoint.conversation_id,
+                "checkpoint": checkpoint
+            }),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_context_checkpoints(checkpoint_id, conversation_id, session_id, room, revision, checkpoint_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                checkpoint.id.to_string(),
+                checkpoint.conversation_id.to_string(),
+                checkpoint.session_id.to_string(),
+                serde_json::to_string(&checkpoint.room)?.trim_matches('"'),
+                i64::try_from(checkpoint.revision).map_err(|_| StorageError::InvalidData("context checkpoint revision exceeds SQLite range".into()))?,
+                serde_json::to_string(checkpoint)?,
+                checkpoint.created_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
     pub fn append_blackboard_entry(
         &mut self,
         entry: &BlackboardEntry,
@@ -2300,6 +2350,11 @@ impl SqliteEventStore {
             worktrees: rows(
                 &self.connection,
                 "SELECT worktree_json FROM managed_worktrees WHERE conversation_id=?1 ORDER BY created_at, worktree_id",
+                conversation_id,
+            )?,
+            context_checkpoints: rows(
+                &self.connection,
+                "SELECT checkpoint_json FROM agent_context_checkpoints WHERE conversation_id=?1 ORDER BY created_at, checkpoint_id",
                 conversation_id,
             )?,
         })
@@ -4444,6 +4499,8 @@ mod tests {
             role_id: mcg_domain::RoleId::new(),
             organization_revision_id: mcg_domain::OrganizationRevisionId::new(),
             kind: mcg_domain::ConversationAgentKind::Chat,
+            display_name: "Chat Agent".into(),
+            parent_session_id: None,
             state: mcg_domain::ConversationAgentSessionState::Working,
             codex_thread_id: Some("chat-thread".into()),
             model: Some("fixture".into()),
@@ -4522,6 +4579,8 @@ mod tests {
             role_id: mcg_domain::RoleId::new(),
             organization_revision_id: mcg_domain::OrganizationRevisionId::new(),
             kind: mcg_domain::ConversationAgentKind::Chat,
+            display_name: "Chat Agent".into(),
+            parent_session_id: None,
             state: mcg_domain::ConversationAgentSessionState::Ready,
             codex_thread_id: Some("chat-thread".into()),
             model: Some("fixture".into()),
@@ -4530,13 +4589,25 @@ mod tests {
             updated_at: now,
         };
         let mut coder = chat.clone();
+        let mut coordinator = chat.clone();
+        coordinator.id = mcg_domain::ConversationAgentSessionId::new();
+        coordinator.role_id = mcg_domain::RoleId::new();
+        coordinator.kind = mcg_domain::ConversationAgentKind::Coordinator;
+        coordinator.display_name = "Coordinator".into();
+        coordinator.parent_session_id = Some(chat.id);
+        coordinator.codex_thread_id = Some("coordinator-thread".into());
         coder.id = mcg_domain::ConversationAgentSessionId::new();
         coder.role_id = mcg_domain::RoleId::new();
         coder.kind = mcg_domain::ConversationAgentKind::Coder;
+        coder.display_name = "Coding Agent Atlas".into();
+        coder.parent_session_id = Some(coordinator.id);
         coder.codex_thread_id = Some("coder-thread".into());
         store
             .save_conversation_agent_session(&chat)
             .expect("chat session");
+        store
+            .save_conversation_agent_session(&coordinator)
+            .expect("coordinator session");
         store
             .save_conversation_agent_session(&coder)
             .expect("coder session");
@@ -4544,7 +4615,7 @@ mod tests {
             schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
             id: mcg_domain::AgentDelegationId::new(),
             conversation_id: first.id,
-            source_session_id: chat.id,
+            source_session_id: coordinator.id,
             coder_session_id: Some(coder.id),
             project_id: ProjectId::new(),
             organization_revision_id: chat.organization_revision_id,
@@ -4586,9 +4657,12 @@ mod tests {
             id: mcg_domain::AgentMessageId::new(),
             conversation_id: first.id,
             delegation_id: Some(delegation.id),
-            from_session_id: chat.id,
+            from_session_id: coordinator.id,
             to_session_id: coder.id,
             kind: mcg_domain::AgentMessageKind::Delegation,
+            room: mcg_domain::AgentRoomKind::Backstage,
+            tool_name: None,
+            correlation_id: Some(delegation.id.to_string()),
             content: "bounded brief".into(),
             created_at: now,
         };
@@ -4598,7 +4672,7 @@ mod tests {
             id: mcg_domain::BlackboardEntryId::new(),
             conversation_id: first.id,
             delegation_id: Some(delegation.id),
-            author_session_id: chat.id,
+            author_session_id: coordinator.id,
             kind: mcg_domain::BlackboardEntryKind::Goal,
             content: "shared goal".into(),
             source_references: vec![],
@@ -4612,7 +4686,7 @@ mod tests {
             .expect("scoped context search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source_id, entry.id.to_string());
-        assert_eq!(hits[0].author_role, "chat");
+        assert_eq!(hits[0].author_role, "coordinator");
         assert_eq!(hits[0].delegation_id, Some(delegation.id));
         assert!(
             store
@@ -4621,11 +4695,32 @@ mod tests {
                 .is_empty()
         );
 
+        let checkpoint = mcg_domain::AgentContextCheckpoint {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::AgentContextCheckpointId::new(),
+            conversation_id: first.id,
+            session_id: coordinator.id,
+            room: mcg_domain::AgentRoomKind::Backstage,
+            revision: 1,
+            through_message_id: Some(message.id),
+            summary: "Coordinator delegated bounded work to Coding Agent Atlas.".into(),
+            source_references: vec![message.id.to_string(), entry.id.to_string()],
+            approximate_tokens: 12,
+            created_at: now,
+        };
+        store
+            .save_agent_context_checkpoint(&checkpoint)
+            .expect("context checkpoint");
+
         let first_team = store.conversation_team_state(first.id).expect("first team");
-        assert_eq!(first_team.sessions, vec![chat, coder]);
+        assert_eq!(first_team.sessions.len(), 3);
+        assert!(first_team.sessions.contains(&chat));
+        assert!(first_team.sessions.contains(&coordinator));
+        assert!(first_team.sessions.contains(&coder));
         assert_eq!(first_team.delegations, vec![delegation.clone()]);
         assert_eq!(first_team.messages, vec![message]);
         assert_eq!(first_team.blackboard, vec![entry]);
+        assert_eq!(first_team.context_checkpoints, vec![checkpoint]);
         assert_eq!(
             store
                 .conversation_team_state(second.id)

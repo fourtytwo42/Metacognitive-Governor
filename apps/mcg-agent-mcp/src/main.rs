@@ -1,4 +1,4 @@
-//! Role-scoped stdio MCP bridge for MCG's internal Chat/Coder sessions.
+//! Role-scoped stdio MCP bridge for MCG's internal Chat/Coordinator/Coder sessions.
 
 use std::{env, path::PathBuf};
 
@@ -105,8 +105,14 @@ fn tool_schema(name: &str) -> Value {
     let description = match name {
         "delegate_code" => "Delegate a bounded coding brief to an isolated MCG Coding Agent.",
         "message_coder" => "Answer or amend an active Coding Agent delegation.",
+        "settle_delegation" => {
+            "Accept or block a reported Coding Agent result after Coordinator review."
+        }
+        "message_coordinator" => {
+            "Send a request, question, update, or result to the Coordinator Agent's backstage room."
+        }
         "message_chat" => {
-            "Send a question or update to the Chat Agent mailbox; never to the owner."
+            "Send a concise coordination update to the Chat Agent; only Chat may address the owner."
         }
         "search_shared_context" => {
             "Search attributed context within this conversation and project only."
@@ -115,12 +121,92 @@ fn tool_schema(name: &str) -> Value {
         "write_blackboard" => "Append a typed entry to this conversation's shared blackboard.",
         "cancel_delegation" => "Cancel one active delegation belonging to this conversation.",
         "report_result" => {
-            "Required final step for a Coding Agent. Call exactly once after verification to report structured results to the Chat Agent."
+            "Required final step for a Coding Agent. Call exactly once after verification to report structured results to the Coordinator Agent."
         }
         _ => "MCG internal role-scoped tool.",
     };
-    let input_schema = if name == "report_result" {
-        json!({
+    let input_schema = match name {
+        "delegate_code" => json!({
+            "type":"object",
+            "properties":{
+                "objective":{"type":"string","minLength":1},
+                "scope":{"type":"array","items":{"type":"string"}},
+                "constraints":{"type":"array","items":{"type":"string"}},
+                "success_conditions":{"type":"array","items":{"type":"string"}},
+                "context_references":{"type":"array","items":{"type":"string"}}
+            },
+            "required":["objective","scope","constraints","success_conditions","context_references"],
+            "additionalProperties":false
+        }),
+        "message_coordinator" => json!({
+            "type":"object",
+            "properties":{
+                "content":{"type":"string","minLength":1},
+                "question":{"type":"boolean"},
+                "delegation_id":{"type":"string"}
+            },
+            "required":["content"],
+            "additionalProperties":false
+        }),
+        "message_chat" => json!({
+            "type":"object",
+            "properties":{
+                "content":{"type":"string","minLength":1},
+                "delegation_id":{"type":"string"}
+            },
+            "required":["content"],
+            "additionalProperties":false
+        }),
+        "message_coder" => json!({
+            "type":"object",
+            "properties":{
+                "delegation_id":{"type":"string"},
+                "content":{"type":"string","minLength":1}
+            },
+            "required":["delegation_id","content"],
+            "additionalProperties":false
+        }),
+        "settle_delegation" => json!({
+            "type":"object",
+            "properties":{
+                "delegation_id":{"type":"string"},
+                "expected_revision":{"type":"integer","minimum":1},
+                "decision":{"type":"string","enum":["accept","block"]},
+                "rationale":{"type":"string","minLength":1}
+            },
+            "required":["delegation_id","expected_revision","decision","rationale"],
+            "additionalProperties":false
+        }),
+        "search_shared_context" => json!({
+            "type":"object",
+            "properties":{
+                "query":{"type":"string","minLength":1},
+                "limit":{"type":"integer","minimum":1,"maximum":100}
+            },
+            "required":["query"],
+            "additionalProperties":false
+        }),
+        "read_blackboard" => json!({"type":"object","properties":{},"additionalProperties":false}),
+        "write_blackboard" => json!({
+            "type":"object",
+            "properties":{
+                "kind":{"type":"string","enum":["goal","context","decision","status","evidence","question","answer","result","blocker"]},
+                "content":{"type":"string","minLength":1},
+                "delegation_id":{"type":"string"}
+            },
+            "required":["kind","content"],
+            "additionalProperties":false
+        }),
+        "cancel_delegation" => json!({
+            "type":"object",
+            "properties":{
+                "delegation_id":{"type":"string"},
+                "expected_revision":{"type":"integer","minimum":1}
+            },
+            "required":["delegation_id","expected_revision"],
+            "additionalProperties":false
+        }),
+        "report_result" => json!({
             "type":"object",
             "properties":{
                 "summary":{"type":"string","minLength":1},
@@ -139,9 +225,8 @@ fn tool_schema(name: &str) -> Value {
                 "integration_ready"
             ],
             "additionalProperties":false
-        })
-    } else {
-        json!({"type":"object","additionalProperties":true})
+        }),
+        _ => json!({"type":"object","properties":{},"additionalProperties":false}),
     };
     json!({
         "name": name,

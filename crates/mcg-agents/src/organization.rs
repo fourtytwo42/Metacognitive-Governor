@@ -23,6 +23,17 @@ impl OrganizationGenome {
             "Handle direct user dialogue and synthesize understandable results.",
             &["project.context.read", "memory.read"],
         );
+        let coordinator = default_role(
+            RoleKind::Coordinator,
+            "Coordinator",
+            "Route requests, decompose coding work, supervise parallel specialists, and synthesize durable internal results without speaking as the owner-facing agent.",
+            &[
+                "agent.delegate",
+                "agent.message",
+                "agent.observe",
+                "context.search",
+            ],
+        );
         let coder = default_role(
             RoleKind::Coder,
             "Coder",
@@ -56,22 +67,42 @@ impl OrganizationGenome {
                 },
                 RoleRelationship {
                     from: conversation.id,
-                    to: coder.id,
+                    to: coordinator.id,
                     kind: RelationshipKind::DelegatesTo,
                 },
                 RoleRelationship {
                     from: conversation.id,
+                    to: coordinator.id,
+                    kind: RelationshipKind::SharesInformationWith,
+                },
+                RoleRelationship {
+                    from: coordinator.id,
+                    to: conversation.id,
+                    kind: RelationshipKind::SharesInformationWith,
+                },
+                RoleRelationship {
+                    from: coordinator.id,
+                    to: conversation.id,
+                    kind: RelationshipKind::ReportsTo,
+                },
+                RoleRelationship {
+                    from: coordinator.id,
+                    to: coder.id,
+                    kind: RelationshipKind::DelegatesTo,
+                },
+                RoleRelationship {
+                    from: coordinator.id,
                     to: coder.id,
                     kind: RelationshipKind::SharesInformationWith,
                 },
                 RoleRelationship {
                     from: coder.id,
-                    to: conversation.id,
+                    to: coordinator.id,
                     kind: RelationshipKind::SharesInformationWith,
                 },
                 RoleRelationship {
                     from: coder.id,
-                    to: conversation.id,
+                    to: coordinator.id,
                     kind: RelationshipKind::ReportsTo,
                 },
             ])
@@ -85,11 +116,18 @@ impl OrganizationGenome {
             parent_revision_id: None,
             inherited_from_revision_id: None,
             name: "MCG Consumer Default".into(),
-            roles: vec![executive, conversation, coder, evaluator, tool_worker],
+            roles: vec![
+                executive,
+                conversation,
+                coordinator,
+                coder,
+                evaluator,
+                tool_worker,
+            ],
             relationships,
             policy: OrganizationPolicy {
                 prefer_minimal_organization: true,
-                max_parallel_agents: 4,
+                max_parallel_agents: 8,
                 max_total_agents: 8,
                 max_organizational_overhead_ratio: 0.30,
                 default_lease_seconds: 900,
@@ -142,6 +180,7 @@ fn default_role(
         model_policy: ModelPolicy {
             capability_class: match kind {
                 RoleKind::Coder => "coding",
+                RoleKind::Coordinator => "reasoning",
                 RoleKind::Evaluator => "reasoning",
                 RoleKind::ToolWorker => "efficient",
                 _ => "general",
@@ -174,6 +213,7 @@ mod tests {
             kinds,
             BTreeSet::from([
                 RoleKind::Executive,
+                RoleKind::Coordinator,
                 RoleKind::Conversation,
                 RoleKind::Coder,
                 RoleKind::Evaluator,

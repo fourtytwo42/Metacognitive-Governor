@@ -128,6 +128,7 @@ pub struct RoleDefinition {
 pub enum RoleKind {
     Executive,
     Conversation,
+    Coordinator,
     Coder,
     Evaluator,
     ToolWorker,

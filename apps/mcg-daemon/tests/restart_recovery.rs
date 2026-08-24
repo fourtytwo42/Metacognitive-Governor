@@ -124,7 +124,10 @@ async fn task_history_and_projection_survive_abrupt_daemon_restart() {
     let second_runtime = Arc::new(AppRuntime::open(config).expect("runtime should recover"));
     assert_eq!(second_runtime.auth().token_for_local_client(), first_token);
     assert_eq!(second_runtime.status().recovered_tasks, 1);
-    assert_eq!(second_runtime.status().recovered_events, 1);
+    // The runtime records its first platform-capability snapshot alongside the
+    // task event. Projection recovery intentionally replays the complete durable
+    // event log, while the task-history assertion below remains task-scoped.
+    assert_eq!(second_runtime.status().recovered_events, 2);
     let (second_host, second_server) = start_server(second_runtime).await;
 
     let recovered: TaskEnvelope = client

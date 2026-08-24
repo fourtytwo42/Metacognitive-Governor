@@ -53,6 +53,7 @@ domain_id!(ConversationAgentSessionId);
 domain_id!(AgentDelegationId);
 domain_id!(AgentMessageId);
 domain_id!(BlackboardEntryId);
+domain_id!(AgentContextCheckpointId);
 domain_id!(ManagedWorktreeId);
 domain_id!(IntegrationJournalId);
 domain_id!(AgentCredentialAuditId);
@@ -1148,12 +1149,13 @@ pub struct PluginInvocationRecord {
 }
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
-pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 3;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationAgentKind {
     Chat,
+    Coordinator,
     Coder,
 }
 
@@ -1176,6 +1178,10 @@ pub struct ConversationAgentSession {
     pub role_id: RoleId,
     pub organization_revision_id: OrganizationRevisionId,
     pub kind: ConversationAgentKind,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<ConversationAgentSessionId>,
     pub state: ConversationAgentSessionState,
     pub codex_thread_id: Option<String>,
     pub model: Option<String>,
@@ -1270,6 +1276,8 @@ pub struct AgentDelegation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMessageKind {
+    Joined,
+    Left,
     Delegation,
     Update,
     Question,
@@ -1277,6 +1285,16 @@ pub enum AgentMessageKind {
     Amendment,
     Report,
     Cancellation,
+    ToolCall,
+    ToolResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRoomKind {
+    Frontstage,
+    #[default]
+    Backstage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1288,7 +1306,30 @@ pub struct AgentMessage {
     pub from_session_id: ConversationAgentSessionId,
     pub to_session_id: ConversationAgentSessionId,
     pub kind: AgentMessageKind,
+    #[serde(default)]
+    pub room: AgentRoomKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentContextCheckpoint {
+    pub schema_version: u16,
+    pub id: AgentContextCheckpointId,
+    pub conversation_id: ConversationId,
+    pub session_id: ConversationAgentSessionId,
+    pub room: AgentRoomKind,
+    pub revision: u64,
+    pub through_message_id: Option<AgentMessageId>,
+    pub summary: String,
+    #[serde(default)]
+    pub source_references: Vec<String>,
+    #[serde(default)]
+    pub approximate_tokens: u64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1486,6 +1527,8 @@ pub struct ConversationTeamState {
     pub blackboard: Vec<BlackboardEntry>,
     #[serde(default)]
     pub worktrees: Vec<ManagedWorktree>,
+    #[serde(default)]
+    pub context_checkpoints: Vec<AgentContextCheckpoint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

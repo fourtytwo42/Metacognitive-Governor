@@ -306,7 +306,7 @@ pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), Code
         || !String::from_utf8_lossy(&version.stdout).contains(CODEX_BINARY_VERSION)
     {
         return Err(CodexHarnessError::Protocol(format!(
-            "two-agent rollout requires pinned Codex {CODEX_BINARY_VERSION}"
+            "multi-agent rollout requires pinned Codex {CODEX_BINARY_VERSION}"
         )));
     }
     let features = std::process::Command::new(executable)
@@ -350,6 +350,13 @@ impl CodexThreadInstructions {
     /// bridge; mutation, browsing, computer use, apps, plugins, skills and nested agents are off.
     #[must_use]
     pub fn isolated_chat_config(mcp_command: &str, bootstrap_file: &str) -> Value {
+        role_thread_config(mcp_command, bootstrap_file, false)
+    }
+
+    /// Builds the fail-closed Coordinator role configuration. Coordination is performed only
+    /// through the role-scoped MCG bridge; native shell/UI and nested Codex agents remain off.
+    #[must_use]
+    pub fn isolated_coordinator_config(mcp_command: &str, bootstrap_file: &str) -> Value {
         role_thread_config(mcp_command, bootstrap_file, false)
     }
 
@@ -1100,11 +1107,28 @@ impl CodexAppServerHarness {
             if method == "mcpServer/elicitation/request"
                 && params.get("turnId").and_then(Value::as_str) == Some(turn_id.as_str())
             {
-                if let Some(progress) = &progress {
+                let trusted_internal_bridge =
+                    params.get("serverName").and_then(Value::as_str) == Some("mcg_agent");
+                if trusted_internal_bridge {
+                    let request_id = notification.get("id").ok_or_else(|| {
+                        CodexHarnessError::Protocol(
+                            "MCG agent MCP elicitation omitted its request id".into(),
+                        )
+                    })?;
+                    // `mcg_agent` is injected only by MCG's per-thread role configuration. Its
+                    // bearer and exact tool list are authorized again by the loopback runtime,
+                    // so this is not an owner permission boundary and must not hang a role turn.
+                    self.resolve_mcp_elicitation(request_id, Some(json!({})))
+                        .await?;
+                } else if let Some(progress) = &progress {
                     let _ = progress.send(CodexTurnProgress::Notification {
                         method: method.to_owned(),
                         params: notification.clone(),
                     });
+                } else if let Some(request_id) = notification.get("id") {
+                    // Ordinary MCP elicitations still fail closed when the caller exposes no
+                    // approval surface.
+                    self.resolve_mcp_elicitation(request_id, None).await?;
                 }
             }
             if method == "item/agentMessage/delta"
@@ -1704,6 +1728,17 @@ mod tests {
             chat["mcp_servers"]["mcg_agent"]["args"],
             json!(["--bootstrap-file", "C:/MCG/bootstrap/one-use.json"])
         );
+
+        let coordinator = CodexThreadInstructions::isolated_coordinator_config(
+            "C:/MCG/mcg-agent-mcp.exe",
+            "C:/MCG/bootstrap/coordinator.json",
+        );
+        assert_eq!(coordinator["features"]["shell_tool"], false);
+        assert_eq!(coordinator["features"]["unified_exec"], false);
+        assert_eq!(coordinator["features"]["multi_agent"], false);
+        assert_eq!(coordinator["features"]["browser_use"], false);
+        assert_eq!(coordinator["features"]["computer_use"], false);
+        assert_eq!(coordinator["features"]["apps"], false);
 
         let coder = CodexThreadInstructions::isolated_coder_config(
             "C:/MCG/mcg-agent-mcp.exe",

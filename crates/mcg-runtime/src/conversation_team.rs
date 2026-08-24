@@ -19,16 +19,24 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const CHAT_AGENT_TOOLS: [&str; 6] = [
+pub const CHAT_AGENT_TOOLS: [&str; 4] = [
+    "message_coordinator",
+    "search_shared_context",
+    "read_blackboard",
+    "write_blackboard",
+];
+pub const COORDINATOR_AGENT_TOOLS: [&str; 8] = [
     "delegate_code",
+    "message_chat",
     "message_coder",
+    "settle_delegation",
     "search_shared_context",
     "read_blackboard",
     "write_blackboard",
     "cancel_delegation",
 ];
 pub const CODER_AGENT_TOOLS: [&str; 5] = [
-    "message_chat",
+    "message_coordinator",
     "search_shared_context",
     "read_blackboard",
     "write_blackboard",
@@ -41,6 +49,8 @@ pub const CODER_AGENT_TOOLS: [&str; 5] = [
 #[derive(Debug, Default)]
 pub struct ConversationTeamCoordinator {
     pub(crate) chat_locks:
+        tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) coordinator_locks:
         tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_delegations:
         tokio::sync::Mutex<BTreeMap<AgentDelegationId, tokio::task::AbortHandle>>,
@@ -73,6 +83,7 @@ impl AgentToolClaims {
     ) -> Self {
         let allowed_tools = match role {
             ConversationAgentKind::Chat => CHAT_AGENT_TOOLS.as_slice(),
+            ConversationAgentKind::Coordinator => COORDINATOR_AGENT_TOOLS.as_slice(),
             ConversationAgentKind::Coder => CODER_AGENT_TOOLS.as_slice(),
         }
         .iter()
@@ -93,13 +104,14 @@ impl AgentToolClaims {
     pub fn validate(&self) -> Result<(), AgentAuthorityError> {
         let expected: BTreeSet<String> = match self.role {
             ConversationAgentKind::Chat => CHAT_AGENT_TOOLS.as_slice(),
+            ConversationAgentKind::Coordinator => COORDINATOR_AGENT_TOOLS.as_slice(),
             ConversationAgentKind::Coder => CODER_AGENT_TOOLS.as_slice(),
         }
         .iter()
         .map(|value| (*value).to_owned())
         .collect();
         if self.allowed_tools != expected
-            || (self.role == ConversationAgentKind::Chat && self.delegation_id.is_some())
+            || (self.role != ConversationAgentKind::Coder && self.delegation_id.is_some())
             || (self.role == ConversationAgentKind::Coder && self.delegation_id.is_none())
             || self.nonce_sha256.len() != 64
         {
@@ -431,8 +443,37 @@ mod tests {
             Err(AgentAuthorityError::InvalidBootstrap)
         );
         registry
-            .authorize(&access.bearer, "delegate_code", now)
+            .authorize(&access.bearer, "message_coordinator", now)
             .expect("allowed Chat tool");
+        assert_eq!(
+            registry.authorize(&access.bearer, "delegate_code", now),
+            Err(AgentAuthorityError::ToolDenied("delegate_code".into()))
+        );
+        assert_eq!(
+            registry.authorize(&access.bearer, "report_result", now),
+            Err(AgentAuthorityError::ToolDenied("report_result".into()))
+        );
+    }
+
+    #[test]
+    fn coordinator_alone_can_delegate_and_message_chat() {
+        let registry = AgentToolCredentialRegistry::default();
+        let now = Utc::now();
+        let bootstrap = registry
+            .issue_bootstrap(claims(ConversationAgentKind::Coordinator), now)
+            .expect("bootstrap");
+        let access = registry
+            .exchange_bootstrap(&bootstrap, now)
+            .expect("exchange");
+        registry
+            .authorize(&access.bearer, "delegate_code", now)
+            .expect("Coordinator can delegate");
+        registry
+            .authorize(&access.bearer, "message_chat", now)
+            .expect("Coordinator can report to Chat");
+        registry
+            .authorize(&access.bearer, "settle_delegation", now)
+            .expect("Coordinator can settle a reviewed report");
         assert_eq!(
             registry.authorize(&access.bearer, "report_result", now),
             Err(AgentAuthorityError::ToolDenied("report_result".into()))

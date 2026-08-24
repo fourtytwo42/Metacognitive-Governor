@@ -2712,6 +2712,47 @@ test("delegated coding work shows a live progress card and active-agent indicato
   expect(screen.getByText("1 coding agent active")).toHaveAttribute("role", "status");
 });
 
+test("Agent Room shows hierarchy, lifecycle, tool traces, and never exposes a direct composer", async () => {
+  const now = "2026-08-24T18:00:00Z";
+  const conversationId = "00000000-0000-4000-8000-000000000e01";
+  const chatId = "00000000-0000-4000-8000-000000000e02";
+  const coordinatorId = "00000000-0000-4000-8000-000000000e03";
+  const coderId = "00000000-0000-4000-8000-000000000e04";
+  client.sendConversationMessage.mockResolvedValue({
+    conversation: { schema_version: 1, id: conversationId, title: "Build in parallel", state: "active", execution_preferences: {}, created_at: now, updated_at: now },
+    turns: [], messages: [], activities: [],
+    team: {
+      sessions: [
+        { schema_version: 4, id: chatId, conversation_id: conversationId, role_id: "role-chat", organization_revision_id: "org", kind: "chat", display_name: "Chat Agent", state: "ready", prompt_revision: 4, created_at: now, updated_at: now },
+        { schema_version: 4, id: coordinatorId, conversation_id: conversationId, role_id: "role-coordinator", organization_revision_id: "org", kind: "coordinator", display_name: "Coordinator", parent_session_id: chatId, state: "working", prompt_revision: 4, created_at: now, updated_at: now },
+        { schema_version: 4, id: coderId, conversation_id: conversationId, role_id: "role-coder", organization_revision_id: "org", kind: "coder", display_name: "Coding Agent Atlas", parent_session_id: coordinatorId, state: "working", prompt_revision: 4, created_at: now, updated_at: now }
+      ],
+      delegations: [], blackboard: [], worktrees: [],
+      messages: [
+        { schema_version: 4, id: "join", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "joined", room: "backstage", content: "Coordinator entered Agent Room", created_at: now },
+        { schema_version: 4, id: "call", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "tool_call", room: "backstage", tool_name: "delegate_code", correlation_id: "trace-1", content: "Calling delegate_code", created_at: now },
+        { schema_version: 4, id: "result", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "tool_result", room: "backstage", tool_name: "delegate_code", correlation_id: "trace-1", content: "delegate_code completed", created_at: now },
+        { schema_version: 4, id: "brief", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coderId, kind: "delegation", room: "backstage", content: "Build the responsive shell", created_at: now }
+      ],
+      context_checkpoints: [{ schema_version: 4, id: "checkpoint", conversation_id: conversationId, session_id: coordinatorId, room: "backstage", revision: 1, summary: "Delegated the responsive shell.", source_references: ["brief"], approximate_tokens: 8, created_at: now }]
+    }
+  });
+  render(<App />);
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build in parallel" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  fireEvent.click(await screen.findByRole("button", { name: /Agent Room/ }));
+  const room = screen.getByRole("region", { name: "Agent Room" });
+  expect(within(room).getByText("You talk to this agent")).toBeInTheDocument();
+  expect(within(room).getAllByText("Coding Agent Atlas").length).toBeGreaterThanOrEqual(1);
+  expect(within(room).getByText("Coordinator entered Agent Room")).toBeInTheDocument();
+  expect(within(room).getByText("delegate_code")).toBeInTheDocument();
+  expect(within(room).getByText("Build the responsive shell")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText(/Context checkpoints/));
+  expect(within(room).getByText("Delegated the responsive shell.")).toBeInTheDocument();
+});
+
 test("active chats queue Enter messages in a drawer and allow immediate steering", async () => {
   const conversation = {
     schema_version: 1,

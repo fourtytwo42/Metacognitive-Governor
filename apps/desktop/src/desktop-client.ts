@@ -354,7 +354,7 @@ export interface ConversationActivity {
   updated_at: string;
 }
 
-export type ConversationAgentKind = "chat" | "coder";
+export type ConversationAgentKind = "chat" | "coordinator" | "coder";
 export type ConversationAgentSessionState = "starting" | "ready" | "working" | "waiting" | "failed" | "retired";
 export interface ConversationAgentSession {
   schema_version: number;
@@ -363,6 +363,8 @@ export interface ConversationAgentSession {
   role_id: string;
   organization_revision_id: string;
   kind: ConversationAgentKind;
+  display_name: string;
+  parent_session_id?: string;
   state: ConversationAgentSessionState;
   codex_thread_id?: string;
   model?: string;
@@ -406,8 +408,16 @@ export interface AgentDelegation {
 export interface AgentMessage {
   schema_version: number; id: string; conversation_id: string; delegation_id?: string;
   from_session_id: string; to_session_id: string;
-  kind: "delegation" | "update" | "question" | "answer" | "amendment" | "report" | "cancellation";
+  kind: "joined" | "left" | "delegation" | "update" | "question" | "answer" | "amendment" | "report" | "cancellation" | "tool_call" | "tool_result";
+  room?: "frontstage" | "backstage";
+  tool_name?: string;
+  correlation_id?: string;
   content: string; created_at: string;
+}
+export interface AgentContextCheckpoint {
+  schema_version: number; id: string; conversation_id: string; session_id: string;
+  room: "frontstage" | "backstage"; revision: number; through_message_id?: string;
+  summary: string; source_references: string[]; approximate_tokens: number; created_at: string;
 }
 export interface BlackboardEntry {
   schema_version: number; id: string; conversation_id: string; delegation_id?: string;
@@ -434,6 +444,7 @@ export interface ConversationTeamState {
   messages: AgentMessage[];
   blackboard: BlackboardEntry[];
   worktrees: ManagedWorktree[];
+  context_checkpoints?: AgentContextCheckpoint[];
 }
 
 export interface ConversationView {

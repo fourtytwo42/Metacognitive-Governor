@@ -896,6 +896,58 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
   </section>;
 }
 
+function AgentRoom({ team }: { team?: ConversationTeamState }) {
+  if (!team) return <section className="agent-room empty-state">The Agent Room has not started yet.</section>;
+  const sessionName = (id: string) => {
+    const session = team.sessions.find((candidate) => candidate.id === id);
+    if (!session) return "Agent";
+    if (session.display_name) return session.display_name;
+    if (session.kind === "chat") return "Chat Agent";
+    if (session.kind === "coordinator") return "Coordinator";
+    return "Coding Agent";
+  };
+  const messages = team.messages.filter((message) => (message.room ?? "backstage") === "backstage");
+  const toolResults = new Map(messages.filter((message) => message.kind === "tool_result" && message.correlation_id).map((message) => [message.correlation_id!, message]));
+  const checkpoints = team.context_checkpoints ?? [];
+  return <section className="agent-room" aria-label="Agent Room">
+    <header className="agent-room-header">
+      <div><span className="agent-room-live" aria-hidden="true" /><div><strong>Agent Room</strong><small>Behind-the-scenes coordination · owner-readable</small></div></div>
+      <span>{team.sessions.filter((session) => ["starting", "ready", "working", "waiting"].includes(session.state)).length} present</span>
+    </header>
+    <div className="agent-room-roster" aria-label="Agent hierarchy">
+      {team.sessions.map((session) => <div className={`agent-roster-member role-${session.kind} state-${session.state}`} key={session.id}>
+        <span className="agent-avatar" aria-hidden="true">{session.kind === "chat" ? "C" : session.kind === "coordinator" ? "◎" : "⌘"}</span>
+        <span><strong>{session.display_name || (session.kind === "chat" ? "Chat Agent" : session.kind === "coordinator" ? "Coordinator" : "Coding Agent")}</strong><small>{session.kind === "chat" ? "You talk to this agent" : session.kind === "coordinator" ? "Routes and supervises work" : session.state.replaceAll("_", " ")}</small></span>
+        <i aria-label={session.state} title={session.state.replaceAll("_", " ")} />
+      </div>)}
+    </div>
+    <div className="agent-room-timeline">
+      {messages.length === 0 ? <p className="empty-state">Agents have not exchanged any messages yet.</p> : messages.map((message) => {
+        if (message.kind === "tool_result") return null;
+        const from = sessionName(message.from_session_id);
+        const to = sessionName(message.to_session_id);
+        if (message.kind === "joined" || message.kind === "left") return <div className={`agent-room-lifecycle ${message.kind}`} key={message.id}><span aria-hidden="true">{message.kind === "joined" ? "+" : "−"}</span><p>{message.content}</p><time>{new Date(message.created_at).toLocaleTimeString()}</time></div>;
+        if (message.kind === "tool_call") {
+          const result = message.correlation_id ? toolResults.get(message.correlation_id) : undefined;
+          return <details className="agent-room-tool" key={message.id}>
+            <summary><span aria-hidden="true">›_</span><strong>{from}</strong><span>{message.tool_name || "tool"}</span><small className={result ? "complete" : "running"}>{result ? "completed" : "running"}</small><span className="chat-activity-chevron" aria-hidden="true">⌄</span></summary>
+            <div><p>{message.content}</p>{result && <p>{result.content}</p>}<time>{new Date(message.created_at).toLocaleString()}</time></div>
+          </details>;
+        }
+        return <article className={`agent-room-message kind-${message.kind}`} key={message.id}>
+          <header><strong>{from}</strong><span aria-hidden="true">→</span><span>{to}</span><small>{message.kind.replaceAll("_", " ")}</small><time>{new Date(message.created_at).toLocaleTimeString()}</time></header>
+          <MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
+          {message.delegation_id && <code>{message.delegation_id}</code>}
+        </article>;
+      })}
+    </div>
+    {checkpoints.length > 0 && <details className="agent-room-compaction">
+      <summary>Context checkpoints <span>{checkpoints.length}</span></summary>
+      {checkpoints.slice(-8).reverse().map((checkpoint) => <article key={checkpoint.id}><strong>{sessionName(checkpoint.session_id)} · revision {checkpoint.revision}</strong><small>~{checkpoint.approximate_tokens} tokens · {checkpoint.source_references.length} sources</small><p>{checkpoint.summary}</p></article>)}
+    </details>}
+  </section>;
+}
+
 function ConversationTurnTranscript({
   turn,
   messages,
@@ -1250,6 +1302,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatSearch, setChatSearch] = useState("");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [conversationRooms, setConversationRooms] = useState<Record<string, "chat" | "agents">>({});
   const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [settingsSearch, setSettingsSearch] = useState("");
@@ -5167,6 +5220,7 @@ export function App() {
   const contextChat = chatContextMenu ? chatSummaries.find((chat) => chat.id === chatContextMenu.chatId) : undefined;
   const visibleTasks = tasks;
   const visibleConversation = selectedChatId ? conversationViews[selectedChatId] : undefined;
+  const activeConversationRoom = selectedChatId ? (conversationRooms[selectedChatId] ?? "chat") : "chat";
   const managedConversationWorktrees = Object.values(conversationViews).flatMap((view) =>
     (view?.team?.worktrees ?? []).map((worktree) => ({
       worktree,
@@ -5756,7 +5810,11 @@ export function App() {
 
         {(advanced || activeSurface === "threads" || (activeSurface === "tasks" && Boolean(workspaceTask))) && <section className="panel task-panel" aria-label={activeSurface === "threads" ? "Chat conversation" : "Tasks"}>
           {activeSurface === "threads" ? <div className="chat-conversation">
-            <div className="chat-message-list">
+            <nav className="conversation-room-tabs" aria-label="Conversation rooms">
+              <button type="button" className={activeConversationRoom === "chat" ? "active" : ""} aria-current={activeConversationRoom === "chat" ? "page" : undefined} onClick={() => selectedChatId && setConversationRooms((current) => ({ ...current, [selectedChatId]: "chat" }))}><span aria-hidden="true">◉</span>Chat <small>you + Chat Agent</small></button>
+              <button type="button" className={activeConversationRoom === "agents" ? "active" : ""} aria-current={activeConversationRoom === "agents" ? "page" : undefined} onClick={() => selectedChatId && setConversationRooms((current) => ({ ...current, [selectedChatId]: "agents" }))}><span aria-hidden="true">⌘</span>Agent Room <small>{visibleConversation?.team?.sessions.filter((session) => ["starting", "ready", "working", "waiting"].includes(session.state)).length ?? 0} present</small></button>
+            </nav>
+            <div className="chat-message-list" hidden={activeConversationRoom !== "chat"}>
               {!visibleConversation || (visibleConversation.messages.length === 0 && visibleConversation.turns.length === 0)
                 ? <p className="empty-state">This conversation has no messages yet.</p>
                 : visibleConversation.turns.map((turn) => <ConversationTurnTranscript
@@ -5787,7 +5845,8 @@ export function App() {
               </section>}
               {visibleConversation?.turns.filter((turn) => turn.error).map((turn) => <p className="error-message" role="alert" key={`${turn.id}-error`}>{turn.error}</p>)}
             </div>
-            <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
+            {activeConversationRoom === "agents" && <AgentRoom team={visibleConversation?.team} />}
+            {activeConversationRoom === "chat" && <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
               {(visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length ?? 0) > 0 && <div className="coding-agent-active-count" role="status">
                 <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
                 {visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length} coding agent{visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length === 1 ? "" : "s"} active
@@ -5811,7 +5870,7 @@ export function App() {
               <div className="composer-actions"><PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} /><ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, and speed" /><button className="primary" type="button" disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}>{conversationIsActive ? "Queue" : "Send"}</button></div>
               {taskError && <p className="error-message" role="alert">{taskError}</p>}
               </div>
-            </div>
+            </div>}
           </div> : <>
           <div className="section-heading">
             <div>
@@ -6196,7 +6255,7 @@ export function App() {
           {agentTab === "overview" && <div className="agents-stack">
             <article className="agent-governor-card">
               <div className="governor-mark" aria-hidden="true">MCG</div>
-              <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC RUNTIME · NOT A MODEL AGENT</span><h3>MCG runtime</h3><p>Enforces owner policy above the Chat and Coding Agents. It brokers tools, permissions, budgets, leases, memory, and evidence.</p></div>
+              <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC RUNTIME · NOT A MODEL AGENT</span><h3>MCG runtime</h3><p>Enforces owner policy above the Chat, Coordinator, and Coding Agents. It brokers tools, permissions, budgets, leases, memory, and evidence. The metacognitive-governor model role remains dormant.</p></div>
               <div className="agent-status-summary"><span className={`agent-state state-${governorOverview?.status.state ?? "starting"}`}>{governorOverview?.status.state ?? "starting"}</span><strong>{governorOverview?.active_runs ?? 0}</strong><small>active runs</small></div>
               <details className="governor-details">
                 <summary>Subsystem status</summary>
@@ -6216,16 +6275,16 @@ export function App() {
             </article>
 
             <article className="agent-section-card">
-              <div className="section-heading compact-heading"><div><h3>Live conversation agents</h3><p className="muted">Only the user-facing Chat Agent and currently working Coding Agents are shown.</p></div></div>
+              <div className="section-heading compact-heading"><div><h3>Live conversation agents</h3><p className="muted">The user-facing Chat Agent, persistent Coordinator, and currently working named Coding Agents are shown.</p></div></div>
               <div className="instance-list">
-                {(visibleConversation?.team?.sessions ?? []).filter((session) => session.kind === "chat" || (session.kind === "coder" && ["starting", "working", "waiting"].includes(session.state))).map((session) => <div className="instance-row" key={session.id}><span><strong>{session.kind === "chat" ? "Chat Agent" : "Coding Agent"}</strong><small>{session.model ?? "Automatic model"} · prompt revision {session.prompt_revision}</small></span><em>{session.state}</em></div>)}
-                {!visibleConversation?.team?.sessions.some((session) => session.kind === "chat" || (session.kind === "coder" && ["starting", "working", "waiting"].includes(session.state))) && <p className="muted">Open a conversation to inspect its Chat Agent and active Coding Agents.</p>}
+                {(visibleConversation?.team?.sessions ?? []).filter((session) => session.kind === "chat" || session.kind === "coordinator" || (session.kind === "coder" && ["starting", "working", "waiting"].includes(session.state))).map((session) => <div className="instance-row" key={session.id}><span><strong>{session.display_name || (session.kind === "chat" ? "Chat Agent" : session.kind === "coordinator" ? "Coordinator" : "Coding Agent")}</strong><small>{session.kind.replaceAll("_", " ")} · {session.model ?? "Automatic model"} · prompt revision {session.prompt_revision}</small></span><em>{session.state}</em></div>)}
+                {!visibleConversation?.team?.sessions.some((session) => session.kind === "chat" || session.kind === "coordinator" || (session.kind === "coder" && ["starting", "working", "waiting"].includes(session.state))) && <p className="muted">Open a conversation to inspect its Chat Agent, Coordinator, and active Coding Agents.</p>}
               </div>
             </article>
 
             <article className="agent-section-card topology-card">
               <div className="section-heading compact-heading"><div><h3>Active team</h3><p className="muted">{activeOrganization ? `${activeOrganization.name} · revision ${activeOrganization.revision}` : "Loading assignment…"}</p></div>{activeOrganization && <button className="secondary" type="button" onClick={() => editOrganization(activeOrganization)}>Edit team</button>}</div>
-              {activeOrganization && <><div className="topology-diagram" aria-hidden="true"><div className="topology-governor">MCG runtime</div><span className="topology-line" /><div className="topology-team">{activeOrganization.name}</div><div className="topology-roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coder").map((role) => <div className={`topology-role role-${role.kind}`} key={role.id}><strong>{role.name}</strong><small>{role.kind}</small></div>)}</div></div><ul className="topology-accessible-list" aria-label="Active conversation roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coder").map((role) => <li key={`accessible-${role.id}`}><strong>{role.name}</strong><span>{role.kind.replaceAll("_", " ")} · {role.purpose}</span></li>)}</ul></>}
+              {activeOrganization && <><div className="topology-diagram" aria-hidden="true"><div className="topology-governor">MCG runtime</div><span className="topology-line" /><div className="topology-team">{activeOrganization.name}</div><div className="topology-roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coordinator" || role.kind === "coder").map((role) => <div className={`topology-role role-${role.kind}`} key={role.id}><strong>{role.name}</strong><small>{role.kind}</small></div>)}</div></div><ul className="topology-accessible-list" aria-label="Active conversation roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coordinator" || role.kind === "coder").map((role) => <li key={`accessible-${role.id}`}><strong>{role.name}</strong><span>{role.kind.replaceAll("_", " ")} · {role.purpose}</span></li>)}</ul></>}
             </article>
 
             <div className="agent-overview-grid"><article className="agent-section-card"><h3>Current work</h3><strong className="agent-metric">{governorOverview?.active_runs ?? 0}</strong><p className="muted">running or waiting agent teams</p><button className="link-button" type="button" onClick={() => setAgentTab("activity")}>Inspect activity →</button></article><article className="agent-section-card"><h3>Recent outcomes</h3><strong className="agent-metric">{agentRuns.filter((run) => run.run.state === "completed").length}</strong><p className="muted">completed in the latest {governorOverview?.recent_runs ?? agentRuns.length} runs</p></article><article className="agent-section-card"><h3>Default assignment</h3><strong>{activeOrganization?.name ?? "Loading"}</strong><p className="muted">Projects and tasks can override this team.</p><button className="link-button" type="button" onClick={() => setAgentTab("teams")}>Manage assignments →</button></article></div>
@@ -6240,7 +6299,7 @@ export function App() {
               <div className="editor-grid"><label>Maximum parallel agents<input type="number" min="1" max={organizationDraft.policy.max_total_agents} value={organizationDraft.policy.max_parallel_agents} onChange={(event) => { setOrganizationDraft({ ...organizationDraft, policy: { ...organizationDraft.policy, max_parallel_agents: Number(event.target.value) } }); setOrganizationPreview(null); }} /></label><label>Maximum total agents<input type="number" min="1" value={organizationDraft.policy.max_total_agents} onChange={(event) => { setOrganizationDraft({ ...organizationDraft, policy: { ...organizationDraft.policy, max_total_agents: Number(event.target.value) } }); setOrganizationPreview(null); }} /></label></div>
               <div className="role-editor-list">
                 <div className="section-heading compact-heading"><h4>Roles</h4><button className="secondary" type="button" onClick={() => { setOrganizationDraft({ ...organizationDraft, roles: [...organizationDraft.roles, { id: "", kind: "temporary_specialist", name: "New specialist", purpose: "Handle a bounded specialty within this team.", prompt_policy: "Follow the assigned goal, owner policy, and evidence requirements.", model_policy: { capability_class: "general", preferred_models: [], allow_fallback: true, max_escalation_tier: 1 }, tool_capabilities: [], memory_namespace: "team" }] }); setOrganizationPreview(null); }}>Add role</button></div>
-                {organizationDraft.roles.map((role, index) => <fieldset className="role-editor" key={role.id || `new-role-${index}`}><legend>{role.name || `Role ${index + 1}`}</legend><div className="editor-grid"><label>Name<input value={role.name} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, name: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label><label>Kind<select value={role.kind} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, kind: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }}>{["executive", "conversation", "coder", "evaluator", "tool_worker", "researcher", "tester", "temporary_specialist"].map((kind) => <option value={kind} key={kind}>{kind.replaceAll("_", " ")}</option>)}</select></label></div><label>Purpose<textarea value={role.purpose} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, purpose: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label>{advanced && <div className="advanced-fields"><label>Prompt policy<textarea value={role.prompt_policy} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, prompt_policy: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label><label>Preferred model<select value={role.model_policy.preferred_models[0] ?? ""} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, model_policy: { ...role.model_policy, preferred_models: event.target.value ? [event.target.value] : [] } }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }}><option value="">Automatic routing</option>{discoveredModels.map((model) => <option value={model.id} key={`${role.id}-${model.id}`}>{model.display_name}</option>)}</select></label><label>Memory namespace<input value={role.memory_namespace} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, memory_namespace: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label><label>Tool capabilities<input value={role.tool_capabilities.join(", ")} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, tool_capabilities: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label></div>}</fieldset>)}
+                {organizationDraft.roles.map((role, index) => <fieldset className="role-editor" key={role.id || `new-role-${index}`}><legend>{role.name || `Role ${index + 1}`}</legend><div className="editor-grid"><label>Name<input value={role.name} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, name: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label><label>Kind<select value={role.kind} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, kind: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }}>{["executive", "conversation", "coordinator", "coder", "evaluator", "tool_worker", "researcher", "tester", "temporary_specialist"].map((kind) => <option value={kind} key={kind}>{kind.replaceAll("_", " ")}</option>)}</select></label></div><label>Purpose<textarea value={role.purpose} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, purpose: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label>{advanced && <div className="advanced-fields"><label>Prompt policy<textarea value={role.prompt_policy} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, prompt_policy: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label><label>Preferred model<select value={role.model_policy.preferred_models[0] ?? ""} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, model_policy: { ...role.model_policy, preferred_models: event.target.value ? [event.target.value] : [] } }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }}><option value="">Automatic routing</option>{discoveredModels.map((model) => <option value={model.id} key={`${role.id}-${model.id}`}>{model.display_name}</option>)}</select></label><label>Memory namespace<input value={role.memory_namespace} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, memory_namespace: event.target.value }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label><label>Tool capabilities<input value={role.tool_capabilities.join(", ")} onChange={(event) => { const roles = [...organizationDraft.roles]; roles[index] = { ...role, tool_capabilities: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) }; setOrganizationDraft({ ...organizationDraft, roles }); setOrganizationPreview(null); }} /></label></div>}</fieldset>)}
               </div>
               {advanced && <div className="relationship-editor"><div className="section-heading compact-heading"><h4>Relationships</h4><button className="secondary" type="button" disabled={organizationDraft.roles.filter((role) => role.id).length < 2} onClick={() => { const roles = organizationDraft.roles.filter((role) => role.id); setOrganizationDraft({ ...organizationDraft, relationships: [...organizationDraft.relationships, { from: roles[0].id, to: roles[1].id, kind: "delegates_to" }] }); setOrganizationPreview(null); }}>Add relationship</button></div>{organizationDraft.relationships.map((relationship, index) => <div className="relationship-row" key={`${relationship.from}-${relationship.to}-${index}`}><select aria-label="From role" value={relationship.from} onChange={(event) => { const relationships = [...organizationDraft.relationships]; relationships[index] = { ...relationship, from: event.target.value }; setOrganizationDraft({ ...organizationDraft, relationships }); setOrganizationPreview(null); }}>{organizationDraft.roles.filter((role) => role.id).map((role) => <option value={role.id} key={`from-${index}-${role.id}`}>{role.name}</option>)}</select><span>→</span><select aria-label="Relationship kind" value={relationship.kind} onChange={(event) => { const relationships = [...organizationDraft.relationships]; relationships[index] = { ...relationship, kind: event.target.value }; setOrganizationDraft({ ...organizationDraft, relationships }); setOrganizationPreview(null); }}>{["delegates_to", "reviews", "escalates_to", "reports_to", "shares_information_with", "observed_by"].map((kind) => <option value={kind} key={kind}>{kind.replaceAll("_", " ")}</option>)}</select><span>→</span><select aria-label="To role" value={relationship.to} onChange={(event) => { const relationships = [...organizationDraft.relationships]; relationships[index] = { ...relationship, to: event.target.value }; setOrganizationDraft({ ...organizationDraft, relationships }); setOrganizationPreview(null); }}>{organizationDraft.roles.filter((role) => role.id).map((role) => <option value={role.id} key={`to-${index}-${role.id}`}>{role.name}</option>)}</select><button className="link-button" type="button" onClick={() => { setOrganizationDraft({ ...organizationDraft, relationships: organizationDraft.relationships.filter((_, candidate) => candidate !== index) }); setOrganizationPreview(null); }}>Remove</button></div>)}</div>}
               <div className="composer-actions"><button className="primary" type="button" disabled={agentBusy} onClick={() => void previewOrganizationChanges()}>{agentBusy ? "Validating…" : "Review changes"}</button></div>

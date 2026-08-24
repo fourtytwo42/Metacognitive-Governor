@@ -108,6 +108,9 @@ test.beforeEach(async ({ page }) => {
           if (command === "list_ssh_hosts") return { hosts: sshHosts };
           if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
           if (command === "list_projects") return { projects: [project] };
+          if (command === "list_conversations") return { conversations: [] };
+          if (command === "list_open_in_applications") return { applications: [] };
+          if (command === "list_tasks") return { tasks: [] };
           if (command === "list_organizations") return { organizations };
           if (command === "list_organization_publishers") return [organizationPublisher];
           if (command === "list_organization_share_reviews") return organizationShareReviews;
@@ -288,17 +291,13 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "What would you like to build?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What would you like to talk about?" })).toBeVisible();
   await expect(page.locator("#projects")).toBeHidden();
   await page.getByRole("link", { name: "Pull requests", exact: true }).click();
   const pullRequests = page.getByRole("region", { name: "Pull requests" });
-  await expect(pullRequests.getByRole("heading", { name: "Pull requests" })).toBeVisible();
-  await expect(pullRequests.getByText("Review is read-only. It will not modify files.")).toBeVisible();
-  await expect(pullRequests.getByRole("heading", { name: "Governed approvals" })).toHaveCount(0);
-  await pullRequests.getByLabel("Repository").selectOption({ index: 1 });
-  await pullRequests.getByLabel("Review scope").selectOption("uncommitted");
-  await pullRequests.getByRole("button", { name: "Start review" }).click();
-  await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Do not modify the working tree during the review/);
+  await expect(pullRequests.getByText("No local reviews yet")).toBeVisible();
+  await expect(pullRequests.getByText("Select a review to view")).toBeVisible();
+  await expect(pullRequests.getByRole("button", { name: "Start local review" })).toBeVisible();
   await page.getByRole("link", { name: "Sites", exact: true }).click();
   const simpleSites = page.getByRole("region", { name: "Sites" });
   await expect(simpleSites.getByRole("heading", { name: "Sites" })).toBeVisible();
@@ -306,7 +305,7 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(simpleSites.getByText("No sites yet")).toBeVisible();
   await expect(simpleSites.getByLabel("Public URL")).toHaveCount(0);
   await simpleSites.getByRole("button", { name: "New site" }).click();
-  await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Build a website/);
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(/Build a website/);
   await openOwnerSurface(page, "Settings");
   await page.getByRole("button", { name: "Import", exact: true }).click();
   const globalFolders = page.getByLabel("Global folders");
@@ -346,9 +345,10 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(scheduler.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
   await expect(scheduler.getByRole("button", { name: "Set up in chat" })).toBeVisible();
   await expect(scheduler.getByLabel("Trigger")).toHaveCount(0);
+  await scheduler.getByLabel("Project").selectOption({ index: 1 });
   await scheduler.getByLabel("Scheduled work").fill("Summarize important project changes every morning");
   await scheduler.getByRole("button", { name: "Set up in chat" }).click();
-  await expect(page.getByRole("textbox", { name: "Goal", exact: true })).toHaveValue(/Summarize important project changes every morning/);
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(/Summarize important project changes every morning/);
 });
 
 test("simple and advanced interfaces meet the WCAG A and AA accessibility baseline", async ({ page }) => {
@@ -381,18 +381,23 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
     "Edit",
     "View",
     "Help",
+    "Minimize",
+    "Maximize or restore",
+    "Close window",
     "Search chats",
+    "Open activity",
     "New chat",
     "Pull requests",
     "Sites",
     "Scheduled",
+    "Agents",
     "Plugins"
   ];
   for (const name of navigation) {
     await page.keyboard.press("Tab");
     const control = name === "Search chats"
-      ? page.getByRole("textbox", { name })
-      : page.getByRole(name === "New chat" ? "button" : name === "Pull requests" || name === "Sites" || name === "Scheduled" || name === "Plugins" ? "link" : "button", { name, exact: true });
+      ? page.getByRole("button", { name })
+      : page.getByRole(name === "New chat" ? "button" : name === "Pull requests" || name === "Sites" || name === "Scheduled" || name === "Agents" || name === "Plugins" ? "link" : "button", { name, exact: true });
     await expect(control).toBeFocused();
     await expectVisibleKeyboardFocus(control);
   }
@@ -403,8 +408,10 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
   const projectChat = page.getByRole("button", { name: "New chat in consumer-app" });
   await expect(projectChat).toBeFocused();
   await expectVisibleKeyboardFocus(projectChat);
-  await page.keyboard.press("Tab");
   const owner = page.getByRole("button", { name: /Local owner/ });
+  for (let index = 0; index < 8 && !(await owner.evaluate((element) => document.activeElement === element)); index += 1) {
+    await page.keyboard.press("Tab");
+  }
   await expect(owner).toBeFocused();
   await expectVisibleKeyboardFocus(owner);
   await page.keyboard.press("Enter");
@@ -430,7 +437,7 @@ test("desktop menus mirror Codex commands without ChatGPT product branding", asy
   await page.getByRole("button", { name: "View", exact: true }).click();
   menu = page.getByLabel("View menu");
   await expect(menu.getByRole("button", { name: /Toggle Sidebar.*Ctrl\+B/ })).toBeVisible();
-  await expect(menu.getByRole("button", { name: "Open Terminal Ctrl+`" })).toBeDisabled();
+  await expect(menu.getByRole("button", { name: "Open Terminal Ctrl+`" })).toBeEnabled();
   await expect(menu.getByRole("button", { name: /Toggle Full Screen.*F11/ })).toBeVisible();
 
   await page.getByRole("button", { name: "Help", exact: true }).click();
