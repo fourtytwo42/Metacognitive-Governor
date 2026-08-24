@@ -4,6 +4,7 @@
 
 use std::{
     collections::BTreeMap,
+    io::{BufRead as _, Read as _},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -1284,6 +1285,53 @@ impl CodexAppServerHarness {
             .map(drop)
     }
 
+    /// Archives every non-archived app-server thread carrying an exact client analytics tag.
+    ///
+    /// MCG uses this to keep its recoverable role threads out of another Codex client's
+    /// user-facing Recents list. The exact `threadSource` match is deliberate: ordinary Codex,
+    /// extension, CLI, and other app-server threads are never touched.
+    pub async fn archive_threads_with_source(
+        &self,
+        thread_source: &str,
+    ) -> Result<Vec<String>, CodexHarnessError> {
+        let mut cursor: Option<String> = None;
+        let mut matching = Vec::new();
+        loop {
+            let response = self
+                .request(
+                    "thread/list",
+                    json!({
+                        "cursor": cursor,
+                        "limit": 100,
+                        "sortKey": "created_at",
+                        "sortDirection": "desc",
+                        // The embedded binary inherits the launching Codex surface's source
+                        // kind (for example `vscode` on Codex Desktop). Authority comes from
+                        // the exact `threadSource` tag below, not this broad discovery filter.
+                        "sourceKinds": [
+                            "cli", "vscode", "exec", "appServer", "subAgent",
+                            "subAgentReview", "subAgentCompact", "subAgentThreadSpawn",
+                            "subAgentOther", "unknown"
+                        ],
+                        "archived": false
+                    }),
+                )
+                .await?;
+            matching.extend(thread_ids_with_source(&response, thread_source));
+            cursor = response
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        for thread_id in &matching {
+            self.archive_thread(thread_id).await?;
+        }
+        Ok(matching)
+    }
+
     pub async fn unarchive_thread(&self, thread_id: &str) -> Result<(), CodexHarnessError> {
         self.request("thread/unarchive", json!({"threadId": thread_id}))
             .await
@@ -1600,6 +1648,50 @@ fn approval_response(request: &CodexApprovalRequest, approved: bool) -> Value {
     json!({"decision": if approved { "accept" } else { "decline" }})
 }
 
+fn thread_ids_with_source(response: &Value, thread_source: &str) -> Vec<String> {
+    response
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|thread| thread_has_source(thread, thread_source))
+        .filter_map(|thread| thread.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+fn thread_has_source(thread: &Value, thread_source: &str) -> bool {
+    if thread.get("threadSource").and_then(Value::as_str) == Some(thread_source) {
+        return true;
+    }
+    // Codex 0.144.6 persists the analytics tag in rollout metadata but can omit it from
+    // `thread/list`. Read only the bounded session-metadata line from the server-supplied local
+    // rollout path; never infer ownership from titles, prompts, or working directories.
+    let Some(path) = thread.get("path").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut first_line = String::new();
+    let mut reader = std::io::BufReader::new(file).take(64 * 1024);
+    let Ok(read) = reader.read_line(&mut first_line) else {
+        return false;
+    };
+    if read == 0 || (read == 64 * 1024 && !first_line.ends_with('\n')) {
+        return false;
+    }
+    serde_json::from_str::<Value>(&first_line)
+        .ok()
+        .and_then(|document| {
+            document
+                .pointer("/payload/thread_source")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(thread_source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1648,6 +1740,38 @@ mod tests {
         assert!(is_supported_server_request(
             "item/commandExecution/requestApproval"
         ));
+    }
+
+    #[test]
+    fn recents_cleanup_selects_only_exact_mcg_owned_threads() {
+        let rollout = std::env::temp_dir().join(format!(
+            "mcg-thread-source-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &rollout,
+            "{\"type\":\"session_meta\",\"payload\":{\"thread_source\":\"mcg\"}}\n",
+        )
+        .expect("rollout fixture");
+        let response = json!({
+            "data": [
+                {"id": "mcg-chat", "threadSource": "mcg"},
+                {"id": "ordinary-codex", "threadSource": "codex"},
+                {"id": "other-integration", "threadSource": "other"},
+                {"id": "mcg-coder", "threadSource": "mcg"},
+                {"id": "mcg-pinned-fallback", "threadSource": null, "path": rollout},
+                {"id": "missing-tag"}
+            ]
+        });
+        assert_eq!(
+            thread_ids_with_source(&response, "mcg"),
+            vec!["mcg-chat", "mcg-coder", "mcg-pinned-fallback"]
+        );
+        std::fs::remove_file(rollout).expect("remove rollout fixture");
     }
 
     #[test]

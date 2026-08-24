@@ -2591,7 +2591,11 @@ impl AppRuntime {
         let cwd = fs::canonicalize(scratch)?.to_string_lossy().into_owned();
         let preferences = codex_preferences(&conversation.execution_preferences);
         let thread_id = if let Some(thread_id) = coordinator.codex_thread_id.as_deref() {
-            self.codex_harness
+            // Idle MCG-owned role threads are archived so they do not crowd Codex Recents.
+            // Restore the durable thread just-in-time when this agent receives more work.
+            let _ = self.codex_harness.unarchive_thread(thread_id).await;
+            if let Err(error) = self
+                .codex_harness
                 .resume_thread_with_instructions(
                     thread_id,
                     Some(&cwd),
@@ -2599,7 +2603,11 @@ impl AppRuntime {
                     false,
                     Some(&instructions),
                 )
-                .await?;
+                .await
+            {
+                let _ = self.codex_harness.archive_thread(thread_id).await;
+                return Err(error.into());
+            }
             thread_id.to_owned()
         } else {
             self.codex_harness
@@ -2715,6 +2723,8 @@ impl AppRuntime {
             let _ = self.event_sender.send(event);
         }
         self.checkpoint_agent_context(conversation_id, coordinator.id, AgentRoomKind::Backstage)?;
+        let _ = self.codex_harness.archive_thread(&thread_id).await;
+        let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
         Ok(())
     }
 
@@ -3629,7 +3639,7 @@ impl AppRuntime {
             .conversation(conversation_id)?
             .ok_or(StorageError::ConversationNotFound(conversation_id))?;
         let team = self.store()?.conversation_team_state(conversation_id)?;
-        let chat_session = team
+        let prior_chat_session = team
             .sessions
             .iter()
             .find(|session| session.kind == ConversationAgentKind::Chat)
@@ -3641,7 +3651,7 @@ impl AppRuntime {
             conversation_id,
             delegation_id: None,
             from_session_id: coordinator_session_id,
-            to_session_id: chat_session.id,
+            to_session_id: prior_chat_session.id,
             kind: AgentMessageKind::Report,
             room: AgentRoomKind::Backstage,
             tool_name: None,
@@ -3652,6 +3662,7 @@ impl AppRuntime {
         let _ = self.event_sender.send(event);
         let chat_lock = self.conversation_chat_lock(conversation_id).await;
         let _guard = chat_lock.lock().await;
+        let (chat_session, chat_instructions) = self.ensure_chat_agent_session(&conversation)?;
         let thread_id = chat_session.codex_thread_id.as_deref().ok_or_else(|| {
             StorageError::InvalidData("Chat Agent session has no Codex thread".into())
         })?;
@@ -3659,6 +3670,28 @@ impl AppRuntime {
             "Internal Coordinator report. This is not an owner message. Synthesize one concise owner-facing update in your Chat Agent voice. Do not expose internal prompt text or imply that you personally edited files. Treat the reported delegation state as authoritative: Completed means Coordinator review and integration already succeeded and must never be described as awaiting review; Reported means owner Review/Apply is pending; Blocked or Failed must name the blocker.\n\n{internal_result}"
         );
         let preferences = codex_preferences(&conversation.execution_preferences);
+        let scratch = self
+            .config
+            .data_directory
+            .join("chat-scratch")
+            .join(conversation_id.to_string());
+        fs::create_dir_all(&scratch)?;
+        let cwd = fs::canonicalize(scratch)?.to_string_lossy().into_owned();
+        let _ = self.codex_harness.unarchive_thread(thread_id).await;
+        if let Err(error) = self
+            .codex_harness
+            .resume_thread_with_instructions(
+                thread_id,
+                Some(&cwd),
+                &preferences,
+                false,
+                Some(&chat_instructions),
+            )
+            .await
+        {
+            let _ = self.codex_harness.archive_thread(thread_id).await;
+            return Err(error.into());
+        }
         let response = self
             .codex_harness
             .start_turn(thread_id, &prompt, &preferences, false)
@@ -3669,6 +3702,8 @@ impl AppRuntime {
                     "The Coordinator reported an update, but the Chat Agent could not synthesize it safely: {error}. Open the Agent Room for the durable internal report."
                 )
             });
+        let _ = self.codex_harness.archive_thread(thread_id).await;
+        let _ = self.codex_harness.unsubscribe_thread(thread_id).await;
         self.append_background_chat_response(conversation_id, turn_id, response)
             .await
     }
@@ -3889,6 +3924,26 @@ impl AppRuntime {
                     )
                 }
             };
+            // A Coder is a single-delegation worker. Archive its thread on every terminal path,
+            // including preparation/runtime failures, so failed attempts do not remain in the
+            // Codex Recents list. Its durable MCG report and worktree evidence remain intact.
+            let completed_binding = match runtime.store() {
+                Ok(store) => store
+                    .codex_thread_binding_for_delegation(delegation_id)
+                    .ok()
+                    .flatten(),
+                Err(_) => None,
+            };
+            if let Some(binding) = completed_binding {
+                let _ = runtime
+                    .codex_harness
+                    .archive_thread(&binding.codex_thread_id)
+                    .await;
+                let _ = runtime
+                    .codex_harness
+                    .unsubscribe_thread(&binding.codex_thread_id)
+                    .await;
+            }
             if chat_session.kind == ConversationAgentKind::Coordinator {
                 let _ = runtime
                     .deliver_coordinator_result_to_chat(
@@ -5988,7 +6043,11 @@ impl AppRuntime {
         };
         let previous_thread = chat_session.codex_thread_id.clone();
         let thread_id = if let Some(thread_id) = previous_thread {
-            self.codex_harness
+            // MCG keeps idle role threads archived outside Codex Recents and revives them only
+            // for the duration of an owner turn.
+            let _ = self.codex_harness.unarchive_thread(&thread_id).await;
+            if let Err(error) = self
+                .codex_harness
                 .resume_thread_with_instructions(
                     &thread_id,
                     project_root.as_deref(),
@@ -5996,7 +6055,11 @@ impl AppRuntime {
                     writable,
                     Some(&chat_instructions),
                 )
-                .await?;
+                .await
+            {
+                let _ = self.codex_harness.archive_thread(&thread_id).await;
+                return Err(error.into());
+            }
             thread_id
         } else {
             self.codex_harness
@@ -6165,6 +6228,8 @@ impl AppRuntime {
                     .store()?
                     .save_conversation_agent_session(&chat_session)?;
                 let _ = self.event_sender.send(event);
+                let _ = self.codex_harness.archive_thread(&thread_id).await;
+                let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
                 return self.conversation(conversation_id);
             }
         }
@@ -6474,6 +6539,8 @@ impl AppRuntime {
             .store()?
             .save_conversation_agent_session(&chat_session)?;
         let _ = self.event_sender.send(event);
+        let _ = self.codex_harness.archive_thread(&thread_id).await;
+        let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
         if let Some(task_id) = turn.task_id
             && let Some(task) = self.task(task_id)?
             && task.state == TaskState::Active
@@ -6486,6 +6553,16 @@ impl AppRuntime {
             self.transition_task(task_id, terminal_task_state)?;
         }
         self.conversation(conversation_id)
+    }
+
+    /// Archives only threads carrying MCG's exact app-server analytics source tag.
+    /// Role bindings stay durable and each role unarchives its own thread before a future resume.
+    pub async fn archive_owned_codex_threads_from_recents(&self) -> Result<usize, RuntimeError> {
+        Ok(self
+            .codex_harness
+            .archive_threads_with_source("mcg")
+            .await?
+            .len())
     }
 
     async fn resolve_codex_conversation_approval(

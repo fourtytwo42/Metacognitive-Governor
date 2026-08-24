@@ -40,6 +40,8 @@ Checkpoints are append-only summaries with source references, an approximate tok
 
 The Coordinator assigns stable, friendly generated names to Coders. Join and leave events are durable. Up to eight active Coding Agents may run concurrently, further bounded by the pinned organization revision and available managed-worktree capacity. Each Coder retains its own Codex thread, lease, branch, worktree, context checkpoint, and cancellation authority. Restarts reconcile durable state and never blindly replay accepted turns.
 
+MCG-owned Codex threads are tagged in rollout metadata with `thread_source: "mcg"`. Idle Chat and Coordinator threads, and every terminal Coder thread, are archived and unsubscribed so they do not appear in Codex Recents. MCG unarchives a retained role thread immediately before resuming it. Packaged-service startup also archives unarchived threads carrying that exact tag; it never uses a title, prompt, or working-directory heuristic and never deletes Codex history.
+
 ## Future governor integration
 
 Chat, Coordinator, and Coder prompt policies are compiled from immutable organization revisions. A later metacognitive-governor feature may publish new revisions or adjust future-session prompt policy through the existing revision mechanism. It must never mutate an in-flight session silently or gain ambient execution authority.
