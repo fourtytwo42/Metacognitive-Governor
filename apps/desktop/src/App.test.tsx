@@ -2796,7 +2796,7 @@ test("Agent Room shows hierarchy, lifecycle, tool traces, and never exposes a di
   expect(within(room).getByText("delegate_code")).toBeInTheDocument();
   expect(within(room).getByText("Build the responsive shell")).toBeInTheDocument();
   expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByText(/Context checkpoints/));
+  fireEvent.click(screen.getByText(/Context milestones/));
   expect(within(room).getByText("Delegated the responsive shell.")).toBeInTheDocument();
 });
 

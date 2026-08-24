@@ -20,6 +20,8 @@ pub enum EventKind {
     AgentDelegationUpdated,
     AgentMessageRecorded,
     AgentContextCheckpointUpdated,
+    CoordinationBatchUpdated,
+    AgentWakeUpdated,
     BlackboardEntryRecorded,
     ManagedWorktreeUpdated,
     CodexHarnessEvent,
@@ -91,6 +93,8 @@ impl EventKind {
             Self::AgentDelegationUpdated => "agent_delegation_updated",
             Self::AgentMessageRecorded => "agent_message_recorded",
             Self::AgentContextCheckpointUpdated => "agent_context_checkpoint_updated",
+            Self::CoordinationBatchUpdated => "coordination_batch_updated",
+            Self::AgentWakeUpdated => "agent_wake_updated",
             Self::BlackboardEntryRecorded => "blackboard_entry_recorded",
             Self::ManagedWorktreeUpdated => "managed_worktree_updated",
             Self::CodexHarnessEvent => "codex_harness_event",
@@ -179,6 +183,10 @@ impl EventKind {
             "agent_context_checkpoint_updated" | "AgentContextCheckpointUpdated" => {
                 Ok(Self::AgentContextCheckpointUpdated)
             }
+            "coordination_batch_updated" | "CoordinationBatchUpdated" => {
+                Ok(Self::CoordinationBatchUpdated)
+            }
+            "agent_wake_updated" | "AgentWakeUpdated" => Ok(Self::AgentWakeUpdated),
             "blackboard_entry_recorded" | "BlackboardEntryRecorded" => {
                 Ok(Self::BlackboardEntryRecorded)
             }

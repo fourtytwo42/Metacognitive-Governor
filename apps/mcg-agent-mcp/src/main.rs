@@ -169,12 +169,14 @@ fn tool_schema(name: &str) -> Value {
         "settle_delegation" => json!({
             "type":"object",
             "properties":{
+                "wake_id":{"type":"string"},
                 "delegation_id":{"type":"string"},
                 "expected_revision":{"type":"integer","minimum":1},
                 "decision":{"type":"string","enum":["accept","block"]},
                 "rationale":{"type":"string","minLength":1}
             },
-            "required":["delegation_id","expected_revision","decision","rationale"],
+            "required":["delegation_id","decision","rationale"],
+            "anyOf":[{"required":["wake_id"]},{"required":["expected_revision"]}],
             "additionalProperties":false
         }),
         "search_shared_context" => json!({

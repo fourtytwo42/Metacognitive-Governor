@@ -836,12 +836,20 @@ function TeamActivityIndicator({ team, onOpenRoom }: { team?: ConversationTeamSt
     .find((session) => session.kind === "coordinator" && session.state !== "retired");
   const activeDelegations = team.delegations.filter((delegation) => codingAgentIsActive(delegation.state));
   const coordinatorActive = Boolean(coordinator && ["starting", "working", "waiting"].includes(coordinator.state));
-  if (!coordinatorActive && activeDelegations.length === 0) return null;
-  const label = activeDelegations.length > 0
-    ? `${activeDelegations.length} coding agent${activeDelegations.length === 1 ? "" : "s"} working`
-    : coordinator?.state === "waiting"
-      ? "Coordinator is waiting for an agent response"
-      : "Coordinator is planning and assigning work";
+  const activeBatch = (team.coordination_batches ?? []).slice().reverse().find((batch) => !["completed", "failed"].includes(batch.state));
+  if (!coordinatorActive && activeDelegations.length === 0 && !activeBatch) return null;
+  const waiting = activeDelegations.filter((delegation) => ["waiting", "blocked"].includes(delegation.state)).length;
+  const label = activeBatch?.state === "reviewing" || activeBatch?.state === "review_pending"
+    ? "Coordinator is reviewing results"
+    : activeBatch?.state === "chat_pending"
+      ? "Chat Agent is preparing your update"
+      : activeBatch?.state === "recovery_required"
+        ? "Agent team delivery needs recovery"
+        : waiting > 0
+          ? `Waiting for answers for ${waiting} coding agent${waiting === 1 ? "" : "s"}`
+          : activeDelegations.length > 0
+            ? `${activeDelegations.length} coding agent${activeDelegations.length === 1 ? "" : "s"} working`
+            : "Coordinator is planning and assigning work";
   return <section className="team-activity-indicator" role="status" aria-live="polite" aria-label="Agent team activity">
     <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
     <span><strong>{label}</strong><small>The Chat Agent will update you automatically when the team finishes.</small></span>
@@ -940,6 +948,14 @@ function AgentRoom({ team }: { team?: ConversationTeamState }) {
   const messages = team.messages.filter((message) => (message.room ?? "backstage") === "backstage");
   const toolResults = new Map(messages.filter((message) => message.kind === "tool_result" && message.correlation_id).map((message) => [message.correlation_id!, message]));
   const checkpoints = team.context_checkpoints ?? [];
+  const latestCheckpointBySession = new Map<string, (typeof checkpoints)[number]>();
+  checkpoints.forEach((checkpoint) => latestCheckpointBySession.set(checkpoint.session_id, checkpoint));
+  const latestCheckpoints = [...latestCheckpointBySession.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
+  const checkpointHistory = checkpoints.filter((checkpoint) => latestCheckpointBySession.get(checkpoint.session_id)?.id !== checkpoint.id).reverse();
+  const coordinator = team.sessions.find((session) => session.kind === "coordinator");
+  const coordinatorBatches = team.coordination_batches ?? [];
+  const coordinatorTurns = coordinatorBatches.reduce((total, batch) => total + (batch.coordinator_turn_count ?? 0), 0);
+  const coordinatorTokens = coordinatorBatches.reduce((total, batch) => total + (batch.coordinator_approximate_tokens ?? 0), 0);
   return <section className="agent-room" aria-label="Agent Room">
     <header className="agent-room-header">
       <div><span className="agent-room-live" aria-hidden="true" /><div><strong>Agent Room</strong><small>Behind-the-scenes coordination · owner-readable</small></div></div>
@@ -952,6 +968,7 @@ function AgentRoom({ team }: { team?: ConversationTeamState }) {
         <i aria-label={session.state} title={session.state.replaceAll("_", " ")} />
       </div>)}
     </div>
+    {coordinator && <p className="agent-room-metrics">Coordinator model turns <strong>{coordinatorTurns}</strong> · estimated tokens <strong>~{coordinatorTokens.toLocaleString()}</strong></p>}
     <div className="agent-room-timeline">
       {messages.length === 0 ? <p className="empty-state">Agents have not exchanged any messages yet.</p> : messages.map((message) => {
         if (message.kind === "tool_result") return null;
@@ -973,8 +990,9 @@ function AgentRoom({ team }: { team?: ConversationTeamState }) {
       })}
     </div>
     {checkpoints.length > 0 && <details className="agent-room-compaction">
-      <summary>Context checkpoints <span>{checkpoints.length}</span></summary>
-      {checkpoints.slice(-8).reverse().map((checkpoint) => <article key={checkpoint.id}><strong>{sessionName(checkpoint.session_id)} · revision {checkpoint.revision}</strong><small>~{checkpoint.approximate_tokens} tokens · {checkpoint.source_references.length} sources</small><p>{checkpoint.summary}</p></article>)}
+      <summary>Context milestones <span>{checkpoints.length}</span></summary>
+      {latestCheckpoints.map((checkpoint) => <article key={checkpoint.id}><strong>{sessionName(checkpoint.session_id)} · {checkpoint.cause?.replaceAll("_", " ") ?? "legacy"} · revision {checkpoint.revision}</strong><small>~{checkpoint.approximate_tokens} tokens · {checkpoint.source_references.length} sources</small><p>{checkpoint.summary}</p></article>)}
+      {checkpointHistory.length > 0 && <details><summary>Earlier milestones <span>{checkpointHistory.length}</span></summary>{checkpointHistory.map((checkpoint) => <article key={checkpoint.id}><strong>{sessionName(checkpoint.session_id)} · {checkpoint.cause?.replaceAll("_", " ") ?? "legacy"} · revision {checkpoint.revision}</strong><small>~{checkpoint.approximate_tokens} tokens · {checkpoint.source_references.length} sources</small><p>{checkpoint.summary}</p></article>)}</details>}
     </details>}
   </section>;
 }

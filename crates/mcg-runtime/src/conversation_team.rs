@@ -11,7 +11,7 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use mcg_domain::{
     AgentDelegationId, ConversationAgentKind, ConversationAgentSessionId, ConversationId,
-    OrganizationRevisionId, ProjectId,
+    CoordinationBatchId, OrganizationRevisionId, ProjectId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,6 +54,7 @@ pub struct ConversationTeamCoordinator {
         tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_delegations:
         tokio::sync::Mutex<BTreeMap<AgentDelegationId, tokio::task::AbortHandle>>,
+    pub(crate) active_batches: Mutex<BTreeMap<ConversationId, CoordinationBatchId>>,
     pub(crate) direct_workspace_locks:
         tokio::sync::Mutex<BTreeMap<ProjectId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) integration_locks: Mutex<BTreeMap<ProjectId, Arc<Mutex<()>>>>,

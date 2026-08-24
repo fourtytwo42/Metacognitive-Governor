@@ -49,21 +49,23 @@ use mcg_codex_app_server::{
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
-    AgentContextCheckpoint, AgentContextCheckpointId, AgentCredentialAudit, AgentCredentialAuditId,
-    AgentCredentialAuditKind, AgentDelegation, AgentDelegationId, AgentDelegationState,
-    AgentInstanceId, AgentLeaseId, AgentMessage, AgentMessageId, AgentMessageKind, AgentRoomKind,
-    ApprovalId, BlackboardEntry, BlackboardEntryId, BlackboardEntryKind,
-    CONVERSATION_TEAM_SCHEMA_VERSION, CodexOwnedThread, CodexRecoveryState, CodexThreadBinding,
-    CodingDelegationBrief, ComputerActionBatch, ComputerActionBatchId, ComputerActionBatchState,
-    ComputerUseCapability, ComputerUseTarget, Conversation, ConversationActivity,
-    ConversationActivityKind, ConversationActivityState, ConversationAgentKind,
-    ConversationAgentSession, ConversationAgentSessionId, ConversationAgentSessionState,
-    ConversationId, ConversationMessage, ConversationMessageId, ConversationRole,
-    ConversationState, ConversationTurn, ConversationTurnId, ConversationTurnState,
-    ConversationView, EvaluationId, ExecutionPreferences, ExperimentBenchmarkId,
-    ExperimentDecisionId, ExperimentId, LeaseId, ManagedWorktree, ManagedWorktreeId,
-    ManagedWorktreeState, MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId,
-    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
+    AgentCredentialAudit, AgentCredentialAuditId, AgentCredentialAuditKind, AgentDelegation,
+    AgentDelegationId, AgentDelegationState, AgentInstanceId, AgentLeaseId, AgentMessage,
+    AgentMessageId, AgentMessageKind, AgentRoomKind, AgentWake, AgentWakeId, AgentWakeKind,
+    AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry, BlackboardEntryId,
+    BlackboardEntryKind, CONVERSATION_TEAM_SCHEMA_VERSION, CodexOwnedThread, CodexRecoveryState,
+    CodexThreadBinding, CodingDelegationBrief, ComputerActionBatch, ComputerActionBatchId,
+    ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, Conversation,
+    ConversationActivity, ConversationActivityKind, ConversationActivityState,
+    ConversationAgentKind, ConversationAgentSession, ConversationAgentSessionId,
+    ConversationAgentSessionState, ConversationId, ConversationMessage, ConversationMessageId,
+    ConversationRole, ConversationState, ConversationTurn, ConversationTurnId,
+    ConversationTurnState, ConversationView, CoordinationBatch, CoordinationBatchId,
+    CoordinationBatchState, CoordinatorReviewDecision, EvaluationId, ExecutionPreferences,
+    ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, LeaseId, ManagedWorktree,
+    ManagedWorktreeId, ManagedWorktreeState, MemoryClaimId, MemoryTransferId, NotificationSeverity,
+    OrganizationId, OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
     PLATFORM_SCHEMA_VERSION, PlatformCapability, PlatformCapabilityAvailability,
     PlatformCapabilityKind, PlatformCapabilitySnapshot, PlatformCapabilitySnapshotId,
     PlatformSession, PlatformSessionEvent, PlatformSessionId, PlatformSessionKind,
@@ -2057,6 +2059,19 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
     }
 }
 
+struct ActiveCoordinationBatchGuard<'a> {
+    batches: &'a Mutex<BTreeMap<ConversationId, CoordinationBatchId>>,
+    conversation_id: ConversationId,
+}
+
+impl Drop for ActiveCoordinationBatchGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut batches) = self.batches.lock() {
+            batches.remove(&self.conversation_id);
+        }
+    }
+}
+
 pub struct AppRuntime {
     config: AppConfig,
     data_lock: Option<DataDirectoryLock>,
@@ -2773,9 +2788,23 @@ impl AppRuntime {
         self: Arc<Self>,
         conversation_id: ConversationId,
         project_request: Option<String>,
+        coordination_batch_id: Option<CoordinationBatchId>,
     ) -> Result<(), RuntimeError> {
         let lock = self.conversation_coordinator_lock(conversation_id).await;
         let _guard = lock.lock().await;
+        let _batch_guard = if let Some(batch_id) = coordination_batch_id {
+            self.conversation_team
+                .active_batches
+                .lock()
+                .map_err(|_| RuntimeError::StorageLock)?
+                .insert(conversation_id, batch_id);
+            Some(ActiveCoordinationBatchGuard {
+                batches: &self.conversation_team.active_batches,
+                conversation_id,
+            })
+        } else {
+            None
+        };
         let conversation = self
             .store()?
             .conversation(conversation_id)?
@@ -2872,6 +2901,15 @@ impl AppRuntime {
                     && checkpoint.room == AgentRoomKind::Backstage
             })
             .max_by_key(|checkpoint| checkpoint.revision);
+        let checkpoint_references = latest_checkpoint
+            .map(|checkpoint| {
+                checkpoint
+                    .source_references
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         let recent = refreshed
             .messages
             .iter()
@@ -2879,9 +2917,19 @@ impl AppRuntime {
                 message.room == AgentRoomKind::Backstage
                     && (message.to_session_id == coordinator.id
                         || message.from_session_id == coordinator.id)
+                    && matches!(
+                        message.kind,
+                        AgentMessageKind::Delegation
+                            | AgentMessageKind::Question
+                            | AgentMessageKind::Answer
+                            | AgentMessageKind::Amendment
+                            | AgentMessageKind::Report
+                            | AgentMessageKind::Cancellation
+                    )
+                    && !checkpoint_references.contains(&message.id.to_string())
             })
             .rev()
-            .take(24)
+            .take(32)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -2904,10 +2952,15 @@ impl AppRuntime {
                 .unwrap_or("No prior checkpoint."),
             recent
         );
+        let mut coordinator_turn_count = 1_u32;
+        let mut coordinator_token_chars = prompt.len();
         let mut result = self
             .codex_harness
             .start_turn(&thread_id, &prompt, &preferences, false)
             .await;
+        if let Ok(completed) = &result {
+            coordinator_token_chars = coordinator_token_chars.saturating_add(completed.text.len());
+        }
         let mut missing_delegation = false;
         if result.is_ok() && project_request.is_some() {
             let after_first_turn = self.store()?.conversation_team_state(conversation_id)?;
@@ -2922,10 +2975,16 @@ impl AppRuntime {
                 let correction = format!(
                     "The prior Coordinator turn completed without creating the Coding Agent required for this accepted project-work request. Call `delegate_code` now with a bounded objective, scope, constraints, and success conditions derived from the request below. Do not merely describe the delegation or return ordinary text. If delegation is genuinely unsafe, call `message_chat` with the concrete blocker instead.\n\nAccepted project request:\n{request}"
                 );
+                coordinator_turn_count = coordinator_turn_count.saturating_add(1);
+                coordinator_token_chars = coordinator_token_chars.saturating_add(correction.len());
                 result = self
                     .codex_harness
                     .start_turn(&thread_id, &correction, &preferences, false)
                     .await;
+                if let Ok(completed) = &result {
+                    coordinator_token_chars =
+                        coordinator_token_chars.saturating_add(completed.text.len());
+                }
                 if result.is_ok() {
                     let after_correction =
                         self.store()?.conversation_team_state(conversation_id)?;
@@ -2946,6 +3005,25 @@ impl AppRuntime {
             .store()?
             .save_conversation_agent_session(&coordinator)?;
         let _ = self.event_sender.send(event);
+        let coordinator_batch = if let Some(batch_id) = coordination_batch_id {
+            self.store()?
+                .coordination_batch(batch_id)?
+                .map(|batch| (batch_id, batch))
+        } else {
+            None
+        };
+        if let Some((_, mut batch)) = coordinator_batch {
+            batch.coordinator_turn_count = batch
+                .coordinator_turn_count
+                .saturating_add(coordinator_turn_count);
+            batch.coordinator_approximate_tokens = batch
+                .coordinator_approximate_tokens
+                .saturating_add(u64::try_from(coordinator_token_chars / 4).unwrap_or(u64::MAX));
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = Utc::now();
+            let event = self.store()?.save_coordination_batch(&batch)?;
+            let _ = self.event_sender.send(event);
+        }
         if let Ok(completed) = &result
             && !completed.text.trim().is_empty()
         {
@@ -2965,7 +3043,16 @@ impl AppRuntime {
             })?;
             let _ = self.event_sender.send(event);
         }
-        self.checkpoint_agent_context(conversation_id, coordinator.id, AgentRoomKind::Backstage)?;
+        self.checkpoint_agent_context(
+            conversation_id,
+            coordinator.id,
+            AgentRoomKind::Backstage,
+            if project_request.is_some() {
+                AgentContextCheckpointCause::DelegationSealed
+            } else {
+                AgentContextCheckpointCause::Question
+            },
+        )?;
         let _ = self.codex_harness.archive_thread(&thread_id).await;
         let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
         if missing_delegation {
@@ -2982,6 +3069,7 @@ impl AppRuntime {
         conversation_id: ConversationId,
         session_id: ConversationAgentSessionId,
         room: AgentRoomKind,
+        cause: AgentContextCheckpointCause,
     ) -> Result<(), RuntimeError> {
         let team = self.store()?.conversation_team_state(conversation_id)?;
         let messages = team
@@ -3001,11 +3089,44 @@ impl AppRuntime {
             .iter()
             .filter(|checkpoint| checkpoint.session_id == session_id && checkpoint.room == room)
             .max_by_key(|checkpoint| checkpoint.revision);
+        let through_index = previous
+            .and_then(|checkpoint| checkpoint.through_message_id)
+            .and_then(|through| messages.iter().position(|message| message.id == through));
+        let selected = messages
+            .iter()
+            .skip(through_index.map_or(0, |index| index.saturating_add(1)))
+            .filter(|message| {
+                matches!(
+                    message.kind,
+                    AgentMessageKind::Delegation
+                        | AgentMessageKind::Question
+                        | AgentMessageKind::Answer
+                        | AgentMessageKind::Amendment
+                        | AgentMessageKind::Report
+                        | AgentMessageKind::Cancellation
+                )
+            })
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Ok(());
+        }
         let revision = previous.map_or(1, |checkpoint| checkpoint.revision.saturating_add(1));
-        let selected = messages.iter().rev().take(16).collect::<Vec<_>>();
-        let mut summary = String::new();
-        let mut references = Vec::new();
-        for message in selected.into_iter().rev() {
+        let mut summary =
+            previous.map_or_else(String::new, |checkpoint| checkpoint.summary.clone());
+        if summary.len() > 4_500 {
+            let mut boundary = summary.len().saturating_sub(4_500);
+            while !summary.is_char_boundary(boundary) {
+                boundary = boundary.saturating_add(1);
+            }
+            summary = format!(
+                "[Earlier milestone context retained in searchable history]\n{}",
+                &summary[boundary..]
+            );
+        }
+        let mut references =
+            previous.map_or_else(Vec::new, |checkpoint| checkpoint.source_references.clone());
+        let mut last_included = previous.and_then(|checkpoint| checkpoint.through_message_id);
+        for message in selected {
             let sender = team
                 .sessions
                 .iter()
@@ -3019,6 +3140,18 @@ impl AppRuntime {
             }
             summary.push_str(&format!("- {sender}: {content}\n"));
             references.push(message.id.to_string());
+            last_included = Some(message.id);
+        }
+        let mut digest = Sha256::new();
+        digest.update(summary.as_bytes());
+        for reference in &references {
+            digest.update(reference.as_bytes());
+        }
+        let content_sha256 = format!("{:x}", digest.finalize());
+        if previous.and_then(|checkpoint| checkpoint.content_sha256.as_deref())
+            == Some(content_sha256.as_str())
+        {
+            return Ok(());
         }
         let checkpoint = AgentContextCheckpoint {
             schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
@@ -3027,7 +3160,9 @@ impl AppRuntime {
             session_id,
             room,
             revision,
-            through_message_id: messages.last().map(|message| message.id),
+            through_message_id: last_included,
+            cause,
+            content_sha256: Some(content_sha256),
             approximate_tokens: u64::try_from(summary.len() / 4).unwrap_or(u64::MAX),
             summary,
             source_references: references,
@@ -3266,6 +3401,8 @@ impl AppRuntime {
         chat_thread_id: &str,
         preferences: &CodexExecutionPreferences,
         brief: CodingDelegationBrief,
+        coordination_batch_id: Option<CoordinationBatchId>,
+        origin_turn_id: ConversationTurnId,
         retry_of_id: Option<AgentDelegationId>,
         idempotency_key: Option<String>,
     ) -> Result<String, RuntimeError> {
@@ -3331,6 +3468,8 @@ impl AppRuntime {
             coder_session_id: Some(coder_session.id),
             project_id,
             organization_revision_id: organization.revision_id,
+            coordination_batch_id,
+            origin_turn_id: Some(origin_turn_id),
             revision: 1,
             prompt_revision: organization.revision,
             permission_mode: Some(conversation.execution_preferences.approval_mode),
@@ -3350,6 +3489,9 @@ impl AppRuntime {
             unresolved_issues: Vec::new(),
             integration_ready: false,
             report_sha256: None,
+            coordinator_decision: None,
+            coordinator_rationale: None,
+            coordinator_reviewed_at: None,
             accepted_codex_item_id: None,
             error: None,
             created_at: now,
@@ -3839,18 +3981,107 @@ impl AppRuntime {
             let event = self.store()?.append_agent_message(&report)?;
             let _ = self.event_sender.send(event);
         }
+        let mut review_delegations = vec![delegation.clone()];
+        let mut review_wake_id = None;
+        if let Some(batch_id) = delegation.coordination_batch_id {
+            let team = self.store()?.conversation_team_state(conversation.id)?;
+            let mut batch = self.store()?.coordination_batch(batch_id)?.ok_or_else(|| {
+                StorageError::InvalidData("coordination batch disappeared before review".into())
+            })?;
+            for _ in 0..100 {
+                if batch.state != CoordinationBatchState::Open {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(50)).await;
+                batch = self.store()?.coordination_batch(batch_id)?.ok_or_else(|| {
+                    StorageError::InvalidData("coordination batch disappeared while sealing".into())
+                })?;
+            }
+            if batch.state == CoordinationBatchState::Open {
+                batch.state = CoordinationBatchState::RecoveryRequired;
+                batch.revision = batch.revision.saturating_add(1);
+                batch.last_error =
+                    Some("Coordinator batch did not seal before Coding Agent completion".into());
+                batch.updated_at = Utc::now();
+                let event = self.store()?.save_coordination_batch(&batch)?;
+                let _ = self.event_sender.send(event);
+                return Ok("Coding work finished, but its coordination batch requires recovery before final review.".into());
+            }
+            review_delegations = batch
+                .delegation_ids
+                .iter()
+                .filter_map(|id| team.delegations.iter().find(|item| item.id == *id).cloned())
+                .collect();
+            let still_active = review_delegations.iter().any(|item| {
+                matches!(
+                    item.state,
+                    AgentDelegationState::Requested
+                        | AgentDelegationState::Preparing
+                        | AgentDelegationState::Running
+                        | AgentDelegationState::Waiting
+                        | AgentDelegationState::Integrating
+                )
+            });
+            if still_active {
+                return Ok("__MCG_BATCH_PENDING__".into());
+            }
+            let revisions = review_delegations
+                .iter()
+                .filter(|item| item.state == AgentDelegationState::Reported)
+                .map(|item| (item.id, item.revision))
+                .collect::<Vec<_>>();
+            let wake = AgentWake {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: AgentWakeId::new(),
+                idempotency_key: format!("{batch_id}:final_review:{}", batch.revision),
+                conversation_id: conversation.id,
+                coordination_batch_id: batch_id,
+                delegation_id: None,
+                source_message_id: None,
+                target_session_id: chat_session.id,
+                target: AgentWakeTarget::Coordinator,
+                kind: AgentWakeKind::FinalReview,
+                state: AgentWakeState::Claimed,
+                attempt_count: 1,
+                claimed_until: Some(Utc::now() + Duration::minutes(5)),
+                delegation_revisions: revisions,
+                payload: "All Coding Agents in this batch are ready for final review.".into(),
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            let (wake, event) = self.store()?.enqueue_agent_wake(&wake)?;
+            if let Some(event) = event {
+                let _ = self.event_sender.send(event);
+            }
+            review_wake_id = Some(wake.id);
+            batch.state = CoordinationBatchState::Reviewing;
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = Utc::now();
+            let event = self.store()?.save_coordination_batch(&batch)?;
+            let _ = self.event_sender.send(event);
+        }
+        let review_payload = review_delegations
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "delegation_id": item.id,
+                    "revision": item.revision,
+                    "state": item.state,
+                    "brief": item.brief,
+                    "summary": item.summary,
+                    "changed_files": item.changed_files,
+                    "checks": item.checks,
+                    "evidence": item.evidence,
+                    "unresolved_issues": item.unresolved_issues,
+                    "permission_mode": item.permission_mode
+                })
+            })
+            .collect::<Vec<_>>();
         let synthesis_prompt = format!(
-            "Review this internal Coding Agent report for delegation {} against its pinned brief. This is not a user message. Before `message_chat`, you MUST call `settle_delegation` exactly once with delegation_id `{}`, expected_revision {}, decision `accept` or `block`, and a concise rationale. Accept only when scope, success conditions, changed files, checks, evidence, and unresolved issues support the result. A block retains the work for owner review. Permission mode is {:?}; Ask remains reported for Review/Apply after acceptance, while other modes integrate only after your acceptance. Then send a concise status through `message_chat`. Never emit an ordinary owner-facing response.\n\nBrief:\n{}\n\nSummary:\n{}\n\nChanged files:\n{}\n\nChecks:\n{}\n\nEvidence:\n{}\n\nUnresolved issues:\n{}",
-            delegation.id,
-            delegation.id,
-            delegation.revision,
-            conversation.execution_preferences.approval_mode,
-            serde_json::to_string(&delegation.brief).map_err(StorageError::from)?,
-            delegation.summary.as_deref().unwrap_or(&coder_result.text),
-            delegation.changed_files.join("\n"),
-            delegation.checks.join("\n"),
-            delegation.evidence.join("\n"),
-            delegation.unresolved_issues.join("\n")
+            "Review this completed coordination batch. This is internal and not an owner message. For every delegation whose state is `reported`, call `settle_delegation` exactly once with wake_id `{}`, its delegation_id, decision `accept` or `block`, and a concise rationale. The wake binds the authoritative revisions; do not search or ask a retired Coder for revision numbers. Accept only when scope, changed files, checks, evidence, and unresolved issues support the result. Then call `message_chat` exactly once with one concise aggregate status. Never emit an ordinary owner-facing response.\n\nBatch reports:\n{}",
+            review_wake_id.map_or_else(|| "legacy".into(), |id| id.to_string()),
+            serde_json::to_string_pretty(&review_payload).map_err(StorageError::from)?
         );
         let synthesis_lock = if chat_session.kind == ConversationAgentKind::Coordinator {
             self.conversation_coordinator_lock(conversation.id).await
@@ -3858,83 +4089,282 @@ impl AppRuntime {
             self.conversation_chat_lock(conversation.id).await
         };
         let _synthesis_guard = synthesis_lock.lock().await;
-        let synthesis = self
-            .codex_harness
-            .start_turn(chat_thread_id, &synthesis_prompt, preferences, false)
-            .await;
-        delegation = self
-            .store()?
-            .agent_delegation(delegation.id)?
-            .ok_or_else(|| StorageError::InvalidData("delegation disappeared".into()))?;
-        if delegation.state == AgentDelegationState::Reported {
-            delegation.state = AgentDelegationState::Blocked;
-            delegation.revision = delegation.revision.saturating_add(1);
-            delegation.integration_ready = false;
-            delegation.error = Some(
-                "Coordinator finished without an authenticated settle_delegation decision".into(),
-            );
-            delegation.updated_at = Utc::now();
-            let event = self.store()?.save_agent_delegation(&delegation)?;
-            let _ = self.event_sender.send(event);
-        }
-        let active_coders = self
+        let owner_chat_session = self
             .store()?
             .conversation_team_state(conversation.id)?
-            .delegations
+            .sessions
             .into_iter()
-            .filter(|candidate| {
-                candidate.id != delegation.id
-                    && matches!(
-                        candidate.state,
-                        AgentDelegationState::Requested
-                            | AgentDelegationState::Preparing
-                            | AgentDelegationState::Running
-                            | AgentDelegationState::Waiting
-                            | AgentDelegationState::Integrating
-                    )
-            })
-            .count();
-        let deterministic_report = format!(
-            "{} finished delegation {} with state {:?}. Summary: {} Changed files: {}. Checks: {}. {}",
-            coder_session.display_name,
-            delegation.id,
-            delegation.state,
-            delegation
-                .summary
-                .as_deref()
-                .unwrap_or("Coding work finished without a textual summary."),
-            if delegation.changed_files.is_empty() {
-                "none".into()
-            } else {
-                delegation.changed_files.join(", ")
-            },
-            if delegation.checks.is_empty() {
-                "none reported".into()
-            } else {
-                delegation.checks.join("; ")
-            },
-            if active_coders == 0 {
-                "No other Coding Agents remain active.".into()
-            } else {
-                format!("{active_coders} other Coding Agent(s) remain active.")
+            .find(|session| session.kind == ConversationAgentKind::Chat)
+            .ok_or_else(|| StorageError::InvalidData("Chat Agent session was not found".into()))?;
+        let (_, review_instructions, _) =
+            self.ensure_coordinator_agent_session(conversation, &owner_chat_session)?;
+        let review_scratch = self
+            .config
+            .data_directory
+            .join("coordinator-scratch")
+            .join(conversation.id.to_string());
+        fs::create_dir_all(&review_scratch)?;
+        let review_cwd = fs::canonicalize(review_scratch)?
+            .to_string_lossy()
+            .into_owned();
+        let _ = self.codex_harness.unarchive_thread(chat_thread_id).await;
+        let mut review_turn_count = 1_u32;
+        let mut review_token_chars = synthesis_prompt.len();
+        let synthesis = match self
+            .codex_harness
+            .resume_thread_with_instructions(
+                chat_thread_id,
+                Some(&review_cwd),
+                preferences,
+                false,
+                Some(&review_instructions),
+            )
+            .await
+        {
+            Ok(()) => {
+                self.codex_harness
+                    .start_turn(chat_thread_id, &synthesis_prompt, preferences, false)
+                    .await
             }
-        );
+            Err(error) => Err(error),
+        };
+        if let Ok(completed) = &synthesis {
+            review_token_chars = review_token_chars.saturating_add(completed.text.len());
+        }
+        let mut refreshed_team = self.store()?.conversation_team_state(conversation.id)?;
+        let mut refreshed = review_delegations
+            .iter()
+            .filter_map(|prior| {
+                refreshed_team
+                    .delegations
+                    .iter()
+                    .find(|item| item.id == prior.id)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let mut unsettled = refreshed
+            .iter()
+            .filter(|item| {
+                item.state == AgentDelegationState::Reported && item.coordinator_decision.is_none()
+            })
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let mut chat_wake_present = delegation.coordination_batch_id.is_some_and(|batch_id| {
+            refreshed_team.wakes.iter().any(|wake| {
+                wake.coordination_batch_id == batch_id
+                    && wake.target == AgentWakeTarget::Chat
+                    && wake.kind == AgentWakeKind::ChatCompletion
+            })
+        });
+        if !unsettled.is_empty() || !chat_wake_present {
+            let corrective_prompt = format!(
+                "Correct the incomplete final review for wake `{}`. Call `settle_delegation` exactly once for each omitted delegation ID [{}], using this wake_id, decision `accept` or `block`, and a concise rationale. Call `message_chat` exactly once if it was not already called. Do not repeat successful calls, do not contact retired Coding Agents, and do not emit an owner-facing response.",
+                review_wake_id.map_or_else(|| "legacy".into(), |id| id.to_string()),
+                unsettled
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            review_turn_count = review_turn_count.saturating_add(1);
+            review_token_chars = review_token_chars.saturating_add(corrective_prompt.len());
+            let corrective = self
+                .codex_harness
+                .start_turn(chat_thread_id, &corrective_prompt, preferences, false)
+                .await;
+            if let Ok(completed) = &corrective {
+                review_token_chars = review_token_chars.saturating_add(completed.text.len());
+            }
+            refreshed_team = self.store()?.conversation_team_state(conversation.id)?;
+            refreshed = review_delegations
+                .iter()
+                .filter_map(|prior| {
+                    refreshed_team
+                        .delegations
+                        .iter()
+                        .find(|item| item.id == prior.id)
+                        .cloned()
+                })
+                .collect();
+            unsettled = refreshed
+                .iter()
+                .filter(|item| {
+                    item.state == AgentDelegationState::Reported
+                        && item.coordinator_decision.is_none()
+                })
+                .map(|item| item.id)
+                .collect();
+            chat_wake_present = delegation.coordination_batch_id.is_some_and(|batch_id| {
+                refreshed_team.wakes.iter().any(|wake| {
+                    wake.coordination_batch_id == batch_id
+                        && wake.target == AgentWakeTarget::Chat
+                        && wake.kind == AgentWakeKind::ChatCompletion
+                })
+            });
+        }
+        let fallback_chat_batch = if unsettled.is_empty() && !chat_wake_present {
+            if let Some(batch_id) = delegation.coordination_batch_id {
+                self.store()?
+                    .coordination_batch(batch_id)?
+                    .map(|batch| (batch_id, batch))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((batch_id, mut batch)) = fallback_chat_batch {
+            let owner_chat_session = refreshed_team
+                .sessions
+                .iter()
+                .find(|session| session.kind == ConversationAgentKind::Chat)
+                .ok_or_else(|| {
+                    StorageError::InvalidData("Chat Agent session was not found".into())
+                })?;
+            let now = Utc::now();
+            let message = AgentMessage {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: AgentMessageId::new(),
+                conversation_id: conversation.id,
+                delegation_id: None,
+                from_session_id: chat_session.id,
+                to_session_id: owner_chat_session.id,
+                kind: AgentMessageKind::Update,
+                room: AgentRoomKind::Backstage,
+                tool_name: None,
+                correlation_id: Some(batch_id.to_string()),
+                content: "The Coordinator completed final review. Prepare one owner-facing completion update from the authoritative delegation results.".into(),
+                created_at: now,
+            };
+            batch.state = CoordinationBatchState::ChatPending;
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = now;
+            let wake = AgentWake {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: AgentWakeId::new(),
+                idempotency_key: format!("{batch_id}:chat_completion"),
+                conversation_id: conversation.id,
+                coordination_batch_id: batch_id,
+                delegation_id: None,
+                source_message_id: Some(message.id),
+                target_session_id: owner_chat_session.id,
+                target: AgentWakeTarget::Chat,
+                kind: AgentWakeKind::ChatCompletion,
+                state: AgentWakeState::Pending,
+                attempt_count: 0,
+                claimed_until: None,
+                delegation_revisions: refreshed
+                    .iter()
+                    .map(|item| (item.id, item.revision))
+                    .collect(),
+                payload: message.content.clone(),
+                last_error: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let (_, events) = self
+                .store()?
+                .append_chat_callback(&message, &wake, &batch)?;
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+        }
+        let review_wake = if let Some(wake_id) = review_wake_id {
+            self.store()?.agent_wake(wake_id)?
+        } else {
+            None
+        };
+        if let Some(mut wake) = review_wake {
+            wake.state = if unsettled.is_empty() {
+                AgentWakeState::Completed
+            } else {
+                AgentWakeState::RecoveryRequired
+            };
+            wake.claimed_until = None;
+            wake.last_error = (!unsettled.is_empty()).then(|| {
+                format!(
+                    "Coordinator omitted settlement for: {}",
+                    unsettled
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+            wake.updated_at = Utc::now();
+            let event = self.store()?.save_agent_wake(&wake)?;
+            let _ = self.event_sender.send(event);
+        }
+        let reviewed_batch = if let Some(batch_id) = delegation.coordination_batch_id {
+            self.store()?.coordination_batch(batch_id)?
+        } else {
+            None
+        };
+        if let Some(mut batch) = reviewed_batch {
+            batch.state = if unsettled.is_empty() {
+                CoordinationBatchState::ChatPending
+            } else {
+                CoordinationBatchState::RecoveryRequired
+            };
+            batch.revision = batch.revision.saturating_add(1);
+            batch.coordinator_turn_count = batch
+                .coordinator_turn_count
+                .saturating_add(review_turn_count);
+            batch.coordinator_approximate_tokens = batch
+                .coordinator_approximate_tokens
+                .saturating_add(u64::try_from(review_token_chars / 4).unwrap_or(u64::MAX));
+            batch.last_error = (!unsettled.is_empty())
+                .then(|| "Coordinator review did not settle every reported delegation".into());
+            batch.updated_at = Utc::now();
+            let event = self.store()?.save_coordination_batch(&batch)?;
+            let _ = self.event_sender.send(event);
+        }
+        let _ = self.codex_harness.archive_thread(chat_thread_id).await;
+        let _ = self.codex_harness.unsubscribe_thread(chat_thread_id).await;
+        self.checkpoint_agent_context(
+            conversation.id,
+            chat_session.id,
+            AgentRoomKind::Backstage,
+            AgentContextCheckpointCause::FinalReview,
+        )?;
+        let deterministic_report = refreshed
+            .iter()
+            .map(|item| {
+                format!(
+                    "Delegation {} is {:?}: {} Changed files: {}. Checks: {}.",
+                    item.id,
+                    item.state,
+                    item.summary.as_deref().unwrap_or("Coding work finished."),
+                    if item.changed_files.is_empty() {
+                        "none".into()
+                    } else {
+                        item.changed_files.join(", ")
+                    },
+                    if item.checks.is_empty() {
+                        "none reported".into()
+                    } else {
+                        item.checks.join("; ")
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let coordinator_message = refreshed_team
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.from_session_id == chat_session.id
+                    && message.to_session_id != chat_session.id
+                    && message.kind == AgentMessageKind::Update
+            })
+            .map(|message| message.content.clone());
         match synthesis {
-            Ok(synthesis) if !synthesis.text.trim().is_empty() => Ok(synthesis.text),
-            Ok(_) => Ok(deterministic_report),
+            Ok(synthesis) => Ok(coordinator_message
+                .or_else(|| (!synthesis.text.trim().is_empty()).then(|| synthesis.text))
+                .unwrap_or(deterministic_report)),
             Err(error) => Ok(format!(
-                "Coding Agent `{}` reported its result. {} Changed files: {}. Chat synthesis was unavailable ({}), so the isolated work remains available in its Coding Agent card for Review/Apply.",
-                delegation.id,
-                delegation
-                    .summary
-                    .as_deref()
-                    .unwrap_or("Coding work finished."),
-                if delegation.changed_files.is_empty() {
-                    "none reported".into()
-                } else {
-                    delegation.changed_files.join(", ")
-                },
-                error
+                "{deterministic_report} Coordinator review synthesis was unavailable: {error}. The durable Coding Agent cards remain authoritative."
             )),
         }
     }
@@ -3965,6 +4395,7 @@ impl AppRuntime {
         conversation_id: ConversationId,
         turn_id: ConversationTurnId,
         coordinator_session_id: ConversationAgentSessionId,
+        coordination_batch_id: Option<CoordinationBatchId>,
         internal_result: String,
     ) -> Result<(), RuntimeError> {
         let conversation = self
@@ -3972,6 +4403,25 @@ impl AppRuntime {
             .conversation(conversation_id)?
             .ok_or(StorageError::ConversationNotFound(conversation_id))?;
         let team = self.store()?.conversation_team_state(conversation_id)?;
+        let mut delivery_wake = coordination_batch_id.and_then(|batch_id| {
+            team.wakes
+                .iter()
+                .rev()
+                .find(|wake| {
+                    wake.coordination_batch_id == batch_id
+                        && wake.target == AgentWakeTarget::Chat
+                        && wake.kind == AgentWakeKind::ChatCompletion
+                })
+                .cloned()
+        });
+        if let Some(wake) = delivery_wake.as_mut() {
+            wake.state = AgentWakeState::Claimed;
+            wake.attempt_count = wake.attempt_count.saturating_add(1);
+            wake.claimed_until = Some(Utc::now() + Duration::minutes(5));
+            wake.updated_at = Utc::now();
+            let event = self.store()?.save_agent_wake(wake)?;
+            let _ = self.event_sender.send(event);
+        }
         let prior_chat_session = team
             .sessions
             .iter()
@@ -4038,7 +4488,32 @@ impl AppRuntime {
         let _ = self.codex_harness.archive_thread(thread_id).await;
         let _ = self.codex_harness.unsubscribe_thread(thread_id).await;
         self.append_background_chat_response(conversation_id, turn_id, response)
-            .await
+            .await?;
+        if let Some(wake) = delivery_wake.as_mut() {
+            wake.state = AgentWakeState::Completed;
+            wake.claimed_until = None;
+            wake.last_error = None;
+            wake.updated_at = Utc::now();
+            let event = self.store()?.save_agent_wake(wake)?;
+            let _ = self.event_sender.send(event);
+        }
+        let delivered_batch = if let Some(batch_id) = coordination_batch_id {
+            self.store()?.coordination_batch(batch_id)?
+        } else {
+            None
+        };
+        if let Some(mut batch) = delivered_batch {
+            let delivery_completes_batch = batch.state == CoordinationBatchState::ChatPending;
+            if delivery_completes_batch {
+                batch.state = CoordinationBatchState::Completed;
+                batch.last_error = None;
+            }
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = Utc::now();
+            let event = self.store()?.save_coordination_batch(&batch)?;
+            let _ = self.event_sender.send(event);
+        }
+        Ok(())
     }
 
     fn settle_failed_delegation(
@@ -4245,6 +4720,7 @@ impl AppRuntime {
         preferences: CodexExecutionPreferences,
         brief: CodingDelegationBrief,
         turn_id: ConversationTurnId,
+        coordination_batch_id: Option<CoordinationBatchId>,
         requested_id: Option<AgentDelegationId>,
         retry_of_id: Option<AgentDelegationId>,
         idempotency_key: Option<String>,
@@ -4284,6 +4760,8 @@ impl AppRuntime {
                     &chat_thread_id,
                     &preferences,
                     brief,
+                    coordination_batch_id,
+                    turn_id,
                     retry_of_id,
                     idempotency_key,
                 )
@@ -4308,7 +4786,7 @@ impl AppRuntime {
                 Err(_) => None,
             };
             if let Some(binding) = completed_binding {
-                let _ = runtime
+                let _archive_result = runtime
                     .codex_harness
                     .archive_thread(&binding.codex_thread_id)
                     .await;
@@ -4317,15 +4795,45 @@ impl AppRuntime {
                     .unsubscribe_thread(&binding.codex_thread_id)
                     .await;
             }
-            if chat_session.kind == ConversationAgentKind::Coordinator {
-                let _ = runtime
+            if response == "__MCG_BATCH_PENDING__" {
+                let _ = runtime.refresh_coordinator_activity(conversation.id, chat_session.id);
+            } else if chat_session.kind == ConversationAgentKind::Coordinator {
+                let delivery = runtime
                     .deliver_coordinator_result_to_chat(
                         conversation.id,
                         turn_id,
                         chat_session.id,
+                        coordination_batch_id,
                         response,
                     )
                     .await;
+                if let Err(error) = delivery {
+                    let fallback = format!(
+                        "The Coding Agent team finished, but Chat synthesis could not be delivered safely: {error}. Review the durable Coding Agent cards for the completed changes and evidence."
+                    );
+                    let _ = runtime
+                        .append_background_chat_response(conversation.id, turn_id, fallback)
+                        .await;
+                    let fallback_batch = coordination_batch_id.and_then(|batch_id| {
+                        runtime
+                            .store()
+                            .ok()
+                            .and_then(|store| store.coordination_batch(batch_id).ok().flatten())
+                    });
+                    if let Some(mut batch) = fallback_batch {
+                        batch.state = CoordinationBatchState::Completed;
+                        batch.revision = batch.revision.saturating_add(1);
+                        batch.last_error = Some(format!("Chat synthesis fallback used: {error}"));
+                        batch.updated_at = Utc::now();
+                        if let Ok(event) = runtime.store().and_then(|mut store| {
+                            store
+                                .save_coordination_batch(&batch)
+                                .map_err(RuntimeError::from)
+                        }) {
+                            let _ = runtime.event_sender.send(event);
+                        }
+                    }
+                }
                 let _ = runtime.refresh_coordinator_activity(conversation.id, chat_session.id);
             } else {
                 let _ = runtime
@@ -4368,6 +4876,20 @@ impl AppRuntime {
                 "Coding Agent exited before MCG could publish its durable progress record".into(),
             )
             .into());
+        }
+        let delegation_batch = if let Some(batch_id) = coordination_batch_id {
+            self.store()?.coordination_batch(batch_id)?
+        } else {
+            None
+        };
+        if let Some(mut batch) = delegation_batch
+            && !batch.delegation_ids.contains(&delegation_id)
+        {
+            batch.delegation_ids.push(delegation_id);
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = Utc::now();
+            let event = self.store()?.save_coordination_batch(&batch)?;
+            let _ = self.event_sender.send(event);
         }
         Ok((
             delegation_id,
@@ -4657,6 +5179,13 @@ impl AppRuntime {
                         StorageError::InvalidData("conversation has no turn".into())
                     })?;
                 let preferences = codex_preferences(&conversation.execution_preferences);
+                let coordination_batch_id = self
+                    .conversation_team
+                    .active_batches
+                    .lock()
+                    .map_err(|_| RuntimeError::StorageLock)?
+                    .get(&claims.conversation_id)
+                    .copied();
                 let (delegation_id, acknowledgement) = self
                     .launch_coding_delegation(
                         conversation,
@@ -4665,6 +5194,7 @@ impl AppRuntime {
                         preferences,
                         brief,
                         turn_id,
+                        coordination_batch_id,
                         None,
                         None,
                         None,
@@ -4735,13 +5265,6 @@ impl AppRuntime {
         {
             let _ = self.event_sender.send(event);
         }
-        if kind == AgentMessageKind::ToolResult {
-            let _ = self.checkpoint_agent_context(
-                claims.conversation_id,
-                claims.session_id,
-                AgentRoomKind::Backstage,
-            );
-        }
     }
 
     fn agent_message_chat(
@@ -4783,14 +5306,90 @@ impl AppRuntime {
             content: content.clone(),
             created_at: Utc::now(),
         };
-        let event = self.store()?.append_agent_message(&message)?;
-        let _ = self.event_sender.send(event);
-        self.checkpoint_agent_context(
-            claims.conversation_id,
-            claims.session_id,
-            AgentRoomKind::Backstage,
-        )?;
-        Ok(serde_json::json!({"message_id":message.id,"delivered_to":"chat_agent"}))
+        let batch = delegation_id
+            .and_then(|id| {
+                team.delegations
+                    .iter()
+                    .find(|item| item.id == id)
+                    .and_then(|item| item.coordination_batch_id)
+            })
+            .and_then(|id| {
+                team.coordination_batches
+                    .iter()
+                    .find(|batch| batch.id == id)
+                    .cloned()
+            })
+            .or_else(|| {
+                team.coordination_batches
+                    .iter()
+                    .rev()
+                    .find(|batch| {
+                        batch.coordinator_session_id == claims.session_id
+                            && matches!(
+                                batch.state,
+                                CoordinationBatchState::Reviewing
+                                    | CoordinationBatchState::ChatPending
+                                    | CoordinationBatchState::RecoveryRequired
+                            )
+                    })
+                    .cloned()
+            })
+            .filter(|batch| {
+                matches!(
+                    batch.state,
+                    CoordinationBatchState::Reviewing
+                        | CoordinationBatchState::ChatPending
+                        | CoordinationBatchState::RecoveryRequired
+                )
+            });
+        let wake_id = if let Some(mut batch) = batch {
+            batch.state = CoordinationBatchState::ChatPending;
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = Utc::now();
+            let wake = AgentWake {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: AgentWakeId::new(),
+                idempotency_key: format!("{}:chat_completion", batch.id),
+                conversation_id: claims.conversation_id,
+                coordination_batch_id: batch.id,
+                delegation_id,
+                source_message_id: Some(message.id),
+                target_session_id: chat_session.id,
+                target: AgentWakeTarget::Chat,
+                kind: AgentWakeKind::ChatCompletion,
+                state: AgentWakeState::Pending,
+                attempt_count: 0,
+                claimed_until: None,
+                delegation_revisions: batch
+                    .delegation_ids
+                    .iter()
+                    .filter_map(|id| {
+                        team.delegations
+                            .iter()
+                            .find(|item| item.id == *id)
+                            .map(|item| (*id, item.revision))
+                    })
+                    .collect(),
+                payload: content,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            let (wake, events) = self
+                .store()?
+                .append_chat_callback(&message, &wake, &batch)?;
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            Some(wake.id)
+        } else {
+            let event = self.store()?.append_agent_message(&message)?;
+            let _ = self.event_sender.send(event);
+            None
+        };
+        Ok(
+            serde_json::json!({"message_id":message.id,"wake_id":wake_id,"status":"queued_for_chat"}),
+        )
     }
 
     async fn agent_message_coordinator(
@@ -4867,16 +5466,74 @@ impl AppRuntime {
             content,
             created_at: Utc::now(),
         };
-        let event = self.store()?.append_agent_message(&message)?;
-        let _ = self.event_sender.send(event);
-        self.checkpoint_agent_context(
-            claims.conversation_id,
-            claims.session_id,
-            AgentRoomKind::Backstage,
-        )?;
+        let owner_turn_id = self
+            .store()?
+            .conversation_view(claims.conversation_id)?
+            .and_then(|view| view.turns.last().map(|turn| turn.id));
+        let now = Utc::now();
+        let mut atomic_chat_handoff = None;
+        if claims.role == ConversationAgentKind::Chat {
+            let origin_turn_id = owner_turn_id.ok_or_else(|| {
+                StorageError::InvalidData("conversation has no owner turn for coordination".into())
+            })?;
+            let batch = CoordinationBatch {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: CoordinationBatchId::new(),
+                conversation_id: claims.conversation_id,
+                origin_turn_id,
+                coordinator_session_id: coordinator.id,
+                state: CoordinationBatchState::Open,
+                revision: 1,
+                delegation_ids: Vec::new(),
+                coordinator_turn_count: 0,
+                coordinator_approximate_tokens: 0,
+                last_error: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let wake = AgentWake {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: AgentWakeId::new(),
+                idempotency_key: format!("{}:initial:{}", batch.id, message.id),
+                conversation_id: claims.conversation_id,
+                coordination_batch_id: batch.id,
+                delegation_id,
+                source_message_id: Some(message.id),
+                target_session_id: coordinator.id,
+                target: AgentWakeTarget::Coordinator,
+                kind: AgentWakeKind::InitialRequest,
+                state: AgentWakeState::Claimed,
+                attempt_count: 1,
+                claimed_until: Some(now + Duration::minutes(5)),
+                delegation_revisions: Vec::new(),
+                payload: message.content.clone(),
+                last_error: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let events = self
+                .store()?
+                .append_coordination_request(&message, &batch, &wake)?;
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            atomic_chat_handoff = Some((batch.id, wake.id));
+        } else {
+            let event = self.store()?.append_agent_message(&message)?;
+            let _ = self.event_sender.send(event);
+        }
+        if question {
+            self.checkpoint_agent_context(
+                claims.conversation_id,
+                claims.session_id,
+                AgentRoomKind::Backstage,
+                AgentContextCheckpointCause::Question,
+            )?;
+        }
         if claims.role == ConversationAgentKind::Coder && question {
             if let Some(delegation_id) = claims.delegation_id {
-                if let Some(mut delegation) = self.store()?.agent_delegation(delegation_id)? {
+                let waiting_delegation = self.store()?.agent_delegation(delegation_id)?;
+                if let Some(mut delegation) = waiting_delegation {
                     delegation.state = AgentDelegationState::Waiting;
                     delegation.revision = delegation.revision.saturating_add(1);
                     delegation.updated_at = Utc::now();
@@ -4885,6 +5542,71 @@ impl AppRuntime {
                 }
             }
         }
+        if claims.role == ConversationAgentKind::Coder && !question {
+            return Ok(serde_json::json!({
+                "message_id": message.id,
+                "coordinator_session_id": coordinator.id,
+                "coordinator_name": coordinator.display_name,
+                "status": "recorded_without_wake"
+            }));
+        }
+        let coordination_batch_id = if claims.role == ConversationAgentKind::Chat {
+            atomic_chat_handoff.map(|(batch_id, _)| batch_id)
+        } else {
+            claims.delegation_id.and_then(|id| {
+                team.delegations
+                    .iter()
+                    .find(|delegation| delegation.id == id)
+                    .and_then(|delegation| delegation.coordination_batch_id)
+            })
+        };
+        let coordinator_wake_id = if let Some((_, wake_id)) = atomic_chat_handoff {
+            Some(wake_id)
+        } else if let Some(batch_id) = coordination_batch_id {
+            let wake = AgentWake {
+                schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                id: AgentWakeId::new(),
+                idempotency_key: format!(
+                    "{}:{}:{}",
+                    batch_id,
+                    if question { "question" } else { "initial" },
+                    message.id
+                ),
+                conversation_id: claims.conversation_id,
+                coordination_batch_id: batch_id,
+                delegation_id,
+                source_message_id: Some(message.id),
+                target_session_id: coordinator.id,
+                target: AgentWakeTarget::Coordinator,
+                kind: if question {
+                    AgentWakeKind::Question
+                } else {
+                    AgentWakeKind::InitialRequest
+                },
+                state: AgentWakeState::Claimed,
+                attempt_count: 1,
+                claimed_until: Some(now + Duration::minutes(5)),
+                delegation_revisions: delegation_id
+                    .and_then(|id| {
+                        team.delegations
+                            .iter()
+                            .find(|item| item.id == id)
+                            .map(|item| vec![(id, item.revision)])
+                    })
+                    .unwrap_or_default(),
+                payload: message.content.clone(),
+                last_error: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let (wake, event) = self.store()?.enqueue_agent_wake(&wake)?;
+            if let Some(event) = event {
+                let _ = self.event_sender.send(event);
+            }
+            Some(wake.id)
+        } else {
+            None
+        };
         // Publish the accepted handoff before starting any app-server work. The desktop uses
         // this durable state to keep polling and to show that the Coordinator is genuinely
         // active during the otherwise quiet interval before its first `delegate_code` call.
@@ -4895,10 +5617,6 @@ impl AppRuntime {
             .store()?
             .save_conversation_agent_session(&active_coordinator)?;
         let _ = self.event_sender.send(event);
-        let owner_turn_id = self
-            .store()?
-            .conversation_view(claims.conversation_id)?
-            .and_then(|view| view.turns.last().map(|turn| turn.id));
         let runtime = Arc::clone(self);
         let conversation_id = claims.conversation_id;
         let claim_delegation_id = claims.delegation_id;
@@ -4908,20 +5626,44 @@ impl AppRuntime {
         let project_request =
             (claims.role == ConversationAgentKind::Chat).then(|| message.content.clone());
         tokio::spawn(async move {
-            if let Err(error) = Arc::clone(&runtime)
-                .run_coordinator_turn(conversation_id, project_request)
-                .await
-            {
-                if let Ok(Some(mut failed)) = runtime.store().and_then(|store| {
+            let coordinator_result = Arc::clone(&runtime)
+                .run_coordinator_turn(conversation_id, project_request, coordination_batch_id)
+                .await;
+            let coordinator_wake = coordinator_wake_id.and_then(|wake_id| {
+                runtime
+                    .store()
+                    .ok()
+                    .and_then(|store| store.agent_wake(wake_id).ok().flatten())
+            });
+            if let Some(mut wake) = coordinator_wake {
+                wake.state = if coordinator_result.is_ok() {
+                    AgentWakeState::Completed
+                } else {
+                    AgentWakeState::Failed
+                };
+                wake.claimed_until = None;
+                wake.last_error = coordinator_result.as_ref().err().map(ToString::to_string);
+                wake.updated_at = Utc::now();
+                if let Ok(event) = runtime
+                    .store()
+                    .and_then(|mut store| store.save_agent_wake(&wake).map_err(RuntimeError::from))
+                {
+                    let _ = runtime.event_sender.send(event);
+                }
+            }
+            if let Err(error) = coordinator_result {
+                let failed_session = runtime.store().ok().and_then(|store| {
                     store
                         .conversation_team_state(conversation_id)
+                        .ok()
                         .map(|team| {
                             team.sessions
                                 .into_iter()
                                 .find(|session| session.id == coordinator_id)
                         })
-                        .map_err(RuntimeError::from)
-                }) {
+                        .flatten()
+                });
+                if let Some(mut failed) = failed_session {
                     failed.state = ConversationAgentSessionState::Failed;
                     failed.updated_at = Utc::now();
                     if let Ok(event) = runtime.store().and_then(|mut store| {
@@ -4964,12 +5706,53 @@ impl AppRuntime {
                         )
                         .await;
                 }
+                let failed_batch = coordination_batch_id.and_then(|batch_id| {
+                    runtime
+                        .store()
+                        .ok()
+                        .and_then(|store| store.coordination_batch(batch_id).ok().flatten())
+                });
+                if let Some(mut batch) = failed_batch {
+                    batch.state = CoordinationBatchState::Failed;
+                    batch.revision = batch.revision.saturating_add(1);
+                    batch.last_error = Some(error.to_string());
+                    batch.updated_at = Utc::now();
+                    if let Ok(event) = runtime.store().and_then(|mut store| {
+                        store
+                            .save_coordination_batch(&batch)
+                            .map_err(RuntimeError::from)
+                    }) {
+                        let _ = runtime.event_sender.send(event);
+                    }
+                }
+            } else {
+                let running_batch = coordination_batch_id.and_then(|batch_id| {
+                    runtime
+                        .store()
+                        .ok()
+                        .and_then(|store| store.coordination_batch(batch_id).ok().flatten())
+                });
+                if let Some(mut batch) = running_batch
+                    && batch.state == CoordinationBatchState::Open
+                {
+                    batch.state = CoordinationBatchState::Running;
+                    batch.revision = batch.revision.saturating_add(1);
+                    batch.updated_at = Utc::now();
+                    if let Ok(event) = runtime.store().and_then(|mut store| {
+                        store
+                            .save_coordination_batch(&batch)
+                            .map_err(RuntimeError::from)
+                    }) {
+                        let _ = runtime.event_sender.send(event);
+                    }
+                }
             }
         });
         Ok(serde_json::json!({
             "message_id": message.id,
             "coordinator_session_id": coordinator_id,
             "coordinator_name": coordinator_name,
+            "coordination_batch_id": coordination_batch_id,
             "status": "accepted"
         }))
     }
@@ -5017,6 +5800,7 @@ impl AppRuntime {
             claims.conversation_id,
             claims.session_id,
             AgentRoomKind::Backstage,
+            AgentContextCheckpointCause::Question,
         )?;
         if delegation.state == AgentDelegationState::Waiting {
             delegation.state = AgentDelegationState::Running;
@@ -5085,10 +5869,45 @@ impl AppRuntime {
             .into());
         }
         let delegation_id = parse_delegation_argument(arguments)?;
-        let expected_revision = arguments
-            .get("expected_revision")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| StorageError::InvalidData("expected_revision is required".into()))?;
+        let wake_id = arguments
+            .get("wake_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::parse::<AgentWakeId>)
+            .transpose()
+            .map_err(|_| StorageError::InvalidData("invalid wake_id".into()))?;
+        let wake = if let Some(id) = wake_id {
+            self.store()?.agent_wake(id)?
+        } else {
+            None
+        };
+        if let Some(wake) = &wake {
+            if wake.conversation_id != claims.conversation_id
+                || wake.target_session_id != claims.session_id
+                || wake.target != AgentWakeTarget::Coordinator
+                || wake.kind != AgentWakeKind::FinalReview
+            {
+                return Err(StorageError::InvalidData(
+                    "settlement wake does not authorize this Coordinator review".into(),
+                )
+                .into());
+            }
+        }
+        let expected_revision = wake
+            .as_ref()
+            .and_then(|wake| {
+                wake.delegation_revisions
+                    .iter()
+                    .find(|(id, _)| *id == delegation_id)
+                    .map(|(_, revision)| *revision)
+            })
+            .or_else(|| {
+                arguments
+                    .get("expected_revision")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .ok_or_else(|| {
+                StorageError::InvalidData("wake_id or expected_revision is required".into())
+            })?;
         let decision = arguments
             .get("decision")
             .and_then(serde_json::Value::as_str)
@@ -5118,6 +5937,23 @@ impl AppRuntime {
             )
             .into());
         }
+        let requested_decision = match decision {
+            "accept" => CoordinatorReviewDecision::Accept,
+            "block" => CoordinatorReviewDecision::Block,
+            _ => {
+                return Err(StorageError::InvalidData(
+                    "settlement decision must be accept or block".into(),
+                )
+                .into());
+            }
+        };
+        if delegation.coordinator_decision == Some(requested_decision) {
+            return Ok(serde_json::json!({
+                "delegation_id": delegation_id,
+                "state": delegation.state,
+                "deduplicated": true
+            }));
+        }
         if delegation.revision != expected_revision {
             return Err(StorageError::Conflict(
                 "delegation changed before Coordinator settlement".into(),
@@ -5144,8 +5980,15 @@ impl AppRuntime {
             created_at: Utc::now(),
         })?;
         let _ = self.event_sender.send(event);
+        delegation.coordinator_decision = Some(requested_decision);
+        delegation.coordinator_rationale = Some(rationale.clone());
+        delegation.coordinator_reviewed_at = Some(Utc::now());
         match decision {
             "accept" => {
+                delegation.revision = delegation.revision.saturating_add(1);
+                delegation.updated_at = Utc::now();
+                let event = self.store()?.save_agent_delegation(&delegation)?;
+                let _ = self.event_sender.send(event);
                 let conversation = self
                     .store()?
                     .conversation(claims.conversation_id)?
@@ -5157,13 +6000,14 @@ impl AppRuntime {
                     Ok(serde_json::json!({
                         "delegation_id":delegation_id,
                         "state":delegation.state,
+                        "revision":delegation.revision,
                         "owner_review_required":true
                     }))
                 } else {
                     let view = self.integrate_delegation(
                         claims.conversation_id,
                         delegation_id,
-                        expected_revision,
+                        delegation.revision,
                     )?;
                     let state = view
                         .team
@@ -5203,10 +6047,7 @@ impl AppRuntime {
                     "owner_review_required":true
                 }))
             }
-            _ => Err(StorageError::InvalidData(
-                "settlement decision must be accept or block".into(),
-            )
-            .into()),
+            _ => unreachable!("decision validated above"),
         }
     }
 
@@ -5235,7 +6076,9 @@ impl AppRuntime {
         if delegation.report_sha256.as_deref() == Some(&report_sha256) {
             return Ok(serde_json::json!({
                 "deduplicated":true,
-                "delegation_id":delegation_id
+                "delegation_id":delegation_id,
+                "report_sha256":report_sha256,
+                "report_revision":delegation.revision
             }));
         }
         if delegation.report_sha256.is_some() {
@@ -5283,7 +6126,9 @@ impl AppRuntime {
         )?;
         Ok(serde_json::json!({
             "deduplicated":false,
-            "delegation_id":delegation_id
+            "delegation_id":delegation_id,
+            "report_sha256":delegation.report_sha256,
+            "report_revision":delegation.revision
         }))
     }
 
@@ -5512,6 +6357,7 @@ impl AppRuntime {
                 preferences,
                 prior.brief,
                 turn_id,
+                prior.coordination_batch_id,
                 Some(candidate),
                 Some(prior_delegation_id),
                 Some(idempotency_key),
@@ -6863,6 +7709,7 @@ impl AppRuntime {
                                 None,
                                 None,
                                 None,
+                                None,
                             )
                             .await
                         {
@@ -7063,6 +7910,7 @@ impl AppRuntime {
                                     codex_preferences.clone(),
                                     brief,
                                     turn.id,
+                                    None,
                                     None,
                                     None,
                                     None,

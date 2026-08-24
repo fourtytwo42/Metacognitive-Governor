@@ -416,6 +416,11 @@ export interface AgentDelegation {
   agent_lease_id?: string;
   worktree_id?: string;
   retry_of_id?: string;
+  coordination_batch_id?: string;
+  origin_turn_id?: string;
+  coordinator_decision?: "accept" | "block";
+  coordinator_rationale?: string;
+  coordinator_reviewed_at?: string;
   idempotency_key?: string;
   summary?: string;
   changed_files: string[];
@@ -442,6 +447,20 @@ export interface AgentContextCheckpoint {
   schema_version: number; id: string; conversation_id: string; session_id: string;
   room: "frontstage" | "backstage"; revision: number; through_message_id?: string;
   summary: string; source_references: string[]; approximate_tokens: number; created_at: string;
+  cause?: "legacy" | "delegation_sealed" | "question" | "blocker" | "final_review" | "size_threshold";
+  content_sha256?: string;
+}
+export interface CoordinationBatch {
+  schema_version: number; id: string; conversation_id: string; origin_turn_id: string;
+  coordinator_session_id: string; state: "open" | "running" | "review_pending" | "reviewing" | "chat_pending" | "completed" | "failed" | "recovery_required";
+  revision: number; delegation_ids: string[]; coordinator_turn_count: number; coordinator_approximate_tokens: number; last_error?: string; created_at: string; updated_at: string;
+}
+export interface AgentWake {
+  schema_version: number; id: string; conversation_id: string; coordination_batch_id: string;
+  target_session_id: string; target: "coordinator" | "chat"; kind: "initial_request" | "question" | "blocker" | "final_review" | "chat_completion";
+  state: "pending" | "claimed" | "completed" | "failed" | "recovery_required"; idempotency_key: string;
+  delegation_id?: string; source_message_id?: string; delegation_revisions: Array<[string, number]>; attempt_count: number;
+  claimed_until?: string; payload: string; last_error?: string; created_at: string; updated_at: string;
 }
 export interface BlackboardEntry {
   schema_version: number; id: string; conversation_id: string; delegation_id?: string;
@@ -469,6 +488,8 @@ export interface ConversationTeamState {
   blackboard: BlackboardEntry[];
   worktrees: ManagedWorktree[];
   context_checkpoints?: AgentContextCheckpoint[];
+  coordination_batches?: CoordinationBatch[];
+  wakes?: AgentWake[];
 }
 
 export interface ConversationView {

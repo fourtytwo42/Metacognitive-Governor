@@ -5,13 +5,14 @@ use std::{collections::HashMap, path::Path, time::Duration};
 use chrono::{DateTime, Utc};
 use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
 use mcg_domain::{
-    AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, ApprovalId,
-    BlackboardEntry, CodexThreadBinding, Conversation, ConversationActivity,
-    ConversationAgentSession, ConversationId, ConversationMessage, ConversationMessageId,
-    ConversationTeamState, ConversationTurn, ConversationTurnId, ConversationView, LeaseId,
-    ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId,
-    SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
-    ToolRequestId,
+    AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, AgentWake,
+    AgentWakeId, AgentWakeKind, AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry,
+    CodexThreadBinding, Conversation, ConversationActivity, ConversationAgentSession,
+    ConversationId, ConversationMessage, ConversationMessageId, ConversationTeamState,
+    ConversationTurn, ConversationTurnId, ConversationView, CoordinationBatch, CoordinationBatchId,
+    CoordinationBatchState, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
+    ProjectSnapshotId, SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState,
+    ToolExecutionId, ToolRequestId,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -68,7 +69,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 42;
+pub const STORAGE_SCHEMA_VERSION: i64 = 43;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1540,6 +1541,43 @@ CREATE INDEX IF NOT EXISTS agent_context_checkpoints_scope
     ON agent_context_checkpoints(conversation_id, session_id, room, revision DESC);
 ";
 
+const MIGRATION_43: &str = r"
+CREATE TABLE IF NOT EXISTS coordination_batches (
+    batch_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    origin_turn_id TEXT NOT NULL,
+    coordinator_session_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    batch_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(origin_turn_id) REFERENCES conversation_turns(turn_id),
+    FOREIGN KEY(coordinator_session_id) REFERENCES conversation_agent_sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS coordination_batches_conversation
+    ON coordination_batches(conversation_id, created_at, batch_id);
+CREATE TABLE IF NOT EXISTS agent_wakes (
+    wake_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    conversation_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    claimed_until TEXT,
+    wake_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(batch_id) REFERENCES coordination_batches(batch_id)
+);
+CREATE INDEX IF NOT EXISTS agent_wakes_pending
+    ON agent_wakes(state, target, created_at, wake_id);
+CREATE INDEX IF NOT EXISTS agent_wakes_conversation
+    ON agent_wakes(conversation_id, created_at, wake_id);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1717,6 +1755,7 @@ impl SqliteEventStore {
             (40_i64, MIGRATION_40),
             (41_i64, MIGRATION_41),
             (42_i64, MIGRATION_42),
+            (43_i64, MIGRATION_43),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -2106,6 +2145,153 @@ impl SqliteEventStore {
         Ok(event)
     }
 
+    /// Persists the owner-to-Coordinator handoff as one recovery boundary. A crash can expose
+    /// either all three projections (message, batch, wake) or none of them, never an orphaned
+    /// backstage message that appears accepted without runnable coordination state.
+    pub fn append_coordination_request(
+        &mut self,
+        message: &AgentMessage,
+        batch: &CoordinationBatch,
+        wake: &AgentWake,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        if message.conversation_id != batch.conversation_id
+            || wake.conversation_id != batch.conversation_id
+            || wake.coordination_batch_id != batch.id
+            || wake.source_message_id != Some(message.id)
+        {
+            return Err(StorageError::InvalidData(
+                "coordination request identities do not match".into(),
+            ));
+        }
+        let message_event = EventEnvelope::new(
+            EventKind::AgentMessageRecorded,
+            None,
+            serde_json::json!({"conversation_id": message.conversation_id, "message": message}),
+        );
+        let batch_event = EventEnvelope::new(
+            EventKind::CoordinationBatchUpdated,
+            None,
+            serde_json::json!({"conversation_id": batch.conversation_id, "batch": batch}),
+        );
+        let wake_event = EventEnvelope::new(
+            EventKind::AgentWakeUpdated,
+            None,
+            serde_json::json!({"conversation_id": wake.conversation_id, "wake": wake}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_messages(message_id, conversation_id, delegation_id, message_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![message.id.to_string(), message.conversation_id.to_string(), message.delegation_id.map(|id| id.to_string()), serde_json::to_string(message)?, message.created_at.to_rfc3339()],
+        )?;
+        let author_role = transaction.query_row(
+            "SELECT json_extract(session_json, '$.kind') FROM conversation_agent_sessions WHERE session_id=?1",
+            [message.from_session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        ).optional()?.unwrap_or_else(|| "agent".into());
+        index_conversation_context(
+            &transaction,
+            &message.id.to_string(),
+            message.conversation_id,
+            message.delegation_id,
+            &author_role,
+            "agent_message",
+            message.created_at,
+            &message.content,
+        )?;
+        transaction.execute(
+            "INSERT INTO coordination_batches(batch_id, conversation_id, origin_turn_id, coordinator_session_id, state, batch_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![batch.id.to_string(), batch.conversation_id.to_string(), batch.origin_turn_id.to_string(), batch.coordinator_session_id.to_string(), serde_json::to_string(&batch.state)?.trim_matches('"'), serde_json::to_string(batch)?, batch.created_at.to_rfc3339(), batch.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_wakes(wake_id, idempotency_key, conversation_id, batch_id, target, kind, state, claimed_until, wake_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![wake.id.to_string(), wake.idempotency_key, wake.conversation_id.to_string(), wake.coordination_batch_id.to_string(), serde_json::to_string(&wake.target)?.trim_matches('"'), serde_json::to_string(&wake.kind)?.trim_matches('"'), serde_json::to_string(&wake.state)?.trim_matches('"'), wake.claimed_until.map(|value| value.to_rfc3339()), serde_json::to_string(wake)?, wake.created_at.to_rfc3339(), wake.updated_at.to_rfc3339()],
+        )?;
+        let message_event = Self::insert_event(&transaction, &message_event)?;
+        let batch_event = Self::insert_event(&transaction, &batch_event)?;
+        let wake_event = Self::insert_event(&transaction, &wake_event)?;
+        transaction.commit()?;
+        Ok(vec![message_event, batch_event, wake_event])
+    }
+
+    /// Atomically records the Coordinator callback, its one Chat wake, and the batch's
+    /// `chat_pending` projection. Repeated wake keys return the original wake without adding a
+    /// duplicate internal message or owner-visible completion path.
+    pub fn append_chat_callback(
+        &mut self,
+        message: &AgentMessage,
+        wake: &AgentWake,
+        batch: &CoordinationBatch,
+    ) -> Result<(AgentWake, Vec<EventEnvelope>), StorageError> {
+        if let Some(existing) = self
+            .connection
+            .query_row(
+                "SELECT wake_json FROM agent_wakes WHERE idempotency_key=?1",
+                [&wake.idempotency_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok((serde_json::from_str(&existing)?, Vec::new()));
+        }
+        if message.conversation_id != batch.conversation_id
+            || wake.conversation_id != batch.conversation_id
+            || wake.coordination_batch_id != batch.id
+            || wake.source_message_id != Some(message.id)
+        {
+            return Err(StorageError::InvalidData(
+                "Chat callback identities do not match".into(),
+            ));
+        }
+        let message_event = EventEnvelope::new(
+            EventKind::AgentMessageRecorded,
+            None,
+            serde_json::json!({"conversation_id": message.conversation_id, "message": message}),
+        );
+        let wake_event = EventEnvelope::new(
+            EventKind::AgentWakeUpdated,
+            None,
+            serde_json::json!({"conversation_id": wake.conversation_id, "wake": wake}),
+        );
+        let batch_event = EventEnvelope::new(
+            EventKind::CoordinationBatchUpdated,
+            None,
+            serde_json::json!({"conversation_id": batch.conversation_id, "batch": batch}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_messages(message_id, conversation_id, delegation_id, message_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![message.id.to_string(), message.conversation_id.to_string(), message.delegation_id.map(|id| id.to_string()), serde_json::to_string(message)?, message.created_at.to_rfc3339()],
+        )?;
+        let author_role = transaction.query_row(
+            "SELECT json_extract(session_json, '$.kind') FROM conversation_agent_sessions WHERE session_id=?1",
+            [message.from_session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        ).optional()?.unwrap_or_else(|| "agent".into());
+        index_conversation_context(
+            &transaction,
+            &message.id.to_string(),
+            message.conversation_id,
+            message.delegation_id,
+            &author_role,
+            "agent_message",
+            message.created_at,
+            &message.content,
+        )?;
+        transaction.execute(
+            "INSERT INTO agent_wakes(wake_id, idempotency_key, conversation_id, batch_id, target, kind, state, claimed_until, wake_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![wake.id.to_string(), wake.idempotency_key, wake.conversation_id.to_string(), wake.coordination_batch_id.to_string(), serde_json::to_string(&wake.target)?.trim_matches('"'), serde_json::to_string(&wake.kind)?.trim_matches('"'), serde_json::to_string(&wake.state)?.trim_matches('"'), wake.claimed_until.map(|value| value.to_rfc3339()), serde_json::to_string(wake)?, wake.created_at.to_rfc3339(), wake.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "UPDATE coordination_batches SET state=?2, batch_json=?3, updated_at=?4 WHERE batch_id=?1",
+            params![batch.id.to_string(), serde_json::to_string(&batch.state)?.trim_matches('"'), serde_json::to_string(batch)?, batch.updated_at.to_rfc3339()],
+        )?;
+        let message_event = Self::insert_event(&transaction, &message_event)?;
+        let wake_event = Self::insert_event(&transaction, &wake_event)?;
+        let batch_event = Self::insert_event(&transaction, &batch_event)?;
+        transaction.commit()?;
+        Ok((wake.clone(), vec![message_event, wake_event, batch_event]))
+    }
+
     pub fn save_agent_context_checkpoint(
         &mut self,
         checkpoint: &AgentContextCheckpoint,
@@ -2135,6 +2321,122 @@ impl SqliteEventStore {
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    pub fn save_coordination_batch(
+        &mut self,
+        batch: &CoordinationBatch,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::CoordinationBatchUpdated,
+            None,
+            serde_json::json!({"conversation_id": batch.conversation_id, "batch": batch}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO coordination_batches(batch_id, conversation_id, origin_turn_id, coordinator_session_id, state, batch_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(batch_id) DO UPDATE SET state=excluded.state, batch_json=excluded.batch_json, updated_at=excluded.updated_at",
+            params![
+                batch.id.to_string(), batch.conversation_id.to_string(), batch.origin_turn_id.to_string(),
+                batch.coordinator_session_id.to_string(), serde_json::to_string(&batch.state)?.trim_matches('"'),
+                serde_json::to_string(batch)?, batch.created_at.to_rfc3339(), batch.updated_at.to_rfc3339()
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn enqueue_agent_wake(
+        &mut self,
+        wake: &AgentWake,
+    ) -> Result<(AgentWake, Option<EventEnvelope>), StorageError> {
+        if let Some(existing) = self
+            .connection
+            .query_row(
+                "SELECT wake_json FROM agent_wakes WHERE idempotency_key=?1",
+                [&wake.idempotency_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok((serde_json::from_str(&existing)?, None));
+        }
+        let event = EventEnvelope::new(
+            EventKind::AgentWakeUpdated,
+            None,
+            serde_json::json!({"conversation_id": wake.conversation_id, "wake": wake}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_wakes(wake_id, idempotency_key, conversation_id, batch_id, target, kind, state, claimed_until, wake_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                wake.id.to_string(), wake.idempotency_key, wake.conversation_id.to_string(),
+                wake.coordination_batch_id.to_string(), serde_json::to_string(&wake.target)?.trim_matches('"'),
+                serde_json::to_string(&wake.kind)?.trim_matches('"'), serde_json::to_string(&wake.state)?.trim_matches('"'),
+                wake.claimed_until.map(|value| value.to_rfc3339()), serde_json::to_string(wake)?,
+                wake.created_at.to_rfc3339(), wake.updated_at.to_rfc3339()
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((wake.clone(), Some(event)))
+    }
+
+    pub fn save_agent_wake(&mut self, wake: &AgentWake) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::AgentWakeUpdated,
+            None,
+            serde_json::json!({"conversation_id": wake.conversation_id, "wake": wake}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE agent_wakes SET state=?2, claimed_until=?3, wake_json=?4, updated_at=?5 WHERE wake_id=?1",
+            params![wake.id.to_string(), serde_json::to_string(&wake.state)?.trim_matches('"'), wake.claimed_until.map(|value| value.to_rfc3339()), serde_json::to_string(wake)?, wake.updated_at.to_rfc3339()],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn coordination_batch(
+        &self,
+        batch_id: CoordinationBatchId,
+    ) -> Result<Option<CoordinationBatch>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT batch_json FROM coordination_batches WHERE batch_id=?1",
+                [batch_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn agent_wake(&self, wake_id: AgentWakeId) -> Result<Option<AgentWake>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT wake_json FROM agent_wakes WHERE wake_id=?1",
+                [wake_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn pending_agent_wakes(&self) -> Result<Vec<AgentWake>, StorageError> {
+        let now = Utc::now().to_rfc3339();
+        let mut statement = self.connection.prepare(
+            "SELECT wake_json FROM agent_wakes WHERE state='pending' OR (state='claimed' AND claimed_until IS NOT NULL AND claimed_until < ?1) ORDER BY created_at, wake_id",
+        )?;
+        statement
+            .query_map([now], |row| row.get::<_, String>(0))?
+            .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+            .collect()
     }
 
     pub fn append_blackboard_entry(
@@ -2357,6 +2659,16 @@ impl SqliteEventStore {
                 "SELECT checkpoint_json FROM agent_context_checkpoints WHERE conversation_id=?1 ORDER BY created_at, checkpoint_id",
                 conversation_id,
             )?,
+            coordination_batches: rows(
+                &self.connection,
+                "SELECT batch_json FROM coordination_batches WHERE conversation_id=?1 ORDER BY created_at, batch_id",
+                conversation_id,
+            )?,
+            wakes: rows(
+                &self.connection,
+                "SELECT wake_json FROM agent_wakes WHERE conversation_id=?1 ORDER BY created_at, wake_id",
+                conversation_id,
+            )?,
         })
     }
 
@@ -2476,15 +2788,81 @@ impl SqliteEventStore {
                 .collect::<Result<Vec<AgentDelegation>, _>>()?
         };
         let mut recovered = 0_u64;
-        for mut delegation in delegations
-            .into_iter()
-            .filter(|delegation| !delegation.state.is_terminal())
-        {
-            delegation.state = mcg_domain::AgentDelegationState::Blocked;
+        for mut delegation in delegations.into_iter().filter(|delegation| {
+            !delegation.state.is_terminal()
+                || delegation.state == mcg_domain::AgentDelegationState::Reported
+        }) {
+            if delegation.coordination_batch_id.is_none() {
+                let origin_turn = self.connection.query_row(
+                    "SELECT turn_json FROM conversation_turns WHERE conversation_id=?1 AND created_at<=?2 ORDER BY created_at DESC, turn_id DESC LIMIT 1",
+                    params![delegation.conversation_id.to_string(), delegation.created_at.to_rfc3339()],
+                    |row| row.get::<_, String>(0),
+                ).optional()?.map(|json| serde_json::from_str::<ConversationTurn>(&json)).transpose()?;
+                let coordinator = self.connection.query_row(
+                    "SELECT session_json FROM conversation_agent_sessions WHERE conversation_id=?1 AND json_extract(session_json, '$.kind')='coordinator' ORDER BY created_at DESC, session_id DESC LIMIT 1",
+                    [delegation.conversation_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                ).optional()?.map(|json| serde_json::from_str::<ConversationAgentSession>(&json)).transpose()?;
+                if let (Some(origin_turn), Some(coordinator)) = (origin_turn, coordinator) {
+                    let batch_id = CoordinationBatchId::new();
+                    let batch = CoordinationBatch {
+                        schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+                        id: batch_id,
+                        conversation_id: delegation.conversation_id,
+                        origin_turn_id: origin_turn.id,
+                        coordinator_session_id: coordinator.id,
+                        state: CoordinationBatchState::RecoveryRequired,
+                        revision: 1,
+                        delegation_ids: vec![delegation.id],
+                        coordinator_turn_count: 0,
+                        coordinator_approximate_tokens: 0,
+                        last_error: Some("Legacy schema-42 work requires explicit delivery recovery after restart.".into()),
+                        created_at: delegation.created_at,
+                        updated_at: now,
+                    };
+                    self.save_coordination_batch(&batch)?;
+                    let wake = AgentWake {
+                        schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+                        id: AgentWakeId::new(),
+                        idempotency_key: format!("recovery:{batch_id}:final_review"),
+                        conversation_id: delegation.conversation_id,
+                        coordination_batch_id: batch_id,
+                        delegation_id: Some(delegation.id),
+                        source_message_id: None,
+                        target_session_id: coordinator.id,
+                        target: AgentWakeTarget::Coordinator,
+                        kind: AgentWakeKind::FinalReview,
+                        state: AgentWakeState::RecoveryRequired,
+                        attempt_count: 0,
+                        claimed_until: None,
+                        delegation_revisions: vec![(delegation.id, delegation.revision)],
+                        payload: "Legacy delegation retained for explicit review; no accepted model turn was replayed.".into(),
+                        last_error: Some("origin reconstructed during schema-43 recovery".into()),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    self.enqueue_agent_wake(&wake)?;
+                    delegation.coordination_batch_id = Some(batch_id);
+                    delegation.origin_turn_id = Some(origin_turn.id);
+                } else {
+                    delegation.error = Some("Delivery recovery could not identify the originating owner turn. Isolated work is retained and was not attached to another conversation turn.".into());
+                }
+            }
+
+            if matches!(
+                delegation.state,
+                mcg_domain::AgentDelegationState::Requested
+                    | mcg_domain::AgentDelegationState::Preparing
+                    | mcg_domain::AgentDelegationState::Running
+                    | mcg_domain::AgentDelegationState::Waiting
+                    | mcg_domain::AgentDelegationState::Integrating
+            ) {
+                delegation.state = mcg_domain::AgentDelegationState::Blocked;
+                delegation.error = Some(
+                    "MCG restarted while this coding delegation was active. The accepted work was not replayed; isolated work is retained for review.".into(),
+                );
+            }
             delegation.revision = delegation.revision.saturating_add(1);
-            delegation.error = Some(
-                "MCG restarted while this coding delegation was active. The isolated work is retained for review; retry explicitly to continue.".into(),
-            );
             delegation.updated_at = now;
             self.save_agent_delegation(&delegation)?;
             if let Some(mut worktree) = self.managed_worktree_for_delegation(delegation.id)?
@@ -2495,6 +2873,71 @@ impl SqliteEventStore {
                 worktree.retained_reason = Some("runtime restart recovery boundary".into());
                 worktree.updated_at = now;
                 self.save_managed_worktree(&worktree)?;
+            }
+            recovered = recovered.saturating_add(1);
+        }
+
+        let wakes = {
+            let mut statement = self.connection.prepare(
+                "SELECT wake_json FROM agent_wakes WHERE state IN ('pending', 'claimed') ORDER BY created_at, wake_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect::<Result<Vec<AgentWake>, _>>()?
+        };
+        for mut wake in wakes {
+            if wake.kind == AgentWakeKind::ChatCompletion
+                && let Some(mut batch) = self.coordination_batch(wake.coordination_batch_id)?
+            {
+                let visible_exists = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE conversation_id=?1 AND turn_id=?2 AND role='assistant' AND created_at>=?3)",
+                    params![wake.conversation_id.to_string(), batch.origin_turn_id.to_string(), wake.created_at.to_rfc3339()],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !visible_exists {
+                    let message = ConversationMessage {
+                        schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                        id: ConversationMessageId::new(),
+                        conversation_id: wake.conversation_id,
+                        turn_id: batch.origin_turn_id,
+                        role: mcg_domain::ConversationRole::Assistant,
+                        content: "The agent team finished, but MCG restarted before the Chat Agent could safely synthesize the result. The durable Coding Agent cards and Agent Room contain the completed report and evidence.".into(),
+                        codex_item_id: None,
+                        created_at: now,
+                    };
+                    self.save_conversation_message(&message)?;
+                }
+                wake.state = AgentWakeState::Completed;
+                wake.claimed_until = None;
+                wake.last_error =
+                    Some("deterministic restart fallback made the callback durably visible".into());
+                wake.updated_at = now;
+                self.save_agent_wake(&wake)?;
+                batch.state = CoordinationBatchState::Completed;
+                batch.revision = batch.revision.saturating_add(1);
+                batch.last_error.clone_from(&wake.last_error);
+                batch.updated_at = now;
+                self.save_coordination_batch(&batch)?;
+                recovered = recovered.saturating_add(1);
+                continue;
+            }
+            wake.state = AgentWakeState::RecoveryRequired;
+            wake.claimed_until = None;
+            wake.last_error = Some("Service restarted before callback completion; accepted model work was not replayed automatically.".into());
+            wake.updated_at = now;
+            self.save_agent_wake(&wake)?;
+            if let Some(mut batch) = self.coordination_batch(wake.coordination_batch_id)?
+                && !matches!(
+                    batch.state,
+                    CoordinationBatchState::Completed | CoordinationBatchState::Failed
+                )
+            {
+                batch.state = CoordinationBatchState::RecoveryRequired;
+                batch.revision = batch.revision.saturating_add(1);
+                batch.last_error.clone_from(&wake.last_error);
+                batch.updated_at = now;
+                self.save_coordination_batch(&batch)?;
             }
             recovered = recovered.saturating_add(1);
         }
@@ -4637,6 +5080,11 @@ mod tests {
             worktree_id: None,
             retry_of_id: None,
             idempotency_key: None,
+            coordination_batch_id: None,
+            origin_turn_id: None,
+            coordinator_decision: None,
+            coordinator_rationale: None,
+            coordinator_reviewed_at: None,
             summary: None,
             changed_files: vec![],
             checks: vec![],
@@ -4706,6 +5154,8 @@ mod tests {
             summary: "Coordinator delegated bounded work to Coding Agent Atlas.".into(),
             source_references: vec![message.id.to_string(), entry.id.to_string()],
             approximate_tokens: 12,
+            cause: mcg_domain::AgentContextCheckpointCause::Legacy,
+            content_sha256: None,
             created_at: now,
         };
         store
@@ -4727,6 +5177,82 @@ mod tests {
                 .expect("second team"),
             ConversationTeamState::default()
         );
+
+        let origin_turn = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: first.id,
+            state: mcg_domain::ConversationTurnState::Completed,
+            execution_preferences: mcg_domain::ExecutionPreferences::default(),
+            codex_thread_id: None,
+            codex_turn_id: None,
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .save_conversation_turn(&origin_turn)
+            .expect("origin turn");
+        let request_message = AgentMessage {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::AgentMessageId::new(),
+            conversation_id: first.id,
+            delegation_id: None,
+            from_session_id: chat.id,
+            to_session_id: coordinator.id,
+            kind: mcg_domain::AgentMessageKind::Delegation,
+            room: mcg_domain::AgentRoomKind::Backstage,
+            tool_name: None,
+            correlation_id: None,
+            content: "coordinate atomically".into(),
+            created_at: now,
+        };
+        let batch = CoordinationBatch {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: CoordinationBatchId::new(),
+            conversation_id: first.id,
+            origin_turn_id: origin_turn.id,
+            coordinator_session_id: coordinator.id,
+            state: CoordinationBatchState::Open,
+            revision: 1,
+            delegation_ids: vec![],
+            coordinator_turn_count: 0,
+            coordinator_approximate_tokens: 0,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let wake = AgentWake {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: AgentWakeId::new(),
+            idempotency_key: format!("{}:initial", batch.id),
+            conversation_id: first.id,
+            coordination_batch_id: batch.id,
+            delegation_id: None,
+            source_message_id: Some(request_message.id),
+            target_session_id: coordinator.id,
+            target: AgentWakeTarget::Coordinator,
+            kind: AgentWakeKind::InitialRequest,
+            state: AgentWakeState::Claimed,
+            attempt_count: 1,
+            claimed_until: Some(now + chrono::Duration::minutes(5)),
+            delegation_revisions: vec![],
+            payload: request_message.content.clone(),
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let events = store
+            .append_coordination_request(&request_message, &batch, &wake)
+            .expect("atomic coordination request");
+        assert_eq!(events.len(), 3);
+        let coordinated = store
+            .conversation_team_state(first.id)
+            .expect("coordinated team");
+        assert_eq!(coordinated.coordination_batches, vec![batch.clone()]);
+        assert_eq!(coordinated.wakes, vec![wake]);
 
         let worktree = ManagedWorktree {
             schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
@@ -4769,7 +5295,7 @@ mod tests {
             .expect("managed worktree");
         assert_eq!(
             store.recover_conversation_team_work(now).expect("recovery"),
-            1
+            2
         );
         let recovered = store
             .conversation_team_state(first.id)
@@ -4790,6 +5316,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("restart"))
         );
+        assert_eq!(
+            recovered.coordination_batches[0].state,
+            CoordinationBatchState::RecoveryRequired
+        );
+        assert_eq!(recovered.wakes[0].state, AgentWakeState::RecoveryRequired);
     }
 
     #[test]

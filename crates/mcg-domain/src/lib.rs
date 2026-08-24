@@ -54,6 +54,8 @@ domain_id!(AgentDelegationId);
 domain_id!(AgentMessageId);
 domain_id!(BlackboardEntryId);
 domain_id!(AgentContextCheckpointId);
+domain_id!(CoordinationBatchId);
+domain_id!(AgentWakeId);
 domain_id!(ManagedWorktreeId);
 domain_id!(IntegrationJournalId);
 domain_id!(AgentCredentialAuditId);
@@ -1149,7 +1151,7 @@ pub struct PluginInvocationRecord {
 }
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
-pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 4;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1234,6 +1236,10 @@ pub struct AgentDelegation {
     pub coder_session_id: Option<ConversationAgentSessionId>,
     pub project_id: ProjectId,
     pub organization_revision_id: OrganizationRevisionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordination_batch_id: Option<CoordinationBatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_turn_id: Option<ConversationTurnId>,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]
@@ -1266,6 +1272,12 @@ pub struct AgentDelegation {
     pub integration_ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_decision: Option<CoordinatorReviewDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_reviewed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_codex_item_id: Option<String>,
     pub error: Option<String>,
@@ -1325,12 +1337,121 @@ pub struct AgentContextCheckpoint {
     pub room: AgentRoomKind,
     pub revision: u64,
     pub through_message_id: Option<AgentMessageId>,
+    #[serde(default)]
+    pub cause: AgentContextCheckpointCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     pub summary: String,
     #[serde(default)]
     pub source_references: Vec<String>,
     #[serde(default)]
     pub approximate_tokens: u64,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextCheckpointCause {
+    #[default]
+    Legacy,
+    DelegationSealed,
+    Question,
+    Blocker,
+    FinalReview,
+    SizeThreshold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorReviewDecision {
+    Accept,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationBatchState {
+    Open,
+    Running,
+    ReviewPending,
+    Reviewing,
+    ChatPending,
+    Completed,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationBatch {
+    pub schema_version: u16,
+    pub id: CoordinationBatchId,
+    pub conversation_id: ConversationId,
+    pub origin_turn_id: ConversationTurnId,
+    pub coordinator_session_id: ConversationAgentSessionId,
+    pub state: CoordinationBatchState,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub delegation_ids: Vec<AgentDelegationId>,
+    #[serde(default)]
+    pub coordinator_turn_count: u32,
+    #[serde(default)]
+    pub coordinator_approximate_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWakeTarget {
+    Coordinator,
+    Chat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWakeKind {
+    InitialRequest,
+    Question,
+    Blocker,
+    FinalReview,
+    ChatCompletion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWakeState {
+    Pending,
+    Claimed,
+    Completed,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWake {
+    pub schema_version: u16,
+    pub id: AgentWakeId,
+    pub idempotency_key: String,
+    pub conversation_id: ConversationId,
+    pub coordination_batch_id: CoordinationBatchId,
+    pub delegation_id: Option<AgentDelegationId>,
+    pub source_message_id: Option<AgentMessageId>,
+    pub target_session_id: ConversationAgentSessionId,
+    pub target: AgentWakeTarget,
+    pub kind: AgentWakeKind,
+    pub state: AgentWakeState,
+    #[serde(default)]
+    pub attempt_count: u32,
+    pub claimed_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub delegation_revisions: Vec<(AgentDelegationId, u64)>,
+    pub payload: String,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1529,6 +1650,10 @@ pub struct ConversationTeamState {
     pub worktrees: Vec<ManagedWorktree>,
     #[serde(default)]
     pub context_checkpoints: Vec<AgentContextCheckpoint>,
+    #[serde(default)]
+    pub coordination_batches: Vec<CoordinationBatch>,
+    #[serde(default)]
+    pub wakes: Vec<AgentWake>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
