@@ -1466,14 +1466,41 @@ fn parse_chat_agent_decision(value: &str) -> Option<ChatAgentDecision> {
     if value.is_empty() {
         return None;
     }
-    serde_json::from_str(value).ok().or_else(|| {
-        let fenced = value
-            .strip_prefix("```json")
-            .or_else(|| value.strip_prefix("```"))?
-            .strip_suffix("```")?
-            .trim();
-        serde_json::from_str(fenced).ok()
-    })
+    serde_json::from_str(value)
+        .ok()
+        .or_else(|| {
+            let fenced = value
+                .strip_prefix("```json")
+                .or_else(|| value.strip_prefix("```"))?
+                .strip_suffix("```")?
+                .trim();
+            serde_json::from_str(fenced).ok()
+        })
+        .or_else(|| {
+            // Codex 0.144.6 can satisfy an output-schema turn with the selected enum tag as
+            // the first line and the selected string payload as the remaining text instead of
+            // publishing the JSON object. Accept only that exact compatibility envelope. A
+            // narrow marker prevents ordinary prose that merely mentions delegation from
+            // acquiring coding authority.
+            let (action, payload) = value.split_once('\n')?;
+            let payload = payload.trim();
+            if payload.is_empty() {
+                return None;
+            }
+            match action.trim() {
+                "respond" => Some(ChatAgentDecision::Respond {
+                    response: payload.to_owned(),
+                }),
+                "delegate_code" => Some(ChatAgentDecision::DelegateCode {
+                    objective: payload.to_owned(),
+                    scope: Vec::new(),
+                    constraints: Vec::new(),
+                    success_conditions: Vec::new(),
+                    context_references: Vec::new(),
+                }),
+                _ => None,
+            }
+        })
 }
 
 fn chat_agent_decision_schema() -> serde_json::Value {
@@ -18556,6 +18583,11 @@ mod tests {
     fn schema39_chat_decision_parser_falls_back_on_empty_or_invalid_output() {
         assert!(parse_chat_agent_decision("").is_none());
         assert!(parse_chat_agent_decision("not structured output").is_none());
+        assert!(parse_chat_agent_decision("delegate_code").is_none());
+        assert!(
+            parse_chat_agent_decision("The response mentions delegate_code\nwithout selecting it")
+                .is_none()
+        );
         assert!(matches!(
             parse_chat_agent_decision(r#"{"action":"respond","response":"Ready"}"#),
             Some(ChatAgentDecision::Respond { response }) if response == "Ready"
@@ -18565,6 +18597,26 @@ mod tests {
                 "```json\n{\"action\":\"respond\",\"response\":\"Ready\"}\n```"
             ),
             Some(ChatAgentDecision::Respond { response }) if response == "Ready"
+        ));
+        assert!(matches!(
+            parse_chat_agent_decision("respond\n\n**Ready** to help."),
+            Some(ChatAgentDecision::Respond { response }) if response == "**Ready** to help."
+        ));
+        assert!(matches!(
+            parse_chat_agent_decision(
+                "delegate_code\n\nBuild the requested site.\n\n- Use the linked project."
+            ),
+            Some(ChatAgentDecision::DelegateCode {
+                objective,
+                scope,
+                constraints,
+                success_conditions,
+                context_references,
+            }) if objective == "Build the requested site.\n\n- Use the linked project."
+                && scope.is_empty()
+                && constraints.is_empty()
+                && success_conditions.is_empty()
+                && context_references.is_empty()
         ));
     }
 
