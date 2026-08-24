@@ -2563,6 +2563,7 @@ impl AppRuntime {
     async fn run_coordinator_turn(
         self: Arc<Self>,
         conversation_id: ConversationId,
+        project_request: Option<String>,
     ) -> Result<(), RuntimeError> {
         let lock = self.conversation_coordinator_lock(conversation_id).await;
         let _guard = lock.lock().await;
@@ -2649,6 +2650,11 @@ impl AppRuntime {
                 recovery_state: CodexRecoveryState::Healthy,
             })?;
         let refreshed = self.store()?.conversation_team_state(conversation_id)?;
+        let known_delegations = refreshed
+            .delegations
+            .iter()
+            .map(|delegation| delegation.id)
+            .collect::<BTreeSet<_>>();
         let latest_checkpoint = refreshed
             .context_checkpoints
             .iter()
@@ -2689,11 +2695,39 @@ impl AppRuntime {
                 .unwrap_or("No prior checkpoint."),
             recent
         );
-        let result = self
+        let mut result = self
             .codex_harness
             .start_turn(&thread_id, &prompt, &preferences, false)
             .await;
-        coordinator.state = if result.is_ok() {
+        let mut missing_delegation = false;
+        if result.is_ok() && project_request.is_some() {
+            let after_first_turn = self.store()?.conversation_team_state(conversation_id)?;
+            let created_coder = after_first_turn
+                .delegations
+                .iter()
+                .any(|delegation| !known_delegations.contains(&delegation.id));
+            if !created_coder {
+                let request = project_request
+                    .as_deref()
+                    .unwrap_or("the pending project request");
+                let correction = format!(
+                    "The prior Coordinator turn completed without creating the Coding Agent required for this accepted project-work request. Call `delegate_code` now with a bounded objective, scope, constraints, and success conditions derived from the request below. Do not merely describe the delegation or return ordinary text. If delegation is genuinely unsafe, call `message_chat` with the concrete blocker instead.\n\nAccepted project request:\n{request}"
+                );
+                result = self
+                    .codex_harness
+                    .start_turn(&thread_id, &correction, &preferences, false)
+                    .await;
+                if result.is_ok() {
+                    let after_correction =
+                        self.store()?.conversation_team_state(conversation_id)?;
+                    missing_delegation = !after_correction
+                        .delegations
+                        .iter()
+                        .any(|delegation| !known_delegations.contains(&delegation.id));
+                }
+            }
+        }
+        coordinator.state = if result.is_ok() && !missing_delegation {
             ConversationAgentSessionState::Ready
         } else {
             ConversationAgentSessionState::Failed
@@ -2703,8 +2737,8 @@ impl AppRuntime {
             .store()?
             .save_conversation_agent_session(&coordinator)?;
         let _ = self.event_sender.send(event);
-        if let Ok(result) = result
-            && !result.text.trim().is_empty()
+        if let Ok(completed) = &result
+            && !completed.text.trim().is_empty()
         {
             let event = self.store()?.append_agent_message(&AgentMessage {
                 schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
@@ -2717,7 +2751,7 @@ impl AppRuntime {
                 room: AgentRoomKind::Backstage,
                 tool_name: None,
                 correlation_id: None,
-                content: result.text,
+                content: completed.text.clone(),
                 created_at: Utc::now(),
             })?;
             let _ = self.event_sender.send(event);
@@ -2725,7 +2759,13 @@ impl AppRuntime {
         self.checkpoint_agent_context(conversation_id, coordinator.id, AgentRoomKind::Backstage)?;
         let _ = self.codex_harness.archive_thread(&thread_id).await;
         let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
-        Ok(())
+        if missing_delegation {
+            return Err(StorageError::InvalidData(
+                "Coordinator completed twice without creating the required Coding Agent".into(),
+            )
+            .into());
+        }
+        result.map(|_| ()).map_err(RuntimeError::from)
     }
 
     fn checkpoint_agent_context(
@@ -4511,17 +4551,53 @@ impl AppRuntime {
                 }
             }
         }
+        // Publish the accepted handoff before starting any app-server work. The desktop uses
+        // this durable state to keep polling and to show that the Coordinator is genuinely
+        // active during the otherwise quiet interval before its first `delegate_code` call.
+        let mut active_coordinator = coordinator.clone();
+        active_coordinator.state = ConversationAgentSessionState::Working;
+        active_coordinator.updated_at = Utc::now();
+        let event = self
+            .store()?
+            .save_conversation_agent_session(&active_coordinator)?;
+        let _ = self.event_sender.send(event);
+        let owner_turn_id = self
+            .store()?
+            .conversation_view(claims.conversation_id)?
+            .and_then(|view| view.turns.last().map(|turn| turn.id));
         let runtime = Arc::clone(self);
         let conversation_id = claims.conversation_id;
         let claim_delegation_id = claims.delegation_id;
         let coordinator_id = coordinator.id;
         let coordinator_name = coordinator.display_name.clone();
         let chat_session_id = chat_session.id;
+        let project_request =
+            (claims.role == ConversationAgentKind::Chat).then(|| message.content.clone());
         tokio::spawn(async move {
             if let Err(error) = Arc::clone(&runtime)
-                .run_coordinator_turn(conversation_id)
+                .run_coordinator_turn(conversation_id, project_request)
                 .await
             {
+                if let Ok(Some(mut failed)) = runtime.store().and_then(|store| {
+                    store
+                        .conversation_team_state(conversation_id)
+                        .map(|team| {
+                            team.sessions
+                                .into_iter()
+                                .find(|session| session.id == coordinator_id)
+                        })
+                        .map_err(RuntimeError::from)
+                }) {
+                    failed.state = ConversationAgentSessionState::Failed;
+                    failed.updated_at = Utc::now();
+                    if let Ok(event) = runtime.store().and_then(|mut store| {
+                        store
+                            .save_conversation_agent_session(&failed)
+                            .map_err(RuntimeError::from)
+                    }) {
+                        let _ = runtime.event_sender.send(event);
+                    }
+                }
                 let event = runtime.store().and_then(|mut store| {
                     store
                         .append_agent_message(&AgentMessage {
@@ -4542,6 +4618,17 @@ impl AppRuntime {
                 });
                 if let Ok(event) = event {
                     let _ = runtime.event_sender.send(event);
+                }
+                if let Some(turn_id) = owner_turn_id {
+                    let _ = runtime
+                        .append_background_chat_response(
+                            conversation_id,
+                            turn_id,
+                            format!(
+                                "The Coordinator could not complete the requested handoff: {error}. The request remains visible in the Agent Room; any Coding Agent work already started remains governed and available there."
+                            ),
+                        )
+                        .await;
                 }
             }
         });

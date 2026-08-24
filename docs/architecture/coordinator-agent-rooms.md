@@ -15,6 +15,7 @@ The owner always addresses the persistent Chat Agent. The Chat Agent is the only
 - **Chat** is the frontstage one-to-one transcript. It contains owner messages and Chat Agent responses only.
 - **Agent Room** is the backstage transcript. It is owner-readable but has no owner composer. It shows named-agent joins/leaves, delegations, questions, answers, reports, and bounded tool-call/result traces.
 - Coding Agent cards remain the task-centric projection for worktree, checks, evidence, review, apply, retry, cancel, and discard actions.
+- The Chat room keeps a compact live team indicator from Coordinator acceptance through the final Coder settlement. It distinguishes Coordinator planning from active Coding Agents, links to the Agent Room, and disappears only after the durable team projection reaches an idle or terminal state. The desktop continues refreshing during the pre-Coder Coordinator phase instead of waiting for a delegation row to exist.
 - Every internal message has durable sender/recipient session IDs, room, timestamp, optional delegation/correlation identity, and type. No hidden reasoning is exposed.
 
 ## Authority
@@ -39,6 +40,8 @@ Checkpoints are append-only summaries with source references, an approximate tok
 ## Lifecycle and limits
 
 The Coordinator assigns stable, friendly generated names to Coders. Join and leave events are durable. Up to eight active Coding Agents may run concurrently, further bounded by the pinned organization revision and available managed-worktree capacity. Each Coder retains its own Codex thread, lease, branch, worktree, context checkpoint, and cancellation authority. Restarts reconcile durable state and never blindly replay accepted turns.
+
+An accepted Chat-to-Coordinator project handoff durably marks the Coordinator `working` before app-server startup. If its first completed turn fails to call `delegate_code`, MCG issues one bounded corrective Coordinator turn. A second no-delegation completion fails visibly and produces a Chat update; it cannot leave the owner with a permanent but false “accepted” acknowledgement. Coder reports still flow asynchronously through Coordinator settlement and the persistent Chat Agent, which is the only role that creates the final owner-facing result.
 
 MCG-owned Codex threads are tagged in rollout metadata with `thread_source: "mcg"`. Idle Chat and Coordinator threads, and every terminal Coder thread, are archived and unsubscribed so they do not appear in Codex Recents. MCG unarchives a retained role thread immediately before resuming it. Packaged-service startup also archives unarchived threads carrying that exact tag; it never uses a title, prompt, or working-directory heuristic and never deletes Codex history.
 

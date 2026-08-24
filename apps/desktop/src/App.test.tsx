@@ -2709,7 +2709,9 @@ test("delegated coding work shows a live progress card and active-agent indicato
   expect(within(activity).getByText("Build the Springfield plumbing website")).toBeInTheDocument();
   expect(within(activity).getByText("Preparing worktree")).toBeInTheDocument();
   expect(within(activity).getByRole("progressbar", { name: /Preparing worktree/ })).toHaveAttribute("aria-valuenow", "24");
-  expect(screen.getByText("1 coding agent active")).toHaveAttribute("role", "status");
+  const teamStatus = screen.getByRole("status", { name: "Agent team activity" });
+  expect(within(teamStatus).getByText("1 coding agent working")).toBeInTheDocument();
+  expect(within(teamStatus).getByText("The Chat Agent will update you automatically when the team finishes.")).toBeInTheDocument();
 });
 
 test("Agent Room shows hierarchy, lifecycle, tool traces, and never exposes a direct composer", async () => {
@@ -2741,7 +2743,9 @@ test("Agent Room shows hierarchy, lifecycle, tool traces, and never exposes a di
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build in parallel" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  fireEvent.click(await screen.findByRole("button", { name: /Agent Room/ }));
+  const teamStatus = await screen.findByRole("status", { name: "Agent team activity" });
+  expect(within(teamStatus).getByText("Coordinator is planning and assigning work")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: /^Agent Room/ }));
   const room = screen.getByRole("region", { name: "Agent Room" });
   expect(within(room).getByText("You talk to this agent")).toBeInTheDocument();
   expect(within(room).getAllByText("Coding Agent Atlas").length).toBeGreaterThanOrEqual(1);

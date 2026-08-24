@@ -818,6 +818,27 @@ function codingAgentIsActive(state: AgentDelegation["state"]): boolean {
   return ["requested", "preparing", "running", "waiting", "integrating"].includes(state);
 }
 
+function TeamActivityIndicator({ team, onOpenRoom }: { team?: ConversationTeamState; onOpenRoom: () => void }) {
+  if (!team) return null;
+  const coordinator = team.sessions
+    .slice()
+    .reverse()
+    .find((session) => session.kind === "coordinator" && session.state !== "retired");
+  const activeDelegations = team.delegations.filter((delegation) => codingAgentIsActive(delegation.state));
+  const coordinatorActive = Boolean(coordinator && ["starting", "working", "waiting"].includes(coordinator.state));
+  if (!coordinatorActive && activeDelegations.length === 0) return null;
+  const label = activeDelegations.length > 0
+    ? `${activeDelegations.length} coding agent${activeDelegations.length === 1 ? "" : "s"} working`
+    : coordinator?.state === "waiting"
+      ? "Coordinator is waiting for an agent response"
+      : "Coordinator is planning and assigning work";
+  return <section className="team-activity-indicator" role="status" aria-live="polite" aria-label="Agent team activity">
+    <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
+    <span><strong>{label}</strong><small>The Chat Agent will update you automatically when the team finishes.</small></span>
+    <button type="button" className="secondary" onClick={onOpenRoom}>View Agent Room</button>
+  </section>;
+}
+
 function CodingAgentCards({ team, conversationId, onView }: { team?: ConversationTeamState; conversationId?: string; onView: (view: ConversationView) => void }) {
   const [tabs, setTabs] = useState<Record<string, "activity" | "exchange" | "blackboard" | "changes" | "evidence">>({});
   const [patches, setPatches] = useState<Record<string, string>>({});
@@ -5240,12 +5261,15 @@ export function App() {
     ? queuedChatMessages.filter((message) => message.conversation_id === selectedChatId)
     : [];
   const conversationIsActive = Boolean(activeConversationTurn || taskBusy);
-  const codingTeamIsRunning = Boolean(visibleConversation?.team?.delegations.some((delegation) =>
-    ["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state)
-  ));
+  const conversationTeamIsRunning = Boolean(
+    visibleConversation?.team?.delegations.some((delegation) => codingAgentIsActive(delegation.state))
+    || visibleConversation?.team?.sessions.some((session) =>
+      session.kind === "coordinator" && ["starting", "working", "waiting"].includes(session.state)
+    )
+  );
 
   useEffect(() => {
-    if (activeSurface !== "threads" || !selectedChatId || !codingTeamIsRunning) return;
+    if (activeSurface !== "threads" || !selectedChatId || !conversationTeamIsRunning) return;
     const refresh = () => {
       void getConversation(selectedChatId).then((view) => {
         setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
@@ -5253,7 +5277,7 @@ export function App() {
     };
     const timer = window.setInterval(refresh, 1000);
     return () => window.clearInterval(timer);
-  }, [activeSurface, selectedChatId, codingTeamIsRunning]);
+  }, [activeSurface, selectedChatId, conversationTeamIsRunning]);
 
   useEffect(() => {
     const next = visibleQueuedMessages[0];
@@ -5824,6 +5848,7 @@ export function App() {
                   activities={(visibleConversation.activities ?? []).filter((activity) => activity.turn_id === turn.id)}
                   active={activeConversationTurn?.id === turn.id}
                 />)}
+              <TeamActivityIndicator team={visibleConversation?.team} onOpenRoom={() => selectedChatId && setConversationRooms((current) => ({ ...current, [selectedChatId]: "agents" }))} />
               <CodingAgentCards team={visibleConversation?.team} conversationId={visibleConversation?.conversation.id} onView={(view) => setConversationViews((current) => ({ ...current, [view.conversation.id]: view }))} />
               {activeConversationTurn?.state === "waiting_for_approval" && activeConversationApproval && <section className="chat-permission" aria-label="Codex permission request">
                 <strong>Permission needed to continue</strong>
@@ -5847,10 +5872,6 @@ export function App() {
             </div>
             {activeConversationRoom === "agents" && <AgentRoom team={visibleConversation?.team} />}
             {activeConversationRoom === "chat" && <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
-              {(visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length ?? 0) > 0 && <div className="coding-agent-active-count" role="status">
-                <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
-                {visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length} coding agent{visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length === 1 ? "" : "s"} active
-              </div>}
               {visibleQueuedMessages.length > 0 && <section className="chat-queue-drawer" aria-label="Queued messages">
                 <div className="chat-queue-heading">
                   <span aria-hidden="true">Ⅱ</span>
