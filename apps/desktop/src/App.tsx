@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { MarkdownContent } from "./MarkdownContent";
 
 export const CHAT_FOLLOW_THRESHOLD_PX = 96;
 
@@ -752,7 +753,7 @@ function ConversationActivityTimeline({ messages, activities }: { messages: Conv
     } else {
       const message = entry.message;
       content.push(<article className="chat-message assistant-message" key={message.id}>
-        <span>Chat Agent</span><p>{message.content}</p>
+        <span>Chat Agent</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
       </article>);
     }
     index += 1;
@@ -852,7 +853,7 @@ function ConversationTurnTranscript({
   const hasResponseText = messages.some((message) => message.role === "assistant" && message.content.length > 0);
   return <section className="chat-turn" aria-label="Conversation turn">
     {visibleMessages.filter((message) => message.role === "user").map((message) => <article className="chat-message user-message" key={message.id}>
-      <span>You</span><p>{message.content}</p>
+      <span>You</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
     </article>)}
     {(activities.length > 0 || assistantMessages.length > 0) && <ConversationActivityTimeline messages={assistantMessages} activities={activities} />}
     {active && <ConversationTurnStatus turn={turn} hasResponseText={hasResponseText} />}

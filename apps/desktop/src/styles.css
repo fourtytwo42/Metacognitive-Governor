@@ -762,7 +762,35 @@ body { background: var(--mcg-bg); }
 .chat-turn { display: grid; min-width: 0; gap: 22px; }
 .chat-message { min-width: 0; max-width: 82%; color: var(--mcg-text); }
 .chat-message > span { display: block; margin-bottom: 7px; color: var(--mcg-muted); font-size: .74rem; font-weight: 650; }
-.chat-message > p { margin: 0; white-space: pre-wrap; line-height: 1.65; }
+.markdown-content { min-width: 0; overflow-wrap: anywhere; color: inherit; line-height: 1.65; }
+.markdown-content > :first-child { margin-top: 0; }
+.markdown-content > :last-child { margin-bottom: 0; }
+.markdown-content p { margin: 0 0 12px; }
+.markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4, .markdown-content h5, .markdown-content h6 { margin: 22px 0 10px; color: var(--mcg-text); line-height: 1.28; }
+.markdown-content h1 { font-size: 1.42rem; }
+.markdown-content h2 { font-size: 1.22rem; }
+.markdown-content h3 { font-size: 1.06rem; }
+.markdown-content h4, .markdown-content h5, .markdown-content h6 { font-size: .96rem; }
+.markdown-content ul, .markdown-content ol { margin: 8px 0 14px; padding-left: 24px; }
+.markdown-content li { margin: 4px 0; padding-left: 2px; }
+.markdown-content li > p { margin: 0; }
+.markdown-content blockquote { margin: 14px 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--mcg-border); color: var(--mcg-muted); }
+.markdown-content blockquote > :last-child { margin-bottom: 0; }
+.markdown-content a { color: var(--mcg-accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--mcg-accent) 48%, transparent); text-underline-offset: 3px; }
+.markdown-content a:hover { text-decoration-color: currentColor; }
+.markdown-content :not(pre) > code { padding: 2px 5px; border: 1px solid color-mix(in srgb, var(--mcg-border) 72%, transparent); border-radius: 5px; color: var(--mcg-text); background: color-mix(in srgb, var(--mcg-surface-raised) 80%, var(--mcg-bg)); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .86em; }
+.markdown-content hr { margin: 20px 0; border: 0; border-top: 1px solid var(--mcg-border); }
+.markdown-content table { display: block; max-width: 100%; margin: 14px 0; overflow-x: auto; border-spacing: 0; border-collapse: collapse; }
+.markdown-content th, .markdown-content td { padding: 7px 11px; border: 1px solid var(--mcg-border); text-align: left; }
+.markdown-content th { background: var(--mcg-surface-raised); font-weight: 650; }
+.markdown-content input[type="checkbox"] { margin-right: 7px; accent-color: var(--mcg-accent); }
+.markdown-content img { display: block; max-width: 100%; max-height: 560px; margin: 14px 0; object-fit: contain; border-radius: 10px; }
+.markdown-code-block { min-width: 0; max-width: 100%; margin: 14px 0; overflow: hidden; border: 1px solid var(--mcg-border); border-radius: 10px; background: color-mix(in srgb, var(--mcg-bg) 90%, black); }
+.markdown-code-header { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px 0 13px; border-bottom: 1px solid var(--mcg-border); color: var(--mcg-muted); background: color-mix(in srgb, var(--mcg-surface-raised) 75%, transparent); font-size: .7rem; text-transform: none; }
+.markdown-code-header button { min-height: 26px; padding: 3px 7px; border: 0; color: var(--mcg-muted); background: transparent; font-size: .68rem; }
+.markdown-code-header button:hover { color: var(--mcg-text); background: var(--mcg-border); }
+.markdown-code-block pre { box-sizing: border-box; max-width: 100%; max-height: 440px; margin: 0; padding: 14px 16px; overflow: auto; color: var(--mcg-text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .78rem; line-height: 1.58; tab-size: 2; }
+.markdown-code-block code { font: inherit; white-space: pre; }
 .user-message { justify-self: end; padding: 13px 17px; border-radius: 18px; background: var(--mcg-surface-raised); }
 .user-message > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .assistant-message { justify-self: start; width: min(100%, 760px); }
