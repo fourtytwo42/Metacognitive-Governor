@@ -2659,6 +2659,59 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(screen.getByText("Fixture response")).toBeInTheDocument();
 });
 
+test("delegated coding work shows a live progress card and active-agent indicator", async () => {
+  const createdAt = new Date(Date.now() - 5_000).toISOString();
+  client.sendConversationMessage.mockImplementation(async (conversationId: string, request: { content: string; execution_preferences?: Record<string, unknown> }) => ({
+    conversation: {
+      schema_version: 1,
+      id: conversationId,
+      title: request.content,
+      state: "active",
+      execution_preferences: request.execution_preferences ?? {},
+      created_at: createdAt,
+      updated_at: createdAt
+    },
+    turns: [],
+    messages: [],
+    activities: [],
+    team: {
+      sessions: [],
+      messages: [],
+      blackboard: [],
+      worktrees: [],
+      delegations: [{
+        schema_version: 1,
+        id: "00000000-0000-4000-8000-000000000d01",
+        conversation_id: conversationId,
+        source_session_id: "00000000-0000-4000-8000-000000000d02",
+        project_id: "00000000-0000-4000-8000-000000000d03",
+        organization_revision_id: "00000000-0000-4000-8000-000000000d04",
+        revision: 1,
+        prompt_revision: 1,
+        state: "preparing" as const,
+        brief: {
+          objective: "Build the Springfield plumbing website",
+          scope: [], constraints: [], success_conditions: [], context_references: []
+        },
+        changed_files: [],
+        checks: [],
+        created_at: createdAt,
+        updated_at: createdAt
+      }]
+    }
+  }));
+  render(<App />);
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build the site" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  const activity = await screen.findByRole("region", { name: "Coding agent activity" });
+  expect(within(activity).getByText("Build the Springfield plumbing website")).toBeInTheDocument();
+  expect(within(activity).getByText("Preparing worktree")).toBeInTheDocument();
+  expect(within(activity).getByRole("progressbar", { name: /Preparing worktree/ })).toHaveAttribute("aria-valuenow", "24");
+  expect(screen.getByText("1 coding agent active")).toHaveAttribute("role", "status");
+});
+
 test("active chats queue Enter messages in a drawer and allow immediate steering", async () => {
   const conversation = {
     schema_version: 1,

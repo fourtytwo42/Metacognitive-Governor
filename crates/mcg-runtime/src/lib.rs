@@ -14,7 +14,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, MutexGuard, RwLock},
-    time::Instant,
+    time::{Duration as StdDuration, Instant},
 };
 
 use async_trait::async_trait;
@@ -2765,10 +2765,14 @@ impl AppRuntime {
             supersedes_id: None,
             created_at: now,
         };
-        for event in [
-            self.store()?.append_agent_message(&message)?,
-            self.store()?.append_blackboard_entry(&entry)?,
-        ] {
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.append_agent_message(&message)?,
+                store.append_blackboard_entry(&entry)?,
+            ]
+        };
+        for event in events {
             let _ = self.event_sender.send(event);
         }
         delegation.state = AgentDelegationState::Preparing;
@@ -2784,12 +2788,15 @@ impl AppRuntime {
         delegation.updated_at = Utc::now();
         coder_session.state = ConversationAgentSessionState::Working;
         coder_session.updated_at = Utc::now();
-        for event in [
-            self.store()?.save_managed_worktree(&worktree)?,
-            self.store()?.save_agent_delegation(&delegation)?,
-            self.store()?
-                .save_conversation_agent_session(&coder_session)?,
-        ] {
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.save_managed_worktree(&worktree)?,
+                store.save_agent_delegation(&delegation)?,
+                store.save_conversation_agent_session(&coder_session)?,
+            ]
+        };
+        for event in events {
             let _ = self.event_sender.send(event);
         }
         let coder_instructions = CodexThreadInstructions {
@@ -2995,12 +3002,15 @@ impl AppRuntime {
             content: coder_result.text.clone(),
             created_at: Utc::now(),
         };
-        for event in [
-            self.store()?.save_agent_delegation(&delegation)?,
-            self.store()?.save_managed_worktree(&worktree)?,
-            self.store()?
-                .save_conversation_agent_session(&coder_session)?,
-        ] {
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.save_agent_delegation(&delegation)?,
+                store.save_managed_worktree(&worktree)?,
+                store.save_conversation_agent_session(&coder_session)?,
+            ]
+        };
+        for event in events {
             let _ = self.event_sender.send(event);
         }
         self.settle_coder_authority(&delegation, AgentRunState::Completed);
@@ -3191,7 +3201,16 @@ impl AppRuntime {
             .conversation_team_state(conversation.id)?
             .delegations
             .into_iter()
-            .filter(|delegation| !delegation.state.is_terminal())
+            .filter(|delegation| {
+                matches!(
+                    delegation.state,
+                    AgentDelegationState::Requested
+                        | AgentDelegationState::Preparing
+                        | AgentDelegationState::Running
+                        | AgentDelegationState::Waiting
+                        | AgentDelegationState::Integrating
+                )
+            })
             .count();
         if active >= usize::from(organization.policy.max_parallel_agents) {
             return Err(StorageError::Conflict(format!(
@@ -3239,6 +3258,31 @@ impl AppRuntime {
             .lock()
             .await
             .insert(delegation_id, task.abort_handle());
+        // Do not acknowledge a delegation until its atomic task/run/instance/lease record is
+        // queryable. Otherwise the completed Chat response can reach the desktop before the
+        // team projection exists, leaving no state from which UI polling can begin.
+        let mut durable = false;
+        for _ in 0..50 {
+            if self.store()?.agent_delegation(delegation_id)?.is_some() {
+                durable = true;
+                break;
+            }
+            if task.is_finished() {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        if !durable {
+            self.conversation_team
+                .active_delegations
+                .lock()
+                .await
+                .remove(&delegation_id);
+            return Err(StorageError::InvalidData(
+                "Coding Agent exited before MCG could publish its durable progress record".into(),
+            )
+            .into());
+        }
         Ok((
             delegation_id,
             format!(
@@ -4238,10 +4282,14 @@ impl AppRuntime {
             worktree.revision = worktree.revision.saturating_add(1);
             worktree.retained_reason = Some("live repository HEAD changed".into());
             worktree.updated_at = Utc::now();
-            for event in [
-                self.store()?.save_agent_delegation(&delegation)?,
-                self.store()?.save_managed_worktree(&worktree)?,
-            ] {
+            let events = {
+                let mut store = self.store()?;
+                vec![
+                    store.save_agent_delegation(&delegation)?,
+                    store.save_managed_worktree(&worktree)?,
+                ]
+            };
+            for event in events {
                 let _ = self.event_sender.send(event);
             }
             return Err(StorageError::Conflict(
@@ -4257,10 +4305,14 @@ impl AppRuntime {
         worktree.state = ManagedWorktreeState::Integrating;
         worktree.revision = worktree.revision.saturating_add(1);
         worktree.updated_at = Utc::now();
-        for event in [
-            self.store()?.save_agent_delegation(&delegation)?,
-            self.store()?.save_managed_worktree(&worktree)?,
-        ] {
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.save_agent_delegation(&delegation)?,
+                store.save_managed_worktree(&worktree)?,
+            ]
+        };
+        for event in events {
             let _ = self.event_sender.send(event);
         }
         if !review.patch.is_empty() {
@@ -4283,10 +4335,14 @@ impl AppRuntime {
                 worktree.retained_reason = Some("integration dry-run failed".into());
                 worktree.revision = worktree.revision.saturating_add(1);
                 worktree.updated_at = Utc::now();
-                for event in [
-                    self.store()?.save_agent_delegation(&delegation)?,
-                    self.store()?.save_managed_worktree(&worktree)?,
-                ] {
+                let events = {
+                    let mut store = self.store()?;
+                    vec![
+                        store.save_agent_delegation(&delegation)?,
+                        store.save_managed_worktree(&worktree)?,
+                    ]
+                };
+                for event in events {
                     let _ = self.event_sender.send(event);
                 }
                 return Err(error.into());
@@ -4335,10 +4391,14 @@ impl AppRuntime {
                     Some("integration apply failed; rollback attempted".into());
                 worktree.revision = worktree.revision.saturating_add(1);
                 worktree.updated_at = Utc::now();
-                for event in [
-                    self.store()?.save_agent_delegation(&delegation)?,
-                    self.store()?.save_managed_worktree(&worktree)?,
-                ] {
+                let events = {
+                    let mut store = self.store()?;
+                    vec![
+                        store.save_agent_delegation(&delegation)?,
+                        store.save_managed_worktree(&worktree)?,
+                    ]
+                };
+                for event in events {
                     let _ = self.event_sender.send(event);
                 }
                 rollback?;
@@ -4357,10 +4417,14 @@ impl AppRuntime {
         worktree.revision = worktree.revision.saturating_add(1);
         worktree.retained_reason = None;
         worktree.updated_at = Utc::now();
-        for event in [
-            self.store()?.save_agent_delegation(&delegation)?,
-            self.store()?.save_managed_worktree(&worktree)?,
-        ] {
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.save_agent_delegation(&delegation)?,
+                store.save_managed_worktree(&worktree)?,
+            ]
+        };
+        for event in events {
             let _ = self.event_sender.send(event);
         }
         self.conversation(conversation_id)

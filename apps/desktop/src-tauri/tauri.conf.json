@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MCG",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "identifier": "dev.mcg.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MCG v0.3.16",
+        "title": "MCG v0.3.17",
         "decorations": false,
         "width": 1180,
         "height": 760,

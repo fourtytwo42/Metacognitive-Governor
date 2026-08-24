@@ -805,8 +805,13 @@ body { background: var(--mcg-bg); }
 .coding-agent-title { display: grid; min-width: 0; flex: 1; gap: 2px; }
 .coding-agent-title strong { font-size: .84rem; }
 .coding-agent-title small { overflow: hidden; color: var(--mcg-muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
-.coding-agent-state { display: inline-flex; align-items: center; gap: 7px; color: var(--mcg-muted); font-size: .72rem; }
+.coding-agent-progress { display: block; width: min(220px, 100%); height: 3px; margin-top: 4px; overflow: hidden; border-radius: 999px; background: var(--mcg-border); }
+.coding-agent-progress i { display: block; height: 100%; border-radius: inherit; background: var(--mcg-accent); transition: width 240ms ease; }
+.coding-agent-state { display: grid; min-width: 78px; justify-items: end; gap: 2px 7px; color: var(--mcg-muted); font-size: .72rem; }
+.coding-agent-state .thinking-dots { grid-column: 2; grid-row: 1 / span 2; }
+.coding-agent-elapsed { color: color-mix(in srgb, var(--mcg-muted) 78%, transparent); font-variant-numeric: tabular-nums; }
 .coding-agent-card.state-failed .coding-agent-state, .coding-agent-card.state-blocked .coding-agent-state { color: var(--mcg-danger); }
+.coding-agent-card.state-failed .coding-agent-progress i, .coding-agent-card.state-blocked .coding-agent-progress i, .coding-agent-card.state-cancelled .coding-agent-progress i { background: var(--mcg-danger); }
 .coding-agent-detail { display: grid; gap: 15px; padding: 14px; }
 .coding-agent-detail section { display: grid; min-width: 0; gap: 7px; }
 .coding-agent-detail h4, .coding-agent-detail p { margin: 0; }

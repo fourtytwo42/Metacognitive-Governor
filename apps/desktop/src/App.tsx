@@ -763,13 +763,68 @@ function ConversationActivityTimeline({ messages, activities }: { messages: Conv
   return <div className="chat-activity-timeline" aria-label="Turn activity">{content}</div>;
 }
 
+function formatAgentElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder.toString().padStart(2, "0")}s`;
+}
+
+function CodingAgentElapsed({ createdAt, updatedAt, active }: { createdAt: string; updatedAt: string; active: boolean }) {
+  const elapsed = () => Math.max(0, Math.floor(((active ? Date.now() : Date.parse(updatedAt)) - Date.parse(createdAt)) / 1000));
+  const [seconds, setSeconds] = useState(elapsed);
+  useEffect(() => {
+    setSeconds(elapsed());
+    if (!active) return;
+    const timer = window.setInterval(() => setSeconds(elapsed()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active, createdAt, updatedAt]);
+  return <span className="coding-agent-elapsed">{formatAgentElapsed(seconds)}</span>;
+}
+
+function codingAgentProgress(state: AgentDelegation["state"]): number {
+  const progress: Record<AgentDelegation["state"], number> = {
+    requested: 8,
+    preparing: 24,
+    running: 56,
+    waiting: 56,
+    blocked: 68,
+    reported: 78,
+    integrating: 90,
+    completed: 100,
+    failed: 100,
+    cancelled: 100
+  };
+  return progress[state];
+}
+
+function codingAgentStateLabel(state: AgentDelegation["state"]): string {
+  const labels: Record<AgentDelegation["state"], string> = {
+    requested: "Queued",
+    preparing: "Preparing worktree",
+    running: "Coding",
+    waiting: "Waiting for Chat Agent",
+    blocked: "Needs attention",
+    reported: "Ready for review",
+    integrating: "Applying changes",
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled"
+  };
+  return labels[state];
+}
+
+function codingAgentIsActive(state: AgentDelegation["state"]): boolean {
+  return ["requested", "preparing", "running", "waiting", "integrating"].includes(state);
+}
+
 function CodingAgentCards({ team, conversationId, onView }: { team?: ConversationTeamState; conversationId?: string; onView: (view: ConversationView) => void }) {
   const [tabs, setTabs] = useState<Record<string, "activity" | "exchange" | "blackboard" | "changes" | "evidence">>({});
   const [patches, setPatches] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   if (!team || team.delegations.length === 0) return null;
-  const stateLabel = (state: AgentDelegation["state"]) => state.replaceAll("_", " ").replace(/^./, (value) => value.toLocaleUpperCase());
+  const stateLabel = codingAgentStateLabel;
   async function runAction(delegation: AgentDelegation, action: "review" | "cancel" | "apply" | "discard" | "retry", worktreeRevision?: number) {
     if (!conversationId) return;
     setBusy(`${delegation.id}:${action}`);
@@ -801,7 +856,7 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
       const worktree = team.worktrees.find((candidate) => candidate.id === delegation.worktree_id);
       const messages = team.messages.filter((message) => message.delegation_id === delegation.id);
       const blackboard = team.blackboard.filter((entry) => entry.delegation_id === delegation.id);
-      const active = ["requested", "preparing", "running", "waiting", "blocked", "reported", "integrating"].includes(delegation.state);
+      const active = codingAgentIsActive(delegation.state);
       const tab = tabs[delegation.id] ?? "activity";
       const cancellable = ["requested", "preparing", "running", "waiting"].includes(delegation.state);
       const reviewable = Boolean(worktree) && ["reported", "blocked", "failed", "cancelled"].includes(delegation.state);
@@ -811,8 +866,12 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
       return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id}>
         <summary>
           <span className="coding-agent-glyph" aria-hidden="true">⌘</span>
-          <span className="coding-agent-title"><strong>Coding Agent {index + 1}</strong><small>{delegation.brief.objective}</small></span>
-          <span className="coding-agent-state">{stateLabel(delegation.state)}{active && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}</span>
+          <span className="coding-agent-title">
+            <strong>Coding Agent {index + 1}</strong>
+            <small>{delegation.brief.objective}</small>
+            <span className="coding-agent-progress" role="progressbar" aria-label={`Coding Agent ${index + 1} progress: ${stateLabel(delegation.state)}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={codingAgentProgress(delegation.state)}><i style={{ width: `${codingAgentProgress(delegation.state)}%` }} /></span>
+          </span>
+          <span className="coding-agent-state"><span>{stateLabel(delegation.state)}</span><CodingAgentElapsed createdAt={delegation.created_at} updatedAt={delegation.updated_at} active={active} />{active && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}</span>
           <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
         </summary>
         <div className="coding-agent-detail">
@@ -5729,9 +5788,9 @@ export function App() {
               {visibleConversation?.turns.filter((turn) => turn.error).map((turn) => <p className="error-message" role="alert" key={`${turn.id}-error`}>{turn.error}</p>)}
             </div>
             <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
-              {(visibleConversation?.team?.delegations.filter((delegation) => ["requested", "preparing", "running", "waiting", "blocked", "reported", "integrating"].includes(delegation.state)).length ?? 0) > 0 && <div className="coding-agent-active-count" role="status">
+              {(visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length ?? 0) > 0 && <div className="coding-agent-active-count" role="status">
                 <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
-                {visibleConversation?.team?.delegations.filter((delegation) => ["requested", "preparing", "running", "waiting", "blocked", "reported", "integrating"].includes(delegation.state)).length} coding agent{visibleConversation?.team?.delegations.filter((delegation) => ["requested", "preparing", "running", "waiting", "blocked", "reported", "integrating"].includes(delegation.state)).length === 1 ? "" : "s"} active
+                {visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length} coding agent{visibleConversation?.team?.delegations.filter((delegation) => codingAgentIsActive(delegation.state)).length === 1 ? "" : "s"} active
               </div>}
               {visibleQueuedMessages.length > 0 && <section className="chat-queue-drawer" aria-label="Queued messages">
                 <div className="chat-queue-heading">
