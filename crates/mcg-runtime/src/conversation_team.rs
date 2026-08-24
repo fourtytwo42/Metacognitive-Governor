@@ -54,6 +54,8 @@ pub struct ConversationTeamCoordinator {
         tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_delegations:
         tokio::sync::Mutex<BTreeMap<AgentDelegationId, tokio::task::AbortHandle>>,
+    pub(crate) direct_workspace_locks:
+        tokio::sync::Mutex<BTreeMap<ProjectId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) integration_locks: Mutex<BTreeMap<ProjectId, Arc<Mutex<()>>>>,
     pub credentials: AgentToolCredentialRegistry,
 }

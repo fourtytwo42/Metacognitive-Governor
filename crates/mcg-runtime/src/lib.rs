@@ -1795,6 +1795,126 @@ fn directory_size_bytes(root: &Path) -> Result<u64, StorageError> {
     Ok(total)
 }
 
+fn direct_workspace_ignored_path(relative: &str) -> bool {
+    relative.replace('\\', "/").split('/').any(|part| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            ".git"
+                | "node_modules"
+                | "target"
+                | "dist"
+                | "build"
+                | ".next"
+                | "coverage"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+        )
+    })
+}
+
+fn direct_workspace_snapshot(
+    source: &Path,
+    destination: Option<&Path>,
+) -> Result<
+    (
+        Vec<mcg_domain::WorktreeBaselineEntry>,
+        Vec<mcg_domain::WorktreeBaselineExclusion>,
+    ),
+    StorageError,
+> {
+    let canonical_source = fs::canonicalize(source).map_err(StorageError::Io)?;
+    let mut pending = vec![canonical_source.clone()];
+    let mut entries = Vec::new();
+    let mut exclusions = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(StorageError::Io)? {
+            let entry = entry.map_err(StorageError::Io)?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&canonical_source)
+                .map_err(|_| StorageError::InvalidData("project path escaped its root".into()))?;
+            let normalized = relative.to_string_lossy().replace('\\', "/");
+            let metadata = fs::symlink_metadata(&path).map_err(StorageError::Io)?;
+            if direct_workspace_ignored_path(&normalized)
+                || generated_agent_artifact_path(&normalized)
+            {
+                continue;
+            }
+            if sensitive_baseline_path(&normalized) {
+                exclusions.push(mcg_domain::WorktreeBaselineExclusion {
+                    normalized_path: normalized,
+                    reason: "sensitive path excluded".into(),
+                    review_blocker: true,
+                });
+                continue;
+            }
+            if metadata.file_type().is_symlink() {
+                exclusions.push(mcg_domain::WorktreeBaselineExclusion {
+                    normalized_path: normalized,
+                    reason: "symlinked path excluded".into(),
+                    review_blocker: true,
+                });
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            if metadata.len() > 10 * 1024 * 1024 {
+                exclusions.push(mcg_domain::WorktreeBaselineExclusion {
+                    normalized_path: normalized,
+                    reason: "file exceeds 10 MiB baseline limit".into(),
+                    review_blocker: true,
+                });
+                continue;
+            }
+            if let Some(destination) = destination {
+                let target = destination.join(relative);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(StorageError::Io)?;
+                }
+                fs::copy(&path, target).map_err(StorageError::Io)?;
+            }
+            entries.push(baseline_entry(
+                &canonical_source,
+                &normalized,
+                mcg_domain::BaselineSourceKind::Untracked,
+            )?);
+        }
+    }
+    entries.sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
+    exclusions.sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
+    Ok((entries, exclusions))
+}
+
+fn direct_workspace_changed_files(worktree: &ManagedWorktree) -> Result<Vec<String>, StorageError> {
+    let root = Path::new(&worktree.root);
+    let (current, _) = direct_workspace_snapshot(root, None)?;
+    let baseline = worktree
+        .baseline_entries
+        .iter()
+        .map(|entry| (entry.normalized_path.as_str(), entry.sha256.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let current = current
+        .iter()
+        .map(|entry| (entry.normalized_path.as_str(), entry.sha256.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut changed = baseline
+        .keys()
+        .chain(current.keys())
+        .filter(|path| baseline.get(**path) != current.get(**path))
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    changed.sort();
+    Ok(changed)
+}
+
 fn parse_delegation_argument(
     arguments: &serde_json::Value,
 ) -> Result<AgentDelegationId, RuntimeError> {
@@ -2844,6 +2964,17 @@ impl AppRuntime {
             .clone())
     }
 
+    async fn project_direct_workspace_lock(
+        &self,
+        project_id: ProjectId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.conversation_team.direct_workspace_locks.lock().await;
+        locks
+            .entry(project_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     fn prepare_conversation_worktree(
         &self,
         conversation: &Conversation,
@@ -2855,12 +2986,6 @@ impl AppRuntime {
         let project = self.project(project_id)?.ok_or_else(|| {
             StorageError::InvalidData("conversation project was not found".into())
         })?;
-        if !project.repository.is_git {
-            return Err(StorageError::InvalidData(
-                "managed parallel coding currently requires a Git project".into(),
-            )
-            .into());
-        }
         let repository = fs::canonicalize(&project.root)?;
         let worktrees_root = self
             .config
@@ -2874,6 +2999,60 @@ impl AppRuntime {
                 "managed worktree destination already exists".into(),
             )
             .into());
+        }
+        if !project.repository.is_git {
+            fs::create_dir_all(&root)?;
+            let prepared = direct_workspace_snapshot(&repository, Some(&root));
+            let (baseline_entries, baseline_exclusions) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&root);
+                    return Err(error.into());
+                }
+            };
+            let mut digest = Sha256::new();
+            for entry in &baseline_entries {
+                digest.update(entry.normalized_path.as_bytes());
+                digest.update(entry.sha256.as_bytes());
+            }
+            let baseline_sha256 = format!("{:x}", digest.finalize());
+            let now = Utc::now();
+            return Ok((
+                ManagedWorktree {
+                    schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+                    id: ManagedWorktreeId::new(),
+                    conversation_id: conversation.id,
+                    delegation_id,
+                    project_id,
+                    root: root.to_string_lossy().into_owned(),
+                    branch: "direct-workspace".into(),
+                    base_head: format!("non-git:{baseline_sha256}"),
+                    baseline_head: None,
+                    baseline_sha256,
+                    workspace_mode: mcg_domain::ManagedWorkspaceMode::DirectWorkspace,
+                    baseline_confidence: if baseline_exclusions
+                        .iter()
+                        .any(|exclusion| exclusion.review_blocker)
+                    {
+                        mcg_domain::BaselineConfidence::ReviewRequired
+                    } else {
+                        mcg_domain::BaselineConfidence::Verified
+                    },
+                    baseline_entries,
+                    baseline_exclusions,
+                    integration_journal: None,
+                    state: ManagedWorktreeState::Ready,
+                    revision: 1,
+                    retained_reason: Some(
+                        "Non-Git project: parallel isolation is unavailable; coding is serialized in a managed mirror."
+                            .into(),
+                    ),
+                    storage_bytes: directory_size_bytes(&root).unwrap_or(0),
+                    created_at: now,
+                    updated_at: now,
+                },
+                String::new(),
+            ));
         }
         let short_id = delegation_id
             .to_string()
@@ -3007,6 +3186,21 @@ impl AppRuntime {
                     .into(),
             )
         })?;
+        let project = self.project(project_id)?.ok_or_else(|| {
+            StorageError::InvalidData("conversation project was not found".into())
+        })?;
+        // A non-Git project is copied into a managed mirror, but it has no merge primitive for
+        // concurrent results. Hold one async project lock for the complete Coder lifecycle.
+        let _direct_workspace_guard = if project.repository.is_git {
+            None
+        } else {
+            Some(
+                self.project_direct_workspace_lock(project_id)
+                    .await
+                    .lock_owned()
+                    .await,
+            )
+        };
         let organization = self.resolve_organization(Some(project_id), None)?;
         let coder_role = organization
             .roles
@@ -3384,15 +3578,20 @@ impl AppRuntime {
             let _ = self.codex_harness.unsubscribe_thread(&coder_thread).await;
         }
         let root = PathBuf::from(&worktree.root);
-        include_untracked_in_worktree_diff(&root)?;
-        let actual_changed_files: Vec<String> = String::from_utf8(git_output(
-            &root,
-            &["diff", "--name-only", &baseline_head, "--"],
-        )?)
-        .map_err(|_| StorageError::InvalidData("changed paths were not UTF-8".into()))?
-        .lines()
-        .map(str::to_owned)
-        .collect();
+        let actual_changed_files: Vec<String> =
+            if worktree.workspace_mode == mcg_domain::ManagedWorkspaceMode::DirectWorkspace {
+                direct_workspace_changed_files(&worktree)?
+            } else {
+                include_untracked_in_worktree_diff(&root)?;
+                String::from_utf8(git_output(
+                    &root,
+                    &["diff", "--name-only", &baseline_head, "--"],
+                )?)
+                .map_err(|_| StorageError::InvalidData("changed paths were not UTF-8".into()))?
+                .lines()
+                .map(str::to_owned)
+                .collect()
+            };
         if self.config.two_agent_conversations {
             let reported: BTreeSet<_> = delegation.changed_files.iter().cloned().collect();
             let actual: BTreeSet<_> = actual_changed_files.iter().cloned().collect();
@@ -3412,7 +3611,12 @@ impl AppRuntime {
             delegation.state = AgentDelegationState::Reported;
             delegation.revision = delegation.revision.saturating_add(1);
         }
-        let agent_patch = git_output(&root, &["diff", "--binary", &baseline_head, "--"])?;
+        let agent_patch =
+            if worktree.workspace_mode == mcg_domain::ManagedWorkspaceMode::DirectWorkspace {
+                Vec::new()
+            } else {
+                git_output(&root, &["diff", "--binary", &baseline_head, "--"])?
+            };
         delegation.updated_at = Utc::now();
         worktree.state = ManagedWorktreeState::Dirty;
         worktree.revision = worktree.revision.saturating_add(1);
@@ -3806,6 +4010,46 @@ impl AppRuntime {
         Ok(())
     }
 
+    fn refresh_coordinator_activity(
+        &self,
+        conversation_id: ConversationId,
+        coordinator_session_id: ConversationAgentSessionId,
+    ) -> Result<(), RuntimeError> {
+        let team = self.store()?.conversation_team_state(conversation_id)?;
+        let Some(mut coordinator) = team
+            .sessions
+            .iter()
+            .find(|session| session.id == coordinator_session_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if coordinator.state == ConversationAgentSessionState::Retired {
+            return Ok(());
+        }
+        let has_active_coder = team.delegations.iter().any(|delegation| {
+            matches!(
+                delegation.state,
+                AgentDelegationState::Requested
+                    | AgentDelegationState::Preparing
+                    | AgentDelegationState::Running
+                    | AgentDelegationState::Waiting
+                    | AgentDelegationState::Integrating
+            )
+        });
+        coordinator.state = if has_active_coder {
+            ConversationAgentSessionState::Waiting
+        } else {
+            ConversationAgentSessionState::Ready
+        };
+        coordinator.updated_at = Utc::now();
+        let event = self
+            .store()?
+            .save_conversation_agent_session(&coordinator)?;
+        let _ = self.event_sender.send(event);
+        Ok(())
+    }
+
     fn settle_coder_authority(&self, delegation: &AgentDelegation, run_state: AgentRunState) {
         let now = Utc::now();
         if let Some(session_id) = delegation.coder_session_id {
@@ -3993,6 +4237,7 @@ impl AppRuntime {
                         response,
                     )
                     .await;
+                let _ = runtime.refresh_coordinator_activity(conversation.id, chat_session.id);
             } else {
                 let _ = runtime
                     .append_background_chat_response(conversation.id, turn_id, response)
@@ -5210,6 +5455,27 @@ impl AppRuntime {
             .store()?
             .managed_worktree_for_delegation(delegation_id)?;
         let patch = if let Some(worktree) = &worktree {
+            if worktree.workspace_mode == mcg_domain::ManagedWorkspaceMode::DirectWorkspace {
+                let changed = direct_workspace_changed_files(worktree)?;
+                let summary = if changed.is_empty() {
+                    "No file changes detected in the managed non-Git workspace.\n".into()
+                } else {
+                    format!(
+                        "Managed non-Git workspace changes ({}):\n{}\n",
+                        changed.len(),
+                        changed
+                            .iter()
+                            .map(|path| format!("- {path}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                return Ok(DelegationReview {
+                    delegation,
+                    worktree: Some(worktree.clone()),
+                    patch: summary,
+                });
+            }
             let baseline = worktree
                 .baseline_head
                 .as_deref()
@@ -5251,11 +5517,18 @@ impl AppRuntime {
                 )
                 .into());
             }
+            if worktree.workspace_mode == mcg_domain::ManagedWorkspaceMode::DirectWorkspace {
+                fs::remove_dir_all(&worktree_root)?;
+                return Ok(());
+            }
             git_output(
                 repository,
                 &["worktree", "remove", "--force", &worktree.root],
             )?;
         } else {
+            if worktree.workspace_mode == mcg_domain::ManagedWorkspaceMode::DirectWorkspace {
+                return Ok(());
+            }
             let _ = git_output(repository, &["worktree", "prune"])?;
         }
         let branch_exists = Command::new("git")
@@ -5413,6 +5686,218 @@ impl AppRuntime {
         Ok(())
     }
 
+    fn integrate_direct_workspace(
+        &self,
+        conversation_id: ConversationId,
+        mut delegation: AgentDelegation,
+        mut worktree: ManagedWorktree,
+        project_root: &Path,
+    ) -> Result<ConversationView, RuntimeError> {
+        let changed = direct_workspace_changed_files(&worktree)?;
+        let mirror = fs::canonicalize(&worktree.root)?;
+        let project_root = fs::canonicalize(project_root)?;
+        let baseline = worktree
+            .baseline_entries
+            .iter()
+            .map(|entry| (entry.normalized_path.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let journal_id = mcg_domain::IntegrationJournalId::new();
+        let preimage_root = self
+            .config
+            .data_directory
+            .join("integration-preimages")
+            .join(journal_id.to_string());
+        fs::create_dir_all(&preimage_root)?;
+        let mut touched_paths = Vec::new();
+        for relative in &changed {
+            let relative_path = Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path.components().any(|component| {
+                    matches!(
+                        component,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
+                || sensitive_baseline_path(relative)
+            {
+                return Err(StorageError::InvalidData(
+                    "managed non-Git workspace contains an unsafe changed path".into(),
+                )
+                .into());
+            }
+            let live = project_root.join(relative_path);
+            let expected = baseline
+                .get(relative.as_str())
+                .map(|entry| entry.sha256.as_str());
+            let (live_sha256, preimage_sha256, preimage_path) = if live.exists() {
+                let metadata = fs::symlink_metadata(&live)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(StorageError::Conflict(format!(
+                        "live path {relative} is no longer a regular file"
+                    ))
+                    .into());
+                }
+                let bytes = fs::read(&live)?;
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                if expected != Some(digest.as_str()) {
+                    return Err(StorageError::Conflict(format!(
+                        "live path {relative} changed after the non-Git baseline was captured"
+                    ))
+                    .into());
+                }
+                let backup = preimage_root.join(relative_path);
+                if let Some(parent) = backup.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&backup, &bytes)?;
+                (
+                    Some(digest.clone()),
+                    Some(digest),
+                    Some(backup.to_string_lossy().into_owned()),
+                )
+            } else {
+                if expected.is_some() {
+                    return Err(StorageError::Conflict(format!(
+                        "live path {relative} was removed after the non-Git baseline was captured"
+                    ))
+                    .into());
+                }
+                (None, None, None)
+            };
+            touched_paths.push(mcg_domain::IntegrationTouchedPath {
+                normalized_path: relative.clone(),
+                live_sha256,
+                preimage_sha256,
+                preimage_path,
+            });
+        }
+        let now = Utc::now();
+        worktree.integration_journal = Some(mcg_domain::IntegrationJournal {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: journal_id,
+            delegation_id: delegation.id,
+            worktree_id: worktree.id,
+            state: mcg_domain::IntegrationJournalState::DryRunPassed,
+            live_head: None,
+            touched_paths,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        });
+        delegation.state = AgentDelegationState::Integrating;
+        delegation.revision = delegation.revision.saturating_add(1);
+        delegation.updated_at = now;
+        worktree.state = ManagedWorktreeState::Integrating;
+        worktree.revision = worktree.revision.saturating_add(1);
+        worktree.updated_at = now;
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.save_agent_delegation(&delegation)?,
+                store.save_managed_worktree(&worktree)?,
+            ]
+        };
+        for event in events {
+            let _ = self.event_sender.send(event);
+        }
+        if let Some(journal) = &mut worktree.integration_journal {
+            journal.state = mcg_domain::IntegrationJournalState::Applying;
+            journal.updated_at = Utc::now();
+        }
+        let apply = (|| -> Result<(), RuntimeError> {
+            for relative in &changed {
+                let source = mirror.join(relative);
+                let live = project_root.join(relative);
+                if source.exists() {
+                    let metadata = fs::symlink_metadata(&source)?;
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        return Err(StorageError::InvalidData(format!(
+                            "managed source {relative} is not a regular file"
+                        ))
+                        .into());
+                    }
+                    if let Some(parent) = live.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::copy(source, live)?;
+                } else if live.exists() {
+                    fs::remove_file(live)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = apply {
+            if let Some(journal) = &mut worktree.integration_journal {
+                journal.state = mcg_domain::IntegrationJournalState::RollingBack;
+                journal.error = Some(error.to_string());
+                journal.updated_at = Utc::now();
+            }
+            let rollback = worktree
+                .integration_journal
+                .as_ref()
+                .map(|journal| self.rollback_integration_journal(&project_root, journal))
+                .transpose();
+            if let Some(journal) = &mut worktree.integration_journal {
+                journal.state = if rollback.as_ref().is_ok_and(|value| value.is_some()) {
+                    mcg_domain::IntegrationJournalState::RolledBack
+                } else {
+                    mcg_domain::IntegrationJournalState::Failed
+                };
+                journal.updated_at = Utc::now();
+            }
+            delegation.state = AgentDelegationState::Blocked;
+            delegation.revision = delegation.revision.saturating_add(1);
+            delegation.error = Some(format!("non-Git integration failed: {error}"));
+            delegation.updated_at = Utc::now();
+            worktree.state = ManagedWorktreeState::Retained;
+            worktree.retained_reason =
+                Some("non-Git integration failed; rollback attempted".into());
+            worktree.revision = worktree.revision.saturating_add(1);
+            worktree.updated_at = Utc::now();
+            let events = {
+                let mut store = self.store()?;
+                vec![
+                    store.save_agent_delegation(&delegation)?,
+                    store.save_managed_worktree(&worktree)?,
+                ]
+            };
+            for event in events {
+                let _ = self.event_sender.send(event);
+            }
+            rollback?;
+            return Err(error);
+        }
+        if let Some(journal) = &mut worktree.integration_journal {
+            journal.state = mcg_domain::IntegrationJournalState::Applied;
+            journal.updated_at = Utc::now();
+        }
+        let cleanup = self.remove_managed_worktree(&project_root, &worktree);
+        delegation.state = AgentDelegationState::Completed;
+        delegation.revision = delegation.revision.saturating_add(1);
+        delegation.updated_at = Utc::now();
+        worktree.state = if cleanup.is_ok() {
+            ManagedWorktreeState::Removed
+        } else {
+            ManagedWorktreeState::Retained
+        };
+        worktree.revision = worktree.revision.saturating_add(1);
+        worktree.retained_reason = cleanup
+            .err()
+            .map(|error| format!("integration completed; managed cleanup is pending: {error}"));
+        worktree.updated_at = Utc::now();
+        let events = {
+            let mut store = self.store()?;
+            vec![
+                store.save_agent_delegation(&delegation)?,
+                store.save_managed_worktree(&worktree)?,
+            ]
+        };
+        for event in events {
+            let _ = self.event_sender.send(event);
+        }
+        self.conversation(conversation_id)
+    }
+
     pub fn integrate_delegation(
         &self,
         conversation_id: ConversationId,
@@ -5477,6 +5962,14 @@ impl AppRuntime {
             StorageError::InvalidData("coding delegation project was not found".into())
         })?;
         let repository = fs::canonicalize(project.root)?;
+        if worktree.workspace_mode == mcg_domain::ManagedWorkspaceMode::DirectWorkspace {
+            return self.integrate_direct_workspace(
+                conversation_id,
+                delegation,
+                worktree,
+                &repository,
+            );
+        }
         let live_head = String::from_utf8(git_output(&repository, &["rev-parse", "HEAD"])?)
             .map_err(|_| StorageError::InvalidData("Git HEAD was not UTF-8".into()))?
             .trim()
@@ -20020,6 +20513,61 @@ mod tests {
         let second = generated_coder_name(first_id, &used);
         assert_ne!(first, second);
         assert!(second.starts_with("Coding Agent "));
+    }
+
+    #[test]
+    fn non_git_workspace_is_mirrored_and_diffed_without_sensitive_or_generated_files() {
+        let source = tempfile::tempdir().expect("source");
+        let mirror = tempfile::tempdir().expect("mirror");
+        fs::write(source.path().join("index.html"), "before").expect("source file");
+        fs::write(source.path().join(".env"), "SECRET=never-copy").expect("sensitive file");
+        fs::create_dir_all(source.path().join("node_modules/pkg")).expect("generated dir");
+        fs::write(source.path().join("node_modules/pkg/index.js"), "generated")
+            .expect("generated file");
+
+        let (entries, exclusions) =
+            direct_workspace_snapshot(source.path(), Some(mirror.path())).expect("snapshot");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].normalized_path, "index.html");
+        assert!(mirror.path().join("index.html").exists());
+        assert!(!mirror.path().join(".env").exists());
+        assert!(!mirror.path().join("node_modules").exists());
+        assert!(
+            exclusions
+                .iter()
+                .any(|entry| entry.normalized_path == ".env" && entry.review_blocker)
+        );
+
+        let now = Utc::now();
+        let worktree = ManagedWorktree {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: ManagedWorktreeId::new(),
+            conversation_id: ConversationId::new(),
+            delegation_id: AgentDelegationId::new(),
+            project_id: ProjectId::new(),
+            root: mirror.path().to_string_lossy().into_owned(),
+            branch: "direct-workspace".into(),
+            base_head: "non-git:test".into(),
+            baseline_head: None,
+            baseline_sha256: "test".into(),
+            workspace_mode: mcg_domain::ManagedWorkspaceMode::DirectWorkspace,
+            baseline_confidence: mcg_domain::BaselineConfidence::Verified,
+            baseline_entries: entries,
+            baseline_exclusions: exclusions,
+            integration_journal: None,
+            state: ManagedWorktreeState::Ready,
+            revision: 1,
+            retained_reason: None,
+            storage_bytes: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        fs::write(mirror.path().join("index.html"), "after").expect("edit mirror");
+        fs::write(mirror.path().join("styles.css"), "body {} ").expect("new mirror file");
+        assert_eq!(
+            direct_workspace_changed_files(&worktree).expect("changed files"),
+            vec!["index.html".to_owned(), "styles.css".to_owned()]
+        );
     }
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
