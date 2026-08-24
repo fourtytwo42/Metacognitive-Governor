@@ -131,6 +131,15 @@ fn shadow_experiments_from_environment() -> bool {
     )
 }
 
+fn two_agent_conversations_from_environment() -> bool {
+    std::env::var("MCG_TWO_AGENT_CONVERSATIONS").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -141,7 +150,7 @@ impl Default for AppConfig {
             data_directory: default_data_directory(),
             browser_executable: std::env::var_os("MCG_BROWSER_EXECUTABLE").map(PathBuf::from),
             shadow_experiments: shadow_experiments_from_environment(),
-            two_agent_conversations: false,
+            two_agent_conversations: two_agent_conversations_from_environment(),
             trusted_plugin_signers: Vec::new(),
         }
     }
@@ -157,7 +166,9 @@ mod tests {
 
         assert_eq!(config.autonomy, AutonomyPreset::Autonomous);
         assert!(!config.advanced_mode);
-        assert!(!config.two_agent_conversations);
+        if std::env::var_os("MCG_TWO_AGENT_CONVERSATIONS").is_none() {
+            assert!(!config.two_agent_conversations);
+        }
         if std::env::var_os("MCG_SHADOW_EXPERIMENTS").is_none() {
             assert_eq!(config.shadow_experiments, cfg!(debug_assertions));
         }

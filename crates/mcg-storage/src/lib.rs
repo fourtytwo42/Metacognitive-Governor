@@ -67,7 +67,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 40;
+pub const STORAGE_SCHEMA_VERSION: i64 = 41;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1512,6 +1512,16 @@ CREATE INDEX IF NOT EXISTS agent_credential_audit_scope
     ON agent_credential_audit(conversation_id, session_id, occurred_at, audit_id);
 ";
 
+// Schema 36 predated role-specific conversation teams and allowed only one Codex thread binding
+// per conversation. A two-agent conversation intentionally owns one persistent Chat thread and
+// one distinct thread for every Coding Agent delegation, so conversation_id is now a lookup key
+// rather than a uniqueness boundary. binding_key remains the authoritative unique identity.
+const MIGRATION_41: &str = r"
+DROP INDEX IF EXISTS codex_bindings_conversation;
+CREATE INDEX IF NOT EXISTS codex_bindings_conversation_lookup
+    ON codex_thread_bindings(conversation_id, updated_at DESC, binding_key);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1687,6 +1697,7 @@ impl SqliteEventStore {
             (38_i64, MIGRATION_38),
             (39_i64, MIGRATION_39),
             (40_i64, MIGRATION_40),
+            (41_i64, MIGRATION_41),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -4275,6 +4286,67 @@ mod tests {
         assert_eq!(recovered, task);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].task_id, Some(task.id));
+    }
+
+    #[test]
+    fn conversation_can_persist_chat_and_distinct_coder_thread_bindings() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        let conversation = Conversation::new("two role threads", None);
+        store
+            .create_conversation(&conversation, None)
+            .expect("conversation should persist");
+        let common = |codex_thread_id: &str| CodexThreadBinding {
+            conversation_id: Some(conversation.id),
+            conversation_turn_id: None,
+            run_id: None,
+            agent_instance_id: None,
+            agent_session_id: None,
+            delegation_id: None,
+            role_id: None,
+            organization_revision_id: None,
+            workspace_id: None,
+            codex_thread_id: codex_thread_id.into(),
+            codex_turn_id: None,
+            codex_item_id: None,
+            codex_session_id: None,
+            binary_version: "test".into(),
+            protocol_version: "test".into(),
+            ownership_source: Some("mcg".into()),
+            manageable: true,
+            last_reconciled_item_id: None,
+            recovery_state: mcg_domain::CodexRecoveryState::Healthy,
+        };
+        let chat = common("chat-thread");
+        store
+            .save_codex_thread_binding(&chat)
+            .expect("chat binding should persist");
+
+        let delegation_id = mcg_domain::AgentDelegationId::new();
+        let coder = CodexThreadBinding {
+            delegation_id: Some(delegation_id),
+            codex_thread_id: "coder-thread".into(),
+            ..common("unused")
+        };
+        store
+            .save_codex_thread_binding(&coder)
+            .expect("coder binding may share the conversation");
+
+        assert_eq!(
+            store
+                .codex_thread_binding_for_conversation(conversation.id)
+                .expect("chat lookup"),
+            Some(chat)
+        );
+        assert_eq!(
+            store
+                .codex_thread_binding_for_delegation(delegation_id)
+                .expect("coder lookup"),
+            Some(coder)
+        );
+        assert_eq!(
+            store.codex_thread_bindings().expect("all bindings").len(),
+            2
+        );
     }
 
     #[test]

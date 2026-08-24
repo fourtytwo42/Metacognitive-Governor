@@ -114,13 +114,39 @@ fn tool_schema(name: &str) -> Value {
         "read_blackboard" => "Read this conversation's append-only shared blackboard.",
         "write_blackboard" => "Append a typed entry to this conversation's shared blackboard.",
         "cancel_delegation" => "Cancel one active delegation belonging to this conversation.",
-        "report_result" => "Report structured coding results and integration readiness to Chat.",
+        "report_result" => {
+            "Required final step for a Coding Agent. Call exactly once after verification to report structured results to the Chat Agent."
+        }
         _ => "MCG internal role-scoped tool.",
+    };
+    let input_schema = if name == "report_result" {
+        json!({
+            "type":"object",
+            "properties":{
+                "summary":{"type":"string","minLength":1},
+                "changed_files":{"type":"array","items":{"type":"string"}},
+                "checks":{"type":"array","items":{"type":"string"}},
+                "evidence":{"type":"array","items":{"type":"string"}},
+                "unresolved_issues":{"type":"array","items":{"type":"string"}},
+                "integration_ready":{"type":"boolean"}
+            },
+            "required":[
+                "summary",
+                "changed_files",
+                "checks",
+                "evidence",
+                "unresolved_issues",
+                "integration_ready"
+            ],
+            "additionalProperties":false
+        })
+    } else {
+        json!({"type":"object","additionalProperties":true})
     };
     json!({
         "name": name,
         "description": description,
-        "inputSchema": {"type":"object","additionalProperties":true}
+        "inputSchema": input_schema
     })
 }
 
