@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - Windows portable v0.4.16 built after disk cleanup
+
+- Context: Owner reclaimed disk space and requested a retry of the portable containing the ChatGPT Sites restoration and bottom-anchored chat composer.
+- Decision: Advance all product/package manifests to v0.4.16 and repeat the one-job, non-incremental Windows portable build while preserving existing release and portable artifacts.
+- Commands/tests: Packaging contracts passed; all release sidecars compiled; desktop TypeScript and Vite production build passed; Tauri single-file portable link passed. Independent file-count, SHA-256, byte-size, and Windows version-resource checks passed.
+- Result: `target/portable/MCG-Portable-Windows-x64-v0.4.16/MCG-Desktop-v0.4.16.exe` is the only payload, 513,380,864 bytes, Product/FileVersion 0.4.16, SHA-256 `09B6322BEC1042883F2753FFF68B7715FA0FD5489E1572CF274449E5B1751185`. About 30.4 GiB remained free after packaging.
+- Follow-up: Owner-native UAT should verify ChatGPT Sites inventory in Simple and Advanced modes and confirm the chat composer stays anchored with the right and terminal panels open.
+
 ### 2026-08-25 - v0.4.16 portable blocked by disk capacity
 
 - Context: Owner requested a new portable after the ChatGPT Sites and anchored-composer fixes. Packaging inputs were advanced transiently to v0.4.16 and a one-job, non-incremental release build was attempted with about 5.9 GiB free.
