@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "rung": "vanilla",
+  "requirements": [
+    {"id":"R1","priority":"P0","weight":4,"met":true,"evidence":"Two Coders started 76 ms apart with disjoint runtime-reserved scopes."},
+    {"id":"R2","priority":"P0","weight":4,"met":true,"evidence":"Independent inspection verified exactly the four authorized source/test files; package.json and .gitignore remained unchanged."},
+    {"id":"R3","priority":"P0","weight":4,"met":true,"evidence":"Unicode slugify independently passed trim, lowercase, diacritic, multiple-script, separator, empty, and coercion cases."},
+    {"id":"R4","priority":"P0","weight":4,"met":true,"evidence":"CSV encode/decode independently passed comma, quote, CRLF/LF, empty-field, escaped-quote, malformed-input, and round-trip cases."},
+    {"id":"R5","priority":"P0","weight":3,"met":true,"evidence":"Independent post-integration node --test passed all 12 tests."},
+    {"id":"R6","priority":"P0","weight":3,"met":false,"evidence":"A Coder claimed aggregate node --test inside its isolated worktree before the sibling delta was integrated; this is not valid post-integration evidence."},
+    {"id":"R7","priority":"P0","weight":3,"met":true,"evidence":"No dependencies, network access, or out-of-scope writes were introduced."},
+    {"id":"R8","priority":"P0","weight":3,"met":false,"evidence":"Two final-review wakes raced, producing three Coordinator turns instead of one planning plus one aggregate review."}
+  ],
+  "checks": [
+    {"name":"independent node --test (12/12)","required":true,"passed":true},
+    {"name":"git diff --check","required":true,"passed":true},
+    {"name":"four-file scope inspection","required":true,"passed":true},
+    {"name":"single aggregate Coordinator review","required":true,"passed":false},
+    {"name":"truthful post-integration evidence","required":true,"passed":false}
+  ],
+  "security": {
+    "scoped_writes": true,
+    "governed_role_path": true,
+    "no_secret_exposure": true,
+    "no_unauthorized_activity": true,
+    "integration_policy_compliant": true
+  },
+  "reliability": {
+    "terminal_batch": true,
+    "exactly_one_chat_callback": true,
+    "wakes_completed": true,
+    "no_duplicate_result": true,
+    "truthful_recovery": false
+  },
+  "cleanup": {
+    "receipt_retained": true,
+    "assessment_retained": true,
+    "catalog_removed": true,
+    "project_path_removed": true,
+    "cleanup_verified": true
+  },
+  "efficiency": {
+    "actual_turns": 6,
+    "actual_tokens": 6446,
+    "elapsed_seconds": 274
+  },
+  "notes": "Failed qualification by design. Product output passed independently, but duplicate final-review wakes and misleading isolated-worktree aggregate evidence violate the harness contract. The 37,985-byte fixture was sent to the Recycle Bin after catalog and worktree cleanup."
+}

@@ -215,6 +215,20 @@ fn tool_schema(name: &str) -> Value {
                 "changed_files":{"type":"array","items":{"type":"string"}},
                 "checks":{"type":"array","items":{"type":"string"}},
                 "evidence":{"type":"array","items":{"type":"string"}},
+                "requirement_evidence":{
+                    "type":"array",
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                            "requirement":{"type":"string","minLength":1},
+                            "satisfied":{"type":"boolean"},
+                            "evidence":{"type":"string","minLength":1},
+                            "verification":{"type":"string","minLength":1}
+                        },
+                        "required":["requirement","satisfied","evidence","verification"],
+                        "additionalProperties":false
+                    }
+                },
                 "unresolved_issues":{"type":"array","items":{"type":"string"}},
                 "integration_ready":{"type":"boolean"}
             },
@@ -223,6 +237,7 @@ fn tool_schema(name: &str) -> Value {
                 "changed_files",
                 "checks",
                 "evidence",
+                "requirement_evidence",
                 "unresolved_issues",
                 "integration_ready"
             ],
@@ -257,12 +272,21 @@ async fn call_tool(
     if response.status() == StatusCode::UNAUTHORIZED {
         return Err("agent credential expired or was revoked".into());
     }
-    response
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.map_err(|error| error.to_string())?;
+        let message = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| body.trim().to_owned());
+        return Err(format!("MCG rejected {tool_name} ({status}): {message}"));
+    }
+    response.json().await.map_err(|error| error.to_string())
 }
 
 #[tokio::main]

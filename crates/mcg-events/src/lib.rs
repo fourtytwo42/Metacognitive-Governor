@@ -22,6 +22,7 @@ pub enum EventKind {
     AgentContextCheckpointUpdated,
     CoordinationBatchUpdated,
     AgentWakeUpdated,
+    ConversationPreviewUpdated,
     BlackboardEntryRecorded,
     ManagedWorktreeUpdated,
     CodexHarnessEvent,
@@ -74,6 +75,8 @@ pub enum EventKind {
     ShadowExecutionRecorded,
     ExperimentBenchmarkRecorded,
     ExperimentDecisionRecorded,
+    GovernorProposalCreated,
+    GovernorProposalStateChanged,
     ShadowWorkspacePrepared,
     ShadowWorkspaceStateChanged,
     SshWorkflowCreated,
@@ -95,6 +98,7 @@ impl EventKind {
             Self::AgentContextCheckpointUpdated => "agent_context_checkpoint_updated",
             Self::CoordinationBatchUpdated => "coordination_batch_updated",
             Self::AgentWakeUpdated => "agent_wake_updated",
+            Self::ConversationPreviewUpdated => "conversation_preview_updated",
             Self::BlackboardEntryRecorded => "blackboard_entry_recorded",
             Self::ManagedWorktreeUpdated => "managed_worktree_updated",
             Self::CodexHarnessEvent => "codex_harness_event",
@@ -147,6 +151,8 @@ impl EventKind {
             Self::ShadowExecutionRecorded => "shadow_execution_recorded",
             Self::ExperimentBenchmarkRecorded => "experiment_benchmark_recorded",
             Self::ExperimentDecisionRecorded => "experiment_decision_recorded",
+            Self::GovernorProposalCreated => "governor_proposal_created",
+            Self::GovernorProposalStateChanged => "governor_proposal_state_changed",
             Self::ShadowWorkspacePrepared => "shadow_workspace_prepared",
             Self::ShadowWorkspaceStateChanged => "shadow_workspace_state_changed",
             Self::SshWorkflowCreated => "ssh_workflow_created",
@@ -187,6 +193,9 @@ impl EventKind {
                 Ok(Self::CoordinationBatchUpdated)
             }
             "agent_wake_updated" | "AgentWakeUpdated" => Ok(Self::AgentWakeUpdated),
+            "conversation_preview_updated" | "ConversationPreviewUpdated" => {
+                Ok(Self::ConversationPreviewUpdated)
+            }
             "blackboard_entry_recorded" | "BlackboardEntryRecorded" => {
                 Ok(Self::BlackboardEntryRecorded)
             }
@@ -284,6 +293,12 @@ impl EventKind {
             }
             "experiment_decision_recorded" | "ExperimentDecisionRecorded" => {
                 Ok(Self::ExperimentDecisionRecorded)
+            }
+            "governor_proposal_created" | "GovernorProposalCreated" => {
+                Ok(Self::GovernorProposalCreated)
+            }
+            "governor_proposal_state_changed" | "GovernorProposalStateChanged" => {
+                Ok(Self::GovernorProposalStateChanged)
             }
             "shadow_workspace_prepared" | "ShadowWorkspacePrepared" => {
                 Ok(Self::ShadowWorkspacePrepared)

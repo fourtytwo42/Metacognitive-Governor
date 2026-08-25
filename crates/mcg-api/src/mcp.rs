@@ -14,18 +14,18 @@ use chrono::{DateTime, Utc};
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, EvaluationReport, ExecutivePlanner,
     ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
-    OrganizationGenome, OrganizationSharePackage, OrganizationalMetrics, PlannedWork,
-    PlanningRequest, PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt,
-    SuccessCondition, SupervisionObservation, TaskComplexity,
+    GovernorProposal, GovernorProposalState, OrganizationGenome, OrganizationSharePackage,
+    OrganizationalMetrics, PlannedWork, PlanningRequest, PortableOrganizationGenome, RoleKind,
+    ShadowExecutionReceipt, SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_domain::{
-    ExperimentId, MemoryClaimId, MemoryTransferId, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformSessionId, PlatformSessionKind,
-    PluginCapabilityGrant, PluginInvocationId, ProjectId, ProjectSnapshotId,
-    ReviewedTopologyPlanId, RiskLevel, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteState,
-    SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId, SshOperationKind,
-    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ConversationId, ExperimentId, GovernorProposalId, MemoryClaimId, MemoryTransferId,
+    OrganizationId, OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInvocationId, ProjectId,
+    ProjectSnapshotId, ReviewedTopologyPlanId, RiskLevel, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheckId,
+    SiteId, SiteState, SshAuthentication, SshHostId, SshHostPlatform, SshHostState, SshOperationId,
+    SshOperationKind, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, WorkItemId,
 };
 use mcg_runtime::{
     AgentDispatchSpec, PlatformSessionRequest, ReviewedTopologyPlanCreateRequest,
@@ -1188,6 +1188,36 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
         }),
         json!({
+            "name": "mcg_governor_inspect",
+            "title": "Inspect Dormant Governor Controls",
+            "description": "Inspect the hard Governor authority policy or durable proposals. The Governor model remains disabled.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["policy", "organization", "proposal"]},
+                    "id": {"type": "string", "format": "uuid"}
+                },
+                "required": ["scope"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "mcg_governor_propose",
+            "title": "Submit or Advance a Governed Improvement Proposal",
+            "description": "Submit an immutable external-operator proposal, apply a revision-checked lifecycle transition, or route an owner-approved implementation brief through Chat to the Coordinator. This tool cannot edit code, contact Coders directly, activate the Governor, or promote without independent evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "transition", "request_implementation"]},
+                    "payload": {"type": "object"}
+                },
+                "required": ["action", "payload"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+        }),
+        json!({
             "name": "mcg_sites_list",
             "title": "List MCG Sites",
             "description": "List durable Site definitions, optionally with immutable revision, deployment, and health history for one Site.",
@@ -1750,6 +1780,8 @@ async fn call_tool(
         "mcg_computer_reclaim" => computer_reclaim(state, &arguments).await,
         "mcg_experiments_inspect" => experiments_inspect(state, &arguments),
         "mcg_experiments_mutate" => experiments_mutate(state, &arguments),
+        "mcg_governor_inspect" => governor_inspect(state, &arguments),
+        "mcg_governor_propose" => governor_propose(state, &arguments).await,
         "mcg_sites_list" => sites_list(state, &arguments),
         "mcg_sites_register" => sites_register(state, &arguments),
         "mcg_sites_update" => sites_update(state, &arguments),
@@ -2056,6 +2088,144 @@ fn experiments_mutate(
             None,
             INTERNAL_ERROR,
             "MCG could not serialize the experiment action result",
+        )),
+    }
+}
+
+fn governor_inspect(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<GovernorInspectArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Governor inspection arguments are invalid",
+        ));
+    };
+    let result = match request.scope {
+        GovernorInspectScope::Policy => {
+            if request.id.is_some() {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "Policy inspection does not accept an id",
+                ));
+            }
+            Ok(json!({"policy": state.runtime.governor_control_policy()}))
+        }
+        GovernorInspectScope::Organization => {
+            let Some(id) = request
+                .id
+                .and_then(|value| value.parse::<OrganizationId>().ok())
+            else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "A valid organization id is required",
+                ));
+            };
+            state
+                .runtime
+                .governor_proposals(id)
+                .map(|proposals| json!({"proposals": proposals}))
+        }
+        GovernorInspectScope::Proposal => {
+            let Some(id) = request
+                .id
+                .and_then(|value| value.parse::<GovernorProposalId>().ok())
+            else {
+                return Ok(tool_error(
+                    "invalid_arguments",
+                    "A valid proposal id is required",
+                ));
+            };
+            match state.runtime.governor_proposal(id) {
+                Ok(Some(proposal)) => Ok(json!({
+                    "proposal": proposal,
+                    "implementation_brief": proposal.implementation_brief(),
+                    "policy": state.runtime.governor_control_policy(),
+                })),
+                Ok(None) => {
+                    return Ok(tool_error(
+                        "proposal_not_found",
+                        "Governor proposal was not found",
+                    ));
+                }
+                Err(error) => Err(error),
+            }
+        }
+    };
+    match result {
+        Ok(value) => tool_success(Ok(value)),
+        Err(error) => Ok(experiment_error(&error)),
+    }
+}
+
+async fn governor_propose(
+    state: &ApiState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<Value, RpcFailure> {
+    let Ok(request) =
+        serde_json::from_value::<GovernorMutationArguments>(Value::Object(arguments.clone()))
+    else {
+        return Ok(tool_error(
+            "invalid_arguments",
+            "Governor proposal arguments are invalid",
+        ));
+    };
+    let result = match request.action {
+        GovernorMutationAction::Create => {
+            decode_experiment_action::<GovernorProposal, _, _>(request.payload, |value| {
+                state.runtime.create_governor_proposal(&value)
+            })
+        }
+        GovernorMutationAction::Transition => {
+            let value = serde_json::from_value::<GovernorTransitionPayload>(request.payload)
+                .map_err(|_| ExperimentActionFailure::InvalidPayload);
+            value.and_then(|value| {
+                if matches!(
+                    value.next,
+                    GovernorProposalState::Approved
+                        | GovernorProposalState::Promoted
+                        | GovernorProposalState::Reverted
+                ) {
+                    return Err(ExperimentActionFailure::InvalidPayload);
+                }
+                let mutation = state
+                    .runtime
+                    .transition_governor_proposal(value.proposal_id, value.expected, value.next)
+                    .map_err(ExperimentActionFailure::Runtime)?;
+                serde_json::to_value(mutation).map_err(|_| ExperimentActionFailure::Serialization)
+            })
+        }
+        GovernorMutationAction::RequestImplementation => {
+            let value = serde_json::from_value::<GovernorImplementationPayload>(request.payload)
+                .map_err(|_| ExperimentActionFailure::InvalidPayload);
+            match value {
+                Ok(value) => state
+                    .runtime
+                    .request_governor_proposal_implementation(
+                        value.proposal_id,
+                        value.conversation_id,
+                    )
+                    .await
+                    .map_err(ExperimentActionFailure::Runtime),
+                Err(error) => Err(error),
+            }
+        }
+    };
+    match result {
+        Ok(value) => tool_success(Ok(value)),
+        Err(ExperimentActionFailure::InvalidPayload) => Ok(tool_error(
+            "invalid_or_rejected_governor_proposal",
+            "The proposal was malformed, targeted a protected surface, or understated risk",
+        )),
+        Err(ExperimentActionFailure::Runtime(error)) => Ok(experiment_error(&error)),
+        Err(ExperimentActionFailure::Serialization) => Err(RpcFailure::new(
+            StatusCode::OK,
+            None,
+            INTERNAL_ERROR,
+            "MCG could not serialize the Governor proposal result",
         )),
     }
 }
@@ -2952,6 +3122,52 @@ enum ExperimentMutationAction {
 struct ExperimentMutationArguments {
     action: ExperimentMutationAction,
     payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GovernorInspectScope {
+    Policy,
+    Organization,
+    Proposal,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernorInspectArguments {
+    scope: GovernorInspectScope,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GovernorMutationAction {
+    Create,
+    Transition,
+    RequestImplementation,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernorMutationArguments {
+    action: GovernorMutationAction,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernorTransitionPayload {
+    proposal_id: GovernorProposalId,
+    expected: GovernorProposalState,
+    next: GovernorProposalState,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernorImplementationPayload {
+    proposal_id: GovernorProposalId,
+    conversation_id: ConversationId,
 }
 
 #[derive(Debug, Deserialize)]

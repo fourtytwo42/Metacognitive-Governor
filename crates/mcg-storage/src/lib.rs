@@ -8,11 +8,12 @@ use mcg_domain::{
     AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, AgentWake,
     AgentWakeId, AgentWakeKind, AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry,
     CodexThreadBinding, Conversation, ConversationActivity, ConversationAgentSession,
-    ConversationId, ConversationMessage, ConversationMessageId, ConversationTeamState,
-    ConversationTurn, ConversationTurnId, ConversationView, CoordinationBatch, CoordinationBatchId,
+    ConversationId, ConversationMessage, ConversationMessageId, ConversationPreview,
+    ConversationPreviewId, ConversationPreviewState, ConversationTeamState, ConversationTurn,
+    ConversationTurnId, ConversationView, CoordinationBatch, CoordinationBatchId,
     CoordinationBatchState, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
     ProjectSnapshotId, SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState,
-    ToolExecutionId, ToolRequestId,
+    ToolExecutionId, ToolRequestId, effective_delegation_attempt_ids,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -62,14 +63,14 @@ pub use agents::{
 };
 pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
-    CandidateRevisionMutation, ExperimentMutation,
+    CandidateRevisionMutation, ExperimentMutation, GovernorProposalMutation,
 };
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 43;
+pub const STORAGE_SCHEMA_VERSION: i64 = 47;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1578,6 +1579,79 @@ CREATE INDEX IF NOT EXISTS agent_wakes_conversation
     ON agent_wakes(conversation_id, created_at, wake_id);
 ";
 
+const MIGRATION_44: &str = r"
+ALTER TABLE projects ADD COLUMN archived_at TEXT;
+ALTER TABLE projects ADD COLUMN removed_at TEXT;
+CREATE INDEX IF NOT EXISTS projects_lifecycle
+    ON projects(removed_at, archived_at, root, project_id);
+";
+
+const MIGRATION_45: &str = r"
+CREATE TABLE IF NOT EXISTS conversation_previews (
+    preview_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    delegation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    preview_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, delegation_id),
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+    FOREIGN KEY(batch_id) REFERENCES coordination_batches(batch_id),
+    FOREIGN KEY(delegation_id) REFERENCES agent_delegations(delegation_id),
+    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_previews_conversation
+    ON conversation_previews(conversation_id, created_at, preview_id);
+";
+
+// Delegation contracts, preflight receipts, context budgets, classified recovery, and outcome
+// telemetry are embedded in the versioned JSON projections so schema-45 rows remain readable.
+// These expression indexes make the new governance facts queryable without duplicating state.
+const MIGRATION_46: &str = r"
+CREATE INDEX IF NOT EXISTS agent_delegations_governance_failure
+    ON agent_delegations(
+        json_extract(delegation_json, '$.governance.failure_class'),
+        updated_at,
+        delegation_id
+    );
+CREATE INDEX IF NOT EXISTS agent_delegations_governance_preflight
+    ON agent_delegations(
+        json_extract(delegation_json, '$.governance.preflight.passed'),
+        updated_at,
+        delegation_id
+    );
+CREATE INDEX IF NOT EXISTS coordination_batches_routing
+    ON coordination_batches(
+        json_extract(batch_json, '$.coordinator_bypassed'),
+        updated_at,
+        batch_id
+    );
+";
+
+const MIGRATION_47: &str = r"
+CREATE TABLE IF NOT EXISTS governor_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    baseline_revision_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    risk TEXT NOT NULL,
+    state TEXT NOT NULL,
+    proposal_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS governor_proposals_organization_state
+    ON governor_proposals(organization_id, state, updated_at, proposal_id);
+CREATE TRIGGER IF NOT EXISTS governor_proposals_no_delete
+BEFORE DELETE ON governor_proposals BEGIN
+    SELECT RAISE(FAIL, 'governor proposals are durable audit records');
+END;
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1756,6 +1830,10 @@ impl SqliteEventStore {
             (41_i64, MIGRATION_41),
             (42_i64, MIGRATION_42),
             (43_i64, MIGRATION_43),
+            (44_i64, MIGRATION_44),
+            (45_i64, MIGRATION_45),
+            (46_i64, MIGRATION_46),
+            (47_i64, MIGRATION_47),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -2439,6 +2517,86 @@ impl SqliteEventStore {
             .collect()
     }
 
+    pub fn save_conversation_preview(
+        &mut self,
+        preview: &ConversationPreview,
+    ) -> Result<EventEnvelope, StorageError> {
+        let event = EventEnvelope::new(
+            EventKind::ConversationPreviewUpdated,
+            None,
+            serde_json::json!({"conversation_id": preview.conversation_id, "preview": preview}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO conversation_previews(preview_id, conversation_id, batch_id, delegation_id, project_id, state, preview_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(preview_id) DO UPDATE SET state=excluded.state, preview_json=excluded.preview_json, updated_at=excluded.updated_at",
+            params![
+                preview.id.to_string(), preview.conversation_id.to_string(),
+                preview.coordination_batch_id.to_string(), preview.delegation_id.to_string(),
+                preview.project_id.to_string(), serde_json::to_string(&preview.state)?.trim_matches('"'),
+                serde_json::to_string(preview)?, preview.created_at.to_rfc3339(), preview.updated_at.to_rfc3339()
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn conversation_preview(
+        &self,
+        preview_id: ConversationPreviewId,
+    ) -> Result<Option<ConversationPreview>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT preview_json FROM conversation_previews WHERE preview_id=?1",
+                [preview_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn conversation_preview_for_delegation(
+        &self,
+        delegation_id: mcg_domain::AgentDelegationId,
+    ) -> Result<Option<ConversationPreview>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT preview_json FROM conversation_previews WHERE delegation_id=?1",
+                [delegation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
+    pub fn stop_ephemeral_conversation_previews(&mut self) -> Result<u64, StorageError> {
+        let mut previews = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT preview_json FROM conversation_previews WHERE state='running'")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| {
+                    serde_json::from_str::<ConversationPreview>(&row?).map_err(StorageError::from)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut stopped = 0_u64;
+        for preview in &mut previews {
+            preview.state = ConversationPreviewState::Stopped;
+            preview.safe_url = None;
+            preview.last_error = Some("MCG restarted; open the preview to start it again".into());
+            preview.updated_at = Utc::now();
+            self.save_conversation_preview(preview)?;
+            stopped = stopped.saturating_add(1);
+        }
+        Ok(stopped)
+    }
+
     pub fn append_blackboard_entry(
         &mut self,
         entry: &BlackboardEntry,
@@ -2669,6 +2827,11 @@ impl SqliteEventStore {
                 "SELECT wake_json FROM agent_wakes WHERE conversation_id=?1 ORDER BY created_at, wake_id",
                 conversation_id,
             )?,
+            previews: rows(
+                &self.connection,
+                "SELECT preview_json FROM conversation_previews WHERE conversation_id=?1 ORDER BY created_at, preview_id",
+                conversation_id,
+            )?,
         })
     }
 
@@ -2788,10 +2951,14 @@ impl SqliteEventStore {
                 .collect::<Result<Vec<AgentDelegation>, _>>()?
         };
         let mut recovered = 0_u64;
-        for mut delegation in delegations.into_iter().filter(|delegation| {
-            !delegation.state.is_terminal()
-                || delegation.state == mcg_domain::AgentDelegationState::Reported
-        }) {
+        for mut delegation in delegations
+            .iter()
+            .filter(|delegation| {
+                !delegation.state.is_terminal()
+                    || delegation.state == mcg_domain::AgentDelegationState::Reported
+            })
+            .cloned()
+        {
             if delegation.coordination_batch_id.is_none() {
                 let origin_turn = self.connection.query_row(
                     "SELECT turn_json FROM conversation_turns WHERE conversation_id=?1 AND created_at<=?2 ORDER BY created_at DESC, turn_id DESC LIMIT 1",
@@ -2811,11 +2978,17 @@ impl SqliteEventStore {
                         conversation_id: delegation.conversation_id,
                         origin_turn_id: origin_turn.id,
                         coordinator_session_id: coordinator.id,
+                        delivery_target: mcg_domain::ConversationDeliveryTarget::CustomProject,
+                        delivery_rationale: Some("Recovered legacy delegation; delivery target was not recorded".into()),
+                        site_owner_session_id: None,
                         state: CoordinationBatchState::RecoveryRequired,
                         revision: 1,
                         delegation_ids: vec![delegation.id],
                         coordinator_turn_count: 0,
                         coordinator_approximate_tokens: 0,
+                        coordinator_bypassed: false,
+                        routing_rationale: Some("Recovered legacy coordination batch".into()),
+                        owner_intervention_count: 0,
                         last_error: Some("Legacy schema-42 work requires explicit delivery recovery after restart.".into()),
                         created_at: delegation.created_at,
                         updated_at: now,
@@ -2877,6 +3050,125 @@ impl SqliteEventStore {
             recovered = recovered.saturating_add(1);
         }
 
+        // Older runtimes could leave a batch indefinitely `running` when every Coder
+        // failed before worktree preparation completed. No accepted work exists to
+        // replay in this case, so make the failure visible deterministically and close
+        // the batch instead of requiring an owner to discover a wedged receipt.
+        let nonterminal_batches = {
+            let mut statement = self.connection.prepare(
+                "SELECT batch_json FROM coordination_batches
+                 WHERE state NOT IN ('completed', 'failed')
+                 ORDER BY created_at, batch_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect::<Result<Vec<CoordinationBatch>, _>>()?
+        };
+        for mut batch in nonterminal_batches {
+            let batch_delegations = delegations
+                .iter()
+                .filter(|item| item.coordination_batch_id == Some(batch.id))
+                .collect::<Vec<_>>();
+            let effective_ids = effective_delegation_attempt_ids(
+                batch_delegations
+                    .iter()
+                    .map(|item| (item.id, item.retry_of_id)),
+            );
+            let effective = batch_delegations
+                .iter()
+                .filter(|item| effective_ids.contains(&item.id))
+                .copied()
+                .collect::<Vec<_>>();
+            if effective.is_empty()
+                || !effective.iter().all(|item| {
+                    matches!(
+                        item.state,
+                        mcg_domain::AgentDelegationState::Failed
+                            | mcg_domain::AgentDelegationState::Cancelled
+                    )
+                })
+            {
+                continue;
+            }
+            let failure_summary = effective
+                .iter()
+                .filter_map(|item| item.error.as_deref())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let chat_session = self
+                .connection
+                .query_row(
+                    "SELECT session_json FROM conversation_agent_sessions
+                 WHERE conversation_id=?1 AND json_extract(session_json, '$.kind')='chat'
+                 ORDER BY created_at, session_id LIMIT 1",
+                    [batch.conversation_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|json| serde_json::from_str::<ConversationAgentSession>(&json))
+                .transpose()?;
+            if let Some(chat_session) = chat_session {
+                let wake = AgentWake {
+                    schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+                    id: AgentWakeId::new(),
+                    idempotency_key: format!("recovery:{}:terminal_failure_chat", batch.id),
+                    conversation_id: batch.conversation_id,
+                    coordination_batch_id: batch.id,
+                    delegation_id: None,
+                    source_message_id: None,
+                    target_session_id: chat_session.id,
+                    target: AgentWakeTarget::Chat,
+                    kind: AgentWakeKind::ChatCompletion,
+                    state: AgentWakeState::Completed,
+                    attempt_count: 0,
+                    claimed_until: None,
+                    delegation_revisions: effective
+                        .iter()
+                        .map(|item| (item.id, item.revision))
+                        .collect(),
+                    payload: "Deterministic restart recovery surfaced a terminal Coder failure."
+                        .into(),
+                    last_error: Some(
+                        "all effective Coders were already terminal before restart".into(),
+                    ),
+                    created_at: now,
+                    updated_at: now,
+                };
+                let (_, wake_event) = self.enqueue_agent_wake(&wake)?;
+                if wake_event.is_some() {
+                    self.save_conversation_message(&ConversationMessage {
+                        schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                        id: ConversationMessageId::new(),
+                        conversation_id: batch.conversation_id,
+                        turn_id: batch.origin_turn_id,
+                        role: mcg_domain::ConversationRole::Assistant,
+                        content: format!(
+                            "The coding batch could not start or complete. No accepted Coder work was replayed. {}",
+                            if failure_summary.is_empty() {
+                                "Inspect the retained delegation evidence for details.".into()
+                            } else {
+                                format!("Failure: {failure_summary}")
+                            }
+                        ),
+                        codex_item_id: None,
+                        created_at: now,
+                    })?;
+                }
+            }
+            batch.state = CoordinationBatchState::Failed;
+            batch.revision = batch.revision.saturating_add(1);
+            batch.last_error = Some(if failure_summary.is_empty() {
+                "all effective Coding Agents failed before completion".into()
+            } else {
+                failure_summary
+            });
+            batch.updated_at = now;
+            self.save_coordination_batch(&batch)?;
+            recovered = recovered.saturating_add(1);
+        }
+
         let wakes = {
             let mut statement = self.connection.prepare(
                 "SELECT wake_json FROM agent_wakes WHERE state IN ('pending', 'claimed') ORDER BY created_at, wake_id",
@@ -2886,7 +3178,7 @@ impl SqliteEventStore {
                 .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
                 .collect::<Result<Vec<AgentWake>, _>>()?
         };
-        for mut wake in wakes {
+        for mut wake in wakes.iter().cloned() {
             if wake.kind == AgentWakeKind::ChatCompletion
                 && let Some(mut batch) = self.coordination_batch(wake.coordination_batch_id)?
             {
@@ -2940,6 +3232,72 @@ impl SqliteEventStore {
                 self.save_coordination_batch(&batch)?;
             }
             recovered = recovered.saturating_add(1);
+        }
+
+        // A failed retry attempt remains durable history, but it must not poison a later
+        // successful descendant. Older runtimes finalized batches by inspecting every attempt.
+        // Repair only when every effective leaf is authoritatively successful and a completed
+        // Chat callback already made that generation visible; this never invents or replays work.
+        let failed_batches = {
+            let mut statement = self.connection.prepare(
+                "SELECT batch_json FROM coordination_batches WHERE state='failed' ORDER BY created_at, batch_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                .collect::<Result<Vec<CoordinationBatch>, _>>()?
+        };
+        for mut batch in failed_batches {
+            let batch_delegations = delegations
+                .iter()
+                .filter(|item| item.coordination_batch_id == Some(batch.id))
+                .collect::<Vec<_>>();
+            let effective_ids = effective_delegation_attempt_ids(
+                batch_delegations
+                    .iter()
+                    .map(|item| (item.id, item.retry_of_id)),
+            );
+            let effective_success = !effective_ids.is_empty()
+                && batch_delegations
+                    .iter()
+                    .filter(|item| effective_ids.contains(&item.id))
+                    .all(|item| {
+                        matches!(
+                            item.state,
+                            mcg_domain::AgentDelegationState::Reported
+                                | mcg_domain::AgentDelegationState::Completed
+                        ) && item.governance.outcome.successful
+                            && item.integration_ready
+                            && item.unresolved_issues.is_empty()
+                    });
+            let completed_callbacks = {
+                let mut statement = self.connection.prepare(
+                    "SELECT wake_json FROM agent_wakes WHERE batch_id=?1 AND kind='chat_completion' AND state='completed' ORDER BY created_at, wake_id",
+                )?;
+                statement
+                    .query_map([batch.id.to_string()], |row| row.get::<_, String>(0))?
+                    .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+                    .collect::<Result<Vec<AgentWake>, _>>()?
+            };
+            let callback_visible = completed_callbacks.iter().any(|wake| {
+                wake.coordination_batch_id == batch.id
+                    && effective_ids.iter().all(|id| {
+                        wake.delegation_revisions
+                            .iter()
+                            .any(|(wake_id, _)| wake_id == id)
+                    })
+            });
+            if effective_success && callback_visible {
+                batch.state = CoordinationBatchState::Completed;
+                batch.revision = batch.revision.saturating_add(1);
+                batch.last_error = Some(
+                    "Recovered successful retry lineage; superseded failed attempts remain in history."
+                        .into(),
+                );
+                batch.updated_at = now;
+                self.save_coordination_batch(&batch)?;
+                recovered = recovered.saturating_add(1);
+            }
         }
         Ok(recovered)
     }
@@ -3454,7 +3812,9 @@ impl SqliteEventStore {
                 root = excluded.root,
                 current_snapshot_id = excluded.current_snapshot_id,
                 project_json = excluded.project_json,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                archived_at = NULL,
+                removed_at = NULL",
             params![
                 model.project_id.to_string(),
                 model.root,
@@ -3498,6 +3858,25 @@ impl SqliteEventStore {
             .transpose()
     }
 
+    /// Loads a catalog project by its canonical root, including archived and removed entries.
+    /// This lets rediscovery revive the stable project identity instead of colliding with the
+    /// root uniqueness constraint or silently creating a second history.
+    pub fn catalog_project_by_root(
+        &self,
+        root: &str,
+    ) -> Result<Option<ProjectModel>, StorageError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT project_json FROM projects WHERE root = ?1",
+                [root],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .transpose()
+    }
+
     /// Loads one immutable project snapshot by its durable identity.
     ///
     /// # Errors
@@ -3519,21 +3898,90 @@ impl SqliteEventStore {
             .transpose()
     }
 
-    /// Lists current project projections in stable root order.
+    /// Lists active current project projections in stable root order.
     ///
     /// # Errors
     ///
     /// Returns an error when stored JSON is invalid or the query fails.
     pub fn projects(&self) -> Result<Vec<ProjectModel>, StorageError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT project_json FROM projects ORDER BY root, project_id")?;
+        let mut statement = self.connection.prepare(
+            "SELECT project_json FROM projects
+                 WHERE archived_at IS NULL AND removed_at IS NULL
+                 ORDER BY root, project_id",
+        )?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
             .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
             .collect()
+    }
+
+    /// Lists archived project projections in stable root order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored JSON is invalid or the query fails.
+    pub fn archived_projects(&self) -> Result<Vec<ProjectModel>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT project_json FROM projects
+             WHERE archived_at IS NOT NULL AND removed_at IS NULL
+             ORDER BY root, project_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+            .collect()
+    }
+
+    /// Archives or restores a project catalog entry without touching its directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project is unknown, removed, or storage cannot commit.
+    pub fn archive_project(
+        &mut self,
+        project_id: ProjectId,
+        archived: bool,
+    ) -> Result<ProjectModel, StorageError> {
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let changed = self.connection.execute(
+            "UPDATE projects
+             SET archived_at = ?2, updated_at = ?3
+             WHERE project_id = ?1 AND removed_at IS NULL",
+            params![
+                project_id.to_string(),
+                archived.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::ProjectNotFound(project_id));
+        }
+        Ok(project)
+    }
+
+    /// Removes a project from the MCG catalog without deleting source files or remote data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project is unknown, already removed, or storage cannot commit.
+    pub fn remove_project(&mut self, project_id: ProjectId) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        let changed = self.connection.execute(
+            "UPDATE projects
+             SET archived_at = NULL, removed_at = ?2, updated_at = ?2
+             WHERE project_id = ?1 AND removed_at IS NULL",
+            params![project_id.to_string(), now],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::ProjectNotFound(project_id));
+        }
+        Ok(())
     }
 
     /// Loads immutable discovery history for one project.
@@ -5073,6 +5521,7 @@ mod tests {
                 success_conditions: vec![],
                 context_references: vec![],
             },
+            governance: mcg_domain::DelegationGovernance::default(),
             task_id: None,
             run_id: None,
             agent_instance_id: None,
@@ -5215,11 +5664,17 @@ mod tests {
             conversation_id: first.id,
             origin_turn_id: origin_turn.id,
             coordinator_session_id: coordinator.id,
+            delivery_target: mcg_domain::ConversationDeliveryTarget::CustomProject,
+            delivery_rationale: None,
+            site_owner_session_id: None,
             state: CoordinationBatchState::Open,
             revision: 1,
             delegation_ids: vec![],
             coordinator_turn_count: 0,
             coordinator_approximate_tokens: 0,
+            coordinator_bypassed: false,
+            routing_rationale: None,
+            owner_intervention_count: 0,
             last_error: None,
             created_at: now,
             updated_at: now,
@@ -5645,6 +6100,68 @@ mod tests {
                 .connection
                 .execute("DELETE FROM project_snapshots", [])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn project_archive_restore_and_removal_are_catalog_only() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("Cargo.toml"), "[workspace]").expect("manifest");
+        let project_id = ProjectId::new();
+        let project =
+            ProjectDiscoverer::discover(project_root.path(), project_id).expect("discover");
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        store
+            .record_project_snapshot(&project)
+            .expect("record project");
+
+        assert_eq!(
+            store.projects().expect("active projects"),
+            vec![project.clone()]
+        );
+        store.archive_project(project_id, true).expect("archive");
+        assert!(store.projects().expect("active projects").is_empty());
+        assert_eq!(
+            store.archived_projects().expect("archived projects"),
+            vec![project.clone()]
+        );
+        assert!(project_root.path().join("Cargo.toml").is_file());
+
+        store.archive_project(project_id, false).expect("restore");
+        assert_eq!(
+            store.projects().expect("restored projects"),
+            vec![project.clone()]
+        );
+        store
+            .remove_project(project_id)
+            .expect("remove from catalog");
+        assert!(store.projects().expect("active projects").is_empty());
+        assert!(
+            store
+                .archived_projects()
+                .expect("archived projects")
+                .is_empty()
+        );
+        assert_eq!(
+            store.project(project_id).expect("historical project"),
+            Some(project.clone())
+        );
+        assert!(project_root.path().join("Cargo.toml").is_file());
+
+        assert_eq!(
+            store
+                .catalog_project_by_root(&project.root)
+                .expect("catalog project by root"),
+            Some(project.clone())
+        );
+        let rediscovered =
+            ProjectDiscoverer::discover(project_root.path(), project_id).expect("rediscover");
+        store
+            .record_project_snapshot(&rediscovered)
+            .expect("revive removed project");
+        assert_eq!(
+            store.projects().expect("revived projects"),
+            vec![rediscovered]
         );
     }
 

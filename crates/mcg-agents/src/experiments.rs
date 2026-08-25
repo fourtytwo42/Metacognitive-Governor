@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use mcg_domain::{
-    EvaluationId, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, OrganizationId,
-    OrganizationRevisionId, RunId, SupervisionObservationId, TaskId,
+    EvaluationId, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId, GovernorProposalId,
+    OrganizationId, OrganizationRevisionId, RunId, SupervisionObservationId, TaskId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -13,6 +13,208 @@ use crate::{
 pub const SUPERVISION_SCHEMA_VERSION: u16 = 1;
 pub const EXPERIMENT_SCHEMA_VERSION: u16 = 1;
 pub const SHADOW_WORKSPACE_SCHEMA_VERSION: u16 = 1;
+pub const GOVERNOR_PROPOSAL_SCHEMA_VERSION: u16 = 1;
+
+/// The dormant Governor's hard authority contract. This is returned by every control surface so
+/// an external operator never has to infer authority from prompt text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernorControlPolicy {
+    pub governor_model_enabled: bool,
+    pub allowed_actions: Vec<String>,
+    pub prohibited_actions: Vec<String>,
+    pub protected_surfaces: Vec<String>,
+    pub implementation_path: String,
+}
+
+impl Default for GovernorControlPolicy {
+    fn default() -> Self {
+        Self {
+            governor_model_enabled: false,
+            allowed_actions: vec![
+                "inspect_attributed_evidence".into(),
+                "submit_immutable_proposal".into(),
+                "request_coordinator_implementation_after_owner_approval".into(),
+                "request_shadow_evaluation".into(),
+                "recommend_promote_reject_or_revert".into(),
+            ],
+            prohibited_actions: vec![
+                "edit_files_or_databases".into(),
+                "run_shell_git_patch_browser_or_deployment_tools".into(),
+                "contact_coding_agents_or_owner_directly".into(),
+                "promote_its_own_proposal".into(),
+                "activate_dormant_roles".into(),
+                "expand_agent_limits_or_its_own_authority".into(),
+            ],
+            protected_surfaces: vec![
+                "security_contract".into(),
+                "runtime_authorization".into(),
+                "approval_thresholds".into(),
+                "credential_and_audit_records".into(),
+                "governor_enablement".into(),
+                "maximum_parallel_agents".into(),
+            ],
+            implementation_path:
+                "owner approval -> Chat Agent -> Coordinator -> Coding Agent(s) -> evaluation"
+                    .into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernorProposalTarget {
+    PromptPolicy,
+    RoutingPolicy,
+    OrganizationTopology,
+    SourceCode,
+    AuthorityBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernorProposalRisk {
+    Low,
+    Moderate,
+    High,
+    Prohibited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernorProposalState {
+    Draft,
+    Validated,
+    AwaitingOwnerApproval,
+    Approved,
+    ImplementationRequested,
+    Evaluating,
+    Promoted,
+    Rejected,
+    Reverted,
+    Expired,
+}
+
+impl GovernorProposalState {
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (
+                Self::Draft,
+                Self::Validated | Self::Rejected | Self::Expired
+            ) | (
+                Self::Validated,
+                Self::AwaitingOwnerApproval | Self::Rejected | Self::Expired
+            ) | (
+                Self::AwaitingOwnerApproval,
+                Self::Approved | Self::Rejected | Self::Expired
+            ) | (
+                Self::Approved,
+                Self::ImplementationRequested | Self::Rejected | Self::Expired
+            ) | (
+                Self::ImplementationRequested,
+                Self::Evaluating | Self::Rejected
+            ) | (Self::Evaluating, Self::Promoted | Self::Rejected)
+                | (Self::Promoted, Self::Reverted)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernorProposal {
+    pub schema_version: u16,
+    pub id: GovernorProposalId,
+    pub organization_id: OrganizationId,
+    pub baseline_revision_id: OrganizationRevisionId,
+    pub target: GovernorProposalTarget,
+    pub risk: GovernorProposalRisk,
+    pub state: GovernorProposalState,
+    pub title: String,
+    pub diagnosis: String,
+    pub proposed_change: String,
+    pub expected_benefits: Vec<String>,
+    pub expected_risks: Vec<String>,
+    pub success_criteria: Vec<String>,
+    pub observation_ids: Vec<SupervisionObservationId>,
+    pub rollback_revision_id: Option<OrganizationRevisionId>,
+    pub validation_findings: Vec<String>,
+    pub owner_approved_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl GovernorProposal {
+    /// Validates the complete bounded proposal contract before persistence or review.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExperimentError`] when a required field, bound, state, or protected
+    /// authority constraint is invalid.
+    pub fn validate(&self) -> Result<(), ExperimentError> {
+        let text_ok = |value: &str| !value.trim().is_empty() && value.len() <= 8_192;
+        let list_ok = |values: &[String]| {
+            !values.is_empty() && values.len() <= 128 && values.iter().all(|value| text_ok(value))
+        };
+        if self.schema_version != GOVERNOR_PROPOSAL_SCHEMA_VERSION
+            || !text_ok(&self.title)
+            || !text_ok(&self.diagnosis)
+            || !text_ok(&self.proposed_change)
+            || !list_ok(&self.expected_benefits)
+            || !list_ok(&self.expected_risks)
+            || !list_ok(&self.success_criteria)
+            || self.observation_ids.is_empty()
+            || self.observation_ids.len() > 1_024
+            || self.validation_findings.len() > 128
+            || self.expires_at <= self.created_at
+            || self.updated_at < self.created_at
+        {
+            return Err(ExperimentError::InvalidGovernorProposal);
+        }
+        if self.target == GovernorProposalTarget::AuthorityBoundary
+            || self.risk == GovernorProposalRisk::Prohibited
+        {
+            return Err(ExperimentError::ProtectedGovernorSurface);
+        }
+        if matches!(
+            self.state,
+            GovernorProposalState::Validated
+                | GovernorProposalState::AwaitingOwnerApproval
+                | GovernorProposalState::Approved
+                | GovernorProposalState::ImplementationRequested
+                | GovernorProposalState::Evaluating
+                | GovernorProposalState::Promoted
+                | GovernorProposalState::Reverted
+        ) && self.validation_findings.is_empty()
+        {
+            return Err(ExperimentError::InvalidGovernorProposal);
+        }
+        if matches!(
+            self.state,
+            GovernorProposalState::Approved
+                | GovernorProposalState::ImplementationRequested
+                | GovernorProposalState::Evaluating
+                | GovernorProposalState::Promoted
+                | GovernorProposalState::Reverted
+        ) && self.owner_approved_at.is_none()
+        {
+            return Err(ExperimentError::OwnerApprovalRequired);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn implementation_brief(&self) -> String {
+        format!(
+            "Approved Governor proposal {}: {}\n\nDiagnosis: {}\n\nRequested change: {}\n\nSuccess criteria:\n- {}\n\nDo not alter protected authority surfaces. Implement only through Coordinator-managed Coding Agents, then run shadow/evaluation gates before promotion.",
+            self.id,
+            self.title,
+            self.diagnosis,
+            self.proposed_change,
+            self.success_criteria.join("\n- ")
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -693,6 +895,12 @@ pub enum ExperimentError {
     InvalidDecision,
     #[error("automatic candidate proposal is inconsistent with its slow-loop evidence")]
     InvalidCandidateProposal,
+    #[error("governor proposal is malformed or exceeds a bound")]
+    InvalidGovernorProposal,
+    #[error("governor proposals cannot alter protected authority surfaces")]
+    ProtectedGovernorSurface,
+    #[error("explicit owner approval is required")]
+    OwnerApprovalRequired,
 }
 
 fn valid_sha256(value: &str) -> bool {

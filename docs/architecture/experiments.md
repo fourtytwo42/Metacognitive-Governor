@@ -5,6 +5,26 @@ observe and recommend freely, but a candidate organization cannot become active
 unless immutable benchmark evidence and an explicit promotion decision commit
 together. Every promotion retains a known-good parent that can be restored.
 
+## Dormant Governor operator controls
+
+The metacognitive-governor model is disabled. Schema 47 exposes the same bounded proposal
+controls to an authenticated external operator through `mcg_governor_inspect` and
+`mcg_governor_propose`. The operator may inspect attributed evidence, create an immutable
+proposal, and advance its optimistic lifecycle. The control has no filesystem, process, Git,
+patch, browser, deployment, credential, direct-Coder, or owner-messaging capability.
+
+Every proposal pins an active organization baseline, cited supervision observations, target,
+risk, benefits, risks, success criteria, expiration, and rollback revision. Source changes are
+always high risk. Protected authority changes—including the security contract, runtime
+authorization, approval thresholds, audit history, Governor enablement, dormant-role activation,
+and parallel-agent limits—are rejected server-side. MCP operators cannot approve, promote, or
+revert their own proposals. Approval is a distinct first-party owner transition. After approval,
+the `request_implementation` action requires a project-linked conversation and submits the brief
+to Chat; Chat must call the Coordinator, and only the Coordinator may create Coding Agent work.
+A per-proposal lock plus a durable hidden transcript marker makes retry and crash recovery
+idempotent. The control never contacts a Coder directly. Promotion continues to require
+independent paired evidence, and the baseline remains available for reversion.
+
 ## Loop boundaries
 
 - The fast loop records task, tool, confidence, cost, latency, and correction

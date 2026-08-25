@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "rung": "vanilla",
+  "conversation_id": "0c5c8a34-5cdc-4b73-9166-c1f6c850b7d4",
+  "batch_id": "4cc4acd6-1adb-4bca-938c-e33eea342142",
+  "hard_gates": {
+    "all_p0_requirements": true,
+    "weighted_requirements_at_least_95_percent": true,
+    "all_required_checks": true,
+    "security": true,
+    "durable_harness_completion": true,
+    "cleanup": true
+  },
+  "scores": {
+    "requirement_fidelity": 30.0,
+    "build_and_test_quality": 25.0,
+    "authority_and_security": 20.0,
+    "efficiency": 14.0,
+    "reliability_and_recovery": 5.0,
+    "evidence_and_cleanup": 5.0
+  },
+  "total": 99.0,
+  "passed": true,
+  "requirement_ratio": 1.0,
+  "check_ratio": 1.0,
+  "efficiency_ratios": {
+    "turns": 0.8,
+    "tokens": 1.0,
+    "elapsed": 1.0
+  }
+}

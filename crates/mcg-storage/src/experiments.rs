@@ -1,11 +1,12 @@
 use mcg_agents::{
     ExperimentBenchmark, ExperimentDecision, ExperimentDecisionKind, ExperimentDefinition,
-    ExperimentMode, ExperimentState, ShadowExecutionReceipt, ShadowWorkspaceState, SupervisionLoop,
+    ExperimentMode, ExperimentState, GovernorProposal, GovernorProposalRisk, GovernorProposalState,
+    GovernorProposalTarget, ShadowExecutionReceipt, ShadowWorkspaceState, SupervisionLoop,
     SupervisionObservation, SupervisionSignal,
 };
 use mcg_domain::{
-    EvaluationId, ExperimentBenchmarkId, ExperimentId, OrganizationId, OrganizationRevisionId,
-    SupervisionObservationId,
+    EvaluationId, ExperimentBenchmarkId, ExperimentId, GovernorProposalId, OrganizationId,
+    OrganizationRevisionId, SupervisionObservationId,
 };
 use mcg_events::{EventEnvelope, EventKind};
 use rusqlite::{OptionalExtension, params};
@@ -22,6 +23,13 @@ pub struct ExperimentMutation {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateRevisionMutation {
     pub candidate: mcg_agents::OrganizationGenome,
+    pub replayed: bool,
+    pub events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GovernorProposalMutation {
+    pub proposal: GovernorProposal,
     pub replayed: bool,
     pub events: Vec<EventEnvelope>,
 }
@@ -52,6 +60,171 @@ pub struct AutomaticExperimentOutcome {
 }
 
 impl SqliteEventStore {
+    pub fn create_governor_proposal(
+        &mut self,
+        proposal: &GovernorProposal,
+    ) -> Result<GovernorProposalMutation, StorageError> {
+        proposal
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if proposal.state != GovernorProposalState::Draft
+            || proposal.owner_approved_at.is_some()
+            || !proposal.validation_findings.is_empty()
+        {
+            return Err(StorageError::InvalidData(
+                "new governor proposals must be unapproved drafts".into(),
+            ));
+        }
+        validate_governor_guardrails(proposal)?;
+        if let Some(existing) = self.governor_proposal(proposal.id)? {
+            if existing == *proposal {
+                return Ok(GovernorProposalMutation {
+                    proposal: existing,
+                    replayed: true,
+                    events: Vec::new(),
+                });
+            }
+            return Err(StorageError::Conflict(
+                "governor proposal identity was reused with different content".into(),
+            ));
+        }
+        let baseline = self
+            .organization(proposal.organization_id)?
+            .ok_or_else(|| StorageError::Conflict("organization was not found".into()))?;
+        if baseline.revision_id != proposal.baseline_revision_id {
+            return Err(StorageError::Conflict(
+                "governor proposal baseline is not the active organization revision".into(),
+            ));
+        }
+        for observation_id in &proposal.observation_ids {
+            if self.supervision_observation(*observation_id)?.is_none() {
+                return Err(StorageError::Conflict(format!(
+                    "supervision observation {observation_id} was not found"
+                )));
+            }
+        }
+        let event = EventEnvelope::new(
+            EventKind::GovernorProposalCreated,
+            None,
+            serde_json::to_value(proposal)?,
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO governor_proposals(
+                proposal_id, organization_id, baseline_revision_id, target, risk, state,
+                proposal_json, created_at, updated_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                proposal.id.to_string(),
+                proposal.organization_id.to_string(),
+                proposal.baseline_revision_id.to_string(),
+                governor_target_name(proposal.target),
+                governor_risk_name(proposal.risk),
+                governor_state_name(proposal.state),
+                serde_json::to_string(proposal)?,
+                proposal.created_at.to_rfc3339(),
+                proposal.updated_at.to_rfc3339(),
+                proposal.expires_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(GovernorProposalMutation {
+            proposal: proposal.clone(),
+            replayed: false,
+            events: vec![event],
+        })
+    }
+
+    pub fn governor_proposal(
+        &self,
+        id: GovernorProposalId,
+    ) -> Result<Option<GovernorProposal>, StorageError> {
+        self.read_optional_json(
+            "SELECT proposal_json FROM governor_proposals WHERE proposal_id = ?1",
+            &id.to_string(),
+        )
+    }
+
+    pub fn governor_proposals(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Vec<GovernorProposal>, StorageError> {
+        self.read_json_rows(
+            "SELECT proposal_json FROM governor_proposals
+             WHERE organization_id = ?1 ORDER BY created_at, proposal_id",
+            &organization_id.to_string(),
+        )
+    }
+
+    pub fn transition_governor_proposal(
+        &mut self,
+        id: GovernorProposalId,
+        expected: GovernorProposalState,
+        next: GovernorProposalState,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<GovernorProposalMutation, StorageError> {
+        let mut proposal = self
+            .governor_proposal(id)?
+            .ok_or_else(|| StorageError::Conflict("governor proposal was not found".into()))?;
+        if proposal.state != expected || !expected.can_transition_to(next) {
+            return Err(StorageError::Conflict(
+                "governor proposal transition is stale or illegal".into(),
+            ));
+        }
+        if at >= proposal.expires_at && next != GovernorProposalState::Expired {
+            return Err(StorageError::Conflict(
+                "governor proposal has expired".into(),
+            ));
+        }
+        validate_governor_guardrails(&proposal)?;
+        if next == GovernorProposalState::Validated {
+            proposal.validation_findings = vec![
+                "Governor model remains disabled; proposal was submitted by an authenticated external operator.".into(),
+                "No filesystem, process, Git, patch, browser, deployment, credential, or direct Coder authority is granted.".into(),
+                "Implementation must enter through owner approval and the Chat -> Coordinator -> Coder path.".into(),
+                "Promotion requires independent experiment evidence and retains the pinned baseline for rollback.".into(),
+            ];
+        }
+        if next == GovernorProposalState::Approved {
+            proposal.owner_approved_at = Some(at);
+        }
+        proposal.state = next;
+        proposal.updated_at = at;
+        proposal
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let event = EventEnvelope::new(
+            EventKind::GovernorProposalStateChanged,
+            None,
+            serde_json::json!({"from": expected, "to": next, "proposal": &proposal}),
+        );
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE governor_proposals SET state = ?1, proposal_json = ?2, updated_at = ?3
+             WHERE proposal_id = ?4 AND state = ?5",
+            params![
+                governor_state_name(next),
+                serde_json::to_string(&proposal)?,
+                at.to_rfc3339(),
+                id.to_string(),
+                governor_state_name(expected),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "governor proposal changed concurrently".into(),
+            ));
+        }
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(GovernorProposalMutation {
+            proposal,
+            replayed: false,
+            events: vec![event],
+        })
+    }
+
     /// Lists automatic running experiments that have a shadow receipt but no benchmark.
     ///
     /// # Errors
@@ -1459,6 +1632,94 @@ const fn experiment_mode_name(mode: ExperimentMode) -> &'static str {
     }
 }
 
+fn validate_governor_guardrails(proposal: &GovernorProposal) -> Result<(), StorageError> {
+    let required_risk = match proposal.target {
+        GovernorProposalTarget::PromptPolicy => GovernorProposalRisk::Low,
+        GovernorProposalTarget::RoutingPolicy | GovernorProposalTarget::OrganizationTopology => {
+            GovernorProposalRisk::Moderate
+        }
+        GovernorProposalTarget::SourceCode => GovernorProposalRisk::High,
+        GovernorProposalTarget::AuthorityBoundary => GovernorProposalRisk::Prohibited,
+    };
+    let rank = |risk| match risk {
+        GovernorProposalRisk::Low => 0_u8,
+        GovernorProposalRisk::Moderate => 1,
+        GovernorProposalRisk::High => 2,
+        GovernorProposalRisk::Prohibited => 3,
+    };
+    if required_risk == GovernorProposalRisk::Prohibited
+        || proposal.risk == GovernorProposalRisk::Prohibited
+        || rank(proposal.risk) < rank(required_risk)
+    {
+        return Err(StorageError::InvalidData(
+            "governor proposal risk is understated or targets a protected authority boundary"
+                .into(),
+        ));
+    }
+    let content = format!(
+        "{}\n{}\n{}",
+        proposal.title, proposal.diagnosis, proposal.proposed_change
+    )
+    .to_ascii_lowercase();
+    let protected_phrases = [
+        "change the security contract",
+        "disable runtime authorization",
+        "lower approval threshold",
+        "delete audit",
+        "erase audit",
+        "activate the governor",
+        "enable the governor model",
+        "activate dormant",
+        "max_parallel_agents",
+        "maximum parallel agents",
+        "grant itself",
+        "expand its own authority",
+    ];
+    if protected_phrases
+        .iter()
+        .any(|phrase| content.contains(phrase))
+    {
+        return Err(StorageError::InvalidData(
+            "governor proposal text requests a protected authority change".into(),
+        ));
+    }
+    Ok(())
+}
+
+const fn governor_target_name(target: GovernorProposalTarget) -> &'static str {
+    match target {
+        GovernorProposalTarget::PromptPolicy => "prompt_policy",
+        GovernorProposalTarget::RoutingPolicy => "routing_policy",
+        GovernorProposalTarget::OrganizationTopology => "organization_topology",
+        GovernorProposalTarget::SourceCode => "source_code",
+        GovernorProposalTarget::AuthorityBoundary => "authority_boundary",
+    }
+}
+
+const fn governor_risk_name(risk: GovernorProposalRisk) -> &'static str {
+    match risk {
+        GovernorProposalRisk::Low => "low",
+        GovernorProposalRisk::Moderate => "moderate",
+        GovernorProposalRisk::High => "high",
+        GovernorProposalRisk::Prohibited => "prohibited",
+    }
+}
+
+const fn governor_state_name(state: GovernorProposalState) -> &'static str {
+    match state {
+        GovernorProposalState::Draft => "draft",
+        GovernorProposalState::Validated => "validated",
+        GovernorProposalState::AwaitingOwnerApproval => "awaiting_owner_approval",
+        GovernorProposalState::Approved => "approved",
+        GovernorProposalState::ImplementationRequested => "implementation_requested",
+        GovernorProposalState::Evaluating => "evaluating",
+        GovernorProposalState::Promoted => "promoted",
+        GovernorProposalState::Rejected => "rejected",
+        GovernorProposalState::Reverted => "reverted",
+        GovernorProposalState::Expired => "expired",
+    }
+}
+
 const fn decision_kind_name(kind: ExperimentDecisionKind) -> &'static str {
     match kind {
         ExperimentDecisionKind::Promote => "promote",
@@ -1498,14 +1759,15 @@ mod tests {
         ConfidenceEstimate, EXPERIMENT_SCHEMA_VERSION, EvaluationEvidence, EvaluationOutcome,
         EvaluationReport, ExecutivePlanner, ExperimentBenchmark, ExperimentDecision,
         ExperimentDecisionKind, ExperimentDefinition, ExperimentMode, ExperimentState,
-        OrganizationalMetrics, PlannedWork, PlanningRequest, ProspectiveAnalysis, RoleKind,
-        SUPERVISION_SCHEMA_VERSION, ShadowAuthority, ShadowExecutionReceipt, SuccessCondition,
-        SupervisionEvidence, SupervisionLoop, SupervisionObservation, SupervisionSignal,
-        TaskComplexity,
+        GOVERNOR_PROPOSAL_SCHEMA_VERSION, GovernorProposal, GovernorProposalRisk,
+        GovernorProposalState, GovernorProposalTarget, OrganizationalMetrics, PlannedWork,
+        PlanningRequest, ProspectiveAnalysis, RoleKind, SUPERVISION_SCHEMA_VERSION,
+        ShadowAuthority, ShadowExecutionReceipt, SuccessCondition, SupervisionEvidence,
+        SupervisionLoop, SupervisionObservation, SupervisionSignal, TaskComplexity,
     };
     use mcg_domain::{
         EvaluationId, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId,
-        OrganizationRevisionId, RunId, SupervisionObservationId, TaskEnvelope,
+        GovernorProposalId, OrganizationRevisionId, RunId, SupervisionObservationId, TaskEnvelope,
     };
 
     use super::*;
@@ -1626,6 +1888,95 @@ mod tests {
             reason: "paired evidence satisfies the configured decision policy".into(),
             decided_at: now,
         }
+    }
+
+    fn governor_proposal(
+        baseline: &mcg_agents::OrganizationGenome,
+        observation_id: SupervisionObservationId,
+        now: chrono::DateTime<Utc>,
+    ) -> GovernorProposal {
+        GovernorProposal {
+            schema_version: GOVERNOR_PROPOSAL_SCHEMA_VERSION,
+            id: GovernorProposalId::new(),
+            organization_id: baseline.organization_id,
+            baseline_revision_id: baseline.revision_id,
+            target: GovernorProposalTarget::SourceCode,
+            risk: GovernorProposalRisk::High,
+            state: GovernorProposalState::Draft,
+            title: "Reduce redundant Coordinator turns".into(),
+            diagnosis: "Measured callbacks show repeated planning turns.".into(),
+            proposed_change: "Use one durable wake and one final aggregate review.".into(),
+            expected_benefits: vec!["Lower token use".into()],
+            expected_risks: vec!["A missed callback could delay delivery".into()],
+            success_criteria: vec!["One planning and one review turn".into()],
+            observation_ids: vec![observation_id],
+            rollback_revision_id: Some(baseline.revision_id),
+            validation_findings: Vec::new(),
+            owner_approved_at: None,
+            expires_at: now + Duration::days(14),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn governor_proposals_are_guarded_owner_approved_and_durable() {
+        let now = Utc::now();
+        let baseline = mcg_agents::OrganizationGenome::consumer_default(now);
+        let observed = observation(&baseline, now);
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        store
+            .record_organization_revision(&baseline)
+            .expect("baseline");
+        store
+            .record_supervision_observation(&observed)
+            .expect("observation");
+        let proposal = governor_proposal(&baseline, observed.id, now);
+        store.create_governor_proposal(&proposal).expect("proposal");
+        let validated = store
+            .transition_governor_proposal(
+                proposal.id,
+                GovernorProposalState::Draft,
+                GovernorProposalState::Validated,
+                now + Duration::seconds(1),
+            )
+            .expect("validated")
+            .proposal;
+        assert_eq!(validated.validation_findings.len(), 4);
+        store
+            .transition_governor_proposal(
+                proposal.id,
+                GovernorProposalState::Validated,
+                GovernorProposalState::AwaitingOwnerApproval,
+                now + Duration::seconds(2),
+            )
+            .expect("review");
+        let approved = store
+            .transition_governor_proposal(
+                proposal.id,
+                GovernorProposalState::AwaitingOwnerApproval,
+                GovernorProposalState::Approved,
+                now + Duration::seconds(3),
+            )
+            .expect("approval")
+            .proposal;
+        assert!(approved.owner_approved_at.is_some());
+        assert!(
+            approved
+                .implementation_brief()
+                .contains("Coordinator-managed Coding Agents")
+        );
+
+        let mut protected = governor_proposal(&baseline, observed.id, now);
+        protected.id = GovernorProposalId::new();
+        protected.proposed_change = "enable the governor model and grant itself shell".into();
+        assert!(store.create_governor_proposal(&protected).is_err());
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM governor_proposals", [])
+                .is_err()
+        );
     }
 
     #[test]

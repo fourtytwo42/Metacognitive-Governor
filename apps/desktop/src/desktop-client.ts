@@ -397,6 +397,18 @@ export interface ConversationAgentSession {
   updated_at: string;
 }
 export type AgentDelegationState = "requested" | "preparing" | "running" | "waiting" | "blocked" | "reported" | "integrating" | "completed" | "failed" | "cancelled";
+export type DelegationFailureClass = "none" | "precondition" | "policy_denied" | "transient_tool" | "agent_omission" | "verification" | "conflict" | "delivery" | "cancelled" | "uncertain";
+export type DelegationRecoveryDirective = "none" | "retry_same_thread" | "retry_new_delegation" | "replan" | "await_owner" | "retain_for_review" | "do_not_retry";
+export interface DelegationGovernance {
+  contract: { objective_sha256: string; allowed_scopes: string[]; required_checks: string[]; required_evidence: string[]; require_integration_ready: boolean; context_token_budget: number; max_attempts: number };
+  preflight: { passed: boolean; checks: string[]; blockers: string[]; receipt_sha256?: string; completed_at?: string };
+  context_receipts: Array<{ source_count: number; approximate_tokens: number; token_budget: number; truncated: boolean; source_sha256: string; created_at?: string }>;
+  outcome: { latency_ms: number; model_turns: number; approximate_tokens: number; tool_calls: number; attempts: number; owner_interventions: number; changed_file_count: number; check_count: number; successful: boolean };
+  failure_class: DelegationFailureClass;
+  recovery: DelegationRecoveryDirective;
+  dependencies: string[];
+  reserved_scopes: string[];
+}
 export interface AgentDelegation {
   schema_version: number;
   id: string;
@@ -410,6 +422,7 @@ export interface AgentDelegation {
   permission_mode?: ApprovalMode;
   state: AgentDelegationState;
   brief: { objective: string; scope: string[]; constraints: string[]; success_conditions: string[]; context_references: string[] };
+  governance?: DelegationGovernance;
   task_id?: string;
   run_id?: string;
   agent_instance_id?: string;
@@ -453,7 +466,19 @@ export interface AgentContextCheckpoint {
 export interface CoordinationBatch {
   schema_version: number; id: string; conversation_id: string; origin_turn_id: string;
   coordinator_session_id: string; state: "open" | "running" | "review_pending" | "reviewing" | "chat_pending" | "completed" | "failed" | "recovery_required";
-  revision: number; delegation_ids: string[]; coordinator_turn_count: number; coordinator_approximate_tokens: number; last_error?: string; created_at: string; updated_at: string;
+  delivery_target?: "codex_sites" | "custom_project"; delivery_rationale?: string; site_owner_session_id?: string;
+  revision: number; delegation_ids: string[]; coordinator_turn_count: number; coordinator_approximate_tokens: number;
+  coordinator_bypassed?: boolean; routing_rationale?: string; owner_intervention_count?: number;
+  last_error?: string; created_at: string; updated_at: string;
+}
+export interface ConversationPreview {
+  schema_version: number; id: string; conversation_id: string; coordination_batch_id: string;
+  delegation_id: string; project_id: string; delivery_target: "codex_sites" | "custom_project";
+  strategy: "codex_sites" | "static_files" | "manifest_command";
+  state: "preparing_site" | "building" | "validating" | "publishing_private" | "approval_required" | "available" | "running" | "stopped" | "failed" | "stale";
+  source_revision: number; source_sha256: string; source_root?: string; entry_path?: string;
+  site_id?: string; site_version_id?: string; deployment_id?: string; safe_url?: string;
+  browser_tab_id?: string; last_error?: string; created_at: string; updated_at: string; last_accessed_at?: string;
 }
 export interface AgentWake {
   schema_version: number; id: string; conversation_id: string; coordination_batch_id: string;
@@ -490,6 +515,7 @@ export interface ConversationTeamState {
   context_checkpoints?: AgentContextCheckpoint[];
   coordination_batches?: CoordinationBatch[];
   wakes?: AgentWake[];
+  previews?: ConversationPreview[];
 }
 
 export interface ConversationView {
@@ -1099,6 +1125,7 @@ export interface ProjectMutation {
 
 export interface ProjectListResponse {
   projects: ProjectModel[];
+  archived_projects: ProjectModel[];
 }
 
 export interface ProjectTopologyPlan {
@@ -1818,6 +1845,14 @@ export function discardConversationDelegation(conversationId: string, delegation
   return invoke("discard_conversation_delegation", { conversationId, delegationId, expectedRevision });
 }
 
+export function startConversationPreview(conversationId: string, previewId: string): Promise<ConversationPreview> {
+  return invoke("start_conversation_preview", { conversationId, previewId });
+}
+
+export function stopConversationPreview(conversationId: string, previewId: string): Promise<ConversationPreview> {
+  return invoke("stop_conversation_preview", { conversationId, previewId });
+}
+
 export function interruptConversationTurn(conversationId: string, turnId: string): Promise<ConversationTurn> {
   return invoke("interrupt_conversation_turn", { conversationId, turnId });
 }
@@ -2061,6 +2096,14 @@ export function linkGitHubRepository(projectId: string, cloneUrl: string): Promi
 
 export function listProjects(): Promise<ProjectListResponse> {
   return invoke("list_projects");
+}
+
+export function archiveProject(projectId: string, archived: boolean): Promise<ProjectModel> {
+  return invoke("archive_project", { projectId, archived });
+}
+
+export function removeProject(projectId: string): Promise<void> {
+  return invoke("remove_project", { projectId });
 }
 
 export function projectTopologyPlan(projectId: string): Promise<ProjectTopologyPlan> {

@@ -45,6 +45,7 @@ import {
   createExperiment,
   createConversation,
   archiveConversation,
+  archiveProject,
   createTask,
   cancelAgentRun,
   deploySite,
@@ -85,6 +86,7 @@ import {
   listSchedules,
   listSchedulerNotifications,
   listProjects,
+  removeProject,
   listProjectMemory,
   listProjectMemoryTransfers,
   listReviewedTopologyPlans,
@@ -180,6 +182,8 @@ import {
   type ConversationActivity,
   type AgentDelegation,
   type ConversationTeamState,
+  type CoordinationBatch,
+  type ConversationPreview,
   type ConversationMessage,
   type ConversationTurn,
   type ConversationView,
@@ -237,6 +241,8 @@ import {
   retryConversationDelegation,
   applyConversationDelegation,
   discardConversationDelegation,
+  startConversationPreview,
+  stopConversationPreview,
   steerConversationTurn,
   requestPlatformSession,
   reclaimBrowserSession,
@@ -403,6 +409,10 @@ function PinIcon({ solid = false }: { solid?: boolean }) {
 
 function ArchiveIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M5 7l1 13h12l1-13M4 4h16v3H4zM9.5 11.5h5" /></svg>;
+}
+
+function TrashIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M4.5 7h15M9 4h6l1 3H8l1-3Zm-2 3 1 13h7l1-13M10 11v5M14 11v5" /></svg>;
 }
 
 function assistantTextForRun(run?: AgentRunView): string | null {
@@ -703,14 +713,23 @@ function ConversationCommandGroup({ commands }: { commands: ConversationActivity
 
 type ConversationTimelineEntry =
   | { type: "message"; timestamp: number; stableOrder: number; message: ConversationMessage }
-  | { type: "activity"; timestamp: number; stableOrder: number; activity: ConversationActivity };
+  | { type: "activity"; timestamp: number; stableOrder: number; activity: ConversationActivity }
+  | { type: "batch"; timestamp: number; stableOrder: number; batch: CoordinationBatch };
 
-function ConversationActivityTimeline({ messages, activities }: { messages: ConversationMessage[]; activities: ConversationActivity[] }) {
+function ConversationActivityTimeline({ messages, activities, batches, team, conversationId, onView, onOpenPreview }: {
+  messages: ConversationMessage[];
+  activities: ConversationActivity[];
+  batches: CoordinationBatch[];
+  team?: ConversationTeamState;
+  conversationId?: string;
+  onView: (view: ConversationView) => void;
+  onOpenPreview: (preview: ConversationPreview) => void;
+}) {
   const visibleActivities = activities.filter((activity) => activity.kind !== "usage");
-  const entries: ConversationTimelineEntry[] = [
+  let entries: ConversationTimelineEntry[] = [
     ...messages.map((message, stableOrder) => ({
       type: "message" as const,
-      timestamp: message.codex_item_id ? Date.parse(message.created_at) : Number.POSITIVE_INFINITY,
+      timestamp: Date.parse(message.created_at),
       stableOrder,
       message
     })),
@@ -719,10 +738,33 @@ function ConversationActivityTimeline({ messages, activities }: { messages: Conv
       timestamp: Date.parse(activity.started_at),
       stableOrder: messages.length + stableOrder,
       activity
+    })),
+    ...batches.map((batch, stableOrder) => ({
+      type: "batch" as const,
+      timestamp: Date.parse(batch.created_at),
+      stableOrder: messages.length + visibleActivities.length + stableOrder,
+      batch
     }))
   ].sort((left, right) => left.timestamp - right.timestamp || left.stableOrder - right.stableOrder);
 
+  // A coordination batch is the durable equivalent of a long-running tool call. Storage clocks
+  // can place its atomic creation a few milliseconds before the Chat acknowledgement, while its
+  // completion callback is appended much later. Preserve semantic chronology instead: the first
+  // Chat message acknowledges the handoff, the batch stays directly beneath it, and every later
+  // Chat message (including the final callback) follows the batch.
+  const batchEntries = entries.filter((entry) => entry.type === "batch");
+  const messageCount = entries.filter((entry) => entry.type === "message").length;
+  if (batchEntries.length > 0 && messageCount > 0) {
+    entries = entries.filter((entry) => entry.type !== "batch");
+    const firstMessageIndex = entries.findIndex((entry) => entry.type === "message");
+    const activeBatch = batchEntries.some((entry) => entry.type === "batch" && !["completed", "failed"].includes(entry.batch.state));
+    const insertAt = messageCount > 1 || activeBatch ? firstMessageIndex + 1 : firstMessageIndex;
+    entries.splice(insertAt, 0, ...batchEntries);
+  }
+
   const content: ReactNode[] = [];
+  const terminalBatch = batches.length > 0 && batches.every((batch) => ["completed", "failed"].includes(batch.state));
+  const finalMessageId = terminalBatch && messages.length > 1 ? messages.at(-1)?.id : undefined;
   for (let index = 0; index < entries.length;) {
     const entry = entries[index];
     if (entry.type === "activity" && entry.activity.kind === "command") {
@@ -736,7 +778,13 @@ function ConversationActivityTimeline({ messages, activities }: { messages: Conv
       content.push(<ConversationCommandGroup commands={commands} key={`commands-${commands[0].codex_item_id}`} />);
       continue;
     }
-    if (entry.type === "activity") {
+    if (entry.type === "batch") {
+      content.push(<section className={`conversation-batch-card state-${entry.batch.state}`} key={`batch-${entry.batch.id}`} aria-label="Delegated agent progress">
+        <header><strong>{entry.batch.delivery_target === "codex_sites" ? "Building with OpenAI Sites" : "Agent team progress"}</strong><small>{entry.batch.delivery_rationale}</small></header>
+        <CoordinatorAgentCard team={team} batch={entry.batch} />
+        <CodingAgentCards team={team} conversationId={conversationId} delegationIds={entry.batch.delegation_ids} onView={onView} />
+      </section>);
+    } else if (entry.type === "activity") {
       const activity = entry.activity;
       const presentation: Record<ConversationActivity["kind"], [string, string]> = {
         working: ["…", "Working"], waiting: ["◷", "Waiting"], reasoning_summary: ["✦", "Reasoning"],
@@ -762,9 +810,12 @@ function ConversationActivityTimeline({ messages, activities }: { messages: Conv
         : <div className={`chat-compaction state-${activity.state}`} role="status" key={activity.codex_item_id}>{row}</div>);
     } else {
       const message = entry.message;
-      content.push(<article className="chat-message assistant-message" key={message.id}>
-        <span>Chat Agent</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
-      </article>);
+      content.push(<div className="chat-agent-result" key={message.id}>
+        <article className="chat-message assistant-message">
+          <span>Chat Agent</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
+        </article>
+        {message.id === finalMessageId && <ConversationDeliveryHandoff batches={batches} team={team} conversationId={conversationId} onView={onView} onOpenPreview={onOpenPreview} />}
+      </div>);
     }
     index += 1;
   }
@@ -828,41 +879,148 @@ function codingAgentIsActive(state: AgentDelegation["state"]): boolean {
   return ["requested", "preparing", "running", "waiting", "integrating"].includes(state);
 }
 
-function TeamActivityIndicator({ team, onOpenRoom }: { team?: ConversationTeamState; onOpenRoom: () => void }) {
+export function conversationTeamHasPendingDelivery(team?: ConversationTeamState): boolean {
+  if (!team) return false;
+  return team.delegations.some((delegation) => codingAgentIsActive(delegation.state))
+    || team.sessions.some((session) =>
+      session.kind === "coordinator" && ["starting", "working", "waiting"].includes(session.state)
+    )
+    || (team.coordination_batches ?? []).some((batch) => !["completed", "failed"].includes(batch.state))
+    || (team.wakes ?? []).some((wake) => ["pending", "claimed", "recovery_required"].includes(wake.state));
+}
+
+function coordinatorStateLabel(batch: CoordinationBatch, activeCoders: number): string {
+  if (batch.state === "reviewing" || batch.state === "review_pending") return "Reviewing results";
+  if (batch.state === "chat_pending") return "Handing results to Chat Agent";
+  if (batch.state === "recovery_required") return "Needs recovery";
+  if (batch.state === "completed") return "Coordination complete";
+  if (batch.state === "failed") return "Coordination failed";
+  if (activeCoders > 0) return `Supervising ${activeCoders} working agent${activeCoders === 1 ? "" : "s"}`;
+  return "Planning and assigning work";
+}
+
+function CoordinatorAgentCard({ team, batch }: { team?: ConversationTeamState; batch: CoordinationBatch }) {
   if (!team) return null;
-  const coordinator = team.sessions
-    .slice()
-    .reverse()
-    .find((session) => session.kind === "coordinator" && session.state !== "retired");
-  const activeDelegations = team.delegations.filter((delegation) => codingAgentIsActive(delegation.state));
-  const coordinatorActive = Boolean(coordinator && ["starting", "working", "waiting"].includes(coordinator.state));
-  const activeBatch = (team.coordination_batches ?? []).slice().reverse().find((batch) => !["completed", "failed"].includes(batch.state));
-  if (!coordinatorActive && activeDelegations.length === 0 && !activeBatch) return null;
-  const waiting = activeDelegations.filter((delegation) => ["waiting", "blocked"].includes(delegation.state)).length;
-  const label = activeBatch?.state === "reviewing" || activeBatch?.state === "review_pending"
-    ? "Coordinator is reviewing results"
-    : activeBatch?.state === "chat_pending"
-      ? "Chat Agent is preparing your update"
-      : activeBatch?.state === "recovery_required"
-        ? "Agent team delivery needs recovery"
-        : waiting > 0
-          ? `Waiting for answers for ${waiting} coding agent${waiting === 1 ? "" : "s"}`
-          : activeDelegations.length > 0
-            ? `${activeDelegations.length} coding agent${activeDelegations.length === 1 ? "" : "s"} working`
-            : "Coordinator is planning and assigning work";
-  return <section className="team-activity-indicator" role="status" aria-live="polite" aria-label="Agent team activity">
-    <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
-    <span><strong>{label}</strong><small>The Chat Agent will update you automatically when the team finishes.</small></span>
-    <button type="button" className="secondary" onClick={onOpenRoom}>View Agent Room</button>
+  const coordinator = team.sessions.slice().reverse().find((session) => session.kind === "coordinator");
+  const delegationIds = new Set(batch.delegation_ids);
+  const activeCoders = team.delegations.filter((delegation) => delegationIds.has(delegation.id) && codingAgentIsActive(delegation.state)).length;
+  const active = !["completed", "failed"].includes(batch.state);
+  const messages = team.messages.filter((message) =>
+    message.from_session_id === coordinator?.id || message.to_session_id === coordinator?.id
+  );
+  const label = coordinatorStateLabel(batch, activeCoders);
+  const progress = batch.state === "completed" || batch.state === "failed" ? 100
+    : batch.state === "reviewing" || batch.state === "review_pending" ? 82
+      : batch.state === "chat_pending" ? 94
+        : activeCoders > 0 ? 48 : 18;
+  return <details className={`coding-agent-card coordinator-agent-card state-${batch.state}`} aria-label="Coordinator activity">
+    <summary>
+      <span className="coding-agent-glyph coordinator" aria-hidden="true">◎</span>
+      <span className="coding-agent-title">
+        <strong>{coordinator?.display_name || "Coordinator"}</strong>
+        <small>{label}</small>
+        <span className="coding-agent-progress" role="progressbar" aria-label={`Coordinator progress: ${label}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><i style={{ width: `${progress}%` }} /></span>
+      </span>
+      <span className="coding-agent-state"><span>{label}</span>{active && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}</span>
+      <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
+    </summary>
+    <div className="coding-agent-detail">
+      <div className="coding-agent-meta">
+        {coordinator?.model && <span>Model <code>{coordinator.model}</code></span>}
+        <span>Route <code>{batch.coordinator_bypassed ? "deterministic single-Coder" : "Coordinator model"}</code></span>
+        <span>Turns <code>{batch.coordinator_turn_count ?? 0}</code></span>
+        <span>Estimated tokens <code>~{(batch.coordinator_approximate_tokens ?? 0).toLocaleString()}</code></span>
+        <span>Owner interventions <code>{batch.owner_intervention_count ?? 0}</code></span>
+      </div>
+      <p>{batch.routing_rationale || batch.delivery_rationale}</p>
+      <section className="inline-agent-trace" aria-label="Coordinator trace">
+        {messages.length === 0 ? <p>No detailed activity recorded yet.</p> : messages.slice(-8).map((message) => <article key={message.id}>
+          <small>{message.tool_name || message.kind.replaceAll("_", " ")}</small>
+          <p>{message.content}</p>
+        </article>)}
+      </section>
+    </div>
+  </details>;
+}
+
+function ConversationDeliveryHandoff({ batches, team, conversationId, onView, onOpenPreview }: {
+  batches: CoordinationBatch[];
+  team?: ConversationTeamState;
+  conversationId?: string;
+  onView: (view: ConversationView) => void;
+  onOpenPreview: (preview: ConversationPreview) => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  if (!team || batches.length === 0) return null;
+  const batchIds = new Set(batches.map((batch) => batch.id));
+  const delegationIds = new Set(batches.flatMap((batch) => batch.delegation_ids));
+  const delegations = team.delegations.filter((delegation) => delegationIds.has(delegation.id));
+  const previews = (team.previews ?? []).filter((preview) => batchIds.has(preview.coordination_batch_id));
+  const preview = previews.slice().sort((left, right) => {
+    const priority = (candidate: ConversationPreview) => candidate.strategy === "codex_sites" && candidate.safe_url ? 3 : candidate.safe_url ? 2 : candidate.state === "stopped" ? 1 : 0;
+    return priority(right) - priority(left) || right.updated_at.localeCompare(left.updated_at);
+  })[0];
+  const completed = delegations.filter((delegation) => delegation.state === "completed").length;
+  const needsReview = delegations.filter((delegation) => ["reported", "blocked"].includes(delegation.state)).length;
+  const failed = delegations.filter((delegation) => ["failed", "cancelled"].includes(delegation.state)).length;
+  const changedFiles = new Set(delegations.flatMap((delegation) => delegation.changed_files)).size;
+  const checks = delegations.reduce((total, delegation) => total + delegation.checks.length, 0);
+  const success = failed === 0 && batches.every((batch) => batch.state === "completed");
+
+  async function runPreviewAction(action: "open" | "copy" | "stop") {
+    if (!conversationId || !preview) return;
+    setBusy(action);
+    setError("");
+    try {
+      if (action === "stop") {
+        await stopConversationPreview(conversationId, preview.id);
+        onView(await getConversation(conversationId));
+      } else if (action === "copy") {
+        if (!preview.safe_url) throw new Error("Open the preview once before copying its temporary URL.");
+        await navigator.clipboard.writeText(preview.safe_url);
+      } else {
+        const running = preview.state === "running" && preview.safe_url
+          ? preview
+          : await startConversationPreview(conversationId, preview.id);
+        onOpenPreview(running);
+        onView(await getConversation(conversationId));
+      }
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return <section className={`chat-delivery-handoff ${success ? "success" : "attention"}`} aria-label="Chat Agent result actions">
+    <div className="chat-delivery-heading">
+      <span aria-hidden="true">{success ? "✓" : "!"}</span>
+      <span><strong>{success ? "Result ready" : "Result needs attention"}</strong><small>
+        {delegations.length} agent{delegations.length === 1 ? "" : "s"} · {completed} completed{needsReview > 0 ? ` · ${needsReview} ready for review` : ""}{failed > 0 ? ` · ${failed} failed` : ""}
+      </small></span>
+    </div>
+    <div className="chat-delivery-summary">
+      {changedFiles > 0 && <span>{changedFiles} changed file{changedFiles === 1 ? "" : "s"}</span>}
+      {checks > 0 && <span>{checks} check{checks === 1 ? "" : "s"}</span>}
+      {preview && <span>{preview.strategy === "codex_sites" ? "OpenAI Sites" : "Temporary local preview"} · {preview.state.replaceAll("_", " ")}</span>}
+    </div>
+    {preview && <div className="conversation-preview-actions">
+      {!["failed", "stale"].includes(preview.state) && <button type="button" className="primary" disabled={busy !== null} onClick={() => void runPreviewAction("open")}>Open preview</button>}
+      {preview.safe_url && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runPreviewAction("copy")}>Copy URL</button>}
+      {preview.strategy !== "codex_sites" && preview.state === "running" && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runPreviewAction("stop")}>Stop preview</button>}
+    </div>}
+    {(error || preview?.last_error) && <p className="error-message" role="alert">{error || preview?.last_error}</p>}
   </section>;
 }
 
-function CodingAgentCards({ team, conversationId, onView }: { team?: ConversationTeamState; conversationId?: string; onView: (view: ConversationView) => void }) {
+function CodingAgentCards({ team, conversationId, delegationIds, onView }: { team?: ConversationTeamState; conversationId?: string; delegationIds?: string[]; onView: (view: ConversationView) => void }) {
   const [tabs, setTabs] = useState<Record<string, "activity" | "exchange" | "blackboard" | "changes" | "evidence">>({});
   const [patches, setPatches] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  if (!team || team.delegations.length === 0) return null;
+  const visibleDelegations = team?.delegations.filter((delegation) => !delegationIds || delegationIds.includes(delegation.id)) ?? [];
+  if (!team || visibleDelegations.length === 0) return null;
   const stateLabel = codingAgentStateLabel;
   async function runAction(delegation: AgentDelegation, action: "review" | "cancel" | "apply" | "discard" | "retry", worktreeRevision?: number) {
     if (!conversationId) return;
@@ -890,7 +1048,7 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
     }
   }
   return <section className="coding-agent-stack" aria-label="Coding agent activity">
-    {team.delegations.map((delegation, index) => {
+    {visibleDelegations.map((delegation, index) => {
       const session = team.sessions.find((candidate) => candidate.id === delegation.coder_session_id);
       const worktree = team.worktrees.find((candidate) => candidate.id === delegation.worktree_id);
       const messages = team.messages.filter((message) => message.delegation_id === delegation.id);
@@ -902,11 +1060,14 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
       const applicable = Boolean(worktree) && ["reported", "blocked"].includes(delegation.state);
       const discardable = Boolean(worktree) && worktree?.state !== "removed" && !["preparing", "running", "integrating"].includes(delegation.state);
       const retryable = ["failed", "cancelled", "blocked"].includes(delegation.state);
-      return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id}>
+      const governance = delegation.governance;
+      const needsAttention = Boolean(governance && (governance.preflight.blockers.length > 0 || governance.failure_class !== "none"));
+      const latestContext = governance?.context_receipts.at(-1);
+      return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id} open={needsAttention}>
         <summary>
           <span className="coding-agent-glyph" aria-hidden="true">⌘</span>
           <span className="coding-agent-title">
-            <strong>Coding Agent {index + 1}</strong>
+            <strong>{session?.display_name || `Coding Agent ${index + 1}`}</strong>
             <small>{delegation.brief.objective}</small>
             <span className="coding-agent-progress" role="progressbar" aria-label={`Coding Agent ${index + 1} progress: ${stateLabel(delegation.state)}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={codingAgentProgress(delegation.state)}><i style={{ width: `${codingAgentProgress(delegation.state)}%` }} /></span>
           </span>
@@ -920,9 +1081,12 @@ function CodingAgentCards({ team, conversationId, onView }: { team?: Conversatio
             {worktree && <span>Branch <code>{worktree.branch}</code></span>}
             {delegation.run_id && <span>Run <code>{delegation.run_id}</code></span>}
             {delegation.agent_lease_id && <span>Lease <code>{delegation.agent_lease_id}</code></span>}
+            {governance && <span>Preflight <code>{governance.preflight.passed ? "passed" : "blocked"}</code></span>}
+            {governance && <span>Attempts <code>{governance.outcome.attempts}</code></span>}
+            {governance?.outcome.latency_ms ? <span>Runtime <code>{Math.round(governance.outcome.latency_ms / 1000)}s</code></span> : null}
           </div>
           <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
-          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{delegation.retry_of_id && <p>Retry of <code>{delegation.retry_of_id}</code></p>}{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}</section>}
+          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{delegation.retry_of_id && <p>Retry of <code>{delegation.retry_of_id}</code></p>}{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{governance?.preflight.checks.map((check) => <p key={check}>✓ {check}</p>)}{governance?.preflight.blockers.map((blocker) => <p className="error-message" key={blocker}>Preflight: {blocker}</p>)}{latestContext && <p>Context receipt: ~{latestContext.approximate_tokens.toLocaleString()} / {latestContext.token_budget.toLocaleString()} tokens · {latestContext.source_count} attributed sources{latestContext.truncated ? " · truncated to budget" : ""}</p>}{governance && governance.failure_class !== "none" && <p className="error-message">Failure class: {governance.failure_class.replaceAll("_", " ")} · recovery: {governance.recovery.replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}</section>}
           {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
           {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
           {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch">{patches[delegation.id]}</pre>}</section>}
@@ -1001,12 +1165,22 @@ function ConversationTurnTranscript({
   turn,
   messages,
   activities,
-  active
+  active,
+  batches,
+  team,
+  conversationId,
+  onView,
+  onOpenPreview
 }: {
   turn: ConversationTurn;
   messages: ConversationMessage[];
   activities: ConversationActivity[];
   active: boolean;
+  batches: CoordinationBatch[];
+  team?: ConversationTeamState;
+  conversationId?: string;
+  onView: (view: ConversationView) => void;
+  onOpenPreview: (preview: ConversationPreview) => void;
 }) {
   const visibleMessages = messages.filter((message) => message.role !== "assistant" || message.content.length > 0);
   const assistantMessages = visibleMessages.filter((message) => message.role !== "user");
@@ -1015,7 +1189,7 @@ function ConversationTurnTranscript({
     {visibleMessages.filter((message) => message.role === "user").map((message) => <article className="chat-message user-message" key={message.id}>
       <span>You</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
     </article>)}
-    {(activities.length > 0 || assistantMessages.length > 0) && <ConversationActivityTimeline messages={assistantMessages} activities={activities} />}
+    {(activities.length > 0 || assistantMessages.length > 0 || batches.length > 0) && <ConversationActivityTimeline messages={assistantMessages} activities={activities} batches={batches} team={team} conversationId={conversationId} onView={onView} onOpenPreview={onOpenPreview} />}
     {active && <ConversationTurnStatus turn={turn} hasResponseText={hasResponseText} />}
     {turn.error && <p className="error-message" role="alert">{turn.error}</p>}
   </section>;
@@ -1351,7 +1525,6 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatSearch, setChatSearch] = useState("");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
-  const [conversationRooms, setConversationRooms] = useState<Record<string, "chat" | "agents">>({});
   const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [settingsSearch, setSettingsSearch] = useState("");
@@ -1550,6 +1723,9 @@ export function App() {
   const [replayBusyTask, setReplayBusyTask] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectModel | null>(null);
   const [projects, setProjects] = useState<ProjectModel[]>([]);
+  const [archivedProjects, setArchivedProjects] = useState<ProjectModel[]>([]);
+  const [archivedProjectsOpen, setArchivedProjectsOpen] = useState(() => window.localStorage.getItem("mcg.sidebar-archived-projects-open") === "true");
+  const [projectMutationBusy, setProjectMutationBusy] = useState<string | null>(null);
   const [topologyPlan, setTopologyPlan] = useState<ProjectTopologyPlan | null>(null);
   const [topologyPlanError, setTopologyPlanError] = useState<string | null>(null);
   const [reviewedTopologyPlans, setReviewedTopologyPlans] = useState<ReviewedTopologyPlan[]>([]);
@@ -2127,6 +2303,25 @@ export function App() {
     setWorkspaceSidePanelOpen(true);
   }
 
+  function openConversationPreview(preview: ConversationPreview) {
+    if (!preview.safe_url) return;
+    setSideBrowserUrl(preview.safe_url);
+    const stableId = preview.browser_tab_id || `conversation-preview-${preview.id}`;
+    const existing = siteBrowserTabs.find((tab) => tab.id === stableId);
+    if (existing) {
+      setSiteBrowserTabs((current) => current.map((tab) => tab.id === stableId ? { ...tab, url: preview.safe_url! } : tab));
+    } else {
+      setSiteBrowserTabs((current) => [...current, {
+        id: stableId,
+        title: preview.strategy === "codex_sites" ? "OpenAI Site" : "Local preview",
+        url: preview.safe_url!
+      }]);
+    }
+    setActiveSiteBrowserTabId(stableId);
+    setWorkspaceSidePanelTab("browser");
+    setWorkspaceSidePanelOpen(true);
+  }
+
   async function openSiteExternally(entry: SiteLibraryEntry) {
     setSiteContextMenu(null);
     setSiteError(null);
@@ -2505,6 +2700,47 @@ export function App() {
     if (restored && openAfterRestore) openChat(chatId);
   }
 
+  async function setProjectArchived(project: ProjectModel, archived: boolean) {
+    setProjectMutationBusy(project.project_id);
+    setProjectError(null);
+    setTaskError(null);
+    try {
+      const updated = await archiveProject(project.project_id, archived);
+      if (archived) {
+        setProjects((current) => current.filter((candidate) => candidate.project_id !== project.project_id));
+        setArchivedProjects((current) => [updated, ...current.filter((candidate) => candidate.project_id !== project.project_id)]);
+        if (selectedProject?.project_id === project.project_id) setSelectedProject(null);
+      } else {
+        setArchivedProjects((current) => current.filter((candidate) => candidate.project_id !== project.project_id));
+        setProjects((current) => [updated, ...current.filter((candidate) => candidate.project_id !== project.project_id)]);
+      }
+    } catch (error) {
+      setProjectError(errorMessage(error));
+      setTaskError(errorMessage(error));
+    } finally {
+      setProjectMutationBusy(null);
+    }
+  }
+
+  async function deleteProject(project: ProjectModel) {
+    const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
+    if (!window.confirm(`Remove ${name} from MCG?\n\nThis only removes the project from MCG. Its folder, local Git history, and GitHub repository will not be deleted.`)) return;
+    setProjectMutationBusy(project.project_id);
+    setProjectError(null);
+    setTaskError(null);
+    try {
+      await removeProject(project.project_id);
+      setProjects((current) => current.filter((candidate) => candidate.project_id !== project.project_id));
+      setArchivedProjects((current) => current.filter((candidate) => candidate.project_id !== project.project_id));
+      if (selectedProject?.project_id === project.project_id) setSelectedProject(null);
+    } catch (error) {
+      setProjectError(errorMessage(error));
+      setTaskError(errorMessage(error));
+    } finally {
+      setProjectMutationBusy(null);
+    }
+  }
+
   async function copyChatText(value: string, status: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -2634,7 +2870,10 @@ export function App() {
       .catch(() => { if (active) setCodexStableDiscovery(null); });
     listProjects()
       .then((response) => {
-        if (active) setProjects(response.projects);
+        if (active) {
+          setProjects(response.projects);
+          setArchivedProjects(response.archived_projects ?? []);
+        }
       })
       .catch((error) => {
         if (active) setProjectError(errorMessage(error));
@@ -5352,7 +5591,8 @@ export function App() {
       const rightIndex = Math.max(0, pinnedTaskIds.findIndex((id) => id === right.id || right.tasks.some((task) => task.id === id)));
       return leftIndex - rightIndex;
     });
-  const unassignedChats = chatSummaries.filter((chat) => !chat.conversation.project_id || !projects.some((project) => project.project_id === chat.conversation.project_id));
+  const knownSidebarProjects = [...projects, ...archivedProjects];
+  const unassignedChats = chatSummaries.filter((chat) => !chat.conversation.project_id || !knownSidebarProjects.some((project) => project.project_id === chat.conversation.project_id));
   const recentChats = chatSummaries
     .slice()
     .sort((left, right) => Date.parse(right.conversation.updated_at) - Date.parse(left.conversation.updated_at))
@@ -5363,7 +5603,6 @@ export function App() {
   const contextChat = chatContextMenu ? chatSummaries.find((chat) => chat.id === chatContextMenu.chatId) : undefined;
   const visibleTasks = tasks;
   const visibleConversation = selectedChatId ? conversationViews[selectedChatId] : undefined;
-  const activeConversationRoom = selectedChatId ? (conversationRooms[selectedChatId] ?? "chat") : "chat";
   const managedConversationWorktrees = Object.values(conversationViews).flatMap((view) =>
     (view?.team?.worktrees ?? []).map((worktree) => ({
       worktree,
@@ -5383,12 +5622,7 @@ export function App() {
     ? queuedChatMessages.filter((message) => message.conversation_id === selectedChatId)
     : [];
   const conversationIsActive = Boolean(activeConversationTurn || taskBusy);
-  const conversationTeamIsRunning = Boolean(
-    visibleConversation?.team?.delegations.some((delegation) => codingAgentIsActive(delegation.state))
-    || visibleConversation?.team?.sessions.some((session) =>
-      session.kind === "coordinator" && ["starting", "working", "waiting"].includes(session.state)
-    )
-  );
+  const conversationTeamIsRunning = conversationTeamHasPendingDelivery(visibleConversation?.team);
 
   useEffect(() => {
     if (activeSurface !== "threads" || !selectedChatId || !conversationTeamIsRunning) return;
@@ -5740,11 +5974,11 @@ export function App() {
         </nav>
         <div className="sidebar-library">
           {pinnedSummaryOpen && <section className="sidebar-section" aria-label="Pinned chats"><h2>Pinned</h2>{pinnedChats.length === 0 ? <p>No pinned chats</p> : pinnedChats.map((chat) => renderChatRow(chat, "pinned"))}</section>}
-          {projectTreeOpen && <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No projects</p>}{projects.map((project) => {
+          {projectTreeOpen && <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No active projects</p>}{projects.map((project) => {
             const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
             const projectChats = chatSummaries.filter((chat) => chat.conversation.project_id === project.project_id);
-            return <div className="project-tree-item" key={project.project_id}><div className="project-tree-heading"><button className="project-tree-name" type="button" onClick={() => startNewChat(project)}><span aria-hidden="true">▱</span>{name}</button><button className="project-new-chat" type="button" aria-label={`New chat in ${name}`} title={`New chat in ${name}`} onClick={() => startNewChat(project)}><span aria-hidden="true">＋</span></button></div>{projectChats.length === 0 ? <p>No chats</p> : projectChats.map((chat) => renderChatRow(chat, "project"))}</div>;
-          })}{unassignedChats.length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{unassignedChats.map((chat) => renderChatRow(chat, "project"))}</div>}</section>}
+            return <div className="project-tree-item" key={project.project_id}><div className="project-tree-heading"><button className="project-tree-name" type="button" onClick={() => startNewChat(project)}><span aria-hidden="true">▱</span>{name}</button><div className="project-tree-actions"><button className="project-action" type="button" aria-label={`New chat in ${name}`} title={`New chat in ${name}`} disabled={projectMutationBusy === project.project_id} onClick={() => startNewChat(project)}><span aria-hidden="true">＋</span></button><button className="project-action" type="button" aria-label={`Archive ${name}`} title="Archive project" disabled={projectMutationBusy === project.project_id} onClick={() => void setProjectArchived(project, true)}><ArchiveIcon /></button><button className="project-action project-delete" type="button" aria-label={`Delete ${name}`} title="Remove project from MCG" disabled={projectMutationBusy === project.project_id} onClick={() => void deleteProject(project)}><TrashIcon /></button></div></div>{projectChats.length === 0 ? <p>No chats</p> : projectChats.map((chat) => renderChatRow(chat, "project"))}</div>;
+          })}{archivedProjects.length > 0 && <div className="archived-projects"><button className="sidebar-section-toggle" type="button" aria-expanded={archivedProjectsOpen} onClick={() => setArchivedProjectsOpen((current) => { window.localStorage.setItem("mcg.sidebar-archived-projects-open", String(!current)); return !current; })}><span>Archived projects</span><span aria-hidden="true">{archivedProjectsOpen ? "⌄" : "›"}</span></button>{archivedProjectsOpen && archivedProjects.map((project) => { const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root; return <div className="project-tree-heading archived-project-row" key={`archived-project-${project.project_id}`}><span className="project-tree-name"><span aria-hidden="true">▱</span>{name}</span><div className="project-tree-actions"><button className="project-action" type="button" aria-label={`Restore ${name}`} title="Restore project" disabled={projectMutationBusy === project.project_id} onClick={() => void setProjectArchived(project, false)}><span aria-hidden="true">↶</span></button><button className="project-action project-delete" type="button" aria-label={`Delete ${name}`} title="Remove project from MCG" disabled={projectMutationBusy === project.project_id} onClick={() => void deleteProject(project)}><TrashIcon /></button></div></div>; })}</div>}{unassignedChats.length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{unassignedChats.map((chat) => renderChatRow(chat, "project"))}</div>}</section>}
           <section className="sidebar-section" aria-label="Recent chats">
             <button className="sidebar-section-toggle" type="button" aria-expanded={recentsOpen} onClick={() => setRecentsOpen((current) => { window.localStorage.setItem("mcg.sidebar-recents-open", String(!current)); return !current; })}><span>Recents</span><span aria-hidden="true">{recentsOpen ? "⌄" : "›"}</span></button>
             {recentsOpen && (recentChats.length === 0 ? <p>No recent chats</p> : recentChats.map((chat) => renderChatRow(chat, "recent")))}
@@ -5956,11 +6190,7 @@ export function App() {
 
         {(advanced || activeSurface === "threads" || (activeSurface === "tasks" && Boolean(workspaceTask))) && <section className="panel task-panel" aria-label={activeSurface === "threads" ? "Chat conversation" : "Tasks"}>
           {activeSurface === "threads" ? <div className="chat-conversation">
-            <nav className="conversation-room-tabs" aria-label="Conversation rooms">
-              <button type="button" className={activeConversationRoom === "chat" ? "active" : ""} aria-current={activeConversationRoom === "chat" ? "page" : undefined} onClick={() => selectedChatId && setConversationRooms((current) => ({ ...current, [selectedChatId]: "chat" }))}><span aria-hidden="true">◉</span>Chat <small>you + Chat Agent</small></button>
-              <button type="button" className={activeConversationRoom === "agents" ? "active" : ""} aria-current={activeConversationRoom === "agents" ? "page" : undefined} onClick={() => selectedChatId && setConversationRooms((current) => ({ ...current, [selectedChatId]: "agents" }))}><span aria-hidden="true">⌘</span>Agent Room <small>{visibleConversation?.team?.sessions.filter((session) => ["starting", "ready", "working", "waiting"].includes(session.state)).length ?? 0} present</small></button>
-            </nav>
-            <div className="chat-message-list" hidden={activeConversationRoom !== "chat"}>
+            <div className="chat-message-list">
               {!visibleConversation || (visibleConversation.messages.length === 0 && visibleConversation.turns.length === 0)
                 ? <p className="empty-state">This conversation has no messages yet.</p>
                 : visibleConversation.turns.map((turn) => <ConversationTurnTranscript
@@ -5969,9 +6199,12 @@ export function App() {
                   messages={visibleConversation.messages.filter((message) => message.turn_id === turn.id)}
                   activities={(visibleConversation.activities ?? []).filter((activity) => activity.turn_id === turn.id)}
                   active={activeConversationTurn?.id === turn.id}
+                  batches={(visibleConversation.team?.coordination_batches ?? []).filter((batch) => batch.origin_turn_id === turn.id)}
+                  team={visibleConversation.team}
+                  conversationId={visibleConversation.conversation.id}
+                  onView={(view) => setConversationViews((current) => ({ ...current, [view.conversation.id]: view }))}
+                  onOpenPreview={openConversationPreview}
                 />)}
-              <TeamActivityIndicator team={visibleConversation?.team} onOpenRoom={() => selectedChatId && setConversationRooms((current) => ({ ...current, [selectedChatId]: "agents" }))} />
-              <CodingAgentCards team={visibleConversation?.team} conversationId={visibleConversation?.conversation.id} onView={(view) => setConversationViews((current) => ({ ...current, [view.conversation.id]: view }))} />
               {activeConversationTurn?.state === "waiting_for_approval" && activeConversationApproval && <section className="chat-permission" aria-label="Codex permission request">
                 <strong>Permission needed to continue</strong>
                 <p>{activeConversationApproval.reason}</p>
@@ -5992,8 +6225,7 @@ export function App() {
               </section>}
               {visibleConversation?.turns.filter((turn) => turn.error).map((turn) => <p className="error-message" role="alert" key={`${turn.id}-error`}>{turn.error}</p>)}
             </div>
-            {activeConversationRoom === "agents" && <AgentRoom team={visibleConversation?.team} />}
-            {activeConversationRoom === "chat" && <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
+            <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
               {visibleQueuedMessages.length > 0 && <section className="chat-queue-drawer" aria-label="Queued messages">
                 <div className="chat-queue-heading">
                   <span aria-hidden="true">Ⅱ</span>
@@ -6013,7 +6245,7 @@ export function App() {
               <div className="composer-actions"><PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} /><ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, and speed" /><button className="primary" type="button" disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}>{conversationIsActive ? "Queue" : "Send"}</button></div>
               {taskError && <p className="error-message" role="alert">{taskError}</p>}
               </div>
-            </div>}
+            </div>
           </div> : <>
           <div className="section-heading">
             <div>

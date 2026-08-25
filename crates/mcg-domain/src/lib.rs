@@ -1,5 +1,7 @@
 //! Stable, versioned domain types shared by every MCG interface.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -56,6 +58,7 @@ domain_id!(BlackboardEntryId);
 domain_id!(AgentContextCheckpointId);
 domain_id!(CoordinationBatchId);
 domain_id!(AgentWakeId);
+domain_id!(ConversationPreviewId);
 domain_id!(ManagedWorktreeId);
 domain_id!(IntegrationJournalId);
 domain_id!(AgentCredentialAuditId);
@@ -105,6 +108,7 @@ domain_id!(SupervisionObservationId);
 domain_id!(ExperimentId);
 domain_id!(ExperimentBenchmarkId);
 domain_id!(ExperimentDecisionId);
+domain_id!(GovernorProposalId);
 domain_id!(PluginRevisionId);
 domain_id!(PluginInvocationId);
 
@@ -1151,7 +1155,7 @@ pub struct PluginInvocationRecord {
 }
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
-pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 5;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1227,6 +1231,127 @@ pub struct CodingDelegationBrief {
     pub context_references: Vec<String>,
 }
 
+/// Deterministic, runtime-enforced completion requirements compiled before a Coder starts.
+/// Prompt text may explain this contract, but cannot relax it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DelegationCompletionContract {
+    #[serde(default)]
+    pub objective_sha256: String,
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
+    #[serde(default)]
+    pub required_checks: Vec<String>,
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
+    #[serde(default)]
+    pub require_integration_ready: bool,
+    #[serde(default)]
+    pub context_token_budget: u64,
+    #[serde(default)]
+    pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationFailureClass {
+    #[default]
+    None,
+    Precondition,
+    PolicyDenied,
+    TransientTool,
+    AgentOmission,
+    Verification,
+    Conflict,
+    Delivery,
+    Cancelled,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationRecoveryDirective {
+    #[default]
+    None,
+    RetrySameThread,
+    RetryNewDelegation,
+    Replan,
+    AwaitOwner,
+    RetainForReview,
+    DoNotRetry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DelegationPreflightReceipt {
+    #[serde(default)]
+    pub passed: bool,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentContextReceipt {
+    #[serde(default)]
+    pub source_count: u32,
+    #[serde(default)]
+    pub approximate_tokens: u64,
+    #[serde(default)]
+    pub token_budget: u64,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub source_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DelegationOutcomeMetrics {
+    #[serde(default)]
+    pub latency_ms: u64,
+    #[serde(default)]
+    pub model_turns: u32,
+    #[serde(default)]
+    pub approximate_tokens: u64,
+    #[serde(default)]
+    pub tool_calls: u32,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub owner_interventions: u32,
+    #[serde(default)]
+    pub changed_file_count: u32,
+    #[serde(default)]
+    pub check_count: u32,
+    #[serde(default)]
+    pub successful: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DelegationGovernance {
+    #[serde(default)]
+    pub contract: DelegationCompletionContract,
+    #[serde(default)]
+    pub preflight: DelegationPreflightReceipt,
+    #[serde(default)]
+    pub context_receipts: Vec<AgentContextReceipt>,
+    #[serde(default)]
+    pub outcome: DelegationOutcomeMetrics,
+    #[serde(default)]
+    pub failure_class: DelegationFailureClass,
+    #[serde(default)]
+    pub recovery: DelegationRecoveryDirective,
+    #[serde(default)]
+    pub dependencies: Vec<AgentDelegationId>,
+    #[serde(default)]
+    pub reserved_scopes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDelegation {
     pub schema_version: u16,
@@ -1248,6 +1373,8 @@ pub struct AgentDelegation {
     pub permission_mode: Option<ApprovalMode>,
     pub state: AgentDelegationState,
     pub brief: CodingDelegationBrief,
+    #[serde(default)]
+    pub governance: DelegationGovernance,
     pub task_id: Option<TaskId>,
     pub run_id: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1283,6 +1410,26 @@ pub struct AgentDelegation {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Returns the authoritative leaf attempts in a delegation retry graph.
+///
+/// Failed or cancelled attempts remain durable evidence, but once another delegation names an
+/// attempt through `retry_of_id`, that ancestor is no longer an effective batch outcome. Multiple
+/// independent retry branches remain visible as separate leaves and must each settle.
+pub fn effective_delegation_attempt_ids(
+    attempts: impl IntoIterator<Item = (AgentDelegationId, Option<AgentDelegationId>)>,
+) -> BTreeSet<AgentDelegationId> {
+    let attempts = attempts.into_iter().collect::<Vec<_>>();
+    let superseded = attempts
+        .iter()
+        .filter_map(|(_, retry_of_id)| *retry_of_id)
+        .collect::<BTreeSet<_>>();
+    attempts
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| !superseded.contains(id))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1381,6 +1528,14 @@ pub enum CoordinationBatchState {
     RecoveryRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationDeliveryTarget {
+    CodexSites,
+    #[default]
+    CustomProject,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinationBatch {
     pub schema_version: u16,
@@ -1388,6 +1543,12 @@ pub struct CoordinationBatch {
     pub conversation_id: ConversationId,
     pub origin_turn_id: ConversationTurnId,
     pub coordinator_session_id: ConversationAgentSessionId,
+    #[serde(default)]
+    pub delivery_target: ConversationDeliveryTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_owner_session_id: Option<ConversationAgentSessionId>,
     pub state: CoordinationBatchState,
     #[serde(default)]
     pub revision: u64,
@@ -1397,10 +1558,76 @@ pub struct CoordinationBatch {
     pub coordinator_turn_count: u32,
     #[serde(default)]
     pub coordinator_approximate_tokens: u64,
+    /// True when the deterministic runtime can safely route a bounded single-Coder request
+    /// without spending a Coordinator model turn. The Coordinator remains the authority owner.
+    #[serde(default)]
+    pub coordinator_bypassed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_rationale: Option<String>,
+    #[serde(default)]
+    pub owner_intervention_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationPreviewStrategy {
+    CodexSites,
+    StaticFiles,
+    ManifestCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationPreviewState {
+    PreparingSite,
+    Building,
+    Validating,
+    PublishingPrivate,
+    ApprovalRequired,
+    Available,
+    Running,
+    Stopped,
+    Failed,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationPreview {
+    pub schema_version: u16,
+    pub id: ConversationPreviewId,
+    pub conversation_id: ConversationId,
+    pub coordination_batch_id: CoordinationBatchId,
+    pub delegation_id: AgentDelegationId,
+    pub project_id: ProjectId,
+    pub delivery_target: ConversationDeliveryTarget,
+    pub strategy: ConversationPreviewStrategy,
+    pub state: ConversationPreviewState,
+    pub source_revision: u64,
+    pub source_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_accessed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1654,6 +1881,8 @@ pub struct ConversationTeamState {
     pub coordination_batches: Vec<CoordinationBatch>,
     #[serde(default)]
     pub wakes: Vec<AgentWake>,
+    #[serde(default)]
+    pub previews: Vec<ConversationPreview>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2104,5 +2333,22 @@ mod tests {
         let installation: PluginInstallation =
             serde_json::from_value(document).expect("legacy installation");
         assert!(installation.capability_grants.is_empty());
+    }
+
+    #[test]
+    fn retry_ancestors_are_not_effective_batch_outcomes() {
+        let first = AgentDelegationId::new();
+        let second = AgentDelegationId::new();
+        let third = AgentDelegationId::new();
+        let independent = AgentDelegationId::new();
+
+        let leaves = effective_delegation_attempt_ids([
+            (first, None),
+            (second, Some(first)),
+            (third, Some(second)),
+            (independent, None),
+        ]);
+
+        assert_eq!(leaves, BTreeSet::from([third, independent]));
     }
 }

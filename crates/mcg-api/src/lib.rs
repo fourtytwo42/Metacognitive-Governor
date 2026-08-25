@@ -25,29 +25,30 @@ use chrono::Utc;
 use mcg_agents::{
     AGENT_RUN_SCHEMA_VERSION, AgentRun, AgentRunState, AgentTurnError, EvaluationPolicy,
     EvaluationReport, ExecutivePlanner, ExperimentBenchmark, ExperimentDecision,
-    ExperimentDefinition, ExperimentState, ModelPolicy, OrganizationAssignments,
-    OrganizationGenome, OrganizationPolicy, OrganizationSharePackage, OrganizationShareReview,
-    OrganizationalMetrics, PlannedWork, PlanningRequest, PortableOrganizationComparison,
-    PortableOrganizationGenome, RoleDefinition, RoleKind, RoleRelationship, ShadowExecutionReceipt,
-    SuccessCondition, SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
+    ExperimentDefinition, ExperimentState, GovernorControlPolicy, GovernorProposal,
+    GovernorProposalState, ModelPolicy, OrganizationAssignments, OrganizationGenome,
+    OrganizationPolicy, OrganizationSharePackage, OrganizationShareReview, OrganizationalMetrics,
+    PlannedWork, PlanningRequest, PortableOrganizationComparison, PortableOrganizationGenome,
+    RoleDefinition, RoleKind, RoleRelationship, ShadowExecutionReceipt, SuccessCondition,
+    SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
 };
 use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComputerActionBatchId,
     ComputerUseCapability, ComputerUseTarget, Conversation, ConversationAgentSessionId,
-    ConversationId, ConversationTeamState, ConversationTurnId, ConversationView,
-    ExecutionPreferences, ExperimentId, MemoryClaimId, MemoryTransferId, NotificationSeverity,
-    OrganizationId, OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
-    PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId, RiskLevel, RoleId,
-    RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, SharedContextHit, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
-    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
-    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
-    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    ConversationId, ConversationPreview, ConversationPreviewId, ConversationTeamState,
+    ConversationTurnId, ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId,
+    MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
+    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
+    SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
+    SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    SshWorkflow, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -66,11 +67,11 @@ use mcg_runtime::{
     AppRuntime, BackupBundleManifest, BackupBundleSummary, BackupPassphrase,
     CandidateRevisionMutation, CodexSiteInventory, ConsumerEvaluationCheckpointState,
     ConsumerEvaluationProgress, DelegationRetryMutation, DelegationReview, DiagnosticReport,
-    EvidenceMutation, ExperimentMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
-    OpenAiOAuthMethod, OrganizationPublisherMutation, OrganizationShareImportMutation,
-    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
-    PlatformComputerMutation, PlatformSessionRequest, PluginInvocationMutation,
-    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
+    EvidenceMutation, ExperimentMutation, GovernorProposalMutation, McpMutation,
+    MemoryClaimMutation, OAuthLoginStart, OpenAiOAuthMethod, OrganizationPublisherMutation,
+    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
+    PlatformComputerActionMutation, PlatformComputerMutation, PlatformSessionRequest,
+    PluginInvocationMutation, PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
     ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport, RuntimeError,
     RuntimeStatus, ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation,
@@ -421,6 +422,13 @@ pub struct DiscoverProjectRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectListResponse {
     pub projects: Vec<ProjectModel>,
+    #[serde(default)]
+    pub archived_projects: Vec<ProjectModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveProjectRequest {
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -863,6 +871,22 @@ pub struct ExperimentBenchmarkListResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentDecisionListResponse {
     pub decisions: Vec<ExperimentDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GovernorProposalListResponse {
+    pub proposals: Vec<GovernorProposal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerGovernorApprovalRequest {
+    pub expected: GovernorProposalState,
+    pub approve: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestGovernorImplementationRequest {
+    pub conversation_id: ConversationId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1391,6 +1415,24 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             get(list_experiments),
         )
         .route("/api/v1/experiments", post(create_experiment))
+        .route("/api/v1/governor/policy", get(get_governor_policy))
+        .route("/api/v1/governor/proposals", post(create_governor_proposal))
+        .route(
+            "/api/v1/governor/organizations/{organization_id}/proposals",
+            get(list_governor_proposals),
+        )
+        .route(
+            "/api/v1/governor/proposals/{proposal_id}",
+            get(get_governor_proposal),
+        )
+        .route(
+            "/api/v1/governor/proposals/{proposal_id}/owner-approval",
+            post(owner_approve_governor_proposal),
+        )
+        .route(
+            "/api/v1/governor/proposals/{proposal_id}/implementation",
+            post(request_governor_proposal_implementation),
+        )
         .route("/api/v1/experiments/{experiment_id}", get(get_experiment))
         .route(
             "/api/v1/experiments/{experiment_id}/transition",
@@ -1522,6 +1564,14 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/delegations/{delegation_id}/discard",
             post(discard_conversation_delegation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/previews/{preview_id}/start",
+            post(start_conversation_preview),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/previews/{preview_id}/stop",
+            post(stop_conversation_preview),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/turns/{turn_id}/interrupt",
@@ -1743,7 +1793,14 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             "/api/v1/projects",
             get(list_projects).post(discover_project),
         )
-        .route("/api/v1/projects/{project_id}", get(get_project))
+        .route(
+            "/api/v1/projects/{project_id}",
+            get(get_project).delete(remove_project),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/archive",
+            post(archive_project),
+        )
         .route(
             "/api/v1/projects/{project_id}/initialize-git",
             post(initialize_project_git),
@@ -2776,6 +2833,92 @@ async fn create_experiment(
     Ok((status, Json(mutation)))
 }
 
+async fn get_governor_policy(State(state): State<ApiState>) -> Json<GovernorControlPolicy> {
+    Json(state.runtime.governor_control_policy())
+}
+
+async fn create_governor_proposal(
+    State(state): State<ApiState>,
+    Json(proposal): Json<GovernorProposal>,
+) -> Result<(StatusCode, Json<GovernorProposalMutation>), ApiError> {
+    let mutation = state
+        .runtime
+        .create_governor_proposal(&proposal)
+        .map_err(map_runtime_error)?;
+    let status = if mutation.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(mutation)))
+}
+
+async fn list_governor_proposals(
+    State(state): State<ApiState>,
+    Path(organization_id): Path<String>,
+) -> Result<Json<GovernorProposalListResponse>, ApiError> {
+    let organization_id = parse_organization_id(&organization_id)?;
+    Ok(Json(GovernorProposalListResponse {
+        proposals: state
+            .runtime
+            .governor_proposals(organization_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn get_governor_proposal(
+    State(state): State<ApiState>,
+    Path(proposal_id): Path<String>,
+) -> Result<Json<GovernorProposal>, ApiError> {
+    let proposal_id = parse_governor_proposal_id(&proposal_id)?;
+    state
+        .runtime
+        .governor_proposal(proposal_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::not_found(format!("governor proposal {proposal_id} was not found"))
+        })
+}
+
+async fn owner_approve_governor_proposal(
+    State(state): State<ApiState>,
+    Path(proposal_id): Path<String>,
+    Json(request): Json<OwnerGovernorApprovalRequest>,
+) -> Result<Json<GovernorProposalMutation>, ApiError> {
+    let proposal_id = parse_governor_proposal_id(&proposal_id)?;
+    if request.expected != GovernorProposalState::AwaitingOwnerApproval {
+        return Err(ApiError::bad_request(
+            "owner approval requires awaiting_owner_approval",
+        ));
+    }
+    let next = if request.approve {
+        GovernorProposalState::Approved
+    } else {
+        GovernorProposalState::Rejected
+    };
+    Ok(Json(
+        state
+            .runtime
+            .transition_governor_proposal(proposal_id, request.expected, next)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn request_governor_proposal_implementation(
+    State(state): State<ApiState>,
+    Path(proposal_id): Path<String>,
+    Json(request): Json<RequestGovernorImplementationRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let proposal_id = parse_governor_proposal_id(&proposal_id)?;
+    state
+        .runtime
+        .request_governor_proposal_implementation(proposal_id, request.conversation_id)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 async fn list_experiments(
     State(state): State<ApiState>,
     Path(organization_id): Path<String>,
@@ -3607,17 +3750,20 @@ async fn archive_conversation(
     let conversation_id = conversation_id
         .parse::<ConversationId>()
         .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
-    state
+    let conversation = state
         .runtime
-        .set_owned_codex_thread_archived(conversation_id, request.archived)
-        .await
+        .archive_conversation(conversation_id, request.archived)
         .map_err(map_runtime_error)?;
-    Ok(Json(
-        state
-            .runtime
-            .archive_conversation(conversation_id, request.archived)
-            .map_err(map_runtime_error)?,
-    ))
+    let runtime = Arc::clone(&state.runtime);
+    tokio::spawn(async move {
+        // The MCG catalog is authoritative for its sidebar. Codex thread cleanup is
+        // deliberately best-effort so an unavailable app-server cannot block the
+        // owner's archive or restore action.
+        let _ = runtime
+            .set_owned_codex_thread_archived(conversation_id, request.archived)
+            .await;
+    });
+    Ok(Json(conversation))
 }
 
 async fn send_conversation_message(
@@ -3782,6 +3928,48 @@ async fn discard_conversation_delegation(
         state
             .runtime
             .discard_delegation_worktree(conversation_id, delegation_id, request.expected_revision)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+fn parse_preview_path(
+    conversation_id: String,
+    preview_id: String,
+) -> Result<(ConversationId, ConversationPreviewId), ApiError> {
+    Ok((
+        conversation_id
+            .parse::<ConversationId>()
+            .map_err(|_| ApiError::bad_request("conversation id is invalid"))?,
+        preview_id
+            .parse::<ConversationPreviewId>()
+            .map_err(|_| ApiError::bad_request("conversation preview id is invalid"))?,
+    ))
+}
+
+async fn start_conversation_preview(
+    State(state): State<ApiState>,
+    Path((conversation_id, preview_id)): Path<(String, String)>,
+) -> Result<Json<ConversationPreview>, ApiError> {
+    let (conversation_id, preview_id) = parse_preview_path(conversation_id, preview_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .start_conversation_preview(conversation_id, preview_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn stop_conversation_preview(
+    State(state): State<ApiState>,
+    Path((conversation_id, preview_id)): Path<(String, String)>,
+) -> Result<Json<ConversationPreview>, ApiError> {
+    let (conversation_id, preview_id) = parse_preview_path(conversation_id, preview_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .stop_conversation_preview(conversation_id, preview_id)
+            .await
             .map_err(map_runtime_error)?,
     ))
 }
@@ -6109,7 +6297,33 @@ async fn list_projects(
 ) -> Result<Json<ProjectListResponse>, ApiError> {
     Ok(Json(ProjectListResponse {
         projects: state.runtime.projects()?,
+        archived_projects: state.runtime.archived_projects()?,
     }))
+}
+
+async fn archive_project(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<ArchiveProjectRequest>,
+) -> Result<Json<ProjectModel>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .archive_project(project_id, request.archived)
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn remove_project(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    state
+        .runtime
+        .remove_project(project_id)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(map_runtime_error)
 }
 
 async fn get_project(
@@ -6570,6 +6784,12 @@ fn parse_experiment_id(value: &str) -> Result<ExperimentId, ApiError> {
     value
         .parse()
         .map_err(|_| ApiError::bad_request("experiment id must be a UUID"))
+}
+
+fn parse_governor_proposal_id(value: &str) -> Result<GovernorProposalId, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request(format!("governor proposal id {value:?} is not a UUID")))
 }
 
 fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
@@ -9443,6 +9663,8 @@ form.addEventListener('submit', (event) => {
                 "mcg_computer_reclaim",
                 "mcg_experiments_inspect",
                 "mcg_experiments_mutate",
+                "mcg_governor_inspect",
+                "mcg_governor_propose",
                 "mcg_sites_list",
                 "mcg_sites_register",
                 "mcg_sites_health",
@@ -16630,6 +16852,143 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("observation");
         assert_eq!(observation_response.status(), StatusCode::CREATED);
+        let policy = mcp_tool_response(
+            app.clone(),
+            299,
+            "mcg_governor_inspect",
+            serde_json::json!({"scope": "policy"}),
+        )
+        .await;
+        assert_eq!(
+            policy.pointer("/result/structuredContent/policy/governor_model_enabled"),
+            Some(&serde_json::json!(false))
+        );
+        let proposal = mcg_agents::GovernorProposal {
+            schema_version: mcg_agents::GOVERNOR_PROPOSAL_SCHEMA_VERSION,
+            id: mcg_domain::GovernorProposalId::new(),
+            organization_id: baseline.organization_id,
+            baseline_revision_id: baseline.revision_id,
+            target: mcg_agents::GovernorProposalTarget::SourceCode,
+            risk: mcg_agents::GovernorProposalRisk::High,
+            state: mcg_agents::GovernorProposalState::Draft,
+            title: "Make callbacks event driven".into(),
+            diagnosis: "Repeated Coordinator polling consumes unnecessary turns".into(),
+            proposed_change: "Use one durable completion wake and aggregate final review".into(),
+            expected_benefits: vec!["Lower token use".into()],
+            expected_risks: vec!["Recovery must reclaim wake leases".into()],
+            success_criteria: vec!["One final callback is delivered".into()],
+            observation_ids: vec![observation.id],
+            rollback_revision_id: Some(baseline.revision_id),
+            validation_findings: Vec::new(),
+            owner_approved_at: None,
+            expires_at: Utc::now() + chrono::Duration::days(14),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let proposal_id = proposal.id;
+        let created_proposal = mcp_tool_response(
+            app.clone(),
+            300,
+            "mcg_governor_propose",
+            serde_json::json!({"action": "create", "payload": proposal}),
+        )
+        .await;
+        assert_eq!(
+            created_proposal.pointer("/result/structuredContent/proposal/state"),
+            Some(&serde_json::json!("draft"))
+        );
+        let validated_proposal = mcp_tool_response(
+            app.clone(),
+            3001,
+            "mcg_governor_propose",
+            serde_json::json!({
+                "action": "transition",
+                "payload": {"proposal_id": proposal_id, "expected": "draft", "next": "validated"}
+            }),
+        )
+        .await;
+        assert_eq!(
+            validated_proposal.pointer("/result/structuredContent/proposal/validation_findings/0"),
+            Some(&serde_json::json!(
+                "Governor model remains disabled; proposal was submitted by an authenticated external operator."
+            ))
+        );
+        let awaiting_proposal = mcp_tool_response(
+            app.clone(),
+            3002,
+            "mcg_governor_propose",
+            serde_json::json!({
+                "action": "transition",
+                "payload": {"proposal_id": proposal_id, "expected": "validated", "next": "awaiting_owner_approval"}
+            }),
+        )
+        .await;
+        assert_eq!(
+            awaiting_proposal.pointer("/result/structuredContent/proposal/state"),
+            Some(&serde_json::json!("awaiting_owner_approval"))
+        );
+        let self_approval = mcp_tool_response(
+            app.clone(),
+            3003,
+            "mcg_governor_propose",
+            serde_json::json!({
+                "action": "transition",
+                "payload": {"proposal_id": proposal_id, "expected": "awaiting_owner_approval", "next": "approved"}
+            }),
+        )
+        .await;
+        assert_eq!(
+            self_approval.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        let conversation_id = mcg_domain::ConversationId::new();
+        let unapproved_handoff = mcp_tool_response(
+            app.clone(),
+            3004,
+            "mcg_governor_propose",
+            serde_json::json!({
+                "action": "request_implementation",
+                "payload": {"proposal_id": proposal_id, "conversation_id": conversation_id}
+            }),
+        )
+        .await;
+        assert_eq!(
+            unapproved_handoff.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
+        let owner_approval = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/governor/proposals/{proposal_id}/owner-approval"
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"expected":"awaiting_owner_approval","approve":true}"#,
+                ))
+                .expect("request"),
+            )
+            .await
+            .expect("owner approval");
+        assert_eq!(owner_approval.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(owner_approval).await["proposal"]["state"],
+            serde_json::json!("approved")
+        );
+        let missing_conversation_handoff = mcp_tool_response(
+            app.clone(),
+            3005,
+            "mcg_governor_propose",
+            serde_json::json!({
+                "action": "request_implementation",
+                "payload": {"proposal_id": proposal_id, "conversation_id": conversation_id}
+            }),
+        )
+        .await;
+        assert_eq!(
+            missing_conversation_handoff.pointer("/result/isError"),
+            Some(&serde_json::json!(true))
+        );
         let mcp_observations = mcp_tool_response(
             app.clone(),
             301,

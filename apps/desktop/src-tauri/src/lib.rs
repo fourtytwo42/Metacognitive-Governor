@@ -42,9 +42,9 @@ use mcg_api::{
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
-    Conversation, ConversationTeamState, ConversationView, PlatformCapabilitySnapshot,
-    PlatformSession, PluginInstallation, ScheduleDefinition, SchedulerNotification, Site,
-    SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
+    Conversation, ConversationPreview, ConversationTeamState, ConversationView,
+    PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ScheduleDefinition,
+    SchedulerNotification, Site, SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpToolCatalog};
@@ -1015,6 +1015,36 @@ async fn discard_conversation_delegation(
         )),
         Some(&WorktreeMutationRequest { expected_revision }),
         "Coding delegation discard",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn start_conversation_preview(
+    conversation_id: String,
+    preview_id: String,
+) -> Result<ConversationPreview, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/previews/{preview_id}/start"
+        )),
+        None::<&()>,
+        "Conversation preview start",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn stop_conversation_preview(
+    conversation_id: String,
+    preview_id: String,
+) -> Result<ConversationPreview, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/previews/{preview_id}/stop"
+        )),
+        None::<&()>,
+        "Conversation preview stop",
     )
     .await
 }
@@ -2773,6 +2803,36 @@ async fn list_projects() -> Result<ProjectListResponse, String> {
 }
 
 #[tauri::command]
+async fn archive_project(project_id: String, archived: bool) -> Result<serde_json::Value, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/archive"),
+        &serde_json::json!({ "archived": archived }),
+        if archived {
+            "Project archive"
+        } else {
+            "Project restore"
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn remove_project(project_id: String) -> Result<(), String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    let response = reqwest::Client::new()
+        .delete(format!("{LOCAL_DAEMON}/api/v1/projects/{project_id}"))
+        .bearer_auth(daemon_token()?)
+        .send()
+        .await
+        .map_err(|error| format!("Project removal could not start: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "Project removal").await);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn project_topology_plan(project_id: String) -> Result<ProjectTopologyPlan, String> {
     let project_id = canonical_uuid(&project_id, "Project identity")?;
     daemon_get(
@@ -3028,7 +3088,7 @@ async fn open_site_in_app_browser(
     url: String,
     bounds: SiteBrowserBounds,
 ) -> Result<(), String> {
-    let target = validate_site_external_url(&url)?;
+    let target = validate_in_app_browser_url(&url)?;
     let (position, size) = validate_site_browser_bounds(&bounds)?;
     let label = site_browser_label(&tab_id)?;
 
@@ -3205,11 +3265,26 @@ fn validate_site_external_url(url: &str) -> Result<reqwest::Url, String> {
     Ok(parsed)
 }
 
+fn validate_in_app_browser_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("The preview URL is invalid: {error}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Credential-bearing preview URLs may not be opened".into());
+    }
+    let remote_https = parsed.scheme() == "https" && parsed.host_str().is_some();
+    let managed_loopback = parsed.scheme() == "http"
+        && parsed.host_str() == Some("127.0.0.1")
+        && parsed.port().is_some();
+    if !remote_https && !managed_loopback {
+        return Err(
+            "Only credential-free HTTPS Sites or managed 127.0.0.1 previews may be opened".into(),
+        );
+    }
+    Ok(parsed)
+}
+
 fn site_browser_navigation_allowed(url: &reqwest::Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
+    validate_in_app_browser_url(url.as_str()).is_ok()
 }
 
 fn canonical_directory(value: &str) -> Result<PathBuf, String> {
@@ -3617,6 +3692,8 @@ pub fn run() {
             retry_conversation_delegation,
             apply_conversation_delegation,
             discard_conversation_delegation,
+            start_conversation_preview,
+            stop_conversation_preview,
             interrupt_conversation_turn,
             steer_conversation_turn,
             codex_models,
@@ -3677,6 +3754,8 @@ pub fn run() {
             discover_project,
             initialize_project_git,
             list_projects,
+            archive_project,
+            remove_project,
             project_topology_plan,
             list_reviewed_topology_plans,
             create_reviewed_topology_plan,
@@ -3711,8 +3790,8 @@ mod tests {
     use super::{
         SiteBrowserBounds, TerminalCommandRequest, bounded_api_error_code, canonical_directory,
         canonical_uuid, run_terminal_command, site_browser_label, site_browser_navigation_allowed,
-        validate_external_url, validate_local_daemon, validate_site_browser_bounds,
-        validate_site_external_url,
+        validate_external_url, validate_in_app_browser_url, validate_local_daemon,
+        validate_site_browser_bounds, validate_site_external_url,
     };
 
     #[test]
@@ -3743,6 +3822,16 @@ mod tests {
     }
 
     #[test]
+    fn in_app_browser_allows_only_https_or_managed_loopback_previews() {
+        assert!(validate_in_app_browser_url("https://springfield.chatgpt.site/").is_ok());
+        assert!(validate_in_app_browser_url("http://127.0.0.1:61410/").is_ok());
+        assert!(validate_in_app_browser_url("http://localhost:61410/").is_err());
+        assert!(validate_in_app_browser_url("http://example.com:61410/").is_err());
+        assert!(validate_in_app_browser_url("http://127.0.0.1/").is_err());
+        assert!(validate_in_app_browser_url("http://user:secret@127.0.0.1:61410/").is_err());
+    }
+
+    #[test]
     fn site_browser_allows_https_auth_redirects_but_rejects_unsafe_navigation() {
         assert!(site_browser_navigation_allowed(
             &reqwest::Url::parse("https://auth.openai.com/authorize").expect("OpenAI auth URL")
@@ -3753,6 +3842,9 @@ mod tests {
         ));
         assert!(!site_browser_navigation_allowed(
             &reqwest::Url::parse("http://example.com/").expect("HTTP URL")
+        ));
+        assert!(site_browser_navigation_allowed(
+            &reqwest::Url::parse("http://127.0.0.1:61410/").expect("loopback URL")
         ));
         assert!(!site_browser_navigation_allowed(
             &reqwest::Url::parse("https://user:secret@example.com/").expect("credential URL")

@@ -489,6 +489,7 @@ fn validate_request(request: &ModelRequest) -> Result<(), ProviderError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // The wire payload is clearer when its mutually dependent fields remain together.
 fn request_json(
     request: &ModelRequest,
     stream: bool,

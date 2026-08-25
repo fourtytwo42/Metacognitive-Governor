@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "conversation_id": "719597b7-98b3-4440-a77d-01cd85f5c0d0",
+  "batch_id": "18db4af4-faab-4501-8f21-9bd7a2f45293",
+  "state": "completed",
+  "hard_gate_ready": true,
+  "coordinator": {
+    "model_turns": 3,
+    "approximate_tokens": 5435
+  },
+  "coders": {
+    "count": 2,
+    "effective_count": 2,
+    "model_turns": 2,
+    "approximate_tokens": 1011,
+    "tool_calls": 42
+  },
+  "wakes": {
+    "initial": 1,
+    "final_review": 2,
+    "chat_completion": 1
+  },
+  "completion_message_id": "8af8cf52-4502-4eb2-aac5-6b72c34231f8",
+  "independent_aggregate_test": "node --test: 12 passed, 0 failed"
+}

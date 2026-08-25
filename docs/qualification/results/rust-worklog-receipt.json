@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "conversation_id": "b6249829-9a4b-4e61-af38-fcefb3145bcc",
+  "batch_id": "a1684471-1c2b-415a-b89a-153c9fc133bd",
+  "state": "completed",
+  "hard_gate_ready": true,
+  "historical_attempts": 3,
+  "effective_attempts": 1,
+  "effective_delegation_id": "5afe67ee-48bd-4c4c-be48-4363086c938a",
+  "coordinator_model_turns": 2,
+  "coder_model_turns": 2,
+  "approximate_coordinator_tokens": 5307,
+  "approximate_coder_tokens": 1860,
+  "chat_callbacks": 1,
+  "note": "Failed retry ancestors remain durable evidence but are superseded batch outcomes. Provider token totals are approximate and exclude unavailable exact Chat accounting."
+}

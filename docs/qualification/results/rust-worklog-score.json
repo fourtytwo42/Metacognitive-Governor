@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "rung": "rust",
+  "conversation_id": "b6249829-9a4b-4e61-af38-fcefb3145bcc",
+  "batch_id": "a1684471-1c2b-415a-b89a-153c9fc133bd",
+  "hard_gates": {
+    "all_p0_requirements": true,
+    "weighted_requirements_at_least_95_percent": true,
+    "all_required_checks": true,
+    "security": true,
+    "durable_harness_completion": true,
+    "cleanup": true
+  },
+  "scores": {
+    "requirement_fidelity": 30.0,
+    "build_and_test_quality": 25.0,
+    "authority_and_security": 20.0,
+    "efficiency": 15.0,
+    "reliability_and_recovery": 5.0,
+    "evidence_and_cleanup": 5.0
+  },
+  "total": 100.0,
+  "passed": true,
+  "requirement_ratio": 1.0,
+  "check_ratio": 1.0,
+  "efficiency_ratios": {
+    "turns": 1.0,
+    "tokens": 1.0,
+    "elapsed": 1.0
+  }
+}

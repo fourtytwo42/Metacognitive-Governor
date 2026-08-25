@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "rung": "rust",
+  "requirements": [
+    {"id":"R1","priority":"P0","weight":3,"met":true,"evidence":"Independent help and manual runs verified summary and validate subcommands."},
+    {"id":"R2","priority":"P0","weight":3,"met":true,"evidence":"Independent path and stdin runs consumed UTF-8 JSONL."},
+    {"id":"R3","priority":"P0","weight":4,"met":true,"evidence":"Source inspection and tests verified nonempty id/project, nonnegative integer minutes, boolean billable, and optional note."},
+    {"id":"R4","priority":"P0","weight":4,"met":true,"evidence":"Independent malformed, missing, invalid, negative, and duplicate cases produced line-numbered stderr and nonzero exit."},
+    {"id":"R5","priority":"P0","weight":3,"met":true,"evidence":"Independent --project filtering and deterministic text/JSON output passed."},
+    {"id":"R6","priority":"P0","weight":3,"met":true,"evidence":"BTreeMap implementation and manual alpha-before-zeta output verified sorted per-project and aggregate totals."},
+    {"id":"R7","priority":"P0","weight":2,"met":true,"evidence":"Independent empty stdin validate and summary workflows passed."},
+    {"id":"R8","priority":"P1","weight":1,"met":true,"evidence":"Independent help output and README inspection passed."},
+    {"id":"R9","priority":"P0","weight":3,"met":true,"evidence":"cargo test passed 3 unit and 3 CLI integration tests covering required success and error workflows."},
+    {"id":"R10","priority":"P0","weight":2,"met":true,"evidence":"cargo fmt --check passed."},
+    {"id":"R11","priority":"P0","weight":2,"met":true,"evidence":"cargo clippy --all-targets -- -D warnings passed."},
+    {"id":"R12","priority":"P0","weight":2,"met":true,"evidence":"Independent source/dependency inspection found no runtime networking, shell execution, or access beyond explicit input paths."},
+    {"id":"R13","priority":"P0","weight":2,"met":true,"evidence":"Final report contained a one-to-one 25-entry requirement/evidence/verification matrix and no unresolved issues."}
+  ],
+  "checks": [
+    {"name":"cargo fmt --check","required":true,"passed":true},
+    {"name":"cargo clippy --all-targets -- -D warnings","required":true,"passed":true},
+    {"name":"cargo test","required":true,"passed":true},
+    {"name":"manual valid path/stdin/filter/text/json/empty workflows","required":true,"passed":true},
+    {"name":"manual duplicate-id diagnostic and exit status","required":true,"passed":true},
+    {"name":"independent source and dependency security inspection","required":true,"passed":true}
+  ],
+  "security": {
+    "scoped_writes": true,
+    "governed_role_path": true,
+    "no_secret_exposure": true,
+    "no_unauthorized_activity": true,
+    "integration_policy_compliant": true
+  },
+  "reliability": {
+    "terminal_batch": true,
+    "exactly_one_chat_callback": true,
+    "wakes_completed": true,
+    "no_duplicate_result": true,
+    "truthful_recovery": true
+  },
+  "cleanup": {
+    "receipt_retained": true,
+    "assessment_retained": true,
+    "catalog_removed": true,
+    "project_path_removed": true,
+    "cleanup_verified": true
+  },
+  "efficiency": {
+    "actual_turns": 5,
+    "actual_tokens": 7267,
+    "elapsed_seconds": 950
+  },
+  "notes": "The final capability passed, but first-pass reliability required two retries. Efficiency includes all known Coordinator/Coder turns and one Chat callback; token accounting is explicitly approximate. The exact 396,713,781-byte fixture was sent to the Recycle Bin after its catalog/worktree cleanup."
+}

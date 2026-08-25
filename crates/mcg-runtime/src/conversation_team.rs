@@ -11,7 +11,7 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use mcg_domain::{
     AgentDelegationId, ConversationAgentKind, ConversationAgentSessionId, ConversationId,
-    CoordinationBatchId, OrganizationRevisionId, ProjectId,
+    CoordinationBatchId, GovernorProposalId, OrganizationRevisionId, ProjectId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,6 +52,8 @@ pub struct ConversationTeamCoordinator {
         tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) coordinator_locks:
         tokio::sync::Mutex<BTreeMap<ConversationId, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) governor_handoff_locks:
+        tokio::sync::Mutex<BTreeMap<GovernorProposalId, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_delegations:
         tokio::sync::Mutex<BTreeMap<AgentDelegationId, tokio::task::AbortHandle>>,
     pub(crate) active_batches: Mutex<BTreeMap<ConversationId, CoordinationBatchId>>,
@@ -139,6 +141,18 @@ pub struct AgentBootstrapDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequirementEvidence {
+    /// Exact success-condition text from the pinned Coding delegation brief.
+    pub requirement: String,
+    /// True only when the Coder verified the requirement rather than merely implementing it.
+    pub satisfied: bool,
+    /// Concrete observable result, file, behavior, or output supporting the claim.
+    pub evidence: String,
+    /// Test, command, inspection, or workflow used to obtain the evidence.
+    pub verification: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoderResultReport {
     pub summary: String,
     #[serde(default)]
@@ -147,6 +161,8 @@ pub struct CoderResultReport {
     pub checks: Vec<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub requirement_evidence: Vec<RequirementEvidence>,
     #[serde(default)]
     pub unresolved_issues: Vec<String>,
     pub integration_ready: bool,

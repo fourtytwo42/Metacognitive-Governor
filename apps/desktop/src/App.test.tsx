@@ -84,6 +84,8 @@ const client = vi.hoisted(() => ({
   discoverProject: vi.fn(),
   initializeProjectGit: vi.fn(),
   listProjects: vi.fn(),
+  archiveProject: vi.fn(),
+  removeProject: vi.fn(),
   projectTopologyPlan: vi.fn(),
   listReviewedTopologyPlans: vi.fn(),
   createReviewedTopologyPlan: vi.fn(),
@@ -150,6 +152,8 @@ const client = vi.hoisted(() => ({
   updateSite: vi.fn(),
   getSiteMonitor: vi.fn(),
   createSiteMonitor: vi.fn()
+  ,startConversationPreview: vi.fn()
+  ,stopConversationPreview: vi.fn()
   ,listSshHosts: vi.fn()
   ,registerSshHost: vi.fn()
   ,loadSshOperations: vi.fn()
@@ -256,6 +260,8 @@ vi.mock("./desktop-client", () => ({
   discoverProject: client.discoverProject,
   initializeProjectGit: client.initializeProjectGit,
   listProjects: client.listProjects,
+  archiveProject: client.archiveProject,
+  removeProject: client.removeProject,
   projectTopologyPlan: client.projectTopologyPlan,
   listReviewedTopologyPlans: client.listReviewedTopologyPlans,
   createReviewedTopologyPlan: client.createReviewedTopologyPlan,
@@ -322,6 +328,8 @@ vi.mock("./desktop-client", () => ({
   updateSite: client.updateSite,
   getSiteMonitor: client.getSiteMonitor,
   createSiteMonitor: client.createSiteMonitor,
+  startConversationPreview: client.startConversationPreview,
+  stopConversationPreview: client.stopConversationPreview,
   listSshHosts: client.listSshHosts,
   registerSshHost: client.registerSshHost,
   loadSshOperations: client.loadSshOperations,
@@ -357,7 +365,7 @@ vi.mock("./desktop-client", () => ({
   runTerminalCommand: client.runTerminalCommand
 }));
 
-import { App, isChatViewportNearBottom } from "./App";
+import { App, conversationTeamHasPendingDelivery, isChatViewportNearBottom } from "./App";
 
 beforeEach(() => {
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -434,6 +442,8 @@ beforeEach(() => {
   client.discoverProject.mockReset();
   client.initializeProjectGit.mockReset();
   client.listProjects.mockReset();
+  client.archiveProject.mockReset();
+  client.removeProject.mockReset();
   client.projectTopologyPlan.mockReset();
   client.listReviewedTopologyPlans.mockReset();
   client.createReviewedTopologyPlan.mockReset();
@@ -500,6 +510,8 @@ beforeEach(() => {
   client.updateSite.mockReset();
   client.getSiteMonitor.mockReset();
   client.createSiteMonitor.mockReset();
+  client.startConversationPreview.mockReset();
+  client.stopConversationPreview.mockReset();
   client.listSshHosts.mockReset();
   client.registerSshHost.mockReset();
   client.loadSshOperations.mockReset();
@@ -941,6 +953,41 @@ test("Codex-style sidebar groups project chats, searches them, and persists pins
   fireEvent.change(screen.getByRole("textbox", { name: "Search chats" }), { target: { value: "dashboard" } });
   fireEvent.click(within(pinned).getByRole("button", { name: task.goal }));
   expect(screen.getByRole("heading", { name: task.goal, level: 3 })).toBeInTheDocument();
+});
+
+test("project sidebar icons archive, restore, and safely remove catalog entries", async () => {
+  const active = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000620",
+    project_id: "00000000-0000-4000-8000-000000000621",
+    root: "C:\\Projects\\active-app",
+    fingerprint: "a".repeat(64),
+    observed_at: "2026-08-24T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false, recent_commits: [] },
+    languages: [], build_systems: [], test_systems: [], package_managers: [], services: [], ci_systems: [], important_directories: [], commands: [],
+    instructions: { conflicts: [] }, world: { nodes: [], relationships: [] }, watched_inputs: {}
+  };
+  const archived = { ...active, id: "00000000-0000-4000-8000-000000000622", project_id: "00000000-0000-4000-8000-000000000623", root: "C:\\Projects\\archived-app" };
+  client.listProjects.mockResolvedValue({ projects: [active], archived_projects: [archived] });
+  client.archiveProject.mockImplementation(async (projectId: string) => projectId === active.project_id ? active : archived);
+  client.removeProject.mockResolvedValue(undefined);
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  render(<App />);
+  const projectTree = screen.getByLabelText("Projects");
+  await within(projectTree).findByRole("button", { name: "active-app" });
+
+  fireEvent.click(within(projectTree).getByRole("button", { name: "Archive active-app" }));
+  await waitFor(() => expect(client.archiveProject).toHaveBeenCalledWith(active.project_id, true));
+  expect(within(projectTree).queryByRole("button", { name: "active-app" })).not.toBeInTheDocument();
+
+  fireEvent.click(within(projectTree).getByRole("button", { name: "Archived projects" }));
+  fireEvent.click(within(projectTree).getByRole("button", { name: "Restore archived-app" }));
+  await waitFor(() => expect(client.archiveProject).toHaveBeenCalledWith(archived.project_id, false));
+
+  fireEvent.click(within(projectTree).getByRole("button", { name: "Delete archived-app" }));
+  await waitFor(() => expect(client.removeProject).toHaveBeenCalledWith(archived.project_id));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("folder, local Git history, and GitHub repository will not be deleted"));
 });
 
 test("project and pinned chat menus pin, archive, and expose the expected distinct actions", async () => {
@@ -2702,8 +2749,12 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(screen.getByText("Fixture response")).toBeInTheDocument();
 });
 
-test("delegated coding work shows a live progress card and active-agent indicator", async () => {
+test("delegated coding work stays inline and Chat presents the final preview without expanding an agent", async () => {
   const createdAt = new Date(Date.now() - 5_000).toISOString();
+  const acknowledgedAt = new Date(Date.now() - 4_000).toISOString();
+  // Batch creation is atomic with delegation and can precede the visible Chat acknowledgement.
+  const batchAt = new Date(Date.now() - 4_500).toISOString();
+  const completedAt = new Date(Date.now() - 2_000).toISOString();
   client.sendConversationMessage.mockImplementation(async (conversationId: string, request: { content: string; execution_preferences?: Record<string, unknown> }) => ({
     conversation: {
       schema_version: 1,
@@ -2714,11 +2765,18 @@ test("delegated coding work shows a live progress card and active-agent indicato
       created_at: createdAt,
       updated_at: createdAt
     },
-    turns: [],
-    messages: [],
+    turns: [{ schema_version: 1, id: "00000000-0000-4000-8000-000000000d05", conversation_id: conversationId, state: "completed", execution_preferences: request.execution_preferences ?? {}, created_at: createdAt, updated_at: completedAt }],
+    messages: [
+      { schema_version: 1, id: "user-message", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", role: "user", content: request.content, created_at: createdAt },
+      { schema_version: 1, id: "ack-message", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", role: "assistant", content: "The Coordinator accepted the request.", created_at: acknowledgedAt },
+      { schema_version: 1, id: "final-message", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", role: "assistant", content: "Your preview is ready.", created_at: completedAt }
+    ],
     activities: [],
     team: {
-      sessions: [],
+      sessions: [
+        { schema_version: 4, id: "00000000-0000-4000-8000-000000000d02", conversation_id: conversationId, role_id: "role-coordinator", organization_revision_id: "org", kind: "coordinator", display_name: "Coordinator", state: "retired", prompt_revision: 4, created_at: createdAt, updated_at: completedAt },
+        { schema_version: 4, id: "00000000-0000-4000-8000-000000000d08", conversation_id: conversationId, role_id: "role-coder", organization_revision_id: "org", kind: "coder", display_name: "Coding Agent Atlas", parent_session_id: "00000000-0000-4000-8000-000000000d02", state: "retired", prompt_revision: 4, created_at: createdAt, updated_at: completedAt }
+      ],
       messages: [],
       blackboard: [],
       worktrees: [],
@@ -2731,18 +2789,85 @@ test("delegated coding work shows a live progress card and active-agent indicato
         organization_revision_id: "00000000-0000-4000-8000-000000000d04",
         revision: 1,
         prompt_revision: 1,
-        state: "preparing" as const,
+        coder_session_id: "00000000-0000-4000-8000-000000000d08",
+        state: "completed" as const,
         brief: {
           objective: "Build the Springfield plumbing website",
           scope: [], constraints: [], success_conditions: [], context_references: []
+        },
+        governance: {
+          contract: { objective_sha256: "a".repeat(64), allowed_scopes: [], required_checks: ["typecheck"], required_evidence: ["checks performed"], require_integration_ready: true, context_token_budget: 12000, max_attempts: 2 },
+          preflight: { passed: true, checks: ["project root exists and is a directory"], blockers: [] },
+          context_receipts: [{ source_count: 2, approximate_tokens: 640, token_budget: 12000, truncated: false, source_sha256: "b".repeat(64) }],
+          outcome: { latency_ms: 90000, model_turns: 1, approximate_tokens: 640, tool_calls: 4, attempts: 1, owner_interventions: 0, changed_file_count: 2, check_count: 1, successful: true },
+          failure_class: "none",
+          recovery: "none",
+          dependencies: [],
+          reserved_scopes: []
         },
         changed_files: [],
         checks: [],
         created_at: createdAt,
         updated_at: createdAt
+      }],
+      coordination_batches: [{
+        schema_version: 6,
+        id: "00000000-0000-4000-8000-000000000d06",
+        conversation_id: conversationId,
+        origin_turn_id: "00000000-0000-4000-8000-000000000d05",
+        coordinator_session_id: "00000000-0000-4000-8000-000000000d02",
+        delivery_target: "codex_sites",
+        delivery_rationale: "New website requests default to Sites.",
+        state: "completed",
+        revision: 1,
+        delegation_ids: ["00000000-0000-4000-8000-000000000d01"],
+        coordinator_turn_count: 1,
+        coordinator_approximate_tokens: 100,
+        coordinator_bypassed: true,
+        routing_rationale: "Deterministic preflight selected one bounded Coding Agent.",
+        owner_intervention_count: 0,
+        created_at: batchAt,
+        updated_at: batchAt
+      }],
+      previews: [{
+        schema_version: 6,
+        id: "00000000-0000-4000-8000-000000000d07",
+        conversation_id: conversationId,
+        coordination_batch_id: "00000000-0000-4000-8000-000000000d06",
+        delegation_id: "00000000-0000-4000-8000-000000000d01",
+        project_id: "00000000-0000-4000-8000-000000000d03",
+        delivery_target: "codex_sites",
+        strategy: "static_files",
+        state: "stopped",
+        source_revision: 1,
+        source_sha256: "abc",
+        source_root: "C:\\Projects\\sample",
+        entry_path: "index.html",
+        browser_tab_id: "conversation-preview-fixture",
+        created_at: batchAt,
+        updated_at: batchAt
       }]
     }
   }));
+  client.startConversationPreview.mockResolvedValue({
+    schema_version: 6,
+    id: "00000000-0000-4000-8000-000000000d07",
+    conversation_id: "00000000-0000-4000-8000-000000000c01",
+    coordination_batch_id: "00000000-0000-4000-8000-000000000d06",
+    delegation_id: "00000000-0000-4000-8000-000000000d01",
+    project_id: "00000000-0000-4000-8000-000000000d03",
+    delivery_target: "codex_sites",
+    strategy: "static_files",
+    state: "running",
+    source_revision: 1,
+    source_sha256: "abc",
+    source_root: "C:\\Projects\\sample",
+    entry_path: "index.html",
+    safe_url: "http://127.0.0.1:43123/",
+    browser_tab_id: "conversation-preview-fixture",
+    created_at: batchAt,
+    updated_at: completedAt
+  });
   render(<App />);
 
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build the site" } });
@@ -2750,22 +2875,44 @@ test("delegated coding work shows a live progress card and active-agent indicato
 
   const activity = await screen.findByRole("region", { name: "Coding agent activity" });
   expect(within(activity).getByText("Build the Springfield plumbing website")).toBeInTheDocument();
-  expect(within(activity).getByText("Preparing worktree")).toBeInTheDocument();
-  expect(within(activity).getByRole("progressbar", { name: /Preparing worktree/ })).toHaveAttribute("aria-valuenow", "24");
-  const teamStatus = screen.getByRole("status", { name: "Agent team activity" });
-  expect(within(teamStatus).getByText("1 coding agent working")).toBeInTheDocument();
-  expect(within(teamStatus).getByText("The Chat Agent will update you automatically when the team finishes.")).toBeInTheDocument();
+  expect(within(activity).getByText("Completed")).toBeInTheDocument();
+  expect(within(activity).getByRole("progressbar", { name: /Completed/ })).toHaveAttribute("aria-valuenow", "100");
+  const coordinatorActivity = screen.getByLabelText("Coordinator activity");
+  expect(coordinatorActivity).toBeInTheDocument();
+  fireEvent.click(within(coordinatorActivity).getByText("Coordinator"));
+  expect(within(coordinatorActivity).getByText("deterministic single-Coder")).toBeInTheDocument();
+  fireEvent.click(within(activity).getByText("Coding Agent Atlas"));
+  expect(within(activity).getByText("project root exists and is a directory", { exact: false })).toBeInTheDocument();
+  expect(within(activity).getByText(/Context receipt: ~640/)).toBeInTheDocument();
+  const acknowledgement = screen.getByText("The Coordinator accepted the request.").closest("article")!;
+  const batch = screen.getByRole("region", { name: "Delegated agent progress" });
+  const completion = screen.getByText("Your preview is ready.").closest("article")!;
+  expect(acknowledgement.compareDocumentPosition(batch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(batch.compareDocumentPosition(completion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(activity).queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  const resultActions = screen.getByRole("region", { name: "Chat Agent result actions" });
+  expect(within(resultActions).getByText(/Temporary local preview/)).toBeInTheDocument();
+  expect(within(resultActions).queryByText(/OpenAI Sites ·/)).not.toBeInTheDocument();
+  expect(resultActions.compareDocumentPosition(completion) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  fireEvent.click(within(resultActions).getByRole("button", { name: "Open preview" }));
+  await waitFor(() => expect(client.startConversationPreview).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    "00000000-0000-4000-8000-000000000d07"
+  ));
+  expect(await screen.findByRole("tab", { name: /Local preview/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByLabelText("MCG browser content")).toBeInTheDocument();
 });
 
-test("Agent Room shows hierarchy, lifecycle, tool traces, and never exposes a direct composer", async () => {
+test("Coordinator lifecycle and tool traces are inline without a separate Agent Room", async () => {
   const now = "2026-08-24T18:00:00Z";
   const conversationId = "00000000-0000-4000-8000-000000000e01";
   const chatId = "00000000-0000-4000-8000-000000000e02";
   const coordinatorId = "00000000-0000-4000-8000-000000000e03";
   const coderId = "00000000-0000-4000-8000-000000000e04";
-  client.sendConversationMessage.mockResolvedValue({
+  const agentRoomView = {
     conversation: { schema_version: 1, id: conversationId, title: "Build in parallel", state: "active", execution_preferences: {}, created_at: now, updated_at: now },
-    turns: [], messages: [], activities: [],
+    turns: [{ schema_version: 1, id: "room-turn", conversation_id: conversationId, state: "completed", execution_preferences: {}, created_at: now, updated_at: now }],
+    messages: [{ schema_version: 1, id: "room-user", conversation_id: conversationId, turn_id: "room-turn", role: "user", content: "Build in parallel", created_at: now }], activities: [],
     team: {
       sessions: [
         { schema_version: 4, id: chatId, conversation_id: conversationId, role_id: "role-chat", organization_revision_id: "org", kind: "chat", display_name: "Chat Agent", state: "ready", prompt_revision: 4, created_at: now, updated_at: now },
@@ -2774,30 +2921,42 @@ test("Agent Room shows hierarchy, lifecycle, tool traces, and never exposes a di
       ],
       delegations: [], blackboard: [], worktrees: [],
       messages: [
-        { schema_version: 4, id: "join", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "joined", room: "backstage", content: "Coordinator entered Agent Room", created_at: now },
+        { schema_version: 4, id: "join", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "joined", room: "backstage", content: "Coordinator started coordinating this request", created_at: now },
         { schema_version: 4, id: "call", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "tool_call", room: "backstage", tool_name: "delegate_code", correlation_id: "trace-1", content: "Calling delegate_code", created_at: now },
         { schema_version: 4, id: "result", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "tool_result", room: "backstage", tool_name: "delegate_code", correlation_id: "trace-1", content: "delegate_code completed", created_at: now },
         { schema_version: 4, id: "brief", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coderId, kind: "delegation", room: "backstage", content: "Build the responsive shell", created_at: now }
       ],
       context_checkpoints: [{ schema_version: 4, id: "checkpoint", conversation_id: conversationId, session_id: coordinatorId, room: "backstage", revision: 1, summary: "Delegated the responsive shell.", source_references: ["brief"], approximate_tokens: 8, created_at: now }]
+      ,coordination_batches: [{ schema_version: 6, id: "room-batch", conversation_id: conversationId, origin_turn_id: "room-turn", coordinator_session_id: coordinatorId, state: "running", revision: 1, delegation_ids: [], coordinator_turn_count: 1, coordinator_approximate_tokens: 10, created_at: now, updated_at: now }]
     }
-  });
+  };
+  client.sendConversationMessage.mockResolvedValue(agentRoomView);
+  client.getConversation.mockResolvedValue(agentRoomView);
   render(<App />);
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build in parallel" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  const teamStatus = await screen.findByRole("status", { name: "Agent team activity" });
-  expect(within(teamStatus).getByText("Coordinator is planning and assigning work")).toBeInTheDocument();
-  fireEvent.click(await screen.findByRole("button", { name: /^Agent Room/ }));
-  const room = screen.getByRole("region", { name: "Agent Room" });
-  expect(within(room).getByText("You talk to this agent")).toBeInTheDocument();
-  expect(within(room).getAllByText("Coding Agent Atlas").length).toBeGreaterThanOrEqual(1);
-  expect(within(room).getByText("Coordinator entered Agent Room")).toBeInTheDocument();
-  expect(within(room).getByText("delegate_code")).toBeInTheDocument();
-  expect(within(room).getByText("Build the responsive shell")).toBeInTheDocument();
-  expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByText(/Context milestones/));
-  expect(within(room).getByText("Delegated the responsive shell.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Agent Room/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "Conversation rooms" })).not.toBeInTheDocument();
+  const coordinator = await screen.findByLabelText("Coordinator activity");
+  expect(within(coordinator).getAllByText("Planning and assigning work").length).toBeGreaterThan(0);
+  fireEvent.click(within(coordinator).getByText("Coordinator"));
+  expect(within(coordinator).getByText("Coordinator started coordinating this request")).toBeInTheDocument();
+  expect(within(coordinator).getAllByText("delegate_code").length).toBe(2);
+  expect(within(coordinator).getByText("Build the responsive shell")).toBeInTheDocument();
+  expect(screen.getByLabelText("Message")).toBeInTheDocument();
+});
+
+test("pending delivery includes batch and wake callbacks after coding is terminal", () => {
+  type Team = Parameters<typeof conversationTeamHasPendingDelivery>[0];
+  const base = { sessions: [], delegations: [], messages: [], blackboard: [], worktrees: [] };
+  expect(conversationTeamHasPendingDelivery({ ...base, coordination_batches: [{ state: "chat_pending" }] } as unknown as Team)).toBe(true);
+  expect(conversationTeamHasPendingDelivery({ ...base, wakes: [{ state: "pending" }] } as unknown as Team)).toBe(true);
+  expect(conversationTeamHasPendingDelivery({
+    ...base,
+    coordination_batches: [{ state: "completed" }],
+    wakes: [{ state: "completed" }]
+  } as unknown as Team)).toBe(false);
 });
 
 test("active chats queue Enter messages in a drawer and allow immediate steering", async () => {

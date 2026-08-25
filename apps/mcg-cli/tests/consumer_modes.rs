@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use mcg_config::AppConfig;
+use mcg_domain::ProjectId;
 use mcg_providers::{CONTRACT_VERSION, ProviderAuthMode, ProviderConnection, ProviderKind};
 use mcg_runtime::AppRuntime;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -117,7 +118,7 @@ fn run_cli_with_stdin(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consumer_cli_supports_bare_piped_json_and_streaming_workflows() {
+async fn cli_supports_structured_task_and_error_workflows() {
     let project = tempfile::tempdir().expect("project directory");
     std::fs::write(
         project.path().join("package.json"),
@@ -127,64 +128,49 @@ async fn consumer_cli_supports_bare_piped_json_and_streaming_workflows() {
     let runtime = Arc::new(
         AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned()).expect("runtime"),
     );
+    let project_id = ProjectId::new();
+    runtime
+        .discover_project(project.path(), project_id)
+        .expect("discover task project");
     let (host, server) = start_server(runtime.clone()).await;
 
-    let bare = run_cli_with_stdin(
+    let created = run_cli(
         &host,
         project.path(),
-        &["review this diff"],
-        "diff --git a/file.txt b/file.txt\n+private fixture content\n",
+        &[
+            "task",
+            "create",
+            "review this diff",
+            "--project-id",
+            &project_id.to_string(),
+            "--json",
+        ],
     );
-    assert!(!bare.status.success());
-    assert!(String::from_utf8_lossy(&bare.stderr).contains("requires attention"));
-    let bare_stdout = String::from_utf8(bare.stdout).expect("bare UTF-8 output");
-    assert!(bare_stdout.contains("Status: blocked"));
-    assert!(!bare_stdout.contains("private fixture content"));
-
-    let tasks = runtime.tasks().expect("tasks after bare submission");
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].goal, "review this diff");
-    assert!(tasks[0].constraints[0].contains("private fixture content"));
-
-    let json = run_cli(
+    assert!(created.status.success());
+    let created: serde_json::Value =
+        serde_json::from_slice(&created.stdout).expect("task JSON result");
+    let task_id = created["task"]["id"].as_str().expect("task id");
+    let launch = run_cli(
         &host,
         project.path(),
-        &["run", "--json", "fix", "the", "tests"],
+        &["task", "launch", task_id, "--json"],
     );
-    assert!(!json.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&json.stdout).expect("one JSON result");
-    assert_eq!(json["task"]["goal"], "fix the tests");
-    assert_eq!(json["task"]["state"], "blocked");
+    assert!(launch.status.success());
+    let launch: serde_json::Value =
+        serde_json::from_slice(&launch.stdout).expect("launch JSON result");
+    assert_eq!(launch["task"]["goal"], "review this diff");
+    assert_eq!(launch["task"]["state"], "blocked");
+    assert!(!launch.to_string().contains(TEST_TOKEN));
 
-    let stream = run_cli(
+    let malformed = run_cli(
         &host,
         project.path(),
-        &["run", "--stream-json", "inspect", "the", "project"],
+        &["task", "get", "not-a-uuid", "--json"],
     );
-    assert!(!stream.status.success());
-    let records = String::from_utf8(stream.stdout)
-        .expect("stream UTF-8")
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("NDJSON record"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        records.first().and_then(|record| record["type"].as_str()),
-        Some("task")
-    );
-    assert_eq!(
-        records.last().and_then(|record| record["type"].as_str()),
-        Some("result")
-    );
-    assert!(records.iter().any(|record| record["type"] == "event"));
-    assert!(records.iter().all(|record| {
-        !record
-            .to_string()
-            .contains("0123456789abcdef0123456789abcdef")
-    }));
-
-    let piped = run_cli_with_stdin(&host, project.path(), &[], "summarize this project\n");
-    assert!(!piped.status.success());
-    assert!(String::from_utf8_lossy(&piped.stdout).contains("Status: blocked"));
+    assert!(!malformed.status.success());
+    let error: serde_json::Value =
+        serde_json::from_slice(&malformed.stderr).expect("structured CLI error");
+    assert_eq!(error["error"], "cli_error");
 
     let oversized = run_cli_with_stdin(
         &host,
@@ -195,7 +181,7 @@ async fn consumer_cli_supports_bare_piped_json_and_streaming_workflows() {
     assert!(!oversized.status.success());
     assert!(String::from_utf8_lossy(&oversized.stderr).contains("1048576-byte limit"));
 
-    assert_eq!(runtime.tasks().expect("all task projections").len(), 4);
+    assert_eq!(runtime.tasks().expect("all task projections").len(), 1);
     assert_eq!(
         runtime.projects().expect("reused project projection").len(),
         1
@@ -204,8 +190,8 @@ async fn consumer_cli_supports_bare_piped_json_and_streaming_workflows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)] // Human, JSON, NDJSON, provider, evaluator, and project-command evidence form one CLI journey contract.
-async fn consumer_cli_completes_provider_backed_human_json_and_streaming_workflows() {
+#[allow(clippy::too_many_lines)] // Provider, evaluator, replay, and project evidence form one CLI journey contract.
+async fn cli_completes_explicit_provider_backed_task_workflows() {
     let project = tempfile::tempdir().expect("provider-backed project directory");
     std::fs::write(
         project.path().join("package.json"),
@@ -234,58 +220,72 @@ async fn consumer_cli_completes_provider_backed_human_json_and_streaming_workflo
         )
         .await
         .expect("configure provider-backed CLI fixture");
+    let project_id = ProjectId::new();
+    runtime
+        .discover_project(project.path(), project_id)
+        .expect("discover provider-backed project");
     let (host, daemon_server) = start_server(runtime.clone()).await;
 
-    let human = run_cli_with_stdin(
-        &host,
-        project.path(),
-        &["complete a provider-backed CLI task"],
-        "bounded owner context that must not be printed\n",
-    );
-    assert!(
-        human.status.success(),
-        "human stderr: {}",
-        String::from_utf8_lossy(&human.stderr)
-    );
-    let human_stdout = String::from_utf8(human.stdout).expect("human UTF-8 output");
-    assert!(human_stdout.contains("Status: completed"));
-    assert!(human_stdout.contains("provider-backed CLI result"));
-    assert!(!human_stdout.contains("bounded owner context"));
-    assert!(!human_stdout.contains(TEST_TOKEN));
+    let mut run_ids = Vec::new();
+    for goal in [
+        "complete a provider-backed CLI task",
+        "complete the JSON journey",
+        "complete the replay journey",
+    ] {
+        let created = run_cli(
+            &host,
+            project.path(),
+            &[
+                "task",
+                "create",
+                goal,
+                "--project-id",
+                &project_id.to_string(),
+                "--json",
+            ],
+        );
+        assert!(created.status.success());
+        let created: serde_json::Value =
+            serde_json::from_slice(&created.stdout).expect("created task JSON");
+        let task_id = created["task"]["id"].as_str().expect("created task id");
+        let launched = run_cli(
+            &host,
+            project.path(),
+            &["task", "launch", task_id, "--json"],
+        );
+        assert!(
+            launched.status.success(),
+            "launch stderr: {}",
+            String::from_utf8_lossy(&launched.stderr)
+        );
+        let launched: serde_json::Value =
+            serde_json::from_slice(&launched.stdout).expect("launch JSON");
+        assert_eq!(launched["task"]["state"], "completed");
+        assert_eq!(launched["run"]["run"]["state"], "completed");
+        assert_eq!(launched["execution"]["state"], "completed");
+        assert_eq!(
+            launched["run"]["evaluations"][0]["outcome"],
+            serde_json::json!("passed")
+        );
+        assert_eq!(launched["run"]["results"].as_array().map(Vec::len), Some(2));
+        assert!(!launched.to_string().contains(TEST_TOKEN));
+        run_ids.push(
+            launched["run"]["run"]["id"]
+                .as_str()
+                .expect("completed run id")
+                .to_owned(),
+        );
+    }
 
-    let json = run_cli(
+    let calls_before_replay = provider_calls.load(Ordering::SeqCst);
+    let replay = run_cli(
         &host,
         project.path(),
-        &["run", "--json", "complete", "the", "JSON", "journey"],
+        &["run", "replay", &run_ids[0], "--json"],
     );
-    assert!(
-        json.status.success(),
-        "JSON stderr: {}",
-        String::from_utf8_lossy(&json.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&json.stdout).expect("success JSON");
-    assert_eq!(json["task"]["state"], "completed");
-    assert_eq!(json["run"]["run"]["state"], "completed");
-    assert_eq!(json["execution"]["state"], "completed");
-    assert_eq!(
-        json["run"]["evaluations"][0]["outcome"],
-        serde_json::json!("passed")
-    );
-    assert_eq!(json["run"]["results"].as_array().map(Vec::len), Some(2));
-    assert!(!json.to_string().contains(TEST_TOKEN));
-    let run_id = json["run"]["run"]["id"]
-        .as_str()
-        .expect("completed run id")
-        .to_owned();
-    let calls_before_replay = provider_calls.load(Ordering::SeqCst);
-    let replay = run_cli(&host, project.path(), &["run", "replay", &run_id, "--json"]);
-    assert!(
-        replay.status.success(),
-        "replay stderr: {}",
-        String::from_utf8_lossy(&replay.stderr)
-    );
+    assert!(replay.status.success());
     let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).expect("replay JSON");
-    assert_eq!(replay["run_id"], run_id);
+    assert_eq!(replay["run_id"], run_ids[0]);
     assert_eq!(replay["side_effect_free"], true);
     assert!(
         replay["invariants"]
@@ -293,49 +293,6 @@ async fn consumer_cli_completes_provider_backed_human_json_and_streaming_workflo
             .is_some_and(|items| items.iter().all(|item| item["passed"] == true))
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), calls_before_replay);
-
-    let stream = run_cli(
-        &host,
-        project.path(),
-        &[
-            "run",
-            "--stream-json",
-            "complete",
-            "the",
-            "streaming",
-            "journey",
-        ],
-    );
-    assert!(
-        stream.status.success(),
-        "stream stderr: {}",
-        String::from_utf8_lossy(&stream.stderr)
-    );
-    let records = String::from_utf8(stream.stdout)
-        .expect("success stream UTF-8")
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("success NDJSON"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        records.first().and_then(|record| record["type"].as_str()),
-        Some("task")
-    );
-    assert_eq!(
-        records.last().and_then(|record| record["type"].as_str()),
-        Some("result")
-    );
-    assert_eq!(
-        records
-            .last()
-            .and_then(|record| record.pointer("/result/task/state")),
-        Some(&serde_json::json!("completed"))
-    );
-    assert!(records.iter().any(|record| record["type"] == "event"));
-    assert!(
-        records
-            .iter()
-            .all(|record| !record.to_string().contains(TEST_TOKEN))
-    );
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 6);
     let tasks = runtime.tasks().expect("provider-backed tasks");

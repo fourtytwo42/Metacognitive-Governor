@@ -251,8 +251,13 @@ impl OAuthTokenSet {
     }
 
     /// Fetches the same secret-free account metadata and rolling usage summary used by Codex.
-    /// These ChatGPT backend routes are best-effort and may be unavailable for some accounts.
+    /// These `ChatGPT` backend routes are best-effort and may be unavailable for some accounts.
     /// No cookies or credentials are returned to callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication, transport, response, or configuration error when the
+    /// authenticated account projection cannot be fetched safely.
     pub async fn fetch_codex_account_profile(
         &self,
     ) -> Result<Option<OAuthAccountProfile>, ProviderError> {
@@ -499,6 +504,7 @@ fn apply_chatgpt_profile(profile: &mut OAuthAccountProfile, value: &serde_json::
         .or(profile.avatar_url.take());
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // The value is rounded and clamped to the complete u8 percentage range first.
 fn parse_usage_window(value: Option<&serde_json::Value>) -> Option<CodexUsageWindow> {
     let value = value?;
     let used = value.get("used_percent")?.as_f64()?;

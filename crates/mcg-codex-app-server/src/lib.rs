@@ -299,21 +299,13 @@ pub struct CodexThreadInstructions {
 /// Verifies the exact pinned binary and the feature/config surface required by the two-agent
 /// security boundary. Callers must fail rollout closed on any error.
 pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), CodexHarnessError> {
-    let version = std::process::Command::new(executable)
-        .arg("--version")
-        .output()
-        .map_err(CodexHarnessError::Io)?;
-    if !version.status.success()
-        || !String::from_utf8_lossy(&version.stdout).contains(CODEX_BINARY_VERSION)
-    {
+    let version = run_conformance_command(executable, &["--version"])?;
+    if !String::from_utf8_lossy(&version.stdout).contains(CODEX_BINARY_VERSION) {
         return Err(CodexHarnessError::Protocol(format!(
             "multi-agent rollout requires pinned Codex {CODEX_BINARY_VERSION}"
         )));
     }
-    let features = std::process::Command::new(executable)
-        .args(["features", "list"])
-        .output()
-        .map_err(CodexHarnessError::Io)?;
+    let features = run_conformance_command(executable, &["features", "list"])?;
     let features = String::from_utf8_lossy(&features.stdout);
     for required in [
         "shell_tool",
@@ -346,6 +338,45 @@ pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), Code
     Ok(())
 }
 
+fn run_conformance_command(
+    executable: &Path,
+    arguments: &[&str],
+) -> Result<std::process::Output, CodexHarnessError> {
+    for attempt in 0..3 {
+        let output = std::process::Command::new(executable)
+            .args(arguments)
+            .output()
+            .map_err(CodexHarnessError::Io)?;
+        if output.status.success() {
+            return Ok(output);
+        }
+        if transient_process_initialization_failure(&output.status) && attempt < 2 {
+            std::thread::sleep(Duration::from_millis(100_u64 << attempt));
+            continue;
+        }
+        return Err(CodexHarnessError::Protocol(format!(
+            "pinned Codex conformance command `{}` failed with status {} after {} attempt(s): {}",
+            arguments.join(" "),
+            output.status,
+            attempt + 1,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    unreachable!("bounded conformance retry loop always returns")
+}
+
+fn transient_process_initialization_failure(status: &std::process::ExitStatus) -> bool {
+    #[cfg(windows)]
+    {
+        status.code() == Some(-1_073_741_502)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = status;
+        false
+    }
+}
+
 impl CodexThreadInstructions {
     /// Builds the fail-closed Chat role configuration. The Chat thread receives only the MCG MCP
     /// bridge; mutation, browsing, computer use, apps, plugins, skills and nested agents are off.
@@ -366,6 +397,29 @@ impl CodexThreadInstructions {
     #[must_use]
     pub fn isolated_coder_config(mcp_command: &str, bootstrap_file: &str) -> Value {
         role_thread_config(mcp_command, bootstrap_file, true)
+    }
+
+    /// Builds the Site-owning Coder configuration. It retains the ordinary Coder sandbox and
+    /// enables only the bundled Sites plugin in addition to the role-scoped MCG bridge.
+    #[must_use]
+    pub fn isolated_site_coder_config(mcp_command: &str, bootstrap_file: &str) -> Value {
+        let mut config = role_thread_config(mcp_command, bootstrap_file, true);
+        config["features"]["apps"] = json!(true);
+        config["features"]["plugins"] = json!(true);
+        config["plugins"] = json!({
+            "sites@openai-bundled": { "enabled": true },
+            "browser@openai-bundled": { "enabled": false },
+            "chrome@openai-bundled": { "enabled": false },
+            "computer-use@openai-bundled": { "enabled": false },
+            "visualize@openai-bundled": { "enabled": false },
+            "codex-app-tools@openai-bundled": { "enabled": false },
+            "documents@openai-primary-runtime": { "enabled": false },
+            "pdf@openai-primary-runtime": { "enabled": false },
+            "spreadsheets@openai-primary-runtime": { "enabled": false },
+            "presentations@openai-primary-runtime": { "enabled": false },
+            "template-creator@openai-primary-runtime": { "enabled": false }
+        });
+        config
     }
 }
 
@@ -1872,6 +1926,38 @@ mod tests {
         assert_eq!(coder["features"]["multi_agent"], false);
         assert_eq!(coder["features"]["browser_use"], false);
         assert_eq!(coder["features"]["computer_use"], false);
+
+        let site_coder = CodexThreadInstructions::isolated_site_coder_config(
+            "C:/MCG/mcg-agent-mcp.exe",
+            "C:/MCG/bootstrap/site-coder.json",
+        );
+        assert_eq!(site_coder["features"]["shell_tool"], true);
+        assert_eq!(site_coder["features"]["apps"], true);
+        assert_eq!(site_coder["features"]["plugins"], true);
+        assert_eq!(site_coder["features"]["multi_agent"], false);
+        assert_eq!(site_coder["features"]["browser_use"], false);
+        assert_eq!(site_coder["features"]["computer_use"], false);
+        assert_eq!(
+            site_coder["plugins"]["sites@openai-bundled"]["enabled"],
+            true
+        );
+        assert_eq!(
+            site_coder["plugins"]["computer-use@openai-bundled"]["enabled"],
+            false
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_initialization_failure_is_retryable_for_conformance() {
+        use std::os::windows::process::ExitStatusExt;
+
+        assert!(transient_process_initialization_failure(
+            &std::process::ExitStatus::from_raw(0xC000_0142)
+        ));
+        assert!(!transient_process_initialization_failure(
+            &std::process::ExitStatus::from_raw(1)
+        ));
     }
 
     #[test]

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "rung": "vanilla",
+  "requirements": [
+    {"id":"R1","priority":"P0","weight":4,"met":true,"evidence":"Two Luna Coders ran concurrently in disjoint managed Git worktrees and retained independent sessions."},
+    {"id":"R2","priority":"P0","weight":4,"met":true,"evidence":"Exactly one initial wake, one batch-stable final-review wake, one Chat completion wake, and two Coordinator turns were durable and completed."},
+    {"id":"R3","priority":"P0","weight":4,"met":true,"evidence":"Independent inspection verified exactly four authorized source/test files; package.json and .gitignore remained unchanged."},
+    {"id":"R4","priority":"P0","weight":4,"met":true,"evidence":"Query encode/decode independently passed sorting, percent encoding, repeated arrays, empty values, plus spaces, Unicode/reserved round trips, and malformed escapes."},
+    {"id":"R5","priority":"P0","weight":4,"met":true,"evidence":"Duration parse/format independently passed all five units, compounds, whitespace, deterministic compact output, and negative/fractional/unknown/duplicate/malformed rejection."},
+    {"id":"R6","priority":"P0","weight":3,"met":true,"evidence":"Independent post-integration node --test passed all 10 tests."},
+    {"id":"R7","priority":"P0","weight":3,"met":true,"evidence":"No dependencies, network/process/filesystem access, secrets, or out-of-scope writes were introduced."},
+    {"id":"R8","priority":"P0","weight":2,"met":true,"evidence":"Both worktrees were removed, the catalog record was removed, the conversation was archived, and the disposable fixture was recycled."}
+  ],
+  "checks": [
+    {"name":"independent node --test (10/10)","required":true,"passed":true},
+    {"name":"manual query and duration workflows","required":true,"passed":true},
+    {"name":"git diff --check and four-file scope inspection","required":true,"passed":true},
+    {"name":"single aggregate Coordinator review","required":true,"passed":true},
+    {"name":"source and dependency security inspection","required":true,"passed":true}
+  ],
+  "security": {
+    "scoped_writes": true,
+    "governed_role_path": true,
+    "no_secret_exposure": true,
+    "no_unauthorized_activity": true,
+    "integration_policy_compliant": true
+  },
+  "reliability": {
+    "terminal_batch": true,
+    "exactly_one_chat_callback": true,
+    "wakes_completed": true,
+    "no_duplicate_result": true,
+    "truthful_recovery": true
+  },
+  "cleanup": {
+    "receipt_retained": true,
+    "assessment_retained": true,
+    "catalog_removed": true,
+    "project_path_removed": true,
+    "cleanup_verified": true
+  },
+  "efficiency": {
+    "actual_turns": 5,
+    "actual_tokens": 4035,
+    "elapsed_seconds": 333
+  },
+  "notes": "Corrected parallel qualification passed. Token totals are provider-derived approximations for Coordinator and Coders; the one Chat callback is counted as a turn. The exact 38,065-byte fixture was sent to the Recycle Bin."
+}

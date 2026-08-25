@@ -10,6 +10,7 @@ impl OrganizationGenome {
     /// Creates the simple-by-default built-in organization. Roles persist, while
     /// instances are created only when the selected work actually needs them.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Keeping the complete built-in genome together makes its authority relationships auditable.
     pub fn consumer_default(created_at: DateTime<Utc>) -> Self {
         let executive = default_role(
             RoleKind::Executive,
@@ -180,8 +181,7 @@ fn default_role(
         model_policy: ModelPolicy {
             capability_class: match kind {
                 RoleKind::Coder => "coding",
-                RoleKind::Coordinator => "reasoning",
-                RoleKind::Evaluator => "reasoning",
+                RoleKind::Coordinator | RoleKind::Evaluator => "reasoning",
                 RoleKind::ToolWorker => "efficient",
                 _ => "general",
             }

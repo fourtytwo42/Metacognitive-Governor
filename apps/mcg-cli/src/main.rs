@@ -1,56 +1,63 @@
 use std::{
     collections::BTreeSet,
     ffi::OsString,
+    fs::OpenOptions,
     io::{BufRead, IsTerminal, Read, Write},
     path::PathBuf,
+    process::{Command as ProcessCommand, Stdio},
     str::FromStr,
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use eventsource_stream::Eventsource;
-use futures_util::StreamExt;
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
-    OrganizationGenome, OrganizationSharePackage, PortableOrganizationComparison,
-    PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt, SuccessCondition,
-    SupervisionObservation, TaskComplexity,
+    GovernorProposalState, OrganizationGenome, OrganizationSharePackage,
+    PortableOrganizationComparison, PortableOrganizationGenome, RoleKind, ShadowExecutionReceipt,
+    SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_api::{
-    ApplyComputerActionsRequest, ApprovalListResponse, AssembleContextRequest,
-    AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    CorrectMemoryClaimRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
+    ApplyComputerActionsRequest, ApprovalListResponse, ArchiveConversationRequest,
+    ArchiveProjectRequest, AssembleContextRequest, AttachBrowserSessionRequest, BackupListResponse,
+    BackupSummaryResponse, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
+    CreateConversationRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
     CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
     CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DecideSharedOrganizationRequest, DeploySiteRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse,
-    ExperimentDecisionListResponse, ExperimentListResponse, ImportOrganizationRequest,
-    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
-    InstallRegistryPluginRequest, InvokePluginRequest, LaunchExecution, LaunchTaskRequest,
-    LaunchTaskResponse, ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse,
-    MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
-    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
-    OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
-    PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
-    PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
-    ProjectMemoryTransferListResponse, ProviderListResponse, ResolveApprovalRequest,
-    ReviewSharedOrganizationRequest, ReviewedTopologyPlanListResponse,
+    DecideSharedOrganizationRequest, DelegationMutationRequest, DelegationRetryRequest,
+    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationHistoryResponse, OrganizationListResponse, OrganizationMutationResponse,
+    OrganizationPublisherListResponse, OrganizationShareReviewListResponse, PlanAgentRunRequest,
+    PlanWorkRequest, PlatformSessionHistoryResponse, PlatformSessionListResponse,
+    PluginInvocationHistoryResponse, PluginListResponse, ProjectHistoryResponse,
+    ProjectListResponse, ProjectMemoryTransferListResponse, ProviderListResponse,
+    ResolveApprovalRequest, ReviewSharedOrganizationRequest, ReviewedTopologyPlanListResponse,
     RevokeOrganizationPublisherRequest, RunSshOperationRequest, ScheduleHistoryResponse,
-    ScheduleListResponse, SchedulerNotificationListResponse, SetPluginEnabledRequest,
-    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse, ShutdownResponse,
-    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
-    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
-    SshWorkflowListResponse, StartOpenAiOAuthRequest, SupervisionObservationListResponse,
+    ScheduleListResponse, SchedulerNotificationListResponse, SendConversationMessageRequest,
+    SetPluginEnabledRequest, SetPluginGrantsRequest, SetScheduleStateRequest,
+    ShadowExecutionListResponse, ShutdownResponse, SiteDeploymentListResponse,
+    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
+    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
+    StartOpenAiOAuthRequest, SteerConversationTurnRequest, SupervisionObservationListResponse,
     TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
     TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
     TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
     UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
-    ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, MemoryClaimId, MemoryTransferId,
+    AgentWakeState, ApprovalMode, ComputerUseCapability, ComputerUseRegion, ComputerUseTarget,
+    Conversation, ConversationRole, ConversationTurnId, ConversationTurnState, ConversationView,
+    CoordinationBatchState, ExecutionPreferences, MemoryClaimId, MemoryTransferId,
     NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
     OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
     PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
@@ -59,6 +66,7 @@ use mcg_domain::{
     SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
     SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{
@@ -68,9 +76,8 @@ use mcg_mcp::{
 use mcg_plugin_protocol::PluginManifest;
 use mcg_projects::{ClaimProvenance, MemoryLifecycleAction, ProvenanceKind};
 use mcg_providers::{
-    CONTRACT_VERSION, ContentPart, MessageRole, ModelProbeReport, OsProviderCredentialStore,
-    OutputItem, ProviderAuthMode, ProviderConnection, ProviderKind, ProviderModelCatalog,
-    ProxyConversation, ProxyUsageSummary,
+    CONTRACT_VERSION, ModelProbeReport, OsProviderCredentialStore, ProviderAuthMode,
+    ProviderConnection, ProviderKind, ProviderModelCatalog, ProxyConversation, ProxyUsageSummary,
 };
 use mcg_runtime::{
     AgentRunView, AgentTurnCommit, CandidateRevisionMutation, DiagnosticReport, DiagnosticSeverity,
@@ -92,6 +99,7 @@ use mcg_tools::{
     PersistentBrowserObservation,
 };
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -156,6 +164,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Start the sibling MCG daemon and wait until its authenticated API is ready.
+    Start {
+        /// Seconds to wait for authenticated readiness.
+        #[arg(long, default_value_t = 15)]
+        timeout_seconds: u64,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cleanly restart the sibling MCG daemon and wait until it is ready.
+    Restart {
+        /// Seconds to wait for shutdown and authenticated readiness.
+        #[arg(long, default_value_t = 20)]
+        timeout_seconds: u64,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Ask the authenticated local daemon to drain and stop cleanly.
     Stop {
         /// Emit machine-readable JSON.
@@ -186,6 +212,26 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Build and manage projects through the Chat → Coordinator → Coder workflow.
+    Conversation {
+        #[command(subcommand)]
+        command: ConversationCommand,
+    },
+    /// Inspect and control the pinned Codex app-server account and model surface.
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommand,
+    },
+    /// Connect GitHub and manage repositories linked to MCG projects.
+    Github {
+        #[command(subcommand)]
+        command: GithubCommand,
+    },
+    /// Inspect and operate bounded dormant-Governor proposals.
+    Governor {
+        #[command(subcommand)]
+        command: GovernorCommand,
+    },
     /// Inspect and resolve owner approval requests.
     Approval {
         #[command(subcommand)]
@@ -211,6 +257,18 @@ enum Command {
         /// Emit task events and the final result as newline-delimited JSON.
         #[arg(long, conflicts_with = "json")]
         stream_json: bool,
+        /// Codex model for the governed Chat/Coordinator/Coder workflow.
+        #[arg(long)]
+        model: Option<String>,
+        /// Model reasoning effort.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Model service tier/speed.
+        #[arg(long)]
+        speed: Option<String>,
+        /// Integration permission for generated changes.
+        #[arg(long, value_enum, default_value_t = ConversationApprovalArg::FullAccess)]
+        approval: ConversationApprovalArg,
         /// Consumer goal when no administrative run subcommand is supplied.
         #[arg(value_name = "GOAL", num_args = 0..)]
         goal: Vec<String>,
@@ -818,6 +876,8 @@ enum ScheduleCommand {
     Notifications {
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Mark one scheduler notification as read.
     Acknowledge { id: String },
@@ -1213,6 +1273,8 @@ enum ProjectCommand {
         #[arg(long)]
         id: Option<String>,
         #[arg(long)]
+        initialize_git: bool,
+        #[arg(long)]
         json: bool,
     },
     /// List registered projects.
@@ -1222,6 +1284,26 @@ enum ProjectCommand {
     },
     /// Read the current project model.
     Get {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Safely initialize a registered plain folder as a local Git repository.
+    InitGit {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Archive or unarchive a project without deleting its source.
+    Archive {
+        id: String,
+        #[arg(long)]
+        undo: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a project from the MCG catalog without deleting its source.
+    Remove {
         id: String,
         #[arg(long)]
         json: bool,
@@ -1354,6 +1436,208 @@ impl From<MemoryActionArg> for MemoryLifecycleAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConversationApprovalArg {
+    Ask,
+    AutoReview,
+    FullAccess,
+}
+
+impl From<ConversationApprovalArg> for ApprovalMode {
+    fn from(value: ConversationApprovalArg) -> Self {
+        match value {
+            ConversationApprovalArg::Ask => Self::Ask,
+            ConversationApprovalArg::AutoReview => Self::AutoReview,
+            ConversationApprovalArg::FullAccess => Self::FullAccess,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ConversationCommand {
+    Create {
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        speed: Option<String>,
+        #[arg(long, value_enum, default_value_t = ConversationApprovalArg::Ask)]
+        approval: ConversationApprovalArg,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        archived: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Send {
+        id: String,
+        #[arg(value_name = "MESSAGE", num_args = 1..)]
+        message: Vec<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        speed: Option<String>,
+        #[arg(long, value_enum)]
+        approval: Option<ConversationApprovalArg>,
+        /// Wait for delegated work and the final Chat callback.
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, default_value_t = 1_800)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 2)]
+        poll_seconds: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    Team {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Emit a compact machine-readable outcome and efficiency receipt for the latest batch.
+    Receipt {
+        id: String,
+    },
+    Search {
+        id: String,
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    Review {
+        id: String,
+        delegation_id: String,
+    },
+    Cancel {
+        id: String,
+        delegation_id: String,
+        expected_revision: u64,
+    },
+    Retry {
+        id: String,
+        delegation_id: String,
+        expected_revision: u64,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    Apply {
+        id: String,
+        delegation_id: String,
+        expected_revision: u64,
+    },
+    Discard {
+        id: String,
+        delegation_id: String,
+        expected_revision: u64,
+    },
+    PreviewStart {
+        id: String,
+        preview_id: String,
+    },
+    PreviewStop {
+        id: String,
+        preview_id: String,
+    },
+    Interrupt {
+        id: String,
+        turn_id: String,
+    },
+    Steer {
+        id: String,
+        turn_id: String,
+        #[arg(value_name = "MESSAGE", num_args = 1..)]
+        message: Vec<String>,
+    },
+    Archive {
+        id: String,
+        #[arg(long)]
+        undo: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexCommand {
+    Status,
+    Models,
+    Account,
+    RateLimits,
+    Usage,
+    Configuration,
+    Pending,
+    Threads,
+    Discover {
+        #[arg(long = "cwd")]
+        cwds: Vec<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    Login,
+    LoginCancel {
+        login_id: String,
+    },
+    Logout,
+}
+
+#[derive(Debug, Subcommand)]
+enum GithubCommand {
+    Status,
+    Login,
+    LoginComplete {
+        session_id: String,
+    },
+    Disconnect,
+    Repositories,
+    Create {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        public: bool,
+    },
+    Link {
+        project_id: String,
+        clone_url: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GovernorCommand {
+    Policy,
+    List {
+        organization_id: String,
+    },
+    Show {
+        proposal_id: String,
+    },
+    Create {
+        file: PathBuf,
+    },
+    Approve {
+        proposal_id: String,
+        #[arg(long)]
+        reject: bool,
+    },
+    RequestImplementation {
+        proposal_id: String,
+        conversation_id: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
     /// Create a durable task.
@@ -1462,10 +1746,39 @@ impl From<TaskStateArg> for TaskState {
 }
 
 #[tokio::main]
+async fn main() {
+    if let Err(error) = run_cli().await {
+        // Keep every failure machine-readable, including argument-independent API,
+        // authentication, and transport errors. This makes the CLI safe to compose
+        // in harnesses without scraping Rust's `Error: ...` debug wrapper.
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "error": "cli_error",
+                "message": error.to_string(),
+            })
+        );
+        std::process::exit(1);
+    }
+}
+
 #[allow(clippy::too_many_lines)] // Keeps offline recovery, authentication, and all CLI modes visible together.
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = AppConfig::default();
+    let host = cli.host.trim_end_matches('/').to_owned();
+    let token_path = cli
+        .token_file
+        .clone()
+        .unwrap_or_else(|| config.auth_token_path());
+    if let Some(Command::Start {
+        timeout_seconds,
+        json,
+    }) = &cli.command
+    {
+        run_start(&host, &token_path, *timeout_seconds, *json).await?;
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
@@ -1514,21 +1827,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token = if let Ok(token) = std::env::var("MCG_AUTH_TOKEN") {
         token
     } else {
-        let path = cli.token_file.unwrap_or_else(|| config.auth_token_path());
-        std::fs::read_to_string(&path).map_err(|error| {
+        std::fs::read_to_string(&token_path).map_err(|error| {
             format!(
                 "cannot read local daemon token at {}: {error}; start mcg-daemon first",
-                path.display()
+                token_path.display()
             )
         })?
     };
-    let host = cli.host.trim_end_matches('/');
     let client = reqwest::Client::new();
     let project = cli.project.unwrap_or(std::env::current_dir()?);
+    let host = host.as_str();
 
     match cli.command {
         Some(Command::Status { json }) => run_status(&client, host, token.trim(), json).await?,
         Some(Command::Stop { json }) => run_stop(&client, host, token.trim(), json).await?,
+        Some(Command::Start { .. }) => unreachable!("start handled before token loading"),
+        Some(Command::Restart {
+            timeout_seconds,
+            json,
+        }) => {
+            request_stop(&client, host, token.trim()).await?;
+            wait_for_daemon_stop(&client, host, token.trim(), timeout_seconds).await?;
+            run_start(host, &token_path, timeout_seconds, json).await?;
+        }
         Some(Command::Doctor { json, strict }) => {
             run_doctor(&client, host, token.trim(), json, strict).await?;
         }
@@ -1539,6 +1860,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_backup(&client, host, token.trim(), command).await?;
         }
         Some(Command::Task { command }) => run_task(&client, host, token.trim(), command).await?,
+        Some(Command::Conversation { command }) => {
+            run_conversation(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Codex { command }) => {
+            run_codex(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Github { command }) => {
+            run_github(&client, host, token.trim(), command).await?;
+        }
+        Some(Command::Governor { command }) => {
+            run_governor(&client, host, token.trim(), command).await?;
+        }
         Some(Command::Approval { command }) => {
             run_approval(&client, host, token.trim(), command).await?;
         }
@@ -1552,9 +1885,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             command: Some(command),
             json,
             stream_json,
+            model,
+            effort,
+            speed,
+            approval: _,
             goal,
         }) => {
-            if json || stream_json || !goal.is_empty() {
+            if json
+                || stream_json
+                || model.is_some()
+                || effort.is_some()
+                || speed.is_some()
+                || !goal.is_empty()
+            {
                 return Err(
                     "administrative run subcommands cannot be combined with a consumer goal or output mode"
                         .into(),
@@ -1566,6 +1909,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             command: None,
             json,
             stream_json,
+            model,
+            effort,
+            speed,
+            approval,
             goal,
         }) => {
             let goal = validated_goal(&goal.join(" "))?;
@@ -1578,6 +1925,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &goal,
                 supplemental,
                 consumer_output(json, stream_json),
+                conversation_preferences(model, effort, speed, approval.into()),
             )
             .await?;
         }
@@ -1592,6 +1940,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &goal,
                 supplemental,
                 ConsumerOutput::Human,
+                conversation_preferences(None, None, None, ApprovalMode::FullAccess),
             )
             .await?;
         }
@@ -1608,6 +1957,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &goal,
                 None,
                 ConsumerOutput::Human,
+                conversation_preferences(None, None, None, ApprovalMode::FullAccess),
             )
             .await?;
         }
@@ -1742,6 +2092,7 @@ async fn run_interactive(
             &goal,
             None,
             ConsumerOutput::Human,
+            conversation_preferences(None, None, None, ApprovalMode::FullAccess),
         )
         .await
         {
@@ -1759,55 +2110,294 @@ async fn run_consumer_submission(
     goal: &str,
     supplemental_input: Option<String>,
     output: ConsumerOutput,
+    preferences: ExecutionPreferences,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_root = std::fs::canonicalize(project_root)?;
     let root = canonical_root
         .to_str()
         .ok_or("project directory must be valid Unicode")?;
     let project = resolve_consumer_project(client, host, token, root).await?;
-    let constraints = supplemental_input
-        .map(|input| vec![format!("Owner-supplied standard input:\n{input}")])
-        .unwrap_or_default();
-    let created: TaskMutationResponse = client
-        .post(format!("{host}/api/v1/tasks"))
-        .bearer_auth(token)
-        .json(&CreateTaskRequest {
-            goal: goal.to_owned(),
-            project_id: Some(project.project.project_id),
-            thread_id: None,
-            constraints,
-            success_conditions: Vec::new(),
-            risk: None,
-            budget: None,
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let title = goal.chars().take(96).collect::<String>();
+    let conversation: Conversation = decode_api_response(
+        client
+            .post(format!("{host}/api/v1/conversations"))
+            .bearer_auth(token)
+            .json(&CreateConversationRequest {
+                title: Some(title),
+                project_id: Some(project.project.project_id),
+                execution_preferences: preferences.clone(),
+            })
+            .send()
+            .await?,
+        "create governed consumer conversation",
+    )
+    .await?;
+
+    let content = if let Some(input) = supplemental_input {
+        format!("{goal}\n\nOwner-supplied standard input (untrusted data):\n{input}")
+    } else {
+        goal.to_owned()
+    };
+    let mut view: ConversationView = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{}/messages",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .json(&SendConversationMessageRequest {
+                content,
+                execution_preferences: Some(preferences),
+            })
+            .send()
+            .await?,
+        "submit governed consumer request",
+    )
+    .await?;
+    let origin_turn_id = view
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ConversationRole::User)
+        .map(|message| message.turn_id)
+        .ok_or("governed consumer response did not contain the owner turn")?;
 
     if output == ConsumerOutput::StreamJson {
         println!(
             "{}",
-            serde_json::json!({"type": "task", "task": &created.task})
+            serde_json::json!({
+                "type": "conversation_started",
+                "conversation_id": conversation.id,
+                "origin_turn_id": origin_turn_id,
+                "project_id": project.project.project_id,
+            })
         );
         std::io::stdout().flush()?;
-        return stream_consumer_launch(client, host, token, &created).await;
     }
-
-    let result = launch_consumer_task(client, host, token, created.task.id).await?;
+    view = wait_for_conversation(
+        client,
+        host,
+        token,
+        &conversation.id.to_string(),
+        origin_turn_id,
+        3_600,
+        2,
+    )
+    .await?;
     if output == ConsumerOutput::Json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&conversation_receipt(&view, Some(origin_turn_id))?)?
+        );
+    } else if output == ConsumerOutput::StreamJson {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "conversation_completed",
+                "receipt": conversation_receipt(&view, Some(origin_turn_id))?
+            })
+        );
     } else {
         println!("Project: {}", project.project.root);
-        println!("Task: {}", result.task.id);
-        println!("Status: {}", result.task.state);
-        println!("{}", launch_execution_detail(&result.execution));
-        if let Some(text) = consumer_result_text(&result) {
+        println!("Conversation: {}", conversation.id);
+        if let Some(text) = view
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.turn_id == origin_turn_id && message.role == ConversationRole::Assistant
+            })
+            .map(|message| message.content.as_str())
+        {
             println!("\n{text}");
         }
     }
-    ensure_consumer_success(&result)
+    ensure_governed_consumer_success(&view, origin_turn_id)
+}
+
+fn ensure_governed_consumer_success(
+    view: &ConversationView,
+    origin_turn_id: ConversationTurnId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let batch = view
+        .team
+        .coordination_batches
+        .iter()
+        .find(|batch| batch.origin_turn_id == origin_turn_id)
+        .ok_or("governed consumer request completed without a coordination batch")?;
+    if batch.state != CoordinationBatchState::Completed {
+        return Err(format!(
+            "governed consumer batch {} ended in {:?}; inspect with `mcg conversation receipt {}`",
+            batch.id, batch.state, view.conversation.id
+        )
+        .into());
+    }
+    let delegations = view
+        .team
+        .delegations
+        .iter()
+        .filter(|delegation| delegation.coordination_batch_id == Some(batch.id))
+        .collect::<Vec<_>>();
+    let effective_ids = effective_delegation_attempt_ids(
+        delegations
+            .iter()
+            .map(|delegation| (delegation.id, delegation.retry_of_id)),
+    );
+    let effective_delegations = delegations
+        .iter()
+        .copied()
+        .filter(|delegation| effective_ids.contains(&delegation.id))
+        .collect::<Vec<_>>();
+    if delegations.is_empty()
+        || effective_delegations.iter().any(|delegation| {
+            !delegation.governance.outcome.successful
+                || !delegation.integration_ready
+                || !delegation.unresolved_issues.is_empty()
+        })
+    {
+        return Err(format!(
+            "governed consumer batch {} did not pass its Coder hard gate; inspect with `mcg conversation receipt {}`",
+            batch.id, view.conversation.id
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn conversation_receipt(
+    view: &ConversationView,
+    origin_turn_id: Option<ConversationTurnId>,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let batch = match origin_turn_id {
+        Some(turn_id) => view
+            .team
+            .coordination_batches
+            .iter()
+            .find(|batch| batch.origin_turn_id == turn_id),
+        None => view
+            .team
+            .coordination_batches
+            .iter()
+            .max_by_key(|batch| batch.created_at),
+    }
+    .ok_or("conversation has no matching coordination batch")?;
+    let delegations = view
+        .team
+        .delegations
+        .iter()
+        .filter(|delegation| delegation.coordination_batch_id == Some(batch.id))
+        .collect::<Vec<_>>();
+    let effective_ids = effective_delegation_attempt_ids(
+        delegations
+            .iter()
+            .map(|delegation| (delegation.id, delegation.retry_of_id)),
+    );
+    let effective_delegations = delegations
+        .iter()
+        .copied()
+        .filter(|delegation| effective_ids.contains(&delegation.id))
+        .collect::<Vec<_>>();
+    let wakes = view
+        .team
+        .wakes
+        .iter()
+        .filter(|wake| wake.coordination_batch_id == batch.id)
+        .collect::<Vec<_>>();
+    let completion = conversation_batch_terminal(batch.state)
+        .then(|| {
+            view.messages.iter().rev().find(|message| {
+                message.turn_id == batch.origin_turn_id
+                    && message.role == ConversationRole::Assistant
+                    && message.created_at >= batch.created_at
+            })
+        })
+        .flatten();
+    let coder_model_turns = delegations
+        .iter()
+        .map(|delegation| u64::from(delegation.governance.outcome.model_turns))
+        .sum::<u64>();
+    let coder_approximate_tokens = delegations
+        .iter()
+        .map(|delegation| delegation.governance.outcome.approximate_tokens)
+        .sum::<u64>();
+    let tool_calls = delegations
+        .iter()
+        .map(|delegation| u64::from(delegation.governance.outcome.tool_calls))
+        .sum::<u64>();
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "conversation_id": view.conversation.id,
+        "batch_id": batch.id,
+        "origin_turn_id": batch.origin_turn_id,
+        "state": batch.state,
+        "delivery_target": batch.delivery_target,
+        "delivery_rationale": batch.delivery_rationale,
+        "coordinator": {
+            "bypassed": batch.coordinator_bypassed,
+            "model_turns": batch.coordinator_turn_count,
+            "approximate_tokens": batch.coordinator_approximate_tokens,
+            "routing_rationale": batch.routing_rationale,
+        },
+        "coders": {
+            "count": delegations.len(),
+            "effective_count": effective_delegations.len(),
+            "model_turns": coder_model_turns,
+            "approximate_tokens": coder_approximate_tokens,
+            "tool_calls": tool_calls,
+            "delegations": delegations.iter().map(|delegation| {
+                let evidence_json = serde_json::to_vec(&delegation.evidence)
+                    .expect("delegation evidence is JSON serializable");
+                serde_json::json!({
+                    "id": delegation.id,
+                    "state": delegation.state,
+                    "revision": delegation.revision,
+                    "model": view.team.sessions.iter()
+                        .find(|session| Some(session.id) == delegation.coder_session_id)
+                        .map(|session| session.model.clone()),
+                    "attempts": delegation.governance.outcome.attempts,
+                    "latency_ms": delegation.governance.outcome.latency_ms,
+                    "changed_files": delegation.changed_files,
+                    "checks": delegation.checks,
+                    // Full attributed evidence remains durable and searchable through
+                    // `conversation team`; the qualification receipt stays compact and
+                    // tamper-evident so it is practical for scripts and CI artifacts.
+                    "evidence_count": delegation.evidence.len(),
+                    "evidence_sha256": format!("{:x}", Sha256::digest(&evidence_json)),
+                    "unresolved_issues": delegation.unresolved_issues,
+                    "integration_ready": delegation.integration_ready,
+                    "successful": delegation.governance.outcome.successful,
+                    "failure_class": delegation.governance.failure_class,
+                    "recovery": delegation.governance.recovery,
+                    "superseded_by_retry": !effective_ids.contains(&delegation.id),
+                })
+            }).collect::<Vec<_>>(),
+        },
+        "wakes": wakes.iter().map(|wake| serde_json::json!({
+            "id": wake.id,
+            "kind": wake.kind,
+            "target": wake.target,
+            "state": wake.state,
+            "attempts": wake.attempt_count,
+            "last_error": wake.last_error,
+        })).collect::<Vec<_>>(),
+        "completion": completion.map(|message| serde_json::json!({
+            "message_id": message.id,
+            "content": message.content,
+            "created_at": message.created_at,
+        })),
+        "previews": view.team.previews.iter()
+            .filter(|preview| preview.coordination_batch_id == batch.id)
+            .collect::<Vec<_>>(),
+        "hard_gate_ready": conversation_batch_terminal(batch.state)
+            && completion.is_some()
+            && !effective_delegations.is_empty()
+            && effective_delegations.iter().all(|delegation| {
+                delegation.governance.outcome.successful
+                    && delegation.integration_ready
+            })
+            && effective_delegations.iter().all(|delegation| delegation.unresolved_issues.is_empty())
+            && wakes.iter().all(|wake| wake.state == AgentWakeState::Completed),
+    }))
 }
 
 async fn resolve_consumer_project(
@@ -1829,10 +2419,21 @@ async fn resolve_consumer_project(
         .into_iter()
         .find(|project| paths_match_for_host(std::path::Path::new(&project.root), canonical_root))
     {
-        return Ok(client
+        let refreshed: ProjectMutation = client
             .post(format!(
                 "{host}/api/v1/projects/{}/refresh",
                 project.project_id
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        return Ok(client
+            .post(format!(
+                "{host}/api/v1/projects/{}/initialize-git",
+                refreshed.project.project_id
             ))
             .bearer_auth(token)
             .send()
@@ -1847,7 +2448,7 @@ async fn resolve_consumer_project(
         .json(&DiscoverProjectRequest {
             root: canonical_root.to_owned(),
             project_id: None,
-            initialize_git: false,
+            initialize_git: true,
         })
         .send()
         .await?
@@ -1869,85 +2470,6 @@ fn paths_match_for_host(existing: &std::path::Path, canonical_root: &str) -> boo
     }
 }
 
-async fn launch_consumer_task(
-    client: &reqwest::Client,
-    host: &str,
-    token: &str,
-    task_id: TaskId,
-) -> Result<LaunchTaskResponse, Box<dyn std::error::Error>> {
-    Ok(client
-        .post(format!("{host}/api/v1/tasks/{task_id}/launch"))
-        .bearer_auth(token)
-        .json(&default_launch_request())
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
-}
-
-async fn stream_consumer_launch(
-    client: &reqwest::Client,
-    host: &str,
-    token: &str,
-    created: &TaskMutationResponse,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let response = client
-        .get(format!(
-            "{host}/api/v1/events/stream?after={}",
-            created.event.sequence
-        ))
-        .bearer_auth(token)
-        .send()
-        .await?
-        .error_for_status()?;
-    let mut events = response.bytes_stream().eventsource();
-    let mut launch = Box::pin(launch_consumer_task(client, host, token, created.task.id));
-    let mut emitted = BTreeSet::new();
-    loop {
-        tokio::select! {
-            result = &mut launch => {
-                let result = result?;
-                let history: TaskEventsResponse = client
-                    .get(format!("{host}/api/v1/tasks/{}/events", created.task.id))
-                    .bearer_auth(token)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
-                for event in history.events {
-                    if event.sequence > created.event.sequence && emitted.insert(event.sequence) {
-                        print_consumer_event(&event)?;
-                    }
-                }
-                println!("{}", serde_json::json!({"type": "result", "result": &result}));
-                std::io::stdout().flush()?;
-                return ensure_consumer_success(&result);
-            }
-            event = events.next() => {
-                let Some(event) = event else {
-                    return Err("daemon event stream ended before task launch completed".into());
-                };
-                let event = event?;
-                if event.data.is_empty() {
-                    continue;
-                }
-                let envelope: EventEnvelope = serde_json::from_str(&event.data)?;
-                if envelope.task_id == Some(created.task.id) && emitted.insert(envelope.sequence) {
-                    print_consumer_event(&envelope)?;
-                }
-            }
-        }
-    }
-}
-
-fn print_consumer_event(event: &EventEnvelope) -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", serde_json::json!({"type": "event", "event": event}));
-    std::io::stdout().flush()?;
-    Ok(())
-}
-
 fn default_launch_request() -> LaunchTaskRequest {
     LaunchTaskRequest {
         organization_id: None,
@@ -1961,56 +2483,6 @@ fn default_launch_request() -> LaunchTaskRequest {
         reasoning_effort: None,
         service_tier: None,
     }
-}
-
-fn launch_execution_detail(execution: &LaunchExecution) -> &str {
-    match execution {
-        LaunchExecution::NotStarted { detail }
-        | LaunchExecution::AwaitingApproval { detail }
-        | LaunchExecution::AwaitingEvaluation { detail }
-        | LaunchExecution::Blocked { detail }
-        | LaunchExecution::Completed { detail }
-        | LaunchExecution::Failed { detail } => detail,
-    }
-}
-
-fn ensure_consumer_success(result: &LaunchTaskResponse) -> Result<(), Box<dyn std::error::Error>> {
-    if matches!(result.execution, LaunchExecution::Completed { .. }) {
-        Ok(())
-    } else {
-        Err(format!(
-            "consumer task {} requires attention: {}",
-            result.task.id,
-            launch_execution_detail(&result.execution)
-        )
-        .into())
-    }
-}
-
-fn consumer_result_text(result: &LaunchTaskResponse) -> Option<String> {
-    let text = result
-        .run
-        .results
-        .iter()
-        .rev()
-        .flat_map(|result| result.response.output.iter().rev())
-        .find_map(|item| match item {
-            OutputItem::Message {
-                role: MessageRole::Assistant,
-                content,
-            } => Some(
-                content
-                    .iter()
-                    .filter_map(|part| match part {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            _ => None,
-        })?;
-    (!text.trim().is_empty()).then_some(text)
 }
 
 #[allow(clippy::too_many_lines)] // Keeps the complete host and workflow HTTP contract together.
@@ -3149,7 +3621,7 @@ async fn run_schedule(
                 .await?;
             println!("{}: {}", mutation.wake.id, mutation.wake.reason);
         }
-        ScheduleCommand::Notifications { all } => {
+        ScheduleCommand::Notifications { all, json } => {
             let response: SchedulerNotificationListResponse = client
                 .get(format!(
                     "{host}/api/v1/scheduler/notifications?include_read={all}"
@@ -3160,11 +3632,15 @@ async fn run_schedule(
                 .error_for_status()?
                 .json()
                 .await?;
-            for notification in response.notifications {
-                println!(
-                    "{}: {:?} — {}",
-                    notification.id, notification.severity, notification.title
-                );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                for notification in response.notifications {
+                    println!(
+                        "{}: {:?} — {}",
+                        notification.id, notification.severity, notification.title
+                    );
+                }
             }
         }
         ScheduleCommand::Acknowledge { id } => {
@@ -3449,26 +3925,176 @@ async fn run_status(
     Ok(())
 }
 
+fn daemon_bind_address(host: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let url = reqwest::Url::parse(host)?;
+    let host_name = url
+        .host_str()
+        .ok_or("daemon host must include a host name")?;
+    if !matches!(host_name, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+        return Err("the CLI may start only a loopback MCG daemon".into());
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or("daemon host must include a port")?;
+    Ok(format!("127.0.0.1:{port}"))
+}
+
+fn sibling_daemon_executable() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let current = std::env::current_exe()?;
+    let name = format!("mcg-daemon{}", std::env::consts::EXE_SUFFIX);
+    let daemon = current
+        .parent()
+        .ok_or("cannot resolve the CLI executable directory")?
+        .join(name);
+    if !daemon.is_file() {
+        return Err(format!(
+            "the bundled daemon is missing at {}; install mcg and mcg-daemon together",
+            daemon.display()
+        )
+        .into());
+    }
+    Ok(daemon)
+}
+
+async fn daemon_status_if_ready(
+    client: &reqwest::Client,
+    host: &str,
+    token_path: &std::path::Path,
+) -> Option<RuntimeStatus> {
+    let token = std::fs::read_to_string(token_path).ok()?;
+    client
+        .get(format!("{host}/api/v1/system/status"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
+async fn run_start(
+    host: &str,
+    token_path: &std::path::Path,
+    timeout_seconds: u64,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    if let Some(status) = daemon_status_if_ready(&client, host, token_path).await {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"started": false, "already_running": true, "status": status})
+            );
+        } else {
+            println!("MCG daemon is already ready at {host}.");
+        }
+        return Ok(());
+    }
+
+    let daemon = sibling_daemon_executable()?;
+    let bind_address = daemon_bind_address(host)?;
+    let data_directory = token_path
+        .parent()
+        .ok_or("daemon token path has no parent data directory")?;
+    std::fs::create_dir_all(data_directory)?;
+    let log_path = data_directory.join("mcg-daemon.log");
+    let stdout_log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let stderr_log = stdout_log.try_clone()?;
+    let mut command = ProcessCommand::new(&daemon);
+    command
+        .env("MCG_BIND_ADDRESS", bind_address)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log));
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000 | 0x0000_0008);
+    let child = command.spawn()?;
+    let pid = child.id();
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.clamp(1, 300));
+    loop {
+        if let Some(status) = daemon_status_if_ready(&client, host, token_path).await {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"started": true, "already_running": false, "pid": pid, "log_path": log_path, "status": status})
+                );
+            } else {
+                println!("MCG daemon is ready at {host} (pid {pid}).");
+            }
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "MCG daemon process {pid} did not become ready at {host} within {timeout_seconds} seconds; inspect {} or run {} directly for diagnostics",
+                log_path.display(),
+                daemon.display(),
+            )
+            .into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_daemon_stop(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    timeout_seconds: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.clamp(1, 300));
+    loop {
+        let stopped = client
+            .get(format!("{host}/api/v1/system/status"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .is_err();
+        if stopped {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("MCG daemon did not stop within {timeout_seconds} seconds").into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 async fn run_stop(
     client: &reqwest::Client,
     host: &str,
     token: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let response: ShutdownResponse = client
-        .post(format!("{host}/api/v1/system/shutdown"))
-        .bearer_auth(token)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let response = request_stop(client, host, token).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
         println!("MCG daemon is draining and will stop cleanly.");
     }
     Ok(())
+}
+
+async fn request_stop(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> Result<ShutdownResponse, Box<dyn std::error::Error>> {
+    Ok(client
+        .post(format!("{host}/api/v1/system/shutdown"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
 }
 
 async fn run_doctor(
@@ -5344,6 +5970,684 @@ async fn transition_run(
     Ok(())
 }
 
+fn conversation_preferences(
+    model: Option<String>,
+    effort: Option<String>,
+    speed: Option<String>,
+    approval: ApprovalMode,
+) -> ExecutionPreferences {
+    ExecutionPreferences {
+        model_id: model,
+        reasoning_effort: effort,
+        service_tier: speed,
+        approval_mode: approval,
+    }
+}
+
+fn conversation_batch_terminal(state: CoordinationBatchState) -> bool {
+    matches!(
+        state,
+        CoordinationBatchState::Completed
+            | CoordinationBatchState::Failed
+            | CoordinationBatchState::RecoveryRequired
+    )
+}
+
+fn conversation_turn_terminal(state: ConversationTurnState) -> bool {
+    matches!(
+        state,
+        ConversationTurnState::Completed
+            | ConversationTurnState::Failed
+            | ConversationTurnState::Interrupted
+            | ConversationTurnState::Indeterminate
+    )
+}
+
+fn conversation_settled(view: &ConversationView, origin_turn_id: ConversationTurnId) -> bool {
+    let batches = view
+        .team
+        .coordination_batches
+        .iter()
+        .filter(|batch| batch.origin_turn_id == origin_turn_id)
+        .collect::<Vec<_>>();
+    if batches.is_empty() {
+        return view
+            .turns
+            .iter()
+            .find(|turn| turn.id == origin_turn_id)
+            .is_some_and(|turn| conversation_turn_terminal(turn.state));
+    }
+    let batch_ids = batches
+        .iter()
+        .map(|batch| batch.id)
+        .collect::<BTreeSet<_>>();
+    batches
+        .iter()
+        .all(|batch| conversation_batch_terminal(batch.state))
+        && !view.team.wakes.iter().any(|wake| {
+            batch_ids.contains(&wake.coordination_batch_id)
+                && matches!(
+                    wake.state,
+                    AgentWakeState::Pending | AgentWakeState::Claimed
+                )
+        })
+        && view.messages.iter().any(|message| {
+            message.turn_id == origin_turn_id && message.role == ConversationRole::Assistant
+        })
+}
+
+async fn fetch_conversation(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    decode_api_response(
+        client
+            .get(format!("{host}/api/v1/conversations/{id}"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "read conversation",
+    )
+    .await
+}
+
+async fn decode_api_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await?;
+        return Err(format!("{operation} failed ({status}): {detail}").into());
+    }
+    Ok(response.json().await?)
+}
+
+async fn wait_for_conversation(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+    origin_turn_id: ConversationTurnId,
+    timeout_seconds: u64,
+    poll_seconds: u64,
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(timeout_seconds.clamp(1, 86_400));
+    let interval = std::time::Duration::from_secs(poll_seconds.clamp(1, 60));
+    loop {
+        let view = fetch_conversation(client, host, token, id).await?;
+        if conversation_settled(&view, origin_turn_id) {
+            return Ok(view);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "conversation {id} did not settle within {timeout_seconds} seconds; durable work remains inspectable with `mcg conversation team {id}`"
+            )
+            .into());
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn print_conversation(
+    view: &ConversationView,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(view)?);
+        return Ok(());
+    }
+    println!("{} · {}", view.conversation.id, view.conversation.title);
+    for message in &view.messages {
+        println!("\n{:?}:\n{}", message.role, message.content);
+    }
+    if !view.team.coordination_batches.is_empty() {
+        println!("\nBatches:");
+        for batch in &view.team.coordination_batches {
+            println!(
+                "{} · {:?} · {} delegation(s) · {} Coordinator turn(s) · ~{} tokens",
+                batch.id,
+                batch.state,
+                batch.delegation_ids.len(),
+                batch.coordinator_turn_count,
+                batch.coordinator_approximate_tokens
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_conversation(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: ConversationCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ConversationCommand::Create {
+            title,
+            project_id,
+            model,
+            effort,
+            speed,
+            approval,
+            json,
+        } => {
+            let project_id = project_id
+                .map(|value| ProjectId::from_str(&value))
+                .transpose()?;
+            let conversation: Conversation = decode_api_response(
+                client
+                    .post(format!("{host}/api/v1/conversations"))
+                    .bearer_auth(token)
+                    .json(&CreateConversationRequest {
+                        title,
+                        project_id,
+                        execution_preferences: conversation_preferences(
+                            model,
+                            effort,
+                            speed,
+                            approval.into(),
+                        ),
+                    })
+                    .send()
+                    .await?,
+                "create conversation",
+            )
+            .await?;
+            let view =
+                fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+            print_conversation(&view, json)?;
+        }
+        ConversationCommand::List { archived, json } => {
+            let value: serde_json::Value = client
+                .get(format!("{host}/api/v1/conversations"))
+                .query(&[("include_archived", archived)])
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else if let Some(items) = value
+                .get("conversations")
+                .and_then(serde_json::Value::as_array)
+            {
+                for item in items {
+                    println!(
+                        "{} · {} · {}",
+                        item["id"].as_str().unwrap_or("?"),
+                        item["state"].as_str().unwrap_or("?"),
+                        item["title"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        ConversationCommand::Show { id, json } => {
+            print_conversation(&fetch_conversation(client, host, token, &id).await?, json)?
+        }
+        ConversationCommand::Send {
+            id,
+            message,
+            model,
+            effort,
+            speed,
+            approval,
+            wait,
+            timeout_seconds,
+            poll_seconds,
+            json,
+        } => {
+            let content = validated_goal(&message.join(" "))?;
+            let execution_preferences =
+                if model.is_some() || effort.is_some() || speed.is_some() || approval.is_some() {
+                    Some(conversation_preferences(
+                        model,
+                        effort,
+                        speed,
+                        approval.unwrap_or(ConversationApprovalArg::Ask).into(),
+                    ))
+                } else {
+                    None
+                };
+            let mut view: ConversationView = decode_api_response(
+                client
+                    .post(format!("{host}/api/v1/conversations/{id}/messages"))
+                    .bearer_auth(token)
+                    .json(&SendConversationMessageRequest {
+                        content,
+                        execution_preferences,
+                    })
+                    .send()
+                    .await?,
+                "send conversation message",
+            )
+            .await?;
+            let turn_id = view
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == ConversationRole::User)
+                .map(|message| message.turn_id)
+                .ok_or("conversation response did not contain the submitted user turn")?;
+            if wait {
+                view = wait_for_conversation(
+                    client,
+                    host,
+                    token,
+                    &id,
+                    turn_id,
+                    timeout_seconds,
+                    poll_seconds,
+                )
+                .await?;
+            }
+            print_conversation(&view, json)?;
+        }
+        ConversationCommand::Team { id, json } => {
+            let value: serde_json::Value = client
+                .get(format!("{host}/api/v1/conversations/{id}/team"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+        }
+        ConversationCommand::Receipt { id } => {
+            let view = fetch_conversation(client, host, token, &id).await?;
+            let receipt = conversation_receipt(&view, None)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        ConversationCommand::Search { id, query, limit } => {
+            let value: serde_json::Value = client
+                .get(format!("{host}/api/v1/conversations/{id}/context/search"))
+                .query(&[("q", query), ("limit", limit.to_string())])
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ConversationCommand::Review { id, delegation_id } => {
+            print_json_response(
+                client
+                    .get(format!(
+                        "{host}/api/v1/conversations/{id}/delegations/{delegation_id}/review"
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+        ConversationCommand::Cancel {
+            id,
+            delegation_id,
+            expected_revision,
+        } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/delegations/{delegation_id}/cancel"
+                    ))
+                    .bearer_auth(token)
+                    .json(&DelegationMutationRequest { expected_revision })
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+        ConversationCommand::Retry {
+            id,
+            delegation_id,
+            expected_revision,
+            idempotency_key,
+        } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/delegations/{delegation_id}/retry"
+                    ))
+                    .bearer_auth(token)
+                    .json(&DelegationRetryRequest {
+                        expected_revision,
+                        idempotency_key: idempotency_key
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    })
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+        ConversationCommand::Apply {
+            id,
+            delegation_id,
+            expected_revision,
+        } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/delegations/{delegation_id}/apply"
+                    ))
+                    .bearer_auth(token)
+                    .json(&WorktreeMutationRequest { expected_revision })
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+        ConversationCommand::Discard {
+            id,
+            delegation_id,
+            expected_revision,
+        } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/delegations/{delegation_id}/discard"
+                    ))
+                    .bearer_auth(token)
+                    .json(&WorktreeMutationRequest { expected_revision })
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+        ConversationCommand::PreviewStart { id, preview_id } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/previews/{preview_id}/start"
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+        ConversationCommand::PreviewStop { id, preview_id } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/previews/{preview_id}/stop"
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+        ConversationCommand::Interrupt { id, turn_id } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/turns/{turn_id}/interrupt"
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+        ConversationCommand::Steer {
+            id,
+            turn_id,
+            message,
+        } => {
+            print_json_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{id}/turns/{turn_id}/steer"
+                    ))
+                    .bearer_auth(token)
+                    .json(&SteerConversationTurnRequest {
+                        content: validated_goal(&message.join(" "))?,
+                    })
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+        ConversationCommand::Archive { id, undo } => {
+            print_json_response(
+                client
+                    .post(format!("{host}/api/v1/conversations/{id}/archive"))
+                    .bearer_auth(token)
+                    .json(&ArchiveConversationRequest { archived: !undo })
+                    .send()
+                    .await?,
+            )
+            .await?
+        }
+    }
+    Ok(())
+}
+
+async fn print_json_response(
+    response: reqwest::Response,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await?;
+        return Err(format!("MCG API request failed ({status}): {detail}").into());
+    }
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        println!("{{}}");
+    } else {
+        let value: serde_json::Value = response.json().await?;
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    }
+    Ok(())
+}
+
+async fn run_codex(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: CodexCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = match command {
+        CodexCommand::Status => {
+            client
+                .get(format!("{host}/api/v1/codex/harness"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Models => {
+            client
+                .get(format!("{host}/api/v1/codex/models"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Account => {
+            client
+                .get(format!("{host}/api/v1/codex/account"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::RateLimits => {
+            client
+                .get(format!("{host}/api/v1/codex/rate-limits"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Usage => {
+            client
+                .get(format!("{host}/api/v1/codex/account/usage"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Configuration => {
+            client
+                .get(format!("{host}/api/v1/codex/configuration"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Pending => {
+            client
+                .get(format!("{host}/api/v1/codex/pending-requests"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Threads => {
+            client
+                .get(format!("{host}/api/v1/codex/owned-threads"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::Discover { cwds, force } => {
+            client
+                .post(format!("{host}/api/v1/codex/discovery"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({"cwds": cwds, "force_reload": force}))
+                .send()
+                .await?
+        }
+        CodexCommand::Login => {
+            client
+                .post(format!("{host}/api/v1/codex/account/login"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        CodexCommand::LoginCancel { login_id } => {
+            client
+                .post(format!("{host}/api/v1/codex/account/login/cancel"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({"login_id": login_id}))
+                .send()
+                .await?
+        }
+        CodexCommand::Logout => {
+            client
+                .post(format!("{host}/api/v1/codex/account/logout"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+    };
+    print_json_response(response).await
+}
+
+async fn run_github(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: GithubCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = match command {
+        GithubCommand::Status => {
+            client
+                .get(format!("{host}/api/v1/github"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        GithubCommand::Login => {
+            client
+                .post(format!("{host}/api/v1/github/login/start"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        GithubCommand::LoginComplete { session_id } => {
+            client
+                .post(format!("{host}/api/v1/github/login/{session_id}/complete"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        GithubCommand::Disconnect => {
+            client
+                .delete(format!("{host}/api/v1/github"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        GithubCommand::Repositories => {
+            client
+                .get(format!("{host}/api/v1/github/repositories"))
+                .bearer_auth(token)
+                .send()
+                .await?
+        }
+        GithubCommand::Create {
+            name,
+            description,
+            public,
+        } => client
+            .post(format!("{host}/api/v1/github/repositories"))
+            .bearer_auth(token)
+            .json(
+                &serde_json::json!({"name": name, "description": description, "private": !public}),
+            )
+            .send()
+            .await?,
+        GithubCommand::Link {
+            project_id,
+            clone_url,
+        } => {
+            client
+                .post(format!("{host}/api/v1/github/repositories/link"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({"project_id": project_id, "clone_url": clone_url}))
+                .send()
+                .await?
+        }
+    };
+    print_json_response(response).await
+}
+
+async fn run_governor(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: GovernorCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = match command {
+        GovernorCommand::Policy => client.get(format!("{host}/api/v1/governor/policy")).bearer_auth(token).send().await?,
+        GovernorCommand::List { organization_id } => client.get(format!("{host}/api/v1/governor/organizations/{organization_id}/proposals")).bearer_auth(token).send().await?,
+        GovernorCommand::Show { proposal_id } => client.get(format!("{host}/api/v1/governor/proposals/{proposal_id}")).bearer_auth(token).send().await?,
+        GovernorCommand::Create { file } => { let value: serde_json::Value = serde_json::from_slice(&std::fs::read(file)?)?; client.post(format!("{host}/api/v1/governor/proposals")).bearer_auth(token).json(&value).send().await? },
+        GovernorCommand::Approve { proposal_id, reject } => client.post(format!("{host}/api/v1/governor/proposals/{proposal_id}/owner-approval")).bearer_auth(token).json(&serde_json::json!({"expected": GovernorProposalState::AwaitingOwnerApproval, "approve": !reject})).send().await?,
+        GovernorCommand::RequestImplementation { proposal_id, conversation_id } => client.post(format!("{host}/api/v1/governor/proposals/{proposal_id}/implementation")).bearer_auth(token).json(&serde_json::json!({"conversation_id": conversation_id})).send().await?,
+    };
+    print_json_response(response).await
+}
+
+fn print_json_or_project(
+    mutation: &ProjectMutation,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(mutation)?);
+    } else {
+        print_project(&mutation.project);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // CLI dispatch keeps related project subcommands discoverable.
 async fn run_project(
     client: &reqwest::Client,
@@ -5352,7 +6656,12 @@ async fn run_project(
     command: ProjectCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        ProjectCommand::Add { root, id, json } => {
+        ProjectCommand::Add {
+            root,
+            id,
+            initialize_git,
+            json,
+        } => {
             let project_id = id.map(|value| ProjectId::from_str(&value)).transpose()?;
             let mutation: ProjectMutation = client
                 .post(format!("{host}/api/v1/projects"))
@@ -5360,7 +6669,7 @@ async fn run_project(
                 .json(&DiscoverProjectRequest {
                     root: root.to_string_lossy().into_owned(),
                     project_id,
-                    initialize_git: false,
+                    initialize_git,
                 })
                 .send()
                 .await?
@@ -5407,6 +6716,57 @@ async fn run_project(
             } else {
                 print_project(&project);
             }
+        }
+        ProjectCommand::InitGit { id, json } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let mutation: ProjectMutation = client
+                .post(format!(
+                    "{host}/api/v1/projects/{project_id}/initialize-git"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            print_json_or_project(&mutation, json)?;
+        }
+        ProjectCommand::Archive { id, undo, json } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let project: mcg_projects::ProjectModel = client
+                .post(format!("{host}/api/v1/projects/{project_id}/archive"))
+                .bearer_auth(token)
+                .json(&ArchiveProjectRequest { archived: !undo })
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&project)?);
+            } else {
+                print_project(&project);
+            }
+        }
+        ProjectCommand::Remove { id, json } => {
+            let project_id = ProjectId::from_str(&id)?;
+            let response = client
+                .delete(format!("{host}/api/v1/projects/{project_id}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"removed": true, "project_id": project_id})
+                );
+            } else {
+                println!(
+                    "Removed project {project_id} from the MCG catalog; source was not deleted."
+                );
+            }
+            drop(response);
         }
         ProjectCommand::Refresh { id, json } => {
             let project_id = ProjectId::from_str(&id)?;
@@ -5882,6 +7242,12 @@ mod tests {
             "fixture-project",
             "run",
             "--json",
+            "--model",
+            "gpt-5.6-luna",
+            "--effort",
+            "medium",
+            "--approval",
+            "full-access",
             "fix",
             "issue",
             "419",
@@ -5894,8 +7260,12 @@ mod tests {
                 command: None,
                 json: true,
                 stream_json: false,
+                model: Some(model),
+                effort: Some(effort),
+                approval: ConversationApprovalArg::FullAccess,
                 goal,
-            }) if goal == ["fix", "issue", "419"]
+                ..
+            }) if model == "gpt-5.6-luna" && effort == "medium" && goal == ["fix", "issue", "419"]
         ));
 
         let streaming = Cli::try_parse_from(["mcg", "run", "--stream-json", "build a website"])
@@ -6501,12 +7871,16 @@ mod tests {
                 }
             }
         ));
-        let notifications = Cli::try_parse_from(["mcg", "schedule", "notifications", "--all"])
-            .expect("notifications command");
+        let notifications =
+            Cli::try_parse_from(["mcg", "schedule", "notifications", "--all", "--json"])
+                .expect("notifications command");
         assert!(matches!(
             notifications.command.expect("command"),
             Command::Schedule {
-                command: ScheduleCommand::Notifications { all: true }
+                command: ScheduleCommand::Notifications {
+                    all: true,
+                    json: true
+                }
             }
         ));
     }
@@ -6838,6 +8212,24 @@ mod tests {
             json.command.expect("command"),
             Command::Stop { json: true }
         ));
+        let start = Cli::try_parse_from(["mcg", "start", "--timeout-seconds", "30", "--json"])
+            .expect("JSON start command");
+        assert!(matches!(
+            start.command.expect("command"),
+            Command::Start {
+                timeout_seconds: 30,
+                json: true
+            }
+        ));
+        let restart = Cli::try_parse_from(["mcg", "restart", "--timeout-seconds", "45"])
+            .expect("restart command");
+        assert!(matches!(
+            restart.command.expect("command"),
+            Command::Restart {
+                timeout_seconds: 45,
+                json: false
+            }
+        ));
     }
 
     #[test]
@@ -6849,6 +8241,153 @@ mod tests {
             Command::Doctor {
                 json: true,
                 strict: true
+            }
+        ));
+    }
+
+    #[test]
+    fn conversation_commands_expose_cli_first_agent_workflows() {
+        let project_id = "00000000-0000-4000-8000-000000000001";
+        let conversation_id = "00000000-0000-4000-8000-000000000002";
+        let delegation_id = "00000000-0000-4000-8000-000000000003";
+        let create = Cli::try_parse_from([
+            "mcg",
+            "conversation",
+            "create",
+            "--title",
+            "CLI qualification",
+            "--project-id",
+            project_id,
+            "--model",
+            "gpt-5.6-luna",
+            "--effort",
+            "medium",
+            "--speed",
+            "standard",
+            "--approval",
+            "full-access",
+        ])
+        .expect("conversation create");
+        assert!(matches!(
+            create.command.expect("command"),
+            Command::Conversation {
+                command: ConversationCommand::Create {
+                    project_id: Some(id),
+                    model: Some(model),
+                    approval: ConversationApprovalArg::FullAccess,
+                    ..
+                }
+            } if id == project_id && model == "gpt-5.6-luna"
+        ));
+
+        let send = Cli::try_parse_from([
+            "mcg",
+            "conversation",
+            "send",
+            conversation_id,
+            "build the fixture",
+            "--wait",
+            "--timeout-seconds",
+            "900",
+        ])
+        .expect("conversation send");
+        assert!(matches!(
+            send.command.expect("command"),
+            Command::Conversation {
+                command: ConversationCommand::Send {
+                    wait: true,
+                    timeout_seconds: 900,
+                    ..
+                }
+            }
+        ));
+
+        let receipt = Cli::try_parse_from(["mcg", "conversation", "receipt", conversation_id])
+            .expect("conversation receipt");
+        assert!(matches!(
+            receipt.command.expect("command"),
+            Command::Conversation {
+                command: ConversationCommand::Receipt { .. }
+            }
+        ));
+
+        let review = Cli::try_parse_from([
+            "mcg",
+            "conversation",
+            "review",
+            conversation_id,
+            delegation_id,
+        ])
+        .expect("delegation review command");
+        assert!(matches!(review.command, Some(Command::Conversation { .. })));
+        for verb in ["cancel", "retry", "apply", "discard"] {
+            let parsed = Cli::try_parse_from([
+                "mcg",
+                "conversation",
+                verb,
+                conversation_id,
+                delegation_id,
+                "3",
+            ])
+            .expect("revision-checked delegation lifecycle command");
+            assert!(matches!(parsed.command, Some(Command::Conversation { .. })));
+        }
+    }
+
+    #[test]
+    fn codex_github_and_governor_commands_are_available_without_the_gui() {
+        let models =
+            Cli::try_parse_from(["mcg", "codex", "models"]).expect("Codex model discovery");
+        assert!(matches!(
+            models.command.expect("command"),
+            Command::Codex {
+                command: CodexCommand::Models
+            }
+        ));
+
+        let github = Cli::try_parse_from(["mcg", "github", "login"]).expect("GitHub device login");
+        assert!(matches!(
+            github.command.expect("command"),
+            Command::Github {
+                command: GithubCommand::Login
+            }
+        ));
+
+        let proposal_id = "00000000-0000-4000-8000-000000000010";
+        let conversation_id = "00000000-0000-4000-8000-000000000011";
+        let implementation = Cli::try_parse_from([
+            "mcg",
+            "governor",
+            "request-implementation",
+            proposal_id,
+            conversation_id,
+        ])
+        .expect("governed implementation request");
+        assert!(matches!(
+            implementation.command.expect("command"),
+            Command::Governor {
+                command: GovernorCommand::RequestImplementation { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn project_commands_expose_git_and_lifecycle_management() {
+        let project_id = "00000000-0000-4000-8000-000000000020";
+        for verb in ["init-git", "archive", "remove"] {
+            let parsed = Cli::try_parse_from(["mcg", "project", verb, project_id])
+                .expect("project lifecycle command");
+            assert!(matches!(parsed.command, Some(Command::Project { .. })));
+        }
+        let add = Cli::try_parse_from(["mcg", "project", "add", ".", "--initialize-git"])
+            .expect("project add with Git initialization");
+        assert!(matches!(
+            add.command.expect("command"),
+            Command::Project {
+                command: ProjectCommand::Add {
+                    initialize_git: true,
+                    ..
+                }
             }
         ));
     }

@@ -1,7 +1,7 @@
 {
   "name": "mcg-workspace",
   "private": true,
-  "version": "0.4.5",
+  "version": "0.4.12",
   "workspaces": [
     "apps/desktop"
   ],
