@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - New MCG brain-and-android app identity integrated
+
+- Context: Owner selected the transparent black, white, and cobalt-blue geometric brain/android mark as MCG's new application logo.
+- Decision: Preserve a 512 px transparent in-app source, display it in the primary sidebar and deterministic-runtime card, and regenerate the complete Tauri Windows, macOS, Linux, Store, iOS, and Android icon family from the approved high-resolution master. Retire the obsolete teal monogram SVG.
+- Files: `apps/desktop/src/assets/mcg-logo.png`, `apps/desktop/src/{App.tsx,styles.css}`, and `apps/desktop/src-tauri/icons/`.
+- Commands/tests: Tauri icon generation completed; 32 px and 128 px outputs were visually inspected; desktop typecheck and production build passed; focused MCG-branding Vitest passed. The complete single-worker Vitest file remained silent under sustained execution and was stopped without classifying it as passed.
+- Result: Source UI and future native packages now consistently use the approved brain/android logo. No new portable was built in this change.
+- Follow-up: Native owner UAT should verify the sidebar, Agents runtime card, taskbar/window icon, executable icon, and light/dark appearance; include the branding in the next portable build.
+
 ### 2026-08-25 - Light-theme contrast normalized across desktop surfaces
 
 - Context: Owner reported that text was difficult to read throughout the app in Light mode. The root light palette was usable, but dark-first components still applied pale hardcoded grays and dark surface colors after theme selection.
@@ -2565,10 +2574,10 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: The simplified non-overlapping New Chat experience is built and independently verified in the Windows one-file portable v0.4.15; commit/push and owner-visible native UAT remain.
-- Last meaningful change: Removed obsolete task-specification controls from Advanced New Chat, unified Simple/Advanced around one compact chat composer, fixed horizontal containment/wrapping, and packaged v0.4.15.
+- Current task: The owner-approved geometric brain/android identity is integrated across the desktop UI and complete native icon family; commit/push and owner-visible native UAT remain.
+- Last meaningful change: Replaced the obsolete teal monogram with the transparent black, white, and cobalt-blue logo in source UI and regenerated Windows, macOS, Linux, Store, iOS, and Android assets.
 - Worktree/checkpoint: Preservation baseline commits are `1cd0894`, `1dbc8ea`, `be2987c`, and `df34462`; schema 39 is `5488128`; schema-40 authority/bridge is `d0630a1`; desktop/package projection is `5860038`; agent-sidecar packaging correction is `7f591af`; conversation recovery is `d69d96d`; Markdown chat is `487121c`; v0.3.23 retry/integration settlement is `1039ca8`; schema-43 event-driven coordination is `226177c`, all on `codex/v34-updater-version-binding`. The external recovery bundle is `C:\Users\hendo420\AppData\Local\MCG\cleanup-backups\20260823-141215`. Do not discard that bundle until the owner confirms the organized commits are sufficient.
-- Next step: Commit and push v0.4.15, then owner-UAT Simple and Advanced New Chat at full and narrow widths. Continue owner UAT of Advanced Governor, retry receipt/history, and global Worktrees surfaces.
+- Next step: Commit and push the new identity, then owner-UAT sidebar/runtime-card presentation and native taskbar/window/executable icons. Include the logo in the next portable build; continue New Chat, Advanced Governor, retry receipt/history, and global Worktrees UAT.
 - Blockers: No discretionary VM permission is outstanding; the owner reconfirmed standing authority for all in-scope administration and qualification on the disposable VMs. Execute installs, administrator prompts, transfers, restarts, tests, browser/desktop interaction, trust changes, and temporary cleanup directly without asking or waiting. The current macOS OAuth page now requires the unavoidable owner-identity OpenAI sign-in; this is not a VM approval request. If one interaction is genuinely automation-inaccessible, treat it as a technical constraint, try another in-scope route, and continue every independent lane; contact the owner only for an unavoidable identity-bound external-account action, never for redundant VM permission. Exact-v34 disposable updater trust has already been removed and fresh ordinary HTTPS distrust proven. Trusted production signing/notarization identities remain external release gates. Credentials are intentionally not retained here.
 - Win11 operations: `ssh mcg-win11-vm` is the qualified key-only administrative path for terminal/build/test/transfer work at `192.168.50.238`; Chrome Remote Desktop remains the GUI/UAT path. The SSH service and key transfer survived an actual reboot, so routine non-GUI work should no longer wait on browser interaction.
 - macOS operations: `ssh mcg-macos-vm` is the verified key-only unattended path for terminal/build/test/transfer work at `192.168.50.151` as user `hendo42`; Chrome Remote Desktop was freshly reverified connected and claimable through the in-app browser on 2026-08-21 for GUI/UAT. SSH is healthy on macOS 26.0 x86_64. The preserved desktop/service OAuth processes remain alive and the service still owns loopback port 7777, so do not disturb them before the owner-identity sign-in continuation. Terminal currently retains temporary Accessibility, Screen Recording, and direct-capture authority for remaining qualification; remove those grants during final cleanup if the disposable VM is kept. The exact clean `c1881f2` source and unsigned owner-built package cache remain for broader native interaction.
@@ -2577,6 +2586,7 @@ Durable project context lives here. Update this file whenever information should
 ## Current State
 
 - MCG now has a compilable implementation foundation alongside its product specifications.
+- The canonical application identity is the transparent black, white, and cobalt-blue geometric brain/android mark in `apps/desktop/src/assets/mcg-logo.png`; the complete Tauri platform icon family is generated from the same approved master.
 - The complete vision remains in scope and will be delivered through integrated, end-to-end milestones rather than a throwaway narrow prototype.
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).

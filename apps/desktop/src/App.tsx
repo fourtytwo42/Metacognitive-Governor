@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { MarkdownContent } from "./MarkdownContent";
+import mcgLogo from "./assets/mcg-logo.png";
 
 export const CHAT_FOLLOW_THRESHOLD_PX = 96;
 const CHATGPT_SITES_LIBRARY_ENABLED = true;
@@ -6018,7 +6019,7 @@ export function App() {
       >
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="sidebar-heading">
-          <div className="sidebar-brand-row"><div className="brand" aria-label="MetaCognitive Governor"><span>MCG</span></div><div className="sidebar-brand-actions">
+          <div className="sidebar-brand-row"><div className="brand" aria-label="MetaCognitive Governor"><img className="brand-mark" src={mcgLogo} alt="" /><span>MCG</span></div><div className="sidebar-brand-actions">
             <button type="button" aria-label="Search chats" title="Search" aria-pressed={sidebarSearchOpen} onClick={() => { setSidebarSearchOpen((current) => !current); window.requestAnimationFrame(() => chatSearchRef.current?.focus()); }}><span aria-hidden="true">⌕</span></button>
             <button type="button" aria-label="Open activity" title="Activity" onClick={() => { setWorkspaceSidePanelTab("activity"); setWorkspaceSidePanelOpen(true); }}><span aria-hidden="true">♧</span></button>
           </div></div>
@@ -6659,7 +6660,7 @@ export function App() {
 
           {agentTab === "overview" && <div className="agents-stack">
             <article className="agent-governor-card">
-              <div className="governor-mark" aria-hidden="true">MCG</div>
+              <div className="governor-mark" aria-hidden="true"><img src={mcgLogo} alt="" /></div>
               <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC RUNTIME · NOT A MODEL AGENT</span><h3>MCG runtime</h3><p>Enforces owner policy above the Chat, Coordinator, and Coding Agents. It brokers tools, permissions, budgets, leases, memory, and evidence. The metacognitive-governor model role remains dormant.</p></div>
               <div className="agent-status-summary"><span className={`agent-state state-${governorOverview?.status.state ?? "starting"}`}>{governorOverview?.status.state ?? "starting"}</span><strong>{governorOverview?.active_runs ?? 0}</strong><small>active runs</small></div>
               <details className="governor-details">

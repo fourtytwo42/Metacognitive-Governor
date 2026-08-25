@@ -3623,6 +3623,9 @@ test("Ctrl+O registers a global folder without creating a project", async () => 
 test("desktop menus follow the Codex command structure with MCG branding", async () => {
   render(<App />);
 
+  const brand = screen.getByLabelText("MetaCognitive Governor");
+  expect(brand.querySelector("img")).toHaveAttribute("src", expect.stringContaining("mcg-logo"));
+
   fireEvent.click(screen.getByRole("button", { name: "File" }));
   let menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
   expect(menu.getByRole("button", { name: "New Window" })).toBeInTheDocument();

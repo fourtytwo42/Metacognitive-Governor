@@ -31,8 +31,7 @@ button { cursor: pointer; }
 }
 .brand { display: flex; align-items: center; gap: 11px; font-weight: 750; letter-spacing: .08em; }
 .brand-mark {
-  width: 34px; height: 34px; display: grid; place-items: center;
-  border: 1px solid #42d9c8; color: #42d9c8; background: #42d9c812;
+  width: 34px; height: 34px; display: block; object-fit: contain;
 }
 nav { display: grid; gap: 6px; }
 .nav-item { color: #8998aa; padding: 10px 12px; text-decoration: none; border-left: 2px solid transparent; }
@@ -601,11 +600,7 @@ body { background: var(--mcg-bg); }
 .brand-mark {
   width: 30px;
   height: 30px;
-  border: 0;
-  border-radius: 8px;
-  color: #111;
-  background: #f0f0f0;
-  font-size: .88rem;
+  object-fit: contain;
 }
 .chat-search { position: relative; display: flex; align-items: center; }
 .chat-search > span[aria-hidden="true"] { position: absolute; left: 11px; color: #888; font-size: 1rem; }
@@ -1409,7 +1404,8 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .segmented-tabs button.active { color: inherit; background: color-mix(in srgb, var(--mcg-surface-raised) 82%, white 4%); }
 .agent-governor-card, .agent-section-card { border: 1px solid var(--mcg-border); border-radius: 16px; background: var(--mcg-surface-raised); }
 .agent-governor-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 20px; }
-.governor-mark { display: grid; width: 56px; height: 56px; place-items: center; border: 1px solid color-mix(in srgb, var(--mcg-border) 60%, #369cff); border-radius: 15px; color: #b9dbff; background: linear-gradient(145deg, #163350, #20242a); font-size: .8rem; font-weight: 750; letter-spacing: .08em; }
+.governor-mark { display: grid; width: 56px; height: 56px; place-items: center; flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--mcg-border) 60%, #369cff); border-radius: 15px; background: linear-gradient(145deg, #163350, #20242a); }
+.governor-mark img { width: 48px; height: 48px; object-fit: contain; }
 .agent-kicker { color: #75b8ff; font-size: .68rem; font-weight: 700; letter-spacing: .1em; }
 .agent-card-copy p { max-width: 700px; color: var(--mcg-muted); line-height: 1.5; }
 .agent-status-summary { justify-items: end; }
