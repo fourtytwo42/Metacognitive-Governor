@@ -10,6 +10,12 @@ Durable project context lives here. Update this file whenever information should
 - Result: Windows one-file portable `target/portable/MCG-Portable-Windows-x64-v0.4.12/MCG-Desktop-v0.4.12.exe` is 500,667,392 bytes, Product/FileVersion 0.4.12, SHA-256 `1FD5936B7C8C120249AFB2EEA17B7E74FECA5F6773F3CBBE3762CE93CC3FC6DA`. Packaged isolated UAT passed authenticated readiness, CLI status/doctor, and JSON scheduler notification output. All generated example projects, managed qualification worktrees, isolated daemon state, packaged-UAT state, and temporary test target were removed. Repository `target\debug` cleanup reclaimed 35.6 GiB and remains absent; release/portable artifacts remain.
 - Follow-up: Strict Clippy on the affected package set reaches 51 pre-existing missing-documentation warnings in older `mcg-storage` conversation APIs; keep that as a bounded cleanup lane. GitHub mutation was not live-tested because the isolated UAT had no connected owner account. Repeat native package qualification on Linux/macOS before calling the cross-platform release ready.
 
+### 2026-08-25 - Push major changes to GitHub
+
+- Context: The owner wants major work preserved remotely as the normal completion workflow.
+- Decision: After verifying any substantial feature, architecture change, migration, release/package update, or multi-file behavioral fix, commit it and push it to the tracked GitHub branch unless the owner explicitly says not to push. Confirm that the remote commit matches local HEAD and that the worktree is clean or clearly disclose any intentionally retained changes.
+- Result: This is the default repository workflow for future major changes.
+
 ### 2026-08-25 - Corrected parallel CLI rung passed at 99/100
 
 - Context: The batch-stable final-review change was rebuilt and qualified with a fresh Luna-medium Node toolkit request using two concurrent Coders and disjoint query-string/duration scopes.
@@ -3680,6 +3686,7 @@ When sources conflict, use this order:
 - Read `AGENTS.md` and `MEMORY.md` before making future changes in this workspace.
 - Update `MEMORY.md` after durable discoveries, decisions, fixes, verification results, blocked work, and handoffs.
 - Never store secrets, tokens, passwords, private keys, or sensitive personal data in `MEMORY.md`.
+- Commit and push every verified major change to the tracked GitHub branch unless the owner explicitly instructs otherwise; confirm local/remote commit parity after pushing.
 - Standing disposable-VM authority is operational, not merely preapproval: directly perform required installs, transfers, administrator actions, restarts, tests, process control, and temporary qualification cleanup without pausing or asking. Contact the owner only for a genuinely unavoidable identity-bound external-account action, and continue all independent work while that action is pending.
 
 ## Archive
