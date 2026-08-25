@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { MarkdownContent } from "./MarkdownContent";
 
 export const CHAT_FOLLOW_THRESHOLD_PX = 96;
+const CHATGPT_SITES_LIBRARY_ENABLED = true;
 
 export function isChatViewportNearBottom(
   viewport: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
@@ -20,6 +21,15 @@ function comparableSiteUrl(value: string) {
     return url.toString().replace(/\/$/, "").toLocaleLowerCase();
   } catch {
     return value.trim().replace(/\/$/, "").toLocaleLowerCase();
+  }
+}
+
+function isChatGptSiteUrl(value: string) {
+  try {
+    const hostname = new URL(value).hostname.toLocaleLowerCase();
+    return hostname === "chatgpt.site" || hostname.endsWith(".chatgpt.site");
+  } catch {
+    return false;
   }
 }
 
@@ -788,7 +798,7 @@ function ConversationActivityTimeline({ messages, activities, batches, team, con
     }
     if (entry.type === "batch") {
       content.push(<section className={`conversation-batch-card state-${entry.batch.state}`} key={`batch-${entry.batch.id}`} aria-label="Delegated agent progress">
-        <header><strong>{entry.batch.delivery_target === "codex_sites" ? "Building with OpenAI Sites" : "Agent team progress"}</strong><small>{entry.batch.delivery_rationale}</small></header>
+        <header><strong>{entry.batch.delivery_target === "codex_sites" ? "Building with ChatGPT Sites" : "Agent team progress"}</strong><small>{entry.batch.delivery_rationale}</small></header>
         <CoordinatorAgentCard team={team} batch={entry.batch} />
         <CodingAgentCards team={team} conversationId={conversationId} delegationIds={entry.batch.delegation_ids} onView={onView} />
       </section>);
@@ -1050,7 +1060,7 @@ function ConversationDeliveryHandoff({ batches, team, conversationId, onView, on
       {checks > 0 && <span>{checks} check{checks === 1 ? "" : "s"}</span>}
       <span>{hardGateReady ? "Verification passed" : "Verification needs review"}</span>
       <span>{batches.reduce((total, batch) => total + batch.coordinator_turn_count, 0)} Coordinator turn{batches.reduce((total, batch) => total + batch.coordinator_turn_count, 0) === 1 ? "" : "s"}</span>
-      {preview && <span>{preview.strategy === "codex_sites" ? "OpenAI Sites" : "Temporary local preview"} · {preview.state.replaceAll("_", " ")}</span>}
+      {preview && <span>{preview.strategy === "codex_sites" ? "ChatGPT Sites" : "Temporary local preview"} · {preview.state.replaceAll("_", " ")}</span>}
     </div>
     {preview && <div className="conversation-preview-actions">
       {!["failed", "stale"].includes(preview.state) && <button type="button" className="primary" disabled={busy !== null} onClick={() => void runPreviewAction("open")}>Open preview</button>}
@@ -2020,7 +2030,7 @@ export function App() {
         if (active) setCodexSites(response.sites);
       })
       .catch((error) => {
-        if (active) setCodexSitesError(`The OpenAI Sites library could not refresh: ${errorMessage(error)}`);
+        if (active) setCodexSitesError(`The ChatGPT Sites library could not refresh: ${errorMessage(error)}`);
       });
     return () => {
       active = false;
@@ -2268,7 +2278,7 @@ export function App() {
     }
     setSelectedProject(null);
     setSelectedChatId(null);
-    setTaskGoal(`Refine the existing OpenAI Site ${entry.displayName} at ${entry.publicUrl}. Inspect its current Sites project and source, show me a reviewable version, and do not publish changes until they are approved.`);
+    setTaskGoal(`Refine the existing ChatGPT Site ${entry.displayName} at ${entry.publicUrl}. Inspect its current Sites project and source, show me a reviewable version, and do not publish changes until they are approved.`);
     setTaskError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
@@ -2311,7 +2321,7 @@ export function App() {
     } else {
       setSiteBrowserTabs((current) => [...current, {
         id: stableId,
-        title: preview.strategy === "codex_sites" ? "OpenAI Site" : "Local preview",
+        title: preview.strategy === "codex_sites" ? "ChatGPT Site" : "Local preview",
         url: preview.safe_url!
       }]);
     }
@@ -5832,7 +5842,7 @@ export function App() {
   const workspaceConversation = selectedChatId ? conversations.find((conversation) => conversation.id === selectedChatId) : undefined;
   const workspaceProject = projects.find((project) => project.project_id === (workspaceConversation?.project_id ?? workspaceTask?.project_id)) ?? selectedProject ?? undefined;
   const workspaceProjectName = workspaceProject?.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "No project selected";
-  const activeLocalSites = sites.filter((site) => site.state !== "archived");
+  const activeLocalSites = sites.filter((site) => site.state !== "archived" && isChatGptSiteUrl(site.public_url));
   const localSitesByUrl = new Map(activeLocalSites.map((site) => [comparableSiteUrl(site.public_url), site]));
   const accountSiteUrls = new Set(codexSites.map((site) => comparableSiteUrl(site.public_url)));
   const siteLibraryEntries: SiteLibraryEntry[] = [
@@ -6882,12 +6892,12 @@ export function App() {
         </section>
 
         <section className="panel scheduler-panel" id="sites" aria-label="Sites">
-          {!advanced ? <>
+          {CHATGPT_SITES_LIBRARY_ENABLED ? <>
             <div className="section-heading sites-heading">
               <div>
                 <p className="eyebrow">SITES</p>
                 <h2>Sites</h2>
-                <p className="muted">Create a website from an idea or an existing project, review it, and keep refining it in chat.</p>
+                <p className="muted">Create, open, and keep refining your ChatGPT Sites in chat.</p>
               </div>
               <span className="count-badge">{siteLibraryEntries.length}</span>
             </div>
@@ -6923,7 +6933,7 @@ export function App() {
                         <h3>{entry.displayName}</h3>
                         {entry.description && <p>{entry.description}</p>}
                         <span className="site-url">{entry.publicUrl}</span>
-                        <small>{project ? project.root.split(/[\\/]/).filter(Boolean).at(-1) : "OpenAI Sites"}{deployment ? ` · ${deployment.state}` : " · Ready to refine"}</small>
+                        <small>{project ? project.root.split(/[\\/]/).filter(Boolean).at(-1) : "ChatGPT Sites"}{deployment ? ` · ${deployment.state}` : " · Ready to refine"}</small>
                       </div>
                       <div className="site-library-actions">
                         <button className="secondary" type="button" title="Uses MCG's separate, persistent browser profile" onClick={() => void openSiteInApp(entry)}>Open in MCG browser</button>

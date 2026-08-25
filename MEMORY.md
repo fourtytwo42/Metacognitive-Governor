@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - ChatGPT Sites inventory regression corrected
+
+- Context: Owner reported that Sites had regressed to provider-agnostic Web properties and their existing `chatgpt.site` projects were missing from MCG.
+- Decision: Sites is exclusively the ChatGPT Sites account library in both Simple and Advanced modes. Account live URLs must use `chatgpt.site`; transient screenshot assets may use credential-free OpenAI CDN HTTPS URLs. Generic registered hosting properties no longer enter the Sites library.
+- Files: `crates/mcg-runtime/src/lib.rs`, `apps/desktop/src/{App.tsx,App.test.tsx}`, and `MEMORY.md`.
+- Commands/tests: Live owner-scoped Sites inventory verified three active projects. Desktop typecheck passed. Focused Sites Vitest passed 5/5 in Simple and Advanced modes. `cargo fmt --all` and `git diff --check` passed.
+- Result: The runtime now accepts the current `structuredContent.result.items` ChatGPT Sites response while retaining the legacy response shape; the desktop consistently shows the ChatGPT Sites library and removes visible provider-selection controls.
+- Follow-up: Rust regression compilation is pending because the system drive had only about 300 MB free and `target/debug` was already absent. Reclaim safe disk space before running the affected Rust suite or building another portable; preserve `target/release` and existing portable artifacts unless explicitly authorized.
+
 ### 2026-08-25 - Advanced New Chat restored to a normal chat composer
 
 - Context: Owner UAT of v0.4.14 showed the Advanced New Chat surface still rendering obsolete constraints, success-condition, risk, and maximum-cost task fields beside the message composer. Their two-column minimum widths pushed content outside the workspace and caused visible overlap and horizontal scrolling.

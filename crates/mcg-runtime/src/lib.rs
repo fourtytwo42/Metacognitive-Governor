@@ -2647,7 +2647,7 @@ impl AppRuntime {
         if website_request {
             Ok((
                 ConversationDeliveryTarget::CodexSites,
-                "New website requests default to an owner-only OpenAI Sites delivery.".into(),
+                "New website requests default to an owner-only ChatGPT Sites delivery.".into(),
             ))
         } else {
             Ok((
@@ -2809,7 +2809,7 @@ impl AppRuntime {
                 preview.last_error = if batch.delivery_target
                     == ConversationDeliveryTarget::CodexSites
                 {
-                    Some("OpenAI Sites publication did not complete. A validated temporary local preview is available instead.".into())
+                    Some("ChatGPT Sites publication did not complete. A validated temporary local preview is available instead.".into())
                 } else {
                     None
                 };
@@ -3516,7 +3516,7 @@ impl AppRuntime {
             })
             .map(|batch| match batch.delivery_target {
                 ConversationDeliveryTarget::CodexSites => format!(
-                    "Delivery target: OpenAI Sites. Create exactly one source-mutating Coding Agent as the Site owner. Its brief must require a Sites-compatible project, pinned Sites scaffold/instructions, validation, and owner-only delivery. Do not create a second Site-editing Coder. Rationale: {}",
+                    "Delivery target: ChatGPT Sites. Create exactly one source-mutating Coding Agent as the Site owner. Its brief must require a Sites-compatible project, pinned Sites scaffold/instructions, validation, and owner-only delivery. Do not create a second Site-editing Coder. Rationale: {}",
                     batch.delivery_rationale.as_deref().unwrap_or("new website default")
                 ),
                 ConversationDeliveryTarget::CustomProject => format!(
@@ -4410,7 +4410,7 @@ impl AppRuntime {
                 "Report what changed and what you verified in your final response."
             },
             if site_owner {
-                "This is an OpenAI Sites delivery. Use the Sites tools to create/reuse the Site, save the validated version, deploy it privately, and confirm the completed HTTPS deployment before report_result."
+                "This is a ChatGPT Sites delivery. Use the Sites tools to create/reuse the Site, save the validated version, deploy it privately, and confirm the completed HTTPS deployment before report_result."
             } else {
                 ""
             }
@@ -7203,7 +7203,7 @@ impl AppRuntime {
                 });
             if !deployment_complete {
                 return Err(StorageError::InvalidData(
-                    "OpenAI Sites delivery is not complete: deploy the validated version owner-only and confirm its terminal HTTPS deployment before report_result"
+                    "ChatGPT Sites delivery is not complete: deploy the validated version owner-only and confirm its terminal HTTPS deployment before report_result"
                         .into(),
                 )
                 .into());
@@ -12515,7 +12515,7 @@ impl AppRuntime {
         Ok(self.store()?.sites()?)
     }
 
-    /// Lists the account-level OpenAI Sites inventory through Codex's stable MCP tool-call API.
+    /// Lists the account-level ChatGPT Sites inventory through Codex's stable MCP tool-call API.
     /// Signed screenshot URLs remain transient and are never persisted in the MCG registry.
     pub async fn codex_sites_inventory(&self) -> Result<CodexSiteInventory, RuntimeError> {
         // MCP tool calls are thread-scoped, but durable conversation bindings can outlive the
@@ -19938,6 +19938,7 @@ fn normalized_site_url(value: &str) -> Result<String, RuntimeError> {
     Ok(url.to_string())
 }
 
+#[derive(Debug)]
 struct CodexSitesPage {
     sites: Vec<CodexSiteInventoryItem>,
     cursor: Option<String>,
@@ -19949,9 +19950,9 @@ fn parse_codex_sites_page(response: &serde_json::Value) -> Result<CodexSitesPage
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        return Err(ToolError::Unavailable("OpenAI Sites inventory call failed".into()).into());
+        return Err(ToolError::Unavailable("ChatGPT Sites inventory call failed".into()).into());
     }
-    let payload = response
+    let structured_payload = response
         .get("structuredContent")
         .or_else(|| {
             response
@@ -19959,11 +19960,18 @@ fn parse_codex_sites_page(response: &serde_json::Value) -> Result<CodexSitesPage
                 .and_then(|value| value.get("structuredContent"))
         })
         .unwrap_or(response);
+    // Current ChatGPT Sites returns its typed result inside
+    // `structuredContent.result`; keep accepting the legacy unwrapped page so
+    // schema-older packaged clients can still recover their inventory.
+    let payload = structured_payload
+        .get("result")
+        .filter(|value| value.get("items").is_some())
+        .unwrap_or(structured_payload);
     let items = payload
         .get("items")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
-            ToolError::Invalid("OpenAI Sites inventory response did not contain items".into())
+            ToolError::Invalid("ChatGPT Sites inventory response did not contain items".into())
         })?;
     let mut sites = Vec::with_capacity(items.len());
     for item in items {
@@ -19974,16 +19982,16 @@ fn parse_codex_sites_page(response: &serde_json::Value) -> Result<CodexSitesPage
                 .filter(|value| !value.is_empty())
         };
         let id = string("id")
-            .ok_or_else(|| ToolError::Invalid("OpenAI Site identity was missing".into()))?;
+            .ok_or_else(|| ToolError::Invalid("ChatGPT Site identity was missing".into()))?;
         let display_name = string("title")
-            .ok_or_else(|| ToolError::Invalid("OpenAI Site title was missing".into()))?;
+            .ok_or_else(|| ToolError::Invalid("ChatGPT Site title was missing".into()))?;
         let public_url = normalized_account_site_url(
             string("current_live_url")
                 .or_else(|| string("current_preview_url"))
-                .ok_or_else(|| ToolError::Invalid("OpenAI Site live URL was missing".into()))?,
+                .ok_or_else(|| ToolError::Invalid("ChatGPT Site live URL was missing".into()))?,
         )?;
         let screenshot_url = string("screenshot_url")
-            .map(normalized_account_site_url)
+            .map(normalized_account_site_asset_url)
             .transpose()?;
         let created_at = parse_codex_site_timestamp(string("created_at"), "created")?;
         let updated_at = parse_codex_site_timestamp(string("updated_at"), "updated")?;
@@ -20009,10 +20017,29 @@ fn parse_codex_sites_page(response: &serde_json::Value) -> Result<CodexSitesPage
 
 fn normalized_account_site_url(value: &str) -> Result<String, RuntimeError> {
     let url = url::Url::parse(value.trim())
-        .map_err(|error| ToolError::Invalid(format!("invalid OpenAI Site URL: {error}")))?;
+        .map_err(|error| ToolError::Invalid(format!("invalid ChatGPT Site URL: {error}")))?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return Err(ToolError::Invalid(
-            "OpenAI Site URLs must be credential-free HTTPS URLs".into(),
+            "ChatGPT Site URLs must be credential-free HTTPS URLs".into(),
+        )
+        .into());
+    }
+    let hostname = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if hostname != "chatgpt.site" && !hostname.ends_with(".chatgpt.site") {
+        return Err(ToolError::Invalid(
+            "ChatGPT Site live URLs must use the chatgpt.site domain".into(),
+        )
+        .into());
+    }
+    Ok(url.to_string())
+}
+
+fn normalized_account_site_asset_url(value: &str) -> Result<String, RuntimeError> {
+    let url = url::Url::parse(value.trim())
+        .map_err(|error| ToolError::Invalid(format!("invalid ChatGPT Site asset URL: {error}")))?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err(ToolError::Invalid(
+            "ChatGPT Site asset URLs must be credential-free HTTPS URLs".into(),
         )
         .into());
     }
@@ -20027,7 +20054,7 @@ fn parse_codex_site_timestamp(
         .map(|value| value.with_timezone(&Utc))
         .map_err(|error| {
             ToolError::Invalid(format!(
-                "OpenAI Site {label} timestamp was invalid: {error}"
+                "ChatGPT Site {label} timestamp was invalid: {error}"
             ))
             .into()
         })
@@ -23645,17 +23672,19 @@ mod tests {
     fn codex_sites_page_preserves_account_inventory_and_transient_screenshot() {
         let response = serde_json::json!({
             "structuredContent": {
-                "items": [{
-                    "id": "site-1",
-                    "title": "Springfield's Best IT",
-                    "description": "Local IT support",
-                    "current_live_url": "https://springfields-best-it.hendo420.chatgpt.site",
-                    "screenshot_url": "https://example.test/screens/site-1.png?signature=transient",
-                    "status": "live",
-                    "created_at": "2026-08-22T00:00:00Z",
-                    "updated_at": "2026-08-22T01:00:00Z"
-                }],
-                "cursor": "next-page"
+                "result": {
+                    "items": [{
+                        "id": "site-1",
+                        "title": "Springfield's Best IT",
+                        "description": "Local IT support",
+                        "current_live_url": "https://springfields-best-it.hendo420.chatgpt.site",
+                        "screenshot_url": "https://example.test/screens/site-1.png?signature=transient",
+                        "status": "live",
+                        "created_at": "2026-08-22T00:00:00Z",
+                        "updated_at": "2026-08-22T01:00:00Z"
+                    }],
+                    "cursor": "next-page"
+                }
             }
         });
 
@@ -23673,6 +23702,27 @@ mod tests {
             Some("https://example.test/screens/site-1.png?signature=transient")
         );
         assert_eq!(page.sites[0].status, "live");
+    }
+
+    #[test]
+    fn codex_sites_page_rejects_non_chatgpt_site_live_urls() {
+        let response = serde_json::json!({
+            "structuredContent": {
+                "result": {
+                    "items": [{
+                        "id": "site-1",
+                        "title": "Wrong provider",
+                        "current_live_url": "https://example.com",
+                        "status": "active",
+                        "created_at": "2026-08-22T00:00:00Z",
+                        "updated_at": "2026-08-22T01:00:00Z"
+                    }]
+                }
+            }
+        });
+
+        let error = parse_codex_sites_page(&response).expect_err("provider URL must fail");
+        assert!(error.to_string().contains("chatgpt.site"));
     }
 
     #[test]

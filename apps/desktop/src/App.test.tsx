@@ -1764,6 +1764,11 @@ test("simple Sites merges the account inventory, renders thumbnails, and offers 
     accountSites[0].screenshot_url
   );
 
+  await enableAdvancedMode();
+  expect(within(panel).getByRole("heading", { name: "Springfield's Best IT" })).toBeVisible();
+  expect(within(panel).queryByRole("heading", { name: "Web properties" })).not.toBeInTheDocument();
+  expect(within(panel).queryByLabelText("Hosting provider")).not.toBeInTheDocument();
+
   const card = within(panel).getByRole("heading", { name: "Springfield's Best IT" }).closest("article");
   expect(card).not.toBeNull();
   fireEvent.contextMenu(card!);
@@ -1791,7 +1796,7 @@ test("simple Sites makes an account inventory failure visible while preserving l
 
   const panel = await screen.findByRole("region", { name: "Sites" });
   expect(await within(panel).findByRole("alert")).toHaveTextContent(
-    "The OpenAI Sites library could not refresh: Account inventory unavailable"
+    "The ChatGPT Sites library could not refresh: Account inventory unavailable"
   );
 });
 
@@ -1864,7 +1869,7 @@ test("advanced Pull requests separates governed approvals from code review", asy
   expect(within(panel).getByText("Install a requested dependency")).toBeVisible();
 });
 
-test("advanced Sites registers a selected project and records governed health", async () => {
+test("advanced Sites remains the ChatGPT Sites library without generic provider controls", async () => {
   const project = {
     id: "00000000-0000-4000-8000-000000000121",
     project_id: "00000000-0000-4000-8000-000000000122",
@@ -1924,32 +1929,11 @@ test("advanced Sites registers a selected project and records governed health", 
   render(<App />);
   await enableAdvancedMode();
   const panel = await screen.findByRole("region", { name: "Sites" });
-  fireEvent.change(within(panel).getByLabelText("Site project"), { target: { value: project.project_id } });
-  fireEvent.change(within(panel).getByLabelText("Site name"), { target: { value: "Production site" } });
-  fireEvent.change(within(panel).getByLabelText("Public URL"), { target: { value: "https://example.com" } });
-  fireEvent.change(within(panel).getByLabelText("Health URL"), { target: { value: "https://example.com/health" } });
-  fireEvent.change(within(panel).getByLabelText("Hosting provider"), { target: { value: "fixture" } });
-  fireEvent.click(within(panel).getByRole("button", { name: "Register Site" }));
-  await waitFor(() => expect(client.registerSite).toHaveBeenCalledWith(expect.objectContaining({
-    project_id: project.project_id,
-    display_name: "Production site",
-    state: "active"
-  })));
-  fireEvent.click(await within(panel).findByRole("button", { name: "Check health" }));
-  await waitFor(() => expect(client.checkSiteHealth).toHaveBeenCalledWith(site.id, expect.any(String)));
-  expect(await within(panel).findByText("Health: healthy · HTTP 204")).toBeInTheDocument();
-  fireEvent.click(within(panel).getByRole("button", { name: "Enable automatic monitoring" }));
-  await waitFor(() => expect(client.createSiteMonitor).toHaveBeenCalledWith(site.id, expect.objectContaining({
-    interval_seconds: 300,
-    expected_status: 200
-  })));
-  expect(await within(panel).findByText("Automatic checks: every 300 seconds")).toBeInTheDocument();
-  fireEvent.click(within(panel).getByRole("button", { name: "Pause monitoring" }));
-  await waitFor(() => expect(client.updateSite).toHaveBeenCalledWith(site.id, expect.objectContaining({
-    expected_revision: 1,
-    state: "monitoring_paused"
-  })));
-  expect(await within(panel).findByRole("button", { name: "Resume monitoring" })).toBeVisible();
+  expect(within(panel).getByRole("heading", { name: "Sites" })).toBeVisible();
+  expect(within(panel).getByLabelText("Starting point")).toBeVisible();
+  expect(within(panel).queryByRole("heading", { name: "Web properties" })).not.toBeInTheDocument();
+  expect(within(panel).queryByLabelText("Hosting provider")).not.toBeInTheDocument();
+  expect(client.registerSite).not.toHaveBeenCalled();
 });
 
 test("simple Scheduled starts a project-aware setup chat and Advanced retains exact scheduling", async () => {
@@ -2994,7 +2978,7 @@ test("delegated coding work stays inline and Chat presents the final preview wit
   expect(within(activity).queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
   const resultActions = screen.getByRole("region", { name: "Chat Agent result actions" });
   expect(within(resultActions).getByText(/Temporary local preview/)).toBeInTheDocument();
-  expect(within(resultActions).queryByText(/OpenAI Sites ·/)).not.toBeInTheDocument();
+  expect(within(resultActions).queryByText(/ChatGPT Sites ·/)).not.toBeInTheDocument();
   expect(resultActions.compareDocumentPosition(completion) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   fireEvent.click(within(resultActions).getByRole("button", { name: "Open preview" }));
   await waitFor(() => expect(client.startConversationPreview).toHaveBeenCalledWith(
