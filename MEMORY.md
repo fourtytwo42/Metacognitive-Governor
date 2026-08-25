@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - Light-theme contrast normalized across desktop surfaces
+
+- Context: Owner reported that text was difficult to read throughout the app in Light mode. The root light palette was usable, but dark-first components still applied pale hardcoded grays and dark surface colors after theme selection.
+- Decision: Add semantic primary, strong, muted, placeholder, success, warning, danger, and link tokens with WCAG-AA light values; normalize recurring navigation, chat, Sites, settings, tasks, pull-request, browser, terminal, menu, card, and status roles against those tokens; preserve status meaning and dark-theme appearance.
+- Files: `apps/desktop/src/styles.css`, `tests/e2e/desktop-smoke.spec.ts`, and `MEMORY.md`.
+- Commands/tests: Desktop typecheck and production build passed; focused Playwright appearance/settings regression passed. Measured light-surface contrast ratios: primary 16.10:1, muted 7.22:1, placeholder 4.98:1, success 6.58:1, warning 6.99:1, danger 6.57:1, and link 7.29:1.
+- Result: Light mode now uses readable text and control contrast across the application, with a regression gate requiring at least 4.5:1 for primary, muted, placeholder, and rendered settings copy.
+- Follow-up: Include this source fix in the next portable version and perform owner-native visual UAT of chat, Sites, Settings, Pull Requests, Agents, and the right-side browser in Light mode.
+
 ### 2026-08-25 - Windows portable v0.4.16 built after disk cleanup
 
 - Context: Owner reclaimed disk space and requested a retry of the portable containing the ChatGPT Sites restoration and bottom-anchored chat composer.

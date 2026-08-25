@@ -479,6 +479,42 @@ test("account menu and Settings follow the compact Codex information architectur
   await expect(page.getByRole("group", { name: "Theme" })).toBeVisible();
   await page.getByRole("button", { name: "Light" }).click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
+  const lightThemeContrast = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const parseRgb = (value: string) => {
+      const trimmed = value.trim();
+      const channels = trimmed.startsWith("#")
+        ? (trimmed.length === 4
+          ? [...trimmed.slice(1)].map((channel) => Number.parseInt(channel + channel, 16))
+          : trimmed.slice(1).match(/../g)?.slice(0, 3).map((channel) => Number.parseInt(channel, 16)) ?? [])
+        : trimmed.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
+      return channels.map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+    };
+    const ratio = (foreground: string, background: string) => {
+      const [red, green, blue] = parseRgb(foreground);
+      const [backgroundRed, backgroundGreen, backgroundBlue] = parseRgb(background);
+      const foregroundLuminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      const backgroundLuminance = 0.2126 * backgroundRed + 0.7152 * backgroundGreen + 0.0722 * backgroundBlue;
+      return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05)
+        / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+    };
+    const background = root.getPropertyValue("--mcg-surface").trim();
+    return {
+      primary: ratio(root.getPropertyValue("--mcg-text").trim(), background),
+      muted: ratio(root.getPropertyValue("--mcg-muted").trim(), background),
+      placeholder: ratio(root.getPropertyValue("--mcg-placeholder").trim(), background),
+      settingsCopy: ratio(getComputedStyle(document.querySelector(".settings-card p")!).color, background),
+    };
+  });
+  expect(lightThemeContrast.primary).toBeGreaterThanOrEqual(4.5);
+  expect(lightThemeContrast.muted).toBeGreaterThanOrEqual(4.5);
+  expect(lightThemeContrast.placeholder).toBeGreaterThanOrEqual(4.5);
+  expect(lightThemeContrast.settingsCopy).toBeGreaterThanOrEqual(4.5);
   await page.getByRole("button", { name: "Dark" }).click();
 
   await settings.getByRole("button", { name: "Keyboard shortcuts" }).click();

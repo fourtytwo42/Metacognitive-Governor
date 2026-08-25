@@ -381,7 +381,15 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
   --mcg-surface: #1f1f1f;
   --mcg-surface-raised: #282828;
   --mcg-border: #353535;
+  --mcg-text: #e7e7e7;
+  --mcg-text-strong: #f4f4f4;
   --mcg-muted: #a5a5a5;
+  --mcg-muted-subtle: #8f8f8f;
+  --mcg-placeholder: #8f8f8f;
+  --mcg-success: #8cdea4;
+  --mcg-warning: #f6bf54;
+  --mcg-danger: #ff9b9b;
+  --mcg-link: #65dccc;
   --mcg-accent: #f07a32;
 }
 
@@ -394,7 +402,15 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
   --mcg-surface: #ffffff;
   --mcg-surface-raised: #f1f1f1;
   --mcg-border: #d9d9d9;
-  --mcg-muted: #666666;
+  --mcg-text: #202124;
+  --mcg-text-strong: #111418;
+  --mcg-muted: #505861;
+  --mcg-muted-subtle: #5f6872;
+  --mcg-placeholder: #66717c;
+  --mcg-success: #176b35;
+  --mcg-warning: #7a5100;
+  --mcg-danger: #b42318;
+  --mcg-link: #075f70;
 }
 
 * { scrollbar-color: #4a4a4a transparent; scrollbar-width: thin; }
@@ -409,7 +425,15 @@ input:focus, select:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c8
     --mcg-surface: #ffffff;
     --mcg-surface-raised: #f1f1f1;
     --mcg-border: #d9d9d9;
-    --mcg-muted: #666666;
+    --mcg-text: #202124;
+    --mcg-text-strong: #111418;
+    --mcg-muted: #505861;
+    --mcg-muted-subtle: #5f6872;
+    --mcg-placeholder: #66717c;
+    --mcg-success: #176b35;
+    --mcg-warning: #7a5100;
+    --mcg-danger: #b42318;
+    --mcg-link: #075f70;
   }
 }
 
@@ -1904,4 +1928,262 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
   bottom: auto;
   padding: 10px 0 16px;
   background: linear-gradient(180deg, transparent, var(--mcg-bg) 12px);
+}
+
+/* Light theme contrast pass.
+   The consumer shell grew from dark-first surfaces, so every recurring text role
+   is normalized here instead of allowing pale dark-theme grays to leak into the
+   light palette. Keep semantic status colors separate from ordinary copy. */
+:root[data-theme="light"] body,
+:root[data-theme="light"] button,
+:root[data-theme="light"] input,
+:root[data-theme="light"] select,
+:root[data-theme="light"] textarea { color: var(--mcg-text); }
+:root[data-theme="light"] ::placeholder { color: var(--mcg-placeholder); opacity: 1; }
+
+:root[data-theme="light"] .brand,
+:root[data-theme="light"] .topbar h1,
+:root[data-theme="light"] .project-tree-name,
+:root[data-theme="light"] .owner-menu-button,
+:root[data-theme="light"] .owner-menu-identity strong,
+:root[data-theme="light"] .desktop-menu-popover button,
+:root[data-theme="light"] .owner-menu > button,
+:root[data-theme="light"] .chat-context-menu,
+:root[data-theme="light"] .task-card h3,
+:root[data-theme="light"] .project-card h3,
+:root[data-theme="light"] .memory-card h3,
+:root[data-theme="light"] .provider-card h3,
+:root[data-theme="light"] .connection-card h3,
+:root[data-theme="light"] .plugin-card h3,
+:root[data-theme="light"] .site-library-copy h3,
+:root[data-theme="light"] .site-library-copy .site-url,
+:root[data-theme="light"] .site-empty-state strong,
+:root[data-theme="light"] .settings-nav button,
+:root[data-theme="light"] .settings-empty-card strong,
+:root[data-theme="light"] .settings-value-field,
+:root[data-theme="light"] .pull-request-row,
+:root[data-theme="light"] .pull-request-list-empty strong,
+:root[data-theme="light"] .pull-request-detail-empty strong,
+:root[data-theme="light"] .pull-request-detail-card h2,
+:root[data-theme="light"] .browser-start-page strong,
+:root[data-theme="light"] .side-project-root,
+:root[data-theme="light"] .terminal-welcome strong,
+:root[data-theme="light"] .terminal-entry pre { color: var(--mcg-text-strong); }
+
+:root[data-theme="light"] .muted,
+:root[data-theme="light"] .menu-shortcut,
+:root[data-theme="light"] .global-folder-list small,
+:root[data-theme="light"] .project-card p,
+:root[data-theme="light"] .project-card small,
+:root[data-theme="light"] .memory-card small,
+:root[data-theme="light"] .provider-card p,
+:root[data-theme="light"] .provider-card small,
+:root[data-theme="light"] .provider-state,
+:root[data-theme="light"] .form-note,
+:root[data-theme="light"] .sidebar-section h2,
+:root[data-theme="light"] .sidebar-section-toggle,
+:root[data-theme="light"] .sidebar-section > p,
+:root[data-theme="light"] .project-tree-item > p,
+:root[data-theme="light"] .archived-project-row .project-tree-name,
+:root[data-theme="light"] .owner-menu-button small,
+:root[data-theme="light"] .owner-menu-identity small,
+:root[data-theme="light"] .owner-menu > button small,
+:root[data-theme="light"] .topbar-subtitle,
+:root[data-theme="light"] .eyebrow,
+:root[data-theme="light"] .settings-back,
+:root[data-theme="light"] .settings-nav h3,
+:root[data-theme="light"] .settings-no-results,
+:root[data-theme="light"] .settings-mode-row small,
+:root[data-theme="light"] .settings-card p,
+:root[data-theme="light"] .settings-card small,
+:root[data-theme="light"] .settings-segmented button,
+:root[data-theme="light"] .settings-segmented button span,
+:root[data-theme="light"] .scheduled-chat-card p,
+:root[data-theme="light"] .scheduled-local-note,
+:root[data-theme="light"] .site-start-card p,
+:root[data-theme="light"] .site-library-copy p,
+:root[data-theme="light"] .site-library-copy small,
+:root[data-theme="light"] .site-empty-state,
+:root[data-theme="light"] .plugin-directory-note,
+:root[data-theme="light"] .plugin-directory-card-heading p,
+:root[data-theme="light"] .plugin-directory-description,
+:root[data-theme="light"] .plugin-simple-access p,
+:root[data-theme="light"] .plugin-simple-access li,
+:root[data-theme="light"] .code-review-intro p,
+:root[data-theme="light"] .integration-note,
+:root[data-theme="light"] .pull-request-tabs button,
+:root[data-theme="light"] .pull-request-filter-popover strong,
+:root[data-theme="light"] .pull-request-filter-popover button span,
+:root[data-theme="light"] .pull-request-group-heading,
+:root[data-theme="light"] .pull-request-row-copy small,
+:root[data-theme="light"] .pull-request-row time,
+:root[data-theme="light"] .pull-request-list-empty,
+:root[data-theme="light"] .pull-request-sync-note,
+:root[data-theme="light"] .pull-request-detail-empty,
+:root[data-theme="light"] .pull-request-detail-card header p,
+:root[data-theme="light"] .pull-request-detail-card > p,
+:root[data-theme="light"] .pull-request-detail-summary span,
+:root[data-theme="light"] .runtime-dot,
+:root[data-theme="light"] .topbar-title h1 > span,
+:root[data-theme="light"] .workspace-popover small,
+:root[data-theme="light"] .workspace-popover p,
+:root[data-theme="light"] .workspace-popover-heading,
+:root[data-theme="light"] .open-in-glyph,
+:root[data-theme="light"] .workspace-action-status span,
+:root[data-theme="light"] .workspace-panel-empty,
+:root[data-theme="light"] .browser-tab,
+:root[data-theme="light"] .browser-toolbar button,
+:root[data-theme="light"] .browser-start-page,
+:root[data-theme="light"] .side-event-list div,
+:root[data-theme="light"] .side-event-list time,
+:root[data-theme="light"] .terminal-welcome,
+:root[data-theme="light"] .terminal-running { color: var(--mcg-muted); }
+
+:root[data-theme="light"] .nav-item,
+:root[data-theme="light"] .chat-link,
+:root[data-theme="light"] .project-tree-item > button,
+:root[data-theme="light"] .chrome-button,
+:root[data-theme="light"] .desktop-menu > button,
+:root[data-theme="light"] .window-controls button,
+:root[data-theme="light"] .sidebar-brand-actions button,
+:root[data-theme="light"] .chat-row-action,
+:root[data-theme="light"] .project-action,
+:root[data-theme="light"] .settings-feature-icon,
+:root[data-theme="light"] .settings-app-icon,
+:root[data-theme="light"] .workspace-mode-toggle,
+:root[data-theme="light"] .workspace-icon-button,
+:root[data-theme="light"] .workspace-panel-tabs button,
+:root[data-theme="light"] .side-panel-heading button { color: var(--mcg-muted); }
+
+:root[data-theme="light"] .nav-item:hover,
+:root[data-theme="light"] .nav-item.active,
+:root[data-theme="light"] .chat-link:hover,
+:root[data-theme="light"] .chat-link.active,
+:root[data-theme="light"] .chat-row:hover,
+:root[data-theme="light"] .chat-row.active,
+:root[data-theme="light"] .project-tree-item > button:hover,
+:root[data-theme="light"] .project-tree-heading:hover,
+:root[data-theme="light"] .chrome-button:hover,
+:root[data-theme="light"] .desktop-menu > button:hover,
+:root[data-theme="light"] .desktop-menu > button[aria-expanded="true"],
+:root[data-theme="light"] .sidebar-brand-actions button[aria-pressed="true"],
+:root[data-theme="light"] .chat-row-action:hover,
+:root[data-theme="light"] .project-action:hover,
+:root[data-theme="light"] .settings-back:hover,
+:root[data-theme="light"] .settings-nav button:hover,
+:root[data-theme="light"] .settings-nav button.active,
+:root[data-theme="light"] .pull-request-tabs button:hover,
+:root[data-theme="light"] .pull-request-tabs button.active,
+:root[data-theme="light"] .pull-request-filter:hover,
+:root[data-theme="light"] .pull-request-filter.active,
+:root[data-theme="light"] .workspace-mode-toggle:hover,
+:root[data-theme="light"] .workspace-icon-button:hover,
+:root[data-theme="light"] .workspace-icon-button.active,
+:root[data-theme="light"] .workspace-panel-tabs button.active,
+:root[data-theme="light"] .side-panel-heading button:hover,
+:root[data-theme="light"] .browser-toolbar button:hover:not(:disabled) { color: var(--mcg-text-strong); background: #e4e7eb; }
+
+:root[data-theme="light"] .desktop-menubar,
+:root[data-theme="light"] .sidebar,
+:root[data-theme="light"] .pull-request-list-pane { background: var(--mcg-sidebar); }
+:root[data-theme="light"] .desktop-menu-popover,
+:root[data-theme="light"] .owner-menu,
+:root[data-theme="light"] .chat-context-menu,
+:root[data-theme="light"] .workspace-popover,
+:root[data-theme="light"] .pull-request-filter-popover,
+:root[data-theme="light"] .browser-tab.active { border-color: var(--mcg-border); color: var(--mcg-text); background: var(--mcg-surface); box-shadow: 0 16px 40px #0002; }
+:root[data-theme="light"] .panel,
+:root[data-theme="light"] .task-card,
+:root[data-theme="light"] .project-card,
+:root[data-theme="light"] .memory-card,
+:root[data-theme="light"] .provider-card,
+:root[data-theme="light"] .connection-card,
+:root[data-theme="light"] .plugin-card,
+:root[data-theme="light"] .schedule-card,
+:root[data-theme="light"] .scheduler-notification,
+:root[data-theme="light"] .plugin-directory-card,
+:root[data-theme="light"] .code-review-start-card,
+:root[data-theme="light"] .site-start-card,
+:root[data-theme="light"] .site-library-card { border-color: var(--mcg-border); background: var(--mcg-surface); }
+:root[data-theme="light"] input,
+:root[data-theme="light"] select,
+:root[data-theme="light"] textarea,
+:root[data-theme="light"] .oauth-card,
+:root[data-theme="light"] .provider-setup,
+:root[data-theme="light"] .advanced-fields,
+:root[data-theme="light"] .pull-request-search input,
+:root[data-theme="light"] .browser-toolbar input { border-color: #b8c0c8; color: var(--mcg-text); background: #fff; }
+:root[data-theme="light"] input:focus,
+:root[data-theme="light"] select:focus,
+:root[data-theme="light"] textarea:focus,
+:root[data-theme="light"] .browser-toolbar input:focus { border-color: #4f7ea8; box-shadow: 0 0 0 3px #4f7ea826; }
+:root[data-theme="light"] .secondary,
+:root[data-theme="light"] .count-badge,
+:root[data-theme="light"] .pull-request-filter,
+:root[data-theme="light"] .pull-request-list-empty button,
+:root[data-theme="light"] .plugin-component-chips span,
+:root[data-theme="light"] .workspace-mode-toggle,
+:root[data-theme="light"] .open-in-button { border-color: var(--mcg-border); color: var(--mcg-text); background: var(--mcg-surface-raised); }
+:root[data-theme="light"] .secondary:hover { background: #e2e6ea; }
+
+:root[data-theme="light"] .task-state { color: var(--mcg-muted); }
+:root[data-theme="light"] .status-chip { color: var(--mcg-danger); }
+:root[data-theme="light"] .status-chip.status-enabled,
+:root[data-theme="light"] .read-only-note,
+:root[data-theme="light"] .tool-result,
+:root[data-theme="light"] .state-completed,
+:root[data-theme="light"] .agent-state.state-running,
+:root[data-theme="light"] .agent-state.state-ready,
+:root[data-theme="light"] .agent-state.state-completed { color: var(--mcg-success); }
+:root[data-theme="light"] .state-waiting_for_approval,
+:root[data-theme="light"] .state-blocked { color: var(--mcg-warning); }
+:root[data-theme="light"] .error-message,
+:root[data-theme="light"] .form-error,
+:root[data-theme="light"] .state-failed,
+:root[data-theme="light"] .state-cancelled,
+:root[data-theme="light"] .result-failed,
+:root[data-theme="light"] .result-denied,
+:root[data-theme="light"] .result-timed_out,
+:root[data-theme="light"] .result-cancelled,
+:root[data-theme="light"] .runtime-dot.status-error,
+:root[data-theme="light"] .workspace-panel-error,
+:root[data-theme="light"] .terminal-entry p,
+:root[data-theme="light"] .agent-state.state-failed,
+:root[data-theme="light"] .agent-state.state-cancelled { color: var(--mcg-danger); }
+:root[data-theme="light"] .link-button,
+:root[data-theme="light"] .device-login summary,
+:root[data-theme="light"] .advanced-details summary,
+:root[data-theme="light"] .task-card code,
+:root[data-theme="light"] .provider-card code,
+:root[data-theme="light"] .connection-card code,
+:root[data-theme="light"] .artifact-evidence code { color: var(--mcg-link); }
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] body,
+  :root[data-theme="system"] button,
+  :root[data-theme="system"] input,
+  :root[data-theme="system"] select,
+  :root[data-theme="system"] textarea { color: var(--mcg-text); }
+  :root[data-theme="system"] ::placeholder { color: var(--mcg-placeholder); opacity: 1; }
+  :root[data-theme="system"] .sidebar,
+  :root[data-theme="system"] .pull-request-list-pane { background: var(--mcg-sidebar); }
+  :root[data-theme="system"] .panel,
+  :root[data-theme="system"] .task-card,
+  :root[data-theme="system"] .project-card,
+  :root[data-theme="system"] .memory-card,
+  :root[data-theme="system"] .provider-card,
+  :root[data-theme="system"] .connection-card,
+  :root[data-theme="system"] .plugin-card,
+  :root[data-theme="system"] .schedule-card,
+  :root[data-theme="system"] .scheduler-notification,
+  :root[data-theme="system"] .plugin-directory-card,
+  :root[data-theme="system"] .code-review-start-card,
+  :root[data-theme="system"] .site-start-card,
+  :root[data-theme="system"] .site-library-card { border-color: var(--mcg-border); background: var(--mcg-surface); }
+  :root[data-theme="system"] .muted,
+  :root[data-theme="system"] .topbar-subtitle,
+  :root[data-theme="system"] .settings-card p,
+  :root[data-theme="system"] .settings-card small,
+  :root[data-theme="system"] .site-library-copy p,
+  :root[data-theme="system"] .site-library-copy small { color: var(--mcg-muted); }
 }
