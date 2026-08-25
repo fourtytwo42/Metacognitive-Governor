@@ -1537,6 +1537,7 @@ export function App() {
   const terminalInputRef = useRef<HTMLInputElement>(null);
   const terminalOutputRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
+  const chatViewportRef = useRef<HTMLDivElement>(null);
   const chatShouldFollowRef = useRef(true);
   const queueDispatchingRef = useRef<string | null>(null);
   const [activeSurface, setActiveSurface] = useState("tasks");
@@ -5720,29 +5721,26 @@ export function App() {
     });
   }, [activeSurface, selectedChatId, conversationIsActive, visibleQueuedMessages, conversations, queueDispatchErrorId]);
 
-  const workspaceOwnsChatScroll = workspaceSidePanelOpen || workspaceBottomPanelOpen;
-
   useEffect(() => {
     if (activeSurface !== "threads" || !visibleConversation) return;
     chatShouldFollowRef.current = true;
-    const scrollTarget = workspaceOwnsChatScroll ? workspaceRef.current : window;
-    const viewport = workspaceOwnsChatScroll ? workspaceRef.current : document.scrollingElement;
-    if (!scrollTarget || !viewport) return;
+    const viewport = chatViewportRef.current;
+    if (!viewport) return;
     const trackChatPosition = () => {
       chatShouldFollowRef.current = isChatViewportNearBottom(viewport);
     };
-    scrollTarget.addEventListener("scroll", trackChatPosition, { passive: true });
-    return () => scrollTarget.removeEventListener("scroll", trackChatPosition);
-  }, [activeSurface, selectedChatId, visibleConversation?.conversation.id, workspaceOwnsChatScroll]);
+    viewport.addEventListener("scroll", trackChatPosition, { passive: true });
+    return () => viewport.removeEventListener("scroll", trackChatPosition);
+  }, [activeSurface, selectedChatId, visibleConversation?.conversation.id]);
 
   useEffect(() => {
     if (activeSurface !== "threads" || !visibleConversation || !chatShouldFollowRef.current) return;
     const frame = window.requestAnimationFrame(() => {
-      const viewport = workspaceOwnsChatScroll ? workspaceRef.current : document.scrollingElement;
+      const viewport = chatViewportRef.current;
       if (viewport && chatShouldFollowRef.current) viewport.scrollTop = viewport.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSurface, selectedChatId, visibleConversation, workspaceOwnsChatScroll]);
+  }, [activeSurface, selectedChatId, visibleConversation]);
 
   const activeConversationApproval = activeConversationTurn?.task_id
     ? approvals.find((approval) => approval.task_id === activeConversationTurn.task_id)
@@ -6221,7 +6219,7 @@ export function App() {
 
         {(advanced || activeSurface === "threads" || (activeSurface === "tasks" && Boolean(workspaceTask))) && <section className="panel task-panel" hidden={activeSurface !== "threads" && !(activeSurface === "tasks" && Boolean(workspaceTask))} aria-label={activeSurface === "threads" ? "Chat conversation" : "Tasks"}>
           {activeSurface === "threads" ? <div className="chat-conversation">
-            <div className="chat-message-list">
+            <div className="chat-message-list" ref={chatViewportRef}>
               {!visibleConversation || (visibleConversation.messages.length === 0 && visibleConversation.turns.length === 0)
                 ? <p className="empty-state">This conversation has no messages yet.</p>
                 : visibleConversation.turns.map((turn) => <ConversationTurnTranscript

@@ -3204,11 +3204,16 @@ test("conversation streaming follows near the bottom and pauses after the user s
   client.getConversation.mockResolvedValue(streamedView);
   client.sendConversationMessage.mockReturnValue(new Promise((resolve) => { finishSend = resolve; }));
   const { container } = render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Toggle side panel" }));
-  const workspace = container.querySelector<HTMLElement>(".workspace");
-  expect(workspace).not.toBeNull();
-  let scrollTop = 0;
-  Object.defineProperties(workspace!, {
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Explain streaming" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(await screen.findByText("Here is a partial", {}, { timeout: 5000 })).toBeInTheDocument();
+  expect(screen.getByText(/^Responding ·/)).toBeInTheDocument();
+  const chatViewport = container.querySelector<HTMLElement>(".chat-message-list");
+  expect(chatViewport).not.toBeNull();
+  let scrollTop = 450;
+  Object.defineProperties(chatViewport!, {
     scrollHeight: { configurable: true, get: () => 1_000 },
     clientHeight: { configurable: true, get: () => 500 },
     scrollTop: {
@@ -3217,16 +3222,16 @@ test("conversation streaming follows near the bottom and pauses after the user s
       set: (value: number) => { scrollTop = Math.min(value, 500); }
     }
   });
-
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Explain streaming" } });
-  fireEvent.click(screen.getByRole("button", { name: "Send" }));
-
-  expect(await screen.findByText("Here is a partial", {}, { timeout: 5000 })).toBeInTheDocument();
-  expect(screen.getByText(/^Responding ·/)).toBeInTheDocument();
+  fireEvent.scroll(chatViewport!);
+  client.getConversation.mockResolvedValue({
+    ...streamedView,
+    messages: [{ ...streamedView.messages[0] }, { ...streamedView.messages[1], content: "A near-bottom partial response" }]
+  });
+  expect(await screen.findByText("A near-bottom partial response", {}, { timeout: 5000 })).toBeInTheDocument();
   await waitFor(() => expect(scrollTop).toBe(500));
 
   scrollTop = 250;
-  fireEvent.scroll(workspace!);
+  fireEvent.scroll(chatViewport!);
   client.getConversation.mockResolvedValue({
     ...streamedView,
     messages: [{ ...streamedView.messages[0] }, { ...streamedView.messages[1], content: "A second partial response" }]
@@ -3235,7 +3240,7 @@ test("conversation streaming follows near the bottom and pauses after the user s
   expect(scrollTop).toBe(250);
 
   scrollTop = 450;
-  fireEvent.scroll(workspace!);
+  fireEvent.scroll(chatViewport!);
   client.getConversation.mockResolvedValue({
     ...streamedView,
     messages: [{ ...streamedView.messages[0] }, { ...streamedView.messages[1], content: "The latest partial response" }]

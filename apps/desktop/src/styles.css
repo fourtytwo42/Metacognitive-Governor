@@ -1856,3 +1856,52 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
   .workspace-toolbar .workspace-icon-button:first-of-type { display: none; }
   .pinned-summary-card dl { grid-template-columns: 1fr; }
 }
+
+/* Conversations own a fixed-height viewport: only the transcript scrolls, while
+   the composer remains in the bottom row like Codex and ChatGPT. */
+.app-shell[data-active-surface="threads"] {
+  height: calc(100vh - var(--desktop-chrome-height));
+  min-height: 0;
+  overflow: hidden;
+}
+.app-shell[data-active-surface="threads"] .workspace {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+.app-shell[data-active-surface="threads"] .workspace > .topbar,
+.app-shell[data-active-surface="threads"] .workspace > .pinned-summary-card,
+.app-shell[data-active-surface="threads"] .workspace > .workspace-action-status {
+  flex: 0 0 auto;
+}
+.app-shell[data-active-surface="threads"] .workspace > .task-panel {
+  display: grid;
+  width: min(100%, 900px);
+  min-height: 0;
+  flex: 1 1 auto;
+  margin: 0 auto;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+.app-shell[data-active-surface="threads"] .chat-conversation {
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0;
+}
+.app-shell[data-active-surface="threads"] .chat-message-list {
+  min-height: 0;
+  padding: 24px 0 28px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.app-shell[data-active-surface="threads"] .chat-composer-stack {
+  position: relative;
+  bottom: auto;
+  padding: 10px 0 16px;
+  background: linear-gradient(180deg, transparent, var(--mcg-bg) 12px);
+}

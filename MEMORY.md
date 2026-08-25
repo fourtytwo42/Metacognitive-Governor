@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - Chat composer anchored to the workspace bottom
+
+- Context: Owner requested that the conversation input remain attached to the bottom of the page instead of moving with transcript length or page scrolling.
+- Decision: Conversation workspaces now occupy the available desktop viewport, the transcript is the sole vertical scroll container, and the composer is a non-scrolling bottom grid row. Auto-follow observes that transcript viewport consistently whether docked side/bottom panels are open or closed.
+- Files: `apps/desktop/src/{App.tsx,App.test.tsx,styles.css}` and `MEMORY.md`.
+- Commands/tests: Desktop typecheck and production build passed; focused workspace-panel and streaming/scroll Vitest passed 2/2; `git diff --check` passed.
+- Result: The composer remains anchored at the bottom while long and streaming conversations scroll independently, preserving pause/resume auto-follow behavior.
+- Follow-up: Confirm the anchored composer visually in owner-native UAT at full width, with the right panel open, and with the terminal panel open.
+
 ### 2026-08-25 - ChatGPT Sites inventory regression corrected
 
 - Context: Owner reported that Sites had regressed to provider-agnostic Web properties and their existing `chatgpt.site` projects were missing from MCG.
