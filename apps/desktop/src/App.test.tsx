@@ -102,6 +102,12 @@ const client = vi.hoisted(() => ({
   loadManagedProjectMemory: vi.fn(),
   listOrganizations: vi.fn(),
   getGovernorOverview: vi.fn(),
+  getGovernorControlPolicy: vi.fn(),
+  listGovernorProposals: vi.fn(),
+  getGovernorProposal: vi.fn(),
+  decideGovernorProposal: vi.fn(),
+  requestGovernorImplementation: vi.fn(),
+  listManagedWorktrees: vi.fn(),
   listAgentRuns: vi.fn(),
   setGlobalOrganizationAssignment: vi.fn(),
   setProjectOrganizationAssignment: vi.fn(),
@@ -278,6 +284,12 @@ vi.mock("./desktop-client", () => ({
   loadManagedProjectMemory: client.loadManagedProjectMemory,
   listOrganizations: client.listOrganizations,
   getGovernorOverview: client.getGovernorOverview,
+  getGovernorControlPolicy: client.getGovernorControlPolicy,
+  listGovernorProposals: client.listGovernorProposals,
+  getGovernorProposal: client.getGovernorProposal,
+  decideGovernorProposal: client.decideGovernorProposal,
+  requestGovernorImplementation: client.requestGovernorImplementation,
+  listManagedWorktrees: client.listManagedWorktrees,
   listAgentRuns: client.listAgentRuns,
   setGlobalOrganizationAssignment: client.setGlobalOrganizationAssignment,
   setProjectOrganizationAssignment: client.setProjectOrganizationAssignment,
@@ -365,7 +377,19 @@ vi.mock("./desktop-client", () => ({
   runTerminalCommand: client.runTerminalCommand
 }));
 
-import { App, conversationTeamHasPendingDelivery, isChatViewportNearBottom } from "./App";
+import { App, conversationTeamHasPendingDelivery, effectiveDelegationAttempts, isChatViewportNearBottom } from "./App";
+
+test("retry lineage counts only the latest effective coding attempt", () => {
+  const attempts = [
+    { id: "failed-attempt", state: "failed" },
+    { id: "successful-retry", state: "completed", retry_of_id: "failed-attempt" },
+    { id: "independent-agent", state: "completed" }
+  ];
+  expect(effectiveDelegationAttempts(attempts as never)).toEqual([
+    attempts[1],
+    attempts[2]
+  ]);
+});
 
 beforeEach(() => {
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -460,6 +484,12 @@ beforeEach(() => {
   client.loadManagedProjectMemory.mockReset();
   client.listOrganizations.mockReset();
   client.getGovernorOverview.mockReset();
+  client.getGovernorControlPolicy.mockReset();
+  client.listGovernorProposals.mockReset();
+  client.getGovernorProposal.mockReset();
+  client.decideGovernorProposal.mockReset();
+  client.requestGovernorImplementation.mockReset();
+  client.listManagedWorktrees.mockReset();
   client.listAgentRuns.mockReset();
   client.setGlobalOrganizationAssignment.mockReset();
   client.setProjectOrganizationAssignment.mockReset();
@@ -696,6 +726,17 @@ beforeEach(() => {
     recent_runs: 0,
     subsystems: []
   });
+  client.getGovernorControlPolicy.mockResolvedValue({
+    schema_version: 1,
+    governor_model_enabled: false,
+    requires_owner_approval: true,
+    allowed_actions: ["propose_prompt_policy_change", "request_governed_implementation"],
+    denied_actions: ["mutate_source_directly"],
+    protected_surfaces: ["authority_boundary"],
+    implementation_path: "Chat Agent to Coordinator to Coding Agent"
+  });
+  client.listGovernorProposals.mockResolvedValue({ proposals: [] });
+  client.listManagedWorktrees.mockResolvedValue({ worktrees: [] });
   client.listAgentRuns.mockResolvedValue({ runs: [] });
   client.listOrganizationPublishers.mockResolvedValue([]);
   client.listOrganizationShareReviews.mockResolvedValue([]);
@@ -2263,6 +2304,42 @@ test("advanced mode reveals runtime details", async () => {
   expect(screen.queryByRole("heading", { name: "Runtime status" })).not.toBeInTheDocument();
   await enableAdvancedMode();
   expect(screen.getByRole("heading", { name: "Runtime status" })).toBeInTheDocument();
+});
+
+test("advanced Agents exposes disabled Governor guardrails and owner-reviewed proposals", async () => {
+  const proposal = {
+    schema_version: 1,
+    id: "governor-proposal-1",
+    organization_id: "00000000-0000-4000-8000-000000000901",
+    baseline_revision_id: "00000000-0000-4000-8000-000000000902",
+    target: "routing_policy",
+    risk: "moderate",
+    state: "awaiting_owner_approval",
+    title: "Reduce redundant Coordinator wakes",
+    diagnosis: "Routine progress events wake the Coordinator too often.",
+    proposed_change: "Deduplicate routine progress and retain terminal callbacks.",
+    expected_benefits: ["Lower token usage"],
+    expected_risks: ["A missed wake could delay delivery"],
+    success_criteria: ["Exactly one final Chat callback"],
+    observation_ids: [],
+    validation_findings: ["Authority boundaries remain unchanged"],
+    expires_at: "2026-09-25T00:00:00Z",
+    created_at: "2026-08-25T00:00:00Z",
+    updated_at: "2026-08-25T00:00:00Z"
+  };
+  client.listGovernorProposals.mockResolvedValue({ proposals: [proposal] });
+  client.decideGovernorProposal.mockResolvedValue({ proposal: { ...proposal, state: "approved" }, replayed: false });
+  render(<App />);
+
+  await enableAdvancedMode();
+  fireEvent.click(await screen.findByRole("button", { name: "Agents overview" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Governor" }));
+
+  expect(screen.getByRole("heading", { name: "Governor guardrails" })).toBeInTheDocument();
+  expect(screen.getByText("disabled")).toBeInTheDocument();
+  expect(screen.getByText("Reduce redundant Coordinator wakes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+  await waitFor(() => expect(client.decideGovernorProposal).toHaveBeenCalledWith("governor-proposal-1", true));
 });
 
 test("mode persistence restores keyboard focus after the temporarily disabled control returns", async () => {

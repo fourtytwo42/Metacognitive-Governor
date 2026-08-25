@@ -74,6 +74,8 @@ import {
   listOrganizationShareReviews,
   listOrganizations,
   listAgentRuns,
+  listGovernorProposals,
+  listManagedWorktrees,
   listPlugins,
   listExperiments,
   listSupervisionObservations,
@@ -114,6 +116,7 @@ import {
   getSiteMonitor,
   getLocalServiceStatus,
   getGovernorOverview,
+  getGovernorControlPolicy,
   getConversation,
   updateConversation,
   getCodexModels,
@@ -164,6 +167,8 @@ import {
   type OrganizationRevisionPreview,
   type AgentRunView,
   type GovernorOverview,
+  type GovernorControlPolicy,
+  type GovernorProposal,
   type OrganizationSharePackage,
   type OrganizationShareReview,
   type PortableOrganizationComparison,
@@ -187,6 +192,7 @@ import {
   type ConversationMessage,
   type ConversationTurn,
   type ConversationView,
+  type ManagedWorktree,
   type CodexModel,
   type CodexAccount,
   type CodexRateLimits,
@@ -299,6 +305,8 @@ import {
   verifyBackup,
   acknowledgeSchedulerNotification,
   decideExperiment,
+  decideGovernorProposal,
+  requestGovernorImplementation,
   wakeSchedule
 } from "./desktop-client";
 
@@ -955,7 +963,8 @@ function ConversationDeliveryHandoff({ batches, team, conversationId, onView, on
   if (!team || batches.length === 0) return null;
   const batchIds = new Set(batches.map((batch) => batch.id));
   const delegationIds = new Set(batches.flatMap((batch) => batch.delegation_ids));
-  const delegations = team.delegations.filter((delegation) => delegationIds.has(delegation.id));
+  const attempts = team.delegations.filter((delegation) => delegationIds.has(delegation.id));
+  const delegations = effectiveDelegationAttempts(attempts);
   const previews = (team.previews ?? []).filter((preview) => batchIds.has(preview.coordination_batch_id));
   const preview = previews.slice().sort((left, right) => {
     const priority = (candidate: ConversationPreview) => candidate.strategy === "codex_sites" && candidate.safe_url ? 3 : candidate.safe_url ? 2 : candidate.state === "stopped" ? 1 : 0;
@@ -967,6 +976,11 @@ function ConversationDeliveryHandoff({ batches, team, conversationId, onView, on
   const changedFiles = new Set(delegations.flatMap((delegation) => delegation.changed_files)).size;
   const checks = delegations.reduce((total, delegation) => total + delegation.checks.length, 0);
   const success = failed === 0 && batches.every((batch) => batch.state === "completed");
+  const hardGateReady = success && delegations.length > 0 && delegations.every((delegation) =>
+    delegation.governance?.preflight.passed !== false
+    && delegation.governance?.outcome.successful !== false
+    && delegation.integration_ready !== false
+  );
 
   async function runPreviewAction(action: "open" | "copy" | "stop") {
     if (!conversationId || !preview) return;
@@ -993,16 +1007,49 @@ function ConversationDeliveryHandoff({ batches, team, conversationId, onView, on
     }
   }
 
+  async function copyReceipt() {
+    setBusy("receipt");
+    setError("");
+    try {
+      await navigator.clipboard.writeText(JSON.stringify({
+        schema_version: 1,
+        conversation_id: conversationId,
+        batch_ids: batches.map((batch) => batch.id),
+        hard_gate_ready: hardGateReady,
+        effective_agent_count: delegations.length,
+        attempt_count: attempts.length,
+        changed_file_count: changedFiles,
+        check_count: checks,
+        coordinator_turn_count: batches.reduce((total, batch) => total + batch.coordinator_turn_count, 0),
+        coordinator_approximate_tokens: batches.reduce((total, batch) => total + batch.coordinator_approximate_tokens, 0),
+        delegations: delegations.map((delegation) => ({
+          id: delegation.id,
+          state: delegation.state,
+          report_sha256: delegation.report_sha256,
+          changed_files: delegation.changed_files,
+          checks: delegation.checks,
+          governance: delegation.governance
+        }))
+      }, null, 2));
+    } catch (copyError) {
+      setError(errorMessage(copyError));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return <section className={`chat-delivery-handoff ${success ? "success" : "attention"}`} aria-label="Chat Agent result actions">
     <div className="chat-delivery-heading">
       <span aria-hidden="true">{success ? "✓" : "!"}</span>
       <span><strong>{success ? "Result ready" : "Result needs attention"}</strong><small>
-        {delegations.length} agent{delegations.length === 1 ? "" : "s"} · {completed} completed{needsReview > 0 ? ` · ${needsReview} ready for review` : ""}{failed > 0 ? ` · ${failed} failed` : ""}
+        {delegations.length} effective agent{delegations.length === 1 ? "" : "s"} · {attempts.length} attempt{attempts.length === 1 ? "" : "s"} · {completed} completed{needsReview > 0 ? ` · ${needsReview} ready for review` : ""}{failed > 0 ? ` · ${failed} failed` : ""}
       </small></span>
     </div>
     <div className="chat-delivery-summary">
       {changedFiles > 0 && <span>{changedFiles} changed file{changedFiles === 1 ? "" : "s"}</span>}
       {checks > 0 && <span>{checks} check{checks === 1 ? "" : "s"}</span>}
+      <span>{hardGateReady ? "Verification passed" : "Verification needs review"}</span>
+      <span>{batches.reduce((total, batch) => total + batch.coordinator_turn_count, 0)} Coordinator turn{batches.reduce((total, batch) => total + batch.coordinator_turn_count, 0) === 1 ? "" : "s"}</span>
       {preview && <span>{preview.strategy === "codex_sites" ? "OpenAI Sites" : "Temporary local preview"} · {preview.state.replaceAll("_", " ")}</span>}
     </div>
     {preview && <div className="conversation-preview-actions">
@@ -1010,8 +1057,29 @@ function ConversationDeliveryHandoff({ batches, team, conversationId, onView, on
       {preview.safe_url && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runPreviewAction("copy")}>Copy URL</button>}
       {preview.strategy !== "codex_sites" && preview.state === "running" && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runPreviewAction("stop")}>Stop preview</button>}
     </div>}
+    <div className="conversation-preview-actions"><button type="button" className="secondary" disabled={busy !== null} onClick={() => void copyReceipt()}>Copy verification receipt</button></div>
     {(error || preview?.last_error) && <p className="error-message" role="alert">{error || preview?.last_error}</p>}
   </section>;
+}
+
+export function effectiveDelegationAttempts(delegations: AgentDelegation[]): AgentDelegation[] {
+  const retriedIds = new Set(delegations.flatMap((delegation) => delegation.retry_of_id ? [delegation.retry_of_id] : []));
+  return delegations.filter((delegation) => !retriedIds.has(delegation.id));
+}
+
+function delegationAttemptChain(delegation: AgentDelegation, attempts: AgentDelegation[]): AgentDelegation[] {
+  const byId = new Map(attempts.map((attempt) => [attempt.id, attempt]));
+  const chain: AgentDelegation[] = [delegation];
+  let current = delegation;
+  const seen = new Set([delegation.id]);
+  while (current.retry_of_id) {
+    const parent = byId.get(current.retry_of_id);
+    if (!parent || seen.has(parent.id)) break;
+    seen.add(parent.id);
+    chain.unshift(parent);
+    current = parent;
+  }
+  return chain;
 }
 
 function CodingAgentCards({ team, conversationId, delegationIds, onView }: { team?: ConversationTeamState; conversationId?: string; delegationIds?: string[]; onView: (view: ConversationView) => void }) {
@@ -1019,7 +1087,8 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
   const [patches, setPatches] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const visibleDelegations = team?.delegations.filter((delegation) => !delegationIds || delegationIds.includes(delegation.id)) ?? [];
+  const allAttempts = team?.delegations.filter((delegation) => !delegationIds || delegationIds.includes(delegation.id)) ?? [];
+  const visibleDelegations = effectiveDelegationAttempts(allAttempts);
   if (!team || visibleDelegations.length === 0) return null;
   const stateLabel = codingAgentStateLabel;
   async function runAction(delegation: AgentDelegation, action: "review" | "cancel" | "apply" | "discard" | "retry", worktreeRevision?: number) {
@@ -1063,6 +1132,7 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
       const governance = delegation.governance;
       const needsAttention = Boolean(governance && (governance.preflight.blockers.length > 0 || governance.failure_class !== "none"));
       const latestContext = governance?.context_receipts.at(-1);
+      const attemptHistory = delegationAttemptChain(delegation, allAttempts);
       return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id} open={needsAttention}>
         <summary>
           <span className="coding-agent-glyph" aria-hidden="true">⌘</span>
@@ -1086,7 +1156,7 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
             {governance?.outcome.latency_ms ? <span>Runtime <code>{Math.round(governance.outcome.latency_ms / 1000)}s</code></span> : null}
           </div>
           <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
-          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{delegation.retry_of_id && <p>Retry of <code>{delegation.retry_of_id}</code></p>}{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{governance?.preflight.checks.map((check) => <p key={check}>✓ {check}</p>)}{governance?.preflight.blockers.map((blocker) => <p className="error-message" key={blocker}>Preflight: {blocker}</p>)}{latestContext && <p>Context receipt: ~{latestContext.approximate_tokens.toLocaleString()} / {latestContext.token_budget.toLocaleString()} tokens · {latestContext.source_count} attributed sources{latestContext.truncated ? " · truncated to budget" : ""}</p>}{governance && governance.failure_class !== "none" && <p className="error-message">Failure class: {governance.failure_class.replaceAll("_", " ")} · recovery: {governance.recovery.replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}</section>}
+          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{governance?.preflight.checks.map((check) => <p key={check}>✓ {check}</p>)}{governance?.preflight.blockers.map((blocker) => <p className="error-message" key={blocker}>Preflight: {blocker}</p>)}{latestContext && <p>Context receipt: ~{latestContext.approximate_tokens.toLocaleString()} / {latestContext.token_budget.toLocaleString()} tokens · {latestContext.source_count} attributed sources{latestContext.truncated ? " · truncated to budget" : ""}</p>}{governance && governance.failure_class !== "none" && <p className="error-message">Failure class: {governance.failure_class.replaceAll("_", " ")} · recovery: {governance.recovery.replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}{attemptHistory.length > 1 && <details><summary>Attempt history <span>{attemptHistory.length}</span></summary>{attemptHistory.map((attempt, attemptIndex) => <p key={attempt.id}>Attempt {attemptIndex + 1}: {stateLabel(attempt.state)} · <code>{attempt.id}</code>{attempt.error ? ` · ${attempt.error}` : ""}</p>)}</details>}</section>}
           {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
           {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
           {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch">{patches[delegation.id]}</pre>}</section>}
@@ -1096,68 +1166,6 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
         </div>
       </details>;
     })}
-  </section>;
-}
-
-function AgentRoom({ team }: { team?: ConversationTeamState }) {
-  if (!team) return <section className="agent-room empty-state">The Agent Room has not started yet.</section>;
-  const sessionName = (id: string) => {
-    const session = team.sessions.find((candidate) => candidate.id === id);
-    if (!session) return "Agent";
-    if (session.display_name) return session.display_name;
-    if (session.kind === "chat") return "Chat Agent";
-    if (session.kind === "coordinator") return "Coordinator";
-    return "Coding Agent";
-  };
-  const messages = team.messages.filter((message) => (message.room ?? "backstage") === "backstage");
-  const toolResults = new Map(messages.filter((message) => message.kind === "tool_result" && message.correlation_id).map((message) => [message.correlation_id!, message]));
-  const checkpoints = team.context_checkpoints ?? [];
-  const latestCheckpointBySession = new Map<string, (typeof checkpoints)[number]>();
-  checkpoints.forEach((checkpoint) => latestCheckpointBySession.set(checkpoint.session_id, checkpoint));
-  const latestCheckpoints = [...latestCheckpointBySession.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
-  const checkpointHistory = checkpoints.filter((checkpoint) => latestCheckpointBySession.get(checkpoint.session_id)?.id !== checkpoint.id).reverse();
-  const coordinator = team.sessions.find((session) => session.kind === "coordinator");
-  const coordinatorBatches = team.coordination_batches ?? [];
-  const coordinatorTurns = coordinatorBatches.reduce((total, batch) => total + (batch.coordinator_turn_count ?? 0), 0);
-  const coordinatorTokens = coordinatorBatches.reduce((total, batch) => total + (batch.coordinator_approximate_tokens ?? 0), 0);
-  return <section className="agent-room" aria-label="Agent Room">
-    <header className="agent-room-header">
-      <div><span className="agent-room-live" aria-hidden="true" /><div><strong>Agent Room</strong><small>Behind-the-scenes coordination · owner-readable</small></div></div>
-      <span>{team.sessions.filter((session) => ["starting", "ready", "working", "waiting"].includes(session.state)).length} present</span>
-    </header>
-    <div className="agent-room-roster" aria-label="Agent hierarchy">
-      {team.sessions.map((session) => <div className={`agent-roster-member role-${session.kind} state-${session.state}`} key={session.id}>
-        <span className="agent-avatar" aria-hidden="true">{session.kind === "chat" ? "C" : session.kind === "coordinator" ? "◎" : "⌘"}</span>
-        <span><strong>{session.display_name || (session.kind === "chat" ? "Chat Agent" : session.kind === "coordinator" ? "Coordinator" : "Coding Agent")}</strong><small>{session.kind === "chat" ? "You talk to this agent" : session.kind === "coordinator" ? "Routes and supervises work" : session.state.replaceAll("_", " ")}</small></span>
-        <i aria-label={session.state} title={session.state.replaceAll("_", " ")} />
-      </div>)}
-    </div>
-    {coordinator && <p className="agent-room-metrics">Coordinator model turns <strong>{coordinatorTurns}</strong> · estimated tokens <strong>~{coordinatorTokens.toLocaleString()}</strong></p>}
-    <div className="agent-room-timeline">
-      {messages.length === 0 ? <p className="empty-state">Agents have not exchanged any messages yet.</p> : messages.map((message) => {
-        if (message.kind === "tool_result") return null;
-        const from = sessionName(message.from_session_id);
-        const to = sessionName(message.to_session_id);
-        if (message.kind === "joined" || message.kind === "left") return <div className={`agent-room-lifecycle ${message.kind}`} key={message.id}><span aria-hidden="true">{message.kind === "joined" ? "+" : "−"}</span><p>{message.content}</p><time>{new Date(message.created_at).toLocaleTimeString()}</time></div>;
-        if (message.kind === "tool_call") {
-          const result = message.correlation_id ? toolResults.get(message.correlation_id) : undefined;
-          return <details className="agent-room-tool" key={message.id}>
-            <summary><span aria-hidden="true">›_</span><strong>{from}</strong><span>{message.tool_name || "tool"}</span><small className={result ? "complete" : "running"}>{result ? "completed" : "running"}</small><span className="chat-activity-chevron" aria-hidden="true">⌄</span></summary>
-            <div><p>{message.content}</p>{result && <p>{result.content}</p>}<time>{new Date(message.created_at).toLocaleString()}</time></div>
-          </details>;
-        }
-        return <article className={`agent-room-message kind-${message.kind}`} key={message.id}>
-          <header><strong>{from}</strong><span aria-hidden="true">→</span><span>{to}</span><small>{message.kind.replaceAll("_", " ")}</small><time>{new Date(message.created_at).toLocaleTimeString()}</time></header>
-          <MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
-          {message.delegation_id && <code>{message.delegation_id}</code>}
-        </article>;
-      })}
-    </div>
-    {checkpoints.length > 0 && <details className="agent-room-compaction">
-      <summary>Context milestones <span>{checkpoints.length}</span></summary>
-      {latestCheckpoints.map((checkpoint) => <article key={checkpoint.id}><strong>{sessionName(checkpoint.session_id)} · {checkpoint.cause?.replaceAll("_", " ") ?? "legacy"} · revision {checkpoint.revision}</strong><small>~{checkpoint.approximate_tokens} tokens · {checkpoint.source_references.length} sources</small><p>{checkpoint.summary}</p></article>)}
-      {checkpointHistory.length > 0 && <details><summary>Earlier milestones <span>{checkpointHistory.length}</span></summary>{checkpointHistory.map((checkpoint) => <article key={checkpoint.id}><strong>{sessionName(checkpoint.session_id)} · {checkpoint.cause?.replaceAll("_", " ") ?? "legacy"} · revision {checkpoint.revision}</strong><small>~{checkpoint.approximate_tokens} tokens · {checkpoint.source_references.length} sources</small><p>{checkpoint.summary}</p></article>)}</details>}
-    </details>}
   </section>;
 }
 
@@ -1755,8 +1763,11 @@ export function App() {
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [organizations, setOrganizations] = useState<OrganizationGenome[]>([]);
-  const [agentTab, setAgentTab] = useState<"overview" | "teams" | "activity">("overview");
+  const [agentTab, setAgentTab] = useState<"overview" | "teams" | "activity" | "governor">("overview");
   const [governorOverview, setGovernorOverview] = useState<GovernorOverview | null>(null);
+  const [governorPolicy, setGovernorPolicy] = useState<GovernorControlPolicy | null>(null);
+  const [governorProposals, setGovernorProposals] = useState<GovernorProposal[]>([]);
+  const [governorConversationId, setGovernorConversationId] = useState("");
   const [organizationAssignments, setOrganizationAssignments] = useState<OrganizationAssignments | null>(null);
   const [agentRuns, setAgentRuns] = useState<AgentRunView[]>([]);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
@@ -1765,6 +1776,7 @@ export function App() {
   const [organizationChangeSummary, setOrganizationChangeSummary] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [managedWorktrees, setManagedWorktrees] = useState<ManagedWorktree[]>([]);
   const [organizationName, setOrganizationName] = useState("");
   const [organizationBaseId, setOrganizationBaseId] = useState("");
   const [organizationBusy, setOrganizationBusy] = useState(false);
@@ -2889,15 +2901,23 @@ export function App() {
         if (active) setOrganizationError(errorMessage(error));
       });
     getGovernorOverview()
-      .then((response) => {
+      .then(async (response) => {
         if (active) {
           setGovernorOverview(response);
           setOrganizationAssignments(response.assignments);
         }
+        const proposals = await listGovernorProposals(response.active_organization.organization_id);
+        if (active) setGovernorProposals(proposals.proposals);
       })
       .catch((error) => {
         if (active) setAgentError(errorMessage(error));
       });
+    getGovernorControlPolicy()
+      .then((policy) => { if (active) setGovernorPolicy(policy); })
+      .catch((error) => { if (active) setAgentError(errorMessage(error)); });
+    listManagedWorktrees()
+      .then((response) => { if (active) setManagedWorktrees(response.worktrees); })
+      .catch((error) => { if (active) setAgentError(errorMessage(error)); });
     listAgentRuns()
       .then((response) => {
         if (active) setAgentRuns(response.runs);
@@ -5161,10 +5181,28 @@ export function App() {
   }
 
   async function refreshAgents() {
-    const [overview, runs] = await Promise.all([getGovernorOverview(), listAgentRuns()]);
+    const [overview, runs, policy, worktrees] = await Promise.all([
+      getGovernorOverview(),
+      listAgentRuns(),
+      getGovernorControlPolicy(),
+      listManagedWorktrees()
+    ]);
+    const proposals = await listGovernorProposals(overview.active_organization.organization_id);
     setGovernorOverview(overview);
     setOrganizationAssignments(overview.assignments);
     setAgentRuns(runs.runs);
+    setGovernorPolicy(policy);
+    setGovernorProposals(proposals.proposals);
+    setManagedWorktrees(worktrees.worktrees);
+  }
+
+  async function refreshManagedWorktrees() {
+    try {
+      const response = await listManagedWorktrees();
+      setManagedWorktrees(response.worktrees);
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    }
   }
 
   async function assignGlobalOrganization(organizationId: string) {
@@ -5240,6 +5278,41 @@ export function App() {
     try {
       await cancelAgentRun(runId);
       await refreshAgents();
+    } catch (error) {
+      setAgentError(errorMessage(error));
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
+  async function decideGovernor(proposal: GovernorProposal, approve: boolean) {
+    setAgentBusy(true);
+    setAgentError(null);
+    try {
+      await decideGovernorProposal(proposal.id, approve);
+      const response = await listGovernorProposals(proposal.organization_id);
+      setGovernorProposals(response.proposals);
+    } catch (error) {
+      setAgentError(errorMessage(error));
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
+  async function handGovernorProposalToChat(proposal: GovernorProposal) {
+    const conversationId = governorConversationId
+      || (selectedChatId && conversations.some((conversation) => conversation.id === selectedChatId) ? selectedChatId : "");
+    if (!conversationId) {
+      setAgentError("Choose a project conversation for the approved implementation request.");
+      return;
+    }
+    setAgentBusy(true);
+    setAgentError(null);
+    try {
+      await requestGovernorImplementation(proposal.id, conversationId);
+      const response = await listGovernorProposals(proposal.organization_id);
+      setGovernorProposals(response.proposals);
+      await openChat(conversationId);
     } catch (error) {
       setAgentError(errorMessage(error));
     } finally {
@@ -5603,13 +5676,11 @@ export function App() {
   const contextChat = chatContextMenu ? chatSummaries.find((chat) => chat.id === chatContextMenu.chatId) : undefined;
   const visibleTasks = tasks;
   const visibleConversation = selectedChatId ? conversationViews[selectedChatId] : undefined;
-  const managedConversationWorktrees = Object.values(conversationViews).flatMap((view) =>
-    (view?.team?.worktrees ?? []).map((worktree) => ({
-      worktree,
-      conversationId: view!.conversation.id,
-      delegation: view!.team!.delegations.find((candidate) => candidate.id === worktree.delegation_id)
-    }))
-  );
+  const managedConversationWorktrees = managedWorktrees.map((worktree) => ({
+    worktree,
+    conversationId: worktree.conversation_id,
+    delegation: conversationViews[worktree.conversation_id]?.team?.delegations.find((candidate) => candidate.id === worktree.delegation_id)
+  }));
   const activeConversationTurn = visibleConversation?.turns
     .slice()
     .reverse()
@@ -6623,6 +6694,7 @@ export function App() {
           </div>
           <nav className="segmented-tabs agents-tabs" aria-label="Agents pages">
             {(["overview", "teams", "activity"] as const).map((tab) => <button type="button" className={agentTab === tab ? "active" : ""} aria-current={agentTab === tab ? "page" : undefined} onClick={() => setAgentTab(tab)} key={tab}>{tab.charAt(0).toUpperCase() + tab.slice(1)}</button>)}
+            {advanced && <button type="button" className={agentTab === "governor" ? "active" : ""} aria-current={agentTab === "governor" ? "page" : undefined} onClick={() => setAgentTab("governor")}>Governor</button>}
             {advanced && <button type="button" onClick={() => navigateSurface("improvement")}>Improvement</button>}
           </nav>
           {agentError && <p className="error-message" role="alert">{agentError}</p>}
@@ -6683,6 +6755,20 @@ export function App() {
           </div>}
 
           {agentTab === "activity" && <div className="activity-layout"><div className="agent-run-list" aria-label="Agent runs">{agentRuns.length === 0 ? <p className="empty-state">No agent runs yet.</p> : agentRuns.map((view) => <button className={`agent-run-row${selectedAgentRunId === view.run.id ? " active" : ""}`} type="button" onClick={() => setSelectedAgentRunId(view.run.id)} key={view.run.id}><span><strong>{tasks.find((task) => task.id === view.run.task_id)?.goal ?? "Agent run"}</strong><small>{new Date(view.run.updated_at).toLocaleString()} · {view.plan.selected_roles.length} roles</small></span><em className={`agent-state state-${view.run.state}`}>{view.run.state}</em></button>)}</div><article className="agent-section-card run-inspector">{!selectedAgentRun ? <div className="empty-state">Select a run to inspect its agents and evidence.</div> : <><div className="section-heading compact-heading"><div><h3>{selectedAgentTask?.goal ?? "Agent run"}</h3><p className="muted">Pinned revision <code>{selectedAgentRun.run.organization_revision_id}</code></p></div><div className="card-actions">{selectedAgentTask?.state === "blocked" && <button className="primary" type="button" disabled={taskBusy} onClick={() => void retryBlockedTask(selectedAgentTask.id)}>Retry task</button>}{selectedAgentTask?.state === "waiting_for_approval" && selectedAgentApproval && <button className="primary" type="button" disabled={taskBusy} onClick={() => void approveAndResume(selectedAgentTask.id, selectedAgentApproval.id)}>Approve and resume</button>}{["planned", "running", "waiting", "recovering"].includes(selectedAgentRun.run.state) && <button className="secondary" type="button" disabled={agentBusy} onClick={() => void cancelRun(selectedAgentRun.run.id)}>Cancel run</button>}</div></div><p>{selectedAgentRun.plan.selection_reason}</p><div className="run-metrics"><span><strong>{selectedAgentRun.instances.length}</strong><small>agents</small></span><span><strong>{selectedAgentRun.plan.items.length}</strong><small>work items</small></span><span><strong>{selectedAgentRun.usage.reduce((sum, usage) => sum + usage.input_tokens + usage.output_tokens, 0).toLocaleString()}</strong><small>tokens</small></span><span><strong>{selectedAgentRun.evaluations.length}</strong><small>evaluations</small></span></div><div className="instance-list">{selectedAgentRun.instances.map((instance) => { const role = organizations.flatMap((organization) => organization.roles).find((candidate) => candidate.id === instance.role_id); return <div className="instance-row" key={instance.id}><span><strong>{role?.name ?? instance.role_id}</strong><small>{instance.model ? `${instance.model.model_id} · ${instance.model.route_reason}` : "Model not routed yet"}</small></span><em>{instance.state}</em></div>; })}</div>{advanced && <><details><summary>Work plan and leases</summary><ul>{selectedAgentRun.plan.items.map((item) => <li key={item.id}><strong>{item.goal}</strong> · {item.state}</li>)}</ul><ul>{selectedAgentRun.leases.map((lease) => <li key={lease.id}><strong>{lease.goal}</strong> · {lease.state} · {lease.budget.consumed_tokens.toLocaleString()} tokens</li>)}</ul></details><details><summary>Evaluations and replay evidence</summary>{selectedAgentRun.evaluations.length === 0 ? <p className="muted">No evaluation recorded yet.</p> : selectedAgentRun.evaluations.map((evaluation) => <div className="evaluation-row" key={evaluation.id}><strong>{evaluation.outcome}</strong><span>{evaluation.confidence.basis_points / 100}% confidence</span>{evaluation.evidence.map((evidence, index) => <small key={`${evaluation.id}-${index}`}>{evidence.passed ? "Pass" : "Fail"} · {evidence.method}: {evidence.detail}</small>)}</div>)}</details></>}</>}</article></div>}
+
+          {agentTab === "governor" && advanced && <div className="agents-stack">
+            <article className="agent-section-card">
+              <div className="section-heading compact-heading"><div><h3>Governor guardrails</h3><p className="muted">The model Governor remains disabled. These owner-controlled boundaries are available to the operator and CLI.</p></div><span className={`agent-state state-${governorPolicy?.governor_model_enabled ? "active" : "idle"}`}>{governorPolicy?.governor_model_enabled ? "enabled" : "disabled"}</span></div>
+              <div className="run-metrics"><span><strong>{governorPolicy?.allowed_actions.length ?? 0}</strong><small>allowed actions</small></span><span><strong>{governorPolicy?.denied_actions.length ?? 0}</strong><small>denied actions</small></span><span><strong>{governorPolicy?.protected_surfaces.length ?? 0}</strong><small>protected surfaces</small></span><span><strong>{governorPolicy?.requires_owner_approval ? "Required" : "Not required"}</strong><small>owner approval</small></span></div>
+              <p>{governorPolicy?.implementation_path ?? "Loading governed implementation path…"}</p>
+              <details className="governor-details"><summary>Inspect authority boundaries</summary><div className="editor-grid"><div><strong>Allowed</strong><ul>{governorPolicy?.allowed_actions.map((action) => <li key={action}>{action.replaceAll("_", " ")}</li>)}</ul></div><div><strong>Denied</strong><ul>{governorPolicy?.denied_actions.map((action) => <li key={action}>{action.replaceAll("_", " ")}</li>)}</ul></div><div><strong>Protected</strong><ul>{governorPolicy?.protected_surfaces.map((surface) => <li key={surface}>{surface.replaceAll("_", " ")}</li>)}</ul></div></div></details>
+            </article>
+            <article className="agent-section-card">
+              <div className="section-heading compact-heading"><div><h3>Governed proposals</h3><p className="muted">Approve bounded changes here, then hand approved implementation to a normal project chat. Chat → Coordinator → Coding Agents remains the only mutation path.</p></div><span className="count-badge">{governorProposals.length}</span></div>
+              {governorProposals.length === 0 ? <div className="empty-state">No Governor proposals are awaiting review.</div> : <div className="team-list">{governorProposals.map((proposal) => <div className="team-row" key={proposal.id}><span><strong>{proposal.title}</strong><small>{proposal.target.replaceAll("_", " ")} · {proposal.risk} risk · {proposal.state.replaceAll("_", " ")}</small><small>{proposal.diagnosis}</small></span><div className="card-actions">{proposal.state === "awaiting_owner_approval" && <><button className="primary" type="button" disabled={agentBusy} onClick={() => void decideGovernor(proposal, true)}>Approve</button><button className="secondary danger" type="button" disabled={agentBusy} onClick={() => void decideGovernor(proposal, false)}>Reject</button></>}{proposal.state === "approved" && <button className="primary" type="button" disabled={agentBusy} onClick={() => void handGovernorProposalToChat(proposal)}>Request implementation</button>}<span className={`agent-state state-${proposal.state}`}>{proposal.state.replaceAll("_", " ")}</span></div><details className="governor-details"><summary>Proposal evidence and validation</summary><p>{proposal.proposed_change}</p><strong>Success criteria</strong><ul>{proposal.success_criteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>{proposal.validation_findings.length > 0 && <><strong>Validation findings</strong><ul>{proposal.validation_findings.map((finding) => <li key={finding}>{finding}</li>)}</ul></>}</details></div>)}</div>}
+              {governorProposals.some((proposal) => proposal.state === "approved") && <label>Implementation conversation<select aria-label="Governor implementation conversation" value={governorConversationId} onChange={(event) => setGovernorConversationId(event.target.value)}><option value="">Select a project chat</option>{conversations.filter((conversation) => conversation.state === "active" && conversation.project_id).map((conversation) => <option value={conversation.id} key={conversation.id}>{conversation.title}</option>)}</select></label>}
+            </article>
+          </div>}
         </section>}
 
         <section className="panel scheduler-panel" id="improvement" aria-label="Measured improvement">
@@ -8337,17 +8423,17 @@ export function App() {
                 {projects.length === 0 ? <div className="settings-empty-card"><strong>No projects attached</strong><p>Add a project to discover its repository, languages, tools, and runnable commands.</p><button className="secondary" type="button" onClick={() => navigateSurface("projects")}>Add project</button></div> : <div className="settings-project-list" aria-label="Project environments">{projects.map((project) => <button type="button" onClick={() => navigateSurface("projects")} key={project.id}><span className="settings-app-icon" aria-hidden="true">▤</span><span><strong>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.project_id}</strong><small>{project.repository.is_git ? `${project.repository.branch ?? "Git repository"}${project.repository.dirty ? " · changes present" : ""}` : "Local project"}</small></span><i aria-hidden="true">＋</i></button>)}</div>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="worktrees">
-                <div className="settings-page-heading"><h2>Worktrees</h2><p>Review isolated task workspace defaults and managed worktrees.</p></div>
+                <div className="settings-page-heading settings-page-heading-actions"><div><h2>Worktrees</h2><p>Review the complete durable inventory of isolated coding work, including retained work from conversations that are not currently open.</p></div><button className="secondary" type="button" onClick={() => void refreshManagedWorktrees()}>Refresh</button></div>
                 <div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>Worktree root</strong><small>Managed worktrees will use an owner-controlled local directory.</small></span><span className="settings-value-field">Runtime managed</span></div>
                   <div className="settings-control"><span><strong>Cleanup policy</strong><small>Integrated worktrees are removed; failed, cancelled, conflicting, and unapplied work is retained.</small></span><span className="count-badge">Safe retention</span></div>
                   <div className="settings-control"><span><strong>Isolation policy</strong><small>Scheduled and coding work must remain within reviewed project boundaries.</small></span><span className="count-badge">Governed</span></div>
                 </div>
                 <div className="settings-section-heading"><strong>Managed worktrees</strong><span>{managedConversationWorktrees.length}</span></div>
-                {managedConversationWorktrees.length === 0 ? <div className="settings-empty-card"><p>No managed coding worktrees have been created in loaded conversations.</p></div> : <div className="settings-card settings-card-stack" aria-label="Managed worktrees">{managedConversationWorktrees.map(({ worktree, conversationId, delegation }) => {
+                {managedConversationWorktrees.length === 0 ? <div className="settings-empty-card"><p>No managed coding worktrees are retained.</p></div> : <div className="settings-card settings-card-stack" aria-label="Managed worktrees">{managedConversationWorktrees.map(({ worktree, conversationId, delegation }) => {
                   const blockingExclusions = worktree.baseline_exclusions?.filter((entry) => entry.review_blocker).length ?? 0;
                   const journal = worktree.integration_journal;
-                  return <div className="settings-control" key={worktree.id}><span><strong>{worktree.branch}</strong><small>{worktree.state}{worktree.retained_reason ? ` · ${worktree.retained_reason}` : ""} · {(worktree.storage_bytes / (1024 * 1024)).toFixed(1)} MiB</small><small>{(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}{blockingExclusions > 0 ? ` · ${blockingExclusions} review blocker${blockingExclusions === 1 ? "" : "s"}` : ""}{journal ? ` · integration ${journal.state.replaceAll("_", " ")}` : ""}</small></span><span className="settings-inline-actions"><button className="secondary" type="button" onClick={() => openChat(conversationId)}>Review</button>{worktree.state !== "removed" && delegation && !["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state) && <button className="secondary danger" type="button" onClick={() => void discardConversationDelegation(conversationId, delegation.id, worktree.revision).then((view) => setConversationViews((current) => ({ ...current, [conversationId]: view }))).catch((error) => setTaskError(errorMessage(error)))}>Discard</button>}</span></div>;
+                  return <div className="settings-control" key={worktree.id}><span><strong>{worktree.branch}</strong><small>{worktree.state}{worktree.retained_reason ? ` · ${worktree.retained_reason}` : ""} · {(worktree.storage_bytes / (1024 * 1024)).toFixed(1)} MiB</small><small>{(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}{blockingExclusions > 0 ? ` · ${blockingExclusions} review blocker${blockingExclusions === 1 ? "" : "s"}` : ""}{journal ? ` · integration ${journal.state.replaceAll("_", " ")}` : ""}</small></span><span className="settings-inline-actions"><button className="secondary" type="button" onClick={() => openChat(conversationId)}>Review</button>{worktree.state !== "removed" && delegation && !["requested", "preparing", "running", "waiting", "integrating"].includes(delegation.state) && <button className="secondary danger" type="button" onClick={() => void discardConversationDelegation(conversationId, delegation.id, worktree.revision).then((view) => { setConversationViews((current) => ({ ...current, [conversationId]: view })); return refreshManagedWorktrees(); }).catch((error) => setTaskError(errorMessage(error)))}>Discard</button>}</span></div>;
                 })}</div>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="archived"><h2>Archived chats</h2>{archivedConversations.length === 0 ? <div className="settings-card"><div><strong>No archived chats</strong><p>Chats you archive will appear here and can be restored at any time.</p></div></div> : <div className="settings-card archived-chat-list">{archivedConversations.map((conversation) => <div className="settings-row" key={conversation.id}><div><strong>{conversation.title}</strong><p>{conversation.project_id ? projects.find((project) => project.project_id === conversation.project_id)?.root ?? "Project chat" : "General chat"}</p></div><button className="secondary" type="button" disabled={chatMutationBusy} onClick={() => void setChatArchived(conversation.id, false)}>Restore</button></div>)}</div>}</div>

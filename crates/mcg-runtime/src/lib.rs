@@ -5942,6 +5942,15 @@ impl AppRuntime {
         Ok(self.store()?.conversation_team_state(conversation_id)?)
     }
 
+    /// Lists the complete durable managed-worktree inventory across conversations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable worktree projections cannot be decoded.
+    pub fn managed_worktrees(&self) -> Result<Vec<ManagedWorktree>, RuntimeError> {
+        Ok(self.store()?.managed_worktrees()?)
+    }
+
     fn audit_agent_claims(
         &self,
         claims: &AgentToolClaims,

@@ -2865,6 +2865,22 @@ impl SqliteEventStore {
             .transpose()
     }
 
+    /// Lists every durable managed worktree, including retained work that belongs to an unloaded
+    /// or archived conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be queried or a stored projection is invalid.
+    pub fn managed_worktrees(&self) -> Result<Vec<ManagedWorktree>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT worktree_json FROM managed_worktrees ORDER BY updated_at DESC, worktree_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|row| serde_json::from_str(&row?).map_err(StorageError::from))
+            .collect()
+    }
+
     pub fn search_conversation_context(
         &self,
         conversation_id: ConversationId,
@@ -3194,7 +3210,7 @@ impl SqliteEventStore {
                         conversation_id: wake.conversation_id,
                         turn_id: batch.origin_turn_id,
                         role: mcg_domain::ConversationRole::Assistant,
-                        content: "The agent team finished, but MCG restarted before the Chat Agent could safely synthesize the result. The durable Coding Agent cards and Agent Room contain the completed report and evidence.".into(),
+                        content: "The agent team finished, but MCG restarted before the Chat Agent could safely synthesize the result. The durable inline Coordinator and Coding Agent cards contain the completed report and evidence.".into(),
                         codex_item_id: None,
                         created_at: now,
                     };

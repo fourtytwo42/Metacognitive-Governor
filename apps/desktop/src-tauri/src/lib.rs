@@ -1,8 +1,8 @@
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition,
-    OrganizationGenome, OrganizationShareReview, PortableOrganizationComparison,
-    PortableOrganizationGenome, ShadowExecutionReceipt, SupervisionObservation,
-    TrustedOrganizationPublisher,
+    GovernorControlPolicy, GovernorProposal, GovernorProposalState, OrganizationGenome,
+    OrganizationShareReview, PortableOrganizationComparison, PortableOrganizationGenome,
+    ShadowExecutionReceipt, SupervisionObservation, TrustedOrganizationPublisher,
 };
 use mcg_api::{
     AgentRunListResponse, ApplyComputerActionsRequest, ApprovalListResponse,
@@ -15,30 +15,32 @@ use mcg_api::{
     DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
     GitHubConnectionStatus, GitHubLoginStart, GitHubRepository, GitHubRepositoryList,
-    GovernorOverviewResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
-    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, LinkGitHubRepository,
-    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    NavigateBrowserSessionRequest, OrganizationAssignmentResponse, OrganizationHistoryResponse,
-    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
-    OrganizationRevisionPreview, OrganizationShareReviewListResponse,
+    GovernorOverviewResponse, GovernorProposalListResponse, ImportOrganizationRequest,
+    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
+    InstallRegistryPluginRequest, InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse,
+    LinkGitHubRepository, ManagedMemoryResponse, ManagedWorktreeListResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
+    OrganizationAssignmentResponse, OrganizationHistoryResponse, OrganizationListResponse,
+    OrganizationMutationResponse, OrganizationPublisherListResponse, OrganizationRevisionPreview,
+    OrganizationShareReviewListResponse, OwnerGovernorApprovalRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, PreviewOrganizationRevisionRequest, ProjectListResponse,
     ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
-    PublishOrganizationRevisionRequest, ResolveApprovalRequest, ReviewSharedOrganizationRequest,
-    ReviewedTopologyPlan, ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest,
-    RunSshOperationRequest, ScheduleHistoryResponse, ScheduleListResponse,
-    SchedulerNotificationListResponse, SendConversationMessageRequest,
-    SetOrganizationAssignmentRequest, SetPluginEnabledRequest, SetPluginGrantsRequest,
-    SetScheduleStateRequest, ShadowExecutionListResponse, SiteDeploymentListResponse,
-    SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse, SshHostListResponse,
-    SshHostRevisionListResponse, SshOperationListResponse, SshWorkflowListResponse,
-    StartOpenAiOAuthRequest, SteerConversationTurnRequest, SupervisionObservationListResponse,
-    TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
-    TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
-    TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
-    UpdateConversationRequest, UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
+    PublishOrganizationRevisionRequest, RequestGovernorImplementationRequest,
+    ResolveApprovalRequest, ReviewSharedOrganizationRequest, ReviewedTopologyPlan,
+    ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest, RunSshOperationRequest,
+    ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
+    SendConversationMessageRequest, SetOrganizationAssignmentRequest, SetPluginEnabledRequest,
+    SetPluginGrantsRequest, SetScheduleStateRequest, ShadowExecutionListResponse,
+    SiteDeploymentListResponse, SiteHealthListResponse, SiteListResponse, SiteRevisionListResponse,
+    SshHostListResponse, SshHostRevisionListResponse, SshOperationListResponse,
+    SshWorkflowListResponse, StartOpenAiOAuthRequest, SteerConversationTurnRequest,
+    SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
+    ToolAuditResponse, TransferProjectMemoryRequest, TransitionAgentRunRequest,
+    TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
+    TrustOrganizationPublisherRequest, UpdateConversationRequest, UpdateSiteRequest,
+    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
+    WakeScheduleRequest, WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
@@ -53,12 +55,12 @@ use mcg_providers::{
 };
 use mcg_runtime::{
     AgentRunView, CandidateRevisionMutation, CodexSiteInventory, DelegationRetryMutation,
-    DelegationReview, DiagnosticReport, EvidenceMutation, ExperimentMutation, McpMutation,
-    MemoryClaimMutation, OAuthLoginStart, OrganizationPublisherMutation,
-    OrganizationShareImportMutation, OrganizationShareReviewMutation, PlatformBrowserMutation,
-    PlatformComputerActionMutation, PlatformComputerMutation, PluginInvocationMutation,
-    PortableOrganizationImportMutation, ProjectMemoryTransferMutation,
-    ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
+    DelegationReview, DiagnosticReport, EvidenceMutation, ExperimentMutation,
+    GovernorProposalMutation, McpMutation, MemoryClaimMutation, OAuthLoginStart,
+    OrganizationPublisherMutation, OrganizationShareImportMutation,
+    OrganizationShareReviewMutation, PlatformBrowserMutation, PlatformComputerActionMutation,
+    PlatformComputerMutation, PluginInvocationMutation, PortableOrganizationImportMutation,
+    ProjectMemoryTransferMutation, ProjectMemoryTransferPreview, ProjectMutation, ProviderMutation,
     ReviewedTopologyPlanCreateRequest, ReviewedTopologyPlanMutation, RunReplayReport,
     ScheduleWakeMutation, SiteDeploymentMutation, SiteHealthMutation, SiteMonitorMutation,
     SiteMutation, SshHostMutation, SshOperationMutation, SshWorkflowCreateRequest,
@@ -1342,6 +1344,75 @@ async fn governor_overview() -> Result<GovernorOverviewResponse, String> {
         "Agent governor overview",
     )
     .await
+}
+
+#[tauri::command]
+async fn governor_control_policy() -> Result<GovernorControlPolicy, String> {
+    daemon_get("/api/v1/governor/policy", "Governor control policy").await
+}
+
+#[tauri::command]
+async fn list_governor_proposals(
+    organization_id: String,
+) -> Result<GovernorProposalListResponse, String> {
+    let organization_id = canonical_uuid(&organization_id, "Organization identity")?;
+    daemon_get(
+        &format!("/api/v1/governor/organizations/{organization_id}/proposals"),
+        "Governor proposal listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_governor_proposal(proposal_id: String) -> Result<GovernorProposal, String> {
+    let proposal_id = canonical_uuid(&proposal_id, "Governor proposal identity")?;
+    daemon_get(
+        &format!("/api/v1/governor/proposals/{proposal_id}"),
+        "Governor proposal",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn decide_governor_proposal(
+    proposal_id: String,
+    approve: bool,
+) -> Result<GovernorProposalMutation, String> {
+    let proposal_id = canonical_uuid(&proposal_id, "Governor proposal identity")?;
+    daemon_post(
+        &format!("/api/v1/governor/proposals/{proposal_id}/owner-approval"),
+        &OwnerGovernorApprovalRequest {
+            expected: GovernorProposalState::AwaitingOwnerApproval,
+            approve,
+        },
+        "Governor proposal owner decision",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn request_governor_implementation(
+    proposal_id: String,
+    conversation_id: String,
+) -> Result<serde_json::Value, String> {
+    let proposal_id = canonical_uuid(&proposal_id, "Governor proposal identity")?;
+    let conversation_id = canonical_uuid(&conversation_id, "Conversation identity")?;
+    daemon_post(
+        &format!("/api/v1/governor/proposals/{proposal_id}/implementation"),
+        &RequestGovernorImplementationRequest {
+            conversation_id: conversation_id
+                .to_string()
+                .parse()
+                .map_err(|_| "Conversation identity is invalid".to_owned())?,
+        },
+        "Governor implementation request",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_managed_worktrees() -> Result<ManagedWorktreeListResponse, String> {
+    daemon_get("/api/v1/worktrees", "Managed worktree listing").await
 }
 
 #[tauri::command]
@@ -3718,6 +3789,12 @@ pub fn run() {
             cancel_codex_login,
             logout_codex_account,
             governor_overview,
+            governor_control_policy,
+            list_governor_proposals,
+            get_governor_proposal,
+            decide_governor_proposal,
+            request_governor_implementation,
+            list_managed_worktrees,
             organization_assignments,
             set_global_organization_assignment,
             set_project_organization_assignment,

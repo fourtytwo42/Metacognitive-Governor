@@ -898,6 +898,44 @@ export interface GovernorOverview {
   subsystems: Array<{ id: string; label: string; state: string; detail: string }>;
 }
 
+export interface GovernorControlPolicy {
+  schema_version: number;
+  governor_model_enabled: boolean;
+  requires_owner_approval: boolean;
+  allowed_actions: string[];
+  denied_actions: string[];
+  protected_surfaces: string[];
+  implementation_path: string;
+}
+
+export type GovernorProposalState = "draft" | "validated" | "awaiting_owner_approval" | "approved" | "implementation_requested" | "evaluating" | "promoted" | "rejected" | "reverted" | "expired";
+export interface GovernorProposal {
+  schema_version: number;
+  id: string;
+  organization_id: string;
+  baseline_revision_id: string;
+  target: "prompt_policy" | "routing_policy" | "organization_topology" | "source_code" | "authority_boundary";
+  risk: "low" | "moderate" | "high" | "prohibited";
+  state: GovernorProposalState;
+  title: string;
+  diagnosis: string;
+  proposed_change: string;
+  expected_benefits: string[];
+  expected_risks: string[];
+  success_criteria: string[];
+  observation_ids: string[];
+  rollback_revision_id?: string;
+  validation_findings: string[];
+  owner_approved_at?: string;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GovernorProposalListResponse { proposals: GovernorProposal[] }
+export interface GovernorProposalMutation { proposal: GovernorProposal; replayed: boolean }
+export interface ManagedWorktreeListResponse { worktrees: ManagedWorktree[] }
+
 export interface AgentRunListResponse { runs: AgentRunView[] }
 
 export interface RuntimeStatus {
@@ -1825,6 +1863,10 @@ export function getConversationTeam(conversationId: string): Promise<Conversatio
   return invoke("get_conversation_team", { conversationId });
 }
 
+export function listManagedWorktrees(): Promise<ManagedWorktreeListResponse> {
+  return invoke("list_managed_worktrees");
+}
+
 export function reviewConversationDelegation(conversationId: string, delegationId: string): Promise<DelegationReview> {
   return invoke("review_conversation_delegation", { conversationId, delegationId });
 }
@@ -2234,6 +2276,26 @@ export function listOrganizations(): Promise<OrganizationListResponse> {
 
 export function getGovernorOverview(): Promise<GovernorOverview> {
   return invoke("governor_overview");
+}
+
+export function getGovernorControlPolicy(): Promise<GovernorControlPolicy> {
+  return invoke("governor_control_policy");
+}
+
+export function listGovernorProposals(organizationId: string): Promise<GovernorProposalListResponse> {
+  return invoke("list_governor_proposals", { organizationId });
+}
+
+export function getGovernorProposal(proposalId: string): Promise<GovernorProposal> {
+  return invoke("get_governor_proposal", { proposalId });
+}
+
+export function decideGovernorProposal(proposalId: string, approve: boolean): Promise<GovernorProposalMutation> {
+  return invoke("decide_governor_proposal", { proposalId, approve });
+}
+
+export function requestGovernorImplementation(proposalId: string, conversationId: string): Promise<Record<string, unknown>> {
+  return invoke("request_governor_implementation", { proposalId, conversationId });
 }
 
 export function getOrganizationAssignments(): Promise<OrganizationAssignmentResponse> {

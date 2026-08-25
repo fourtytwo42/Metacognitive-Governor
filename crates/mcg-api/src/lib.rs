@@ -38,17 +38,18 @@ use mcg_domain::{
     ComputerUseCapability, ComputerUseTarget, Conversation, ConversationAgentSessionId,
     ConversationId, ConversationPreview, ConversationPreviewId, ConversationTeamState,
     ConversationTurnId, ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId,
-    MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
-    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
-    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
-    SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
-    SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
-    SshWorkflow, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    ManagedWorktree, MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId,
+    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
+    PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId, RiskLevel, RoleId,
+    RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, SharedContextHit, Site, SiteDeployment, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
+    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
+    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
+    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -878,6 +879,11 @@ pub struct GovernorProposalListResponse {
     pub proposals: Vec<GovernorProposal>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedWorktreeListResponse {
+    pub worktrees: Vec<ManagedWorktree>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerGovernorApprovalRequest {
     pub expected: GovernorProposalState,
@@ -1417,6 +1423,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route("/api/v1/experiments", post(create_experiment))
         .route("/api/v1/governor/policy", get(get_governor_policy))
         .route("/api/v1/governor/proposals", post(create_governor_proposal))
+        .route("/api/v1/worktrees", get(list_managed_worktrees))
         .route(
             "/api/v1/governor/organizations/{organization_id}/proposals",
             get(list_governor_proposals),
@@ -2835,6 +2842,17 @@ async fn create_experiment(
 
 async fn get_governor_policy(State(state): State<ApiState>) -> Json<GovernorControlPolicy> {
     Json(state.runtime.governor_control_policy())
+}
+
+async fn list_managed_worktrees(
+    State(state): State<ApiState>,
+) -> Result<Json<ManagedWorktreeListResponse>, ApiError> {
+    Ok(Json(ManagedWorktreeListResponse {
+        worktrees: state
+            .runtime
+            .managed_worktrees()
+            .map_err(map_runtime_error)?,
+    }))
 }
 
 async fn create_governor_proposal(
