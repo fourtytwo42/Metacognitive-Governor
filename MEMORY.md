@@ -2,6 +2,13 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - v0.4.16 portable blocked by disk capacity
+
+- Context: Owner requested a new portable after the ChatGPT Sites and anchored-composer fixes. Packaging inputs were advanced transiently to v0.4.16 and a one-job, non-incremental release build was attempted with about 5.9 GiB free.
+- Result: All v0.4.16 sidecars compiled and the frontend production bundle passed, but the Tauri desktop archive failed with Windows error 112 while writing `target/release/deps/libmcg_desktop_lib.rlib`. No v0.4.16 portable directory or executable was created. Version manifests and locks were restored to committed v0.4.15 afterward.
+- Disk: About 1.1 GiB remained after failure. `target/debug` was already absent. Twelve preserved historical portable versions v0.4.4 through v0.4.15 consume about 5.7 GiB; deleting older portables requires explicit owner direction because prior release/portable artifacts are preservation-scoped.
+- Follow-up: With owner approval, retain v0.4.15, remove explicitly selected older portable directories, confirm at least 6 GiB free, then repeat the v0.4.16 one-job build. Do not delete `target/release` under the repository cleanup rule.
+
 ### 2026-08-25 - Chat composer anchored to the workspace bottom
 
 - Context: Owner requested that the conversation input remain attached to the bottom of the page instead of moving with transcript length or page scrolling.
