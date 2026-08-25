@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - Advanced workspace routing and mode escape fixed
+
+- Context: Owner UAT of v0.4.13 showed Advanced mode stacking New Chat, Tasks, Pull Requests, and other workspace surfaces into an overlapping dashboard; the only mode control was inside Settings, so the owner could not reliably return to Simple mode.
+- Decision: Simple and Advanced now share the same one-surface workspace router. Advanced retains its richer controls within the active surface instead of rendering every surface concurrently. A persistent toolbar mode pill plus View-menu and owner-menu actions always provide a route back to Simple. Legacy New Chat/Tasks conditional panels use the native `hidden` contract, and task controls wrap within bounded cards at narrower widths.
+- Files: `apps/desktop/src/{App.tsx,App.test.tsx,styles.css}`, product version manifests/locks, and `MEMORY.md`.
+- Commands/tests: Desktop typecheck and production build passed; verbose single-worker Vitest passed 83/83; browser visual QA at 1280x720 and 900x720 confirmed exactly one visible top-level workspace surface and no horizontal overflow.
+- Result: Fixed and packaged as the single-file Windows portable `target/portable/MCG-Portable-Windows-x64-v0.4.14/MCG-Desktop-v0.4.14.exe`, 500,908,544 bytes, Product/FileVersion 0.4.14, SHA-256 `40CC6D9492BABB92F66989BD991C39B175E394B85A3B29DB7F805EEF9035CE58`. Packaging raised the repository to 58.91 GiB with 7.45 GiB in the exact `target\debug` cache; process validation found zero executors there, then exact `cargo clean --target-dir` removed 10,814 generated files/7.5 GiB. `target\debug` is absent, free disk is 10.86 GiB, and release/portable artifacts remain.
+- Follow-up: Owner-native UAT should switch Advanced → Simple from the toolbar, View menu, and owner menu, then navigate New Chat, Tasks, and Pull Requests at both full and narrow window widths.
+
 ### 2026-08-25 - GUI-aligned Windows portable v0.4.13 built
 
 - Context: The owner requested a new portable after the desktop GUI was aligned with the governed CLI/runtime harness.

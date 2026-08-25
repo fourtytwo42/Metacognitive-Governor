@@ -7,6 +7,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
@@ -684,6 +685,7 @@ body { background: var(--mcg-bg); }
 .owner-menu > button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
 .owner-menu > button small { color: #999; font-size: .72rem; }
 .owner-menu > .owner-menu-usage { grid-template-columns: 20px minmax(0, 1fr); align-items: start; }
+.owner-menu > .owner-menu-mode { grid-template-columns: 20px minmax(0, 1fr); }
 .owner-menu-usage-copy { min-width: 0; display: grid; gap: 5px; }
 .owner-menu-usage-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .owner-menu-usage-heading strong { color: #ddd; font-size: .72rem; font-weight: 600; white-space: nowrap; }
@@ -740,21 +742,25 @@ body { background: var(--mcg-bg); }
   border: 0;
   background: transparent;
 }
-.simple-mode .workspace > section { display: none; }
-.simple-mode[data-active-surface="tasks"] .workspace > .hero-card,
-.simple-mode[data-active-surface="threads"] .workspace > .task-panel,
-.simple-mode[data-active-surface="pull-requests"] .workspace > #pull-requests,
-.simple-mode[data-active-surface="projects"] .workspace > #projects,
-.simple-mode[data-active-surface="agents"] .workspace > #agents,
-.simple-mode[data-active-surface="improvement"] .workspace > #improvement,
-.simple-mode[data-active-surface="sites"] .workspace > #sites,
-.simple-mode[data-active-surface="ssh"] .workspace > #ssh,
-.simple-mode[data-active-surface="platform"] .workspace > #platform,
-.simple-mode[data-active-surface="scheduler"] .workspace > #scheduler,
-.simple-mode[data-active-surface="providers"] .workspace > #providers,
-.simple-mode[data-active-surface="mcp"] .workspace > #mcp,
-.simple-mode[data-active-surface="plugins"] .workspace > #plugins,
-.simple-mode[data-active-surface="settings"] .workspace > #settings { display: grid; }
+.app-shell .workspace > section { display: none; }
+.app-shell[data-active-surface="tasks"] .workspace > .hero-card,
+.app-shell[data-active-surface="threads"] .workspace > .task-panel,
+.app-shell[data-active-surface="pull-requests"] .workspace > #pull-requests,
+.app-shell[data-active-surface="projects"] .workspace > #projects,
+.app-shell[data-active-surface="agents"] .workspace > #agents,
+.app-shell[data-active-surface="improvement"] .workspace > #improvement,
+.app-shell[data-active-surface="sites"] .workspace > #sites,
+.app-shell[data-active-surface="ssh"] .workspace > #ssh,
+.app-shell[data-active-surface="platform"] .workspace > #platform,
+.app-shell[data-active-surface="scheduler"] .workspace > #scheduler,
+.app-shell[data-active-surface="providers"] .workspace > #providers,
+.app-shell[data-active-surface="mcp"] .workspace > #mcp,
+.app-shell[data-active-surface="plugins"] .workspace > #plugins,
+.app-shell[data-active-surface="settings"] .workspace > #settings { display: grid; }
+.advanced-mode .workspace > section:not(.settings-page) { width: min(100%, 1360px); margin-right: auto; margin-left: auto; }
+.advanced-mode .task-card { flex-wrap: wrap; }
+.advanced-mode .task-card-main { flex: 1 1 480px; }
+.advanced-mode .task-actions { flex: 0 1 auto; min-width: 0; }
 .simple-mode[data-active-surface="threads"] .task-panel { margin-top: 18px; }
 .simple-mode[data-active-surface="threads"] .task-panel {
   width: min(100%, 900px);
@@ -1579,6 +1585,10 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 }
 .desktop-frame.sidebar-collapsed:is(.side-panel-open, .bottom-panel-open) .workspace { grid-column: 1; }
 .workspace-toolbar { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.workspace-mode-toggle { display: flex; min-height: 32px; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid var(--mcg-border); border-radius: 8px; color: #a9a9a9; background: #232323; font-size: .7rem; }
+.workspace-mode-toggle:hover { color: #eee; background: #303030; }
+.workspace-mode-toggle.advanced { border-color: #765332; color: #efbd83; background: #2b241d; }
+.workspace-mode-toggle:disabled { cursor: wait; opacity: .6; }
 .workspace-toolbar-menu { position: relative; }
 .workspace-icon-button,
 .open-in-button,

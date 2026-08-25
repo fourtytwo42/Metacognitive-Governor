@@ -2356,6 +2356,26 @@ test("mode persistence restores keyboard focus after the temporarily disabled co
   await waitFor(() => expect(simple).toHaveFocus());
 });
 
+test("advanced mode keeps one routed workspace surface and exposes a persistent simple-mode escape", async () => {
+  render(<App />);
+
+  await enableAdvancedMode();
+  const toolbar = screen.getByRole("button", { name: "Use simple mode", pressed: true });
+  expect(toolbar).toHaveTextContent("Advanced");
+
+  fireEvent.click(screen.getByRole("link", { name: "Pull requests" }));
+  const pullRequests = await screen.findByRole("region", { name: "Pull requests" });
+  const newChat = document.querySelector(".hero-card") as HTMLElement;
+  const taskPanel = document.querySelector(".task-panel") as HTMLElement;
+  expect(pullRequests).not.toHaveAttribute("hidden");
+  expect(newChat).toHaveAttribute("hidden");
+  expect(taskPanel).toHaveAttribute("hidden");
+
+  fireEvent.click(toolbar);
+  await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
+  expect(client.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ advanced_mode: false }));
+});
+
 test("OpenAI subscription browser login completes automatically after the callback", async () => {
   client.startCodexLogin.mockResolvedValue({ loginId: "fixture-session", authUrl: "https://auth.openai.com/oauth/authorize" });
   render(<App />);

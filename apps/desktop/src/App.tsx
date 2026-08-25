@@ -5980,6 +5980,7 @@ export function App() {
                 <button type="button" onClick={() => { setWorkspaceBottomPanelOpen(true); setDesktopMenu(null); window.requestAnimationFrame(() => terminalInputRef.current?.focus()); }}><span>Open Terminal</span><span className="menu-shortcut">Ctrl+`</span></button>
                 <button type="button" onClick={() => { setProjectTreeOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle File Tree</span><span className="menu-shortcut">Ctrl+Shift+E</span></button>
                 <button type="button" onClick={() => { setWorkspaceSidePanelOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle Side Panel</span><span className="menu-shortcut">Ctrl+Alt+B</span></button>
+                <button type="button" disabled={!userSettings || settingsBusy} onClick={() => { setDesktopMenu(null); void toggleAdvancedMode(); }}><span>{advanced ? "Use Simple Interface" : "Use Advanced Interface"}</span></button>
                 <hr />
                 <div className="desktop-menu-submenu">
                   <button type="button" aria-haspopup="menu"><span>Browser</span><span className="menu-arrow" aria-hidden="true">›</span></button>
@@ -6081,6 +6082,7 @@ export function App() {
               </span>
             </button>
             <button type="button" aria-label="Settings" onClick={() => { setSettingsTab("general"); navigateSurface("settings"); }}><span aria-hidden="true">⚙</span><span>Settings</span><small>Ctrl+,</small></button>
+            <button className="owner-menu-mode" type="button" aria-label={advanced ? "Use simple mode from owner menu" : "Use advanced mode from owner menu"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => { setOwnerMenuOpen(false); void toggleAdvancedMode(); }}><span aria-hidden="true">{advanced ? "◐" : "◑"}</span><span>{advanced ? "Use simple mode" : "Use advanced mode"}</span></button>
             {signedInWithOpenAi
               ? <button className="owner-menu-session" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}><span aria-hidden="true">↪</span><span>{busy ? "Logging out…" : "Log out"}</span></button>
               : <button className="owner-menu-session" type="button" disabled={busy || Boolean(login || codexLogin)} onClick={() => { setOwnerMenuOpen(false); setSettingsTab("account"); navigateSurface("settings"); void startLogin("browser"); }}><span aria-hidden="true">↪</span><span>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</span></button>}
@@ -6156,6 +6158,7 @@ export function App() {
             <p className="topbar-subtitle">Build, review, and run work with a local AI team.</p>
           </div>
           <div className="workspace-toolbar" aria-label="Workspace controls">
+            <button className={`workspace-mode-toggle${advanced ? " advanced" : ""}`} type="button" aria-label={advanced ? "Use simple mode" : "Use advanced mode"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => void toggleAdvancedMode()}><span aria-hidden="true">{advanced ? "◐" : "◑"}</span>{advanced ? "Advanced" : "Simple"}</button>
             <span className={`runtime-dot${localService && !localService.ready ? " status-error" : ""}`} title={localService?.detail} role="status"><i />{localService?.ready ? `v${localService.version}` : "Local runtime needs attention"}</span>
             <div className="workspace-toolbar-menu">
               <button className="workspace-icon-button" type="button" aria-label="Share" title="Share" aria-expanded={workspacePopover === "share"} onClick={() => setWorkspacePopover((current) => current === "share" ? null : "share")}><span aria-hidden="true">⇧</span></button>
@@ -6186,7 +6189,7 @@ export function App() {
         </aside>}
         {workspaceActionStatus && <button className="workspace-action-status" type="button" title="Dismiss" onClick={() => setWorkspaceActionStatus(null)}>{workspaceActionStatus}<span aria-hidden="true">×</span></button>}
 
-        {(advanced || activeSurface === "tasks") && <section className="hero-card">
+        {(advanced || activeSurface === "tasks") && <section className="hero-card" hidden={activeSurface !== "tasks"}>
           <div>
             <p className="eyebrow">NEW CHAT</p>
             <h2>What would you like to talk about?</h2>
@@ -6259,7 +6262,7 @@ export function App() {
           </div>
         </section>}
 
-        {(advanced || activeSurface === "threads" || (activeSurface === "tasks" && Boolean(workspaceTask))) && <section className="panel task-panel" aria-label={activeSurface === "threads" ? "Chat conversation" : "Tasks"}>
+        {(advanced || activeSurface === "threads" || (activeSurface === "tasks" && Boolean(workspaceTask))) && <section className="panel task-panel" hidden={activeSurface !== "threads" && !(activeSurface === "tasks" && Boolean(workspaceTask))} aria-label={activeSurface === "threads" ? "Chat conversation" : "Tasks"}>
           {activeSurface === "threads" ? <div className="chat-conversation">
             <div className="chat-message-list">
               {!visibleConversation || (visibleConversation.messages.length === 0 && visibleConversation.turns.length === 0)
@@ -8046,7 +8049,7 @@ export function App() {
             </p>
             <div className="settings-mode-row">
               <span><strong>Interface mode</strong><small>Simple mode keeps everyday choices compact. Advanced mode reveals exact runtime controls and evidence.</small></span>
-              <button ref={modeButtonRef} className="secondary" type="button" aria-pressed={advanced} disabled={settingsBusy} onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button>
+              <button ref={modeButtonRef} className="secondary" type="button" aria-label={advanced ? "Use simple mode from settings" : "Use advanced mode from settings"} aria-pressed={advanced} disabled={settingsBusy} onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button>
             </div>
             {advanced && <label className="check-row">
               <input
