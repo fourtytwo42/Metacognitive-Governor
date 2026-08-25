@@ -39,7 +39,7 @@ nav { display: grid; gap: 6px; }
 .nav-item:hover, .nav-item.active { color: #f1f6fb; background: #111a27; border-left-color: #42d9c8; }
 .mode-button { margin-top: auto; color: #b8c6d7; border: 1px solid #29384b; background: transparent; padding: 10px 12px; }
 
-.workspace { padding: 34px clamp(24px, 5vw, 72px); background: radial-gradient(circle at 80% 5%, #15314955, transparent 34%), #070b12; }
+.workspace { min-width: 0; padding: 34px clamp(24px, 5vw, 72px); overflow-x: hidden; background: radial-gradient(circle at 80% 5%, #15314955, transparent 34%), #070b12; }
 .topbar { display: flex; justify-content: space-between; gap: 20px; align-items: center; margin-bottom: 34px; }
 h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 0; font-size: clamp(2rem, 4vw, 3.2rem); letter-spacing: -.04em; }
@@ -52,12 +52,12 @@ h2 { font-size: 1.3rem; letter-spacing: -.02em; }
 .status-pill.status-error i { background: #ff747f; }
 
 .hero-card, .panel { border: 1px solid #1f2b3b; background: #0c121cdd; box-shadow: 0 18px 60px #0004; }
-.hero-card { padding: clamp(24px, 4vw, 48px); display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, 1.1fr); gap: 48px; }
+.hero-card { padding: clamp(24px, 4vw, 48px); display: grid; grid-template-columns: 1fr; gap: 24px; }
 .composer { display: grid; gap: 10px; }
 .composer label { color: #a8b6c6; font-size: .82rem; }
 textarea { min-height: 128px; resize: vertical; color: #e9f0f8; background: #070b12; border: 1px solid #2a394c; padding: 14px; outline: none; }
 textarea:focus { border-color: #42d9c8; box-shadow: 0 0 0 3px #42d9c814; }
-.composer-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.composer-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .primary, .secondary { border: 1px solid #42d9c8; padding: 9px 16px; }
 .primary { background: #42d9c8; color: #06100f; font-weight: 750; }
 .secondary { background: transparent; color: #b9c8d8; border-color: #2a394c; }
@@ -733,7 +733,7 @@ body { background: var(--mcg-bg); }
   background: var(--mcg-surface);
   box-shadow: none;
 }
-.simple-mode .hero-card {
+.app-shell[data-active-surface="tasks"] .hero-card {
   width: min(100%, 900px);
   margin: 10vh auto 0;
   padding: clamp(24px, 4vw, 42px);
@@ -1314,26 +1314,28 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
   .pull-request-list-pane { min-height: 420px; border-right: 0; border-bottom: 1px solid var(--mcg-border); }
   .pull-request-detail-pane { min-height: 460px; }
 }
-.simple-mode .hero-card > div:first-child { text-align: center; }
-.simple-mode .hero-card h2 { margin-bottom: 8px; font-size: clamp(1.65rem, 3vw, 2.25rem); }
-.simple-mode .hero-card .muted { margin-right: auto; margin-left: auto; }
-.simple-mode .composer {
+.new-chat-heading { text-align: center; }
+.new-chat-heading h2 { margin-bottom: 8px; font-size: clamp(1.65rem, 3vw, 2.25rem); }
+.app-shell[data-active-surface="tasks"] .composer {
+  min-width: 0;
   padding: 14px;
   border: 1px solid #414141;
   border-radius: 20px;
   background: var(--mcg-surface-raised);
   box-shadow: 0 12px 38px #0004;
 }
-.simple-mode .composer > label[for="goal"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-.simple-mode .composer > textarea {
+.app-shell[data-active-surface="tasks"] .composer > label[for="goal"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.app-shell[data-active-surface="tasks"] .composer > textarea {
   min-height: 96px;
   padding: 8px;
   border: 0;
   background: transparent;
   box-shadow: none;
 }
-.simple-mode .composer-actions { align-items: center; }
-.simple-mode .composer-actions .primary { border-radius: 999px; }
+.app-shell[data-active-surface="tasks"] .composer-actions { min-width: 0; align-items: center; }
+.app-shell[data-active-surface="tasks"] .composer-actions .primary { border-radius: 999px; }
+.app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector { flex: 1 1 220px; min-width: 0; max-width: 360px; }
+.app-shell[data-active-surface="tasks"] .composer-actions .project-select { flex: 0 1 155px; }
 .primary, .secondary, input, select, textarea, .count-badge {
   border-color: #414141;
   border-radius: 8px;

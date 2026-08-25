@@ -2362,6 +2362,11 @@ test("advanced mode keeps one routed workspace surface and exposes a persistent 
   await enableAdvancedMode();
   const toolbar = screen.getByRole("button", { name: "Use simple mode", pressed: true });
   expect(toolbar).toHaveTextContent("Advanced");
+  expect(screen.getByRole("heading", { name: "What can I help with?" })).toBeInTheDocument();
+  expect(screen.getAllByRole("textbox", { name: "Message" })).toHaveLength(1);
+  expect(screen.queryByText("Constraints (one per line)")).not.toBeInTheDocument();
+  expect(screen.queryByText("Success conditions (one per line)")).not.toBeInTheDocument();
+  expect(screen.queryByText("Maximum cost (USD, optional)")).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("link", { name: "Pull requests" }));
   const pullRequests = await screen.findByRole("region", { name: "Pull requests" });

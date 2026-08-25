@@ -1695,10 +1695,6 @@ export function App() {
   const [queuedChatMessages, setQueuedChatMessages] = useState<QueuedChatMessage[]>(storedChatQueue);
   const [steeringMessageId, setSteeringMessageId] = useState<string | null>(null);
   const [queueDispatchErrorId, setQueueDispatchErrorId] = useState<string | null>(null);
-  const [taskConstraints, setTaskConstraints] = useState("");
-  const [taskSuccess, setTaskSuccess] = useState("");
-  const [taskRisk, setTaskRisk] = useState<RiskLevel>("medium");
-  const [taskMaxCost, setTaskMaxCost] = useState("");
   const [taskBusy, setTaskBusy] = useState(false);
   const [conversationApprovalBusy, setConversationApprovalBusy] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
@@ -2219,8 +2215,6 @@ export function App() {
     setSelectedChatId(null);
     setDraftThreadId(crypto.randomUUID());
     setTaskGoal("");
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
@@ -2230,8 +2224,6 @@ export function App() {
     setSelectedProject(project);
     setSelectedChatId(null);
     setTaskGoal("Build a website. Start by asking me about its audience, purpose, required behavior, and information, then build and test a reviewable version before publishing it.");
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
@@ -2253,8 +2245,6 @@ export function App() {
           : codeReviewInstructions.trim() || "the code changes I describe next";
     setSelectedChatId(null);
     setTaskGoal(`${CODE_REVIEW_GOAL_PREFIX} in ${projectName}: review ${scope}. Prioritize correctness, regressions, security, missing tests, and repository instructions. Report concise, actionable findings with file and line references, ordered by severity. Do not modify the working tree during the review.`);
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     setCodeReviewError(null);
     navigateSurface("tasks");
@@ -2266,8 +2256,6 @@ export function App() {
     setSelectedProject(project);
     setSelectedChatId(null);
     setTaskGoal(`Refine the website ${site.display_name} at ${site.public_url}. Inspect the existing project, show me a reviewable version, and do not publish changes until they are approved.`);
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
@@ -2281,8 +2269,6 @@ export function App() {
     setSelectedProject(null);
     setSelectedChatId(null);
     setTaskGoal(`Refine the existing OpenAI Site ${entry.displayName} at ${entry.publicUrl}. Inspect its current Sites project and source, show me a reviewable version, and do not publish changes until they are approved.`);
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
@@ -3806,8 +3792,6 @@ export function App() {
     }
     setSelectedChatId(null);
     setTaskGoal(`Use @${plugin.active_revision.manifest.display_name} to `);
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     setPluginError(null);
     navigateSurface("tasks");
@@ -3937,9 +3921,6 @@ export function App() {
       return;
     }
     setTaskGoal("");
-    setTaskConstraints("");
-    setTaskSuccess("");
-    setTaskMaxCost("");
     const sent = await sendMessageContent(content);
     if (!sent) setTaskGoal((current) => current || content);
   }
@@ -4649,8 +4630,6 @@ export function App() {
       : "Start a separate chat for each run so every result is independent and appears in Scheduled.";
     setSelectedChatId(null);
     setTaskGoal(`Set up scheduled work for ${projectName}. Requested work: ${requestedWork} ${destination} First explain the unattended security boundary, then interview me for the exact cadence, stopping conditions, and permissions. Help me test and refine the prompt before enabling it. Use the narrowest access that can succeed. If this build cannot create the final schedule from chat yet, give me a complete reviewable schedule proposal and state that limitation clearly.`);
-    setTaskConstraints("");
-    setTaskSuccess("");
     setTaskError(null);
     setScheduleError(null);
     navigateSurface("tasks");
@@ -6190,13 +6169,8 @@ export function App() {
         {workspaceActionStatus && <button className="workspace-action-status" type="button" title="Dismiss" onClick={() => setWorkspaceActionStatus(null)}>{workspaceActionStatus}<span aria-hidden="true">×</span></button>}
 
         {(advanced || activeSurface === "tasks") && <section className="hero-card" hidden={activeSurface !== "tasks"}>
-          <div>
-            <p className="eyebrow">NEW CHAT</p>
-            <h2>What would you like to talk about?</h2>
-            <p className="muted">
-              Ask a question, explore an idea, or open a folder when you want MCG to
-              work with a project. Governance stays with the conversation.
-            </p>
+          <div className="new-chat-heading">
+            <h2>What can I help with?</h2>
           </div>
           <div className="composer">
             <label htmlFor="goal">Message</label>
@@ -6208,33 +6182,6 @@ export function App() {
               onKeyDown={handleComposerKeyDown}
               placeholder="Message MCG..."
             />
-            {advanced && <div className="advanced-fields task-advanced">
-              <label>
-                Constraints (one per line)
-                <textarea value={taskConstraints} onChange={(event) => setTaskConstraints(event.target.value)} />
-              </label>
-              <label>
-                Success conditions (one per line)
-                <textarea
-                  value={taskSuccess}
-                  onChange={(event) => setTaskSuccess(event.target.value)}
-                  placeholder={"FILE EXISTS dist/output.json\nSERVICE HEALTHY http://127.0.0.1:3000/health\nACCESSIBILITY CHECK http://127.0.0.1:3000/"}
-                />
-              </label>
-              <label>
-                Risk
-                <select value={taskRisk} onChange={(event) => setTaskRisk(event.target.value as RiskLevel)}>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="critical">Critical</option>
-                </select>
-              </label>
-              <label>
-                Maximum cost (USD, optional)
-                <input type="number" min="0" step="0.01" value={taskMaxCost} onChange={(event) => setTaskMaxCost(event.target.value)} />
-              </label>
-            </div>}
             <div className="composer-actions">
               <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(selectedProject)} />
               <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, and speed" />
