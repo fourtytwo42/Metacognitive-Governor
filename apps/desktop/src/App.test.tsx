@@ -838,6 +838,26 @@ async function enableSimpleMode() {
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
 }
 
+async function selectNewChatProject(name: string) {
+  fireEvent.click(screen.getByLabelText("Choose project"));
+  const menu = screen.getByRole("menu", { name: "Project choices" });
+  fireEvent.click(await within(menu).findByRole("menuitemradio", { name: new RegExp(name, "i") }));
+}
+
+function expectNewChatProject(name: string) {
+  expect(screen.getByLabelText("Choose project")).toHaveTextContent(name);
+}
+
+function openNewChatRunSettings() {
+  const selector = document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement;
+  expect(selector).toBeInTheDocument();
+  fireEvent.click(selector);
+  return {
+    selector,
+    dialog: screen.getByRole("dialog", { name: "New chat model, effort, speed, and team" })
+  };
+}
+
 test("custom desktop chrome invokes native minimize, maximize, and close controls", async () => {
   Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
   render(<App />);
@@ -1704,7 +1724,7 @@ test("simple Sites starts a project-aware website chat without exposing deployme
   expect(within(panel).queryByLabelText("Deployment executable")).not.toBeInTheDocument();
   fireEvent.change(within(panel).getByLabelText("Starting point"), { target: { value: project.project_id } });
   fireEvent.click(within(panel).getByRole("button", { name: "New site" }));
-  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expectNewChatProject("site");
   expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Build a website");
 });
 
@@ -1863,7 +1883,7 @@ test("simple Pull requests starts a read-only repository review instead of expos
   fireEvent.change(within(panel).getByLabelText("Review scope"), { target: { value: "uncommitted" } });
   fireEvent.click(within(panel).getByRole("button", { name: "Start review" }));
 
-  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expectNewChatProject("review-me");
   const goal = (screen.getByLabelText("Message") as HTMLTextAreaElement).value;
   expect(goal).toContain("Review code changes in review-me");
   expect(goal).toContain("all staged, unstaged, and untracked changes");
@@ -1997,7 +2017,7 @@ test("simple Scheduled starts a project-aware setup chat and Advanced retains ex
   fireEvent.change(within(scheduler).getByLabelText("Scheduled work"), { target: { value: "Summarize important changes every morning" } });
   fireEvent.change(within(scheduler).getByLabelText("Each run"), { target: { value: "chat" } });
   fireEvent.click(within(scheduler).getByRole("button", { name: "Set up in chat" }));
-  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expectNewChatProject("scheduled");
   expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Summarize important changes every morning");
   expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Return to this setup chat on each run");
 
@@ -2409,7 +2429,7 @@ test("advanced mode keeps one routed workspace surface and exposes a persistent 
   await enableAdvancedMode();
   const toolbar = screen.getByRole("button", { name: "Use simple mode", pressed: true });
   expect(toolbar).toHaveTextContent("Advanced");
-  expect(screen.getByRole("heading", { name: "What can I help with?" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "What should we build?" })).toBeInTheDocument();
   expect(screen.getAllByRole("textbox", { name: "Message" })).toHaveLength(1);
   expect(screen.queryByText("Constraints (one per line)")).not.toBeInTheDocument();
   expect(screen.queryByText("Success conditions (one per line)")).not.toBeInTheDocument();
@@ -2426,6 +2446,41 @@ test("advanced mode keeps one routed workspace surface and exposes a persistent 
   fireEvent.click(toolbar);
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
   expect(client.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ advanced_mode: false }));
+});
+
+test("new chat presents project, workspace, branch, add, permission, and run settings as contextual controls", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000020",
+    project_id: "00000000-0000-4000-8000-000000000021",
+    root: "C:\\Projects\\Metacognitive Governor",
+    observed_at: "2026-08-26T00:00:00Z",
+    repository: { is_git: true, branch: "codex/new-chat-surface", head: "0123456789abcdef", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  render(<App />);
+
+  await selectNewChatProject("Metacognitive Governor");
+  expect(screen.getByRole("heading", { name: "What should we build in Metacognitive Governor?" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByLabelText("Workspace: Local"));
+  const workspaceMenu = screen.getByRole("menu", { name: "Work in" });
+  expect(within(workspaceMenu).getByRole("menuitemradio", { name: /Local/ })).toHaveAttribute("aria-checked", "true");
+  expect(within(workspaceMenu).getByRole("menuitem", { name: /New local worktree/ })).toBeDisabled();
+  expect(within(workspaceMenu).getByRole("menuitem", { name: /Cloud/ })).toBeDisabled();
+
+  fireEvent.click(screen.getByLabelText("Branch: codex/new-chat-surface"));
+  expect(within(screen.getByRole("menu", { name: "Git branch" })).getByRole("menuitemradio", { name: /codex\/new-chat-surface/ })).toHaveAttribute("aria-checked", "true");
+
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  const addMenu = screen.getByRole("menu", { name: "Add" });
+  expect(within(addMenu).getByRole("menuitem", { name: /Open project folder/ })).toBeEnabled();
+  expect(within(addMenu).getByRole("menuitem", { name: /Remove project/ })).toBeEnabled();
+  expect(screen.getByLabelText("Change permissions")).toBeInTheDocument();
+  expect(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]')).toBeInTheDocument();
 });
 
 test("OpenAI subscription browser login completes automatically after the callback", async () => {
@@ -2464,12 +2519,14 @@ test("empty provider catalogs are discovered automatically and populate the chat
   render(<App />);
 
   await waitFor(() => expect(client.discoverProvider).toHaveBeenCalledWith(connection.id));
-  const selector = document.querySelector('summary[aria-label="New chat model, effort, and speed"]') as HTMLElement;
-  fireEvent.click(selector);
-  expect(await screen.findByRole("option", { name: "5.6 Sol · OpenAI Subscription" })).toBeInTheDocument();
-  expect(screen.getByText("1 available model")).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Model"), { target: { value: `${connection.id}\u0000gpt-5.6-sol` } });
+  const { selector, dialog } = openNewChatRunSettings();
+  fireEvent.click(within(dialog).getByRole("button", { name: /^Model/ }));
+  const modelMenu = screen.getByRole("menu", { name: "Model" });
+  const modelOption = await within(modelMenu).findByRole("menuitemradio", { name: /5\.6 Sol.*OpenAI Subscription/ });
+  expect(modelOption).toBeInTheDocument();
+  fireEvent.click(modelOption);
   expect(selector).toHaveTextContent("5.6 Sol");
+  expect(screen.getByText("1 available model")).toBeInTheDocument();
 });
 
 test("OpenAI subscription browser login resets after its callback timeout", async () => {
@@ -2876,10 +2933,7 @@ test("new chat opens immediately as a conversation without creating a project or
   client.listProjects.mockResolvedValue({ projects: [project] });
   render(<App />);
 
-  await waitFor(() => expect(within(screen.getByLabelText("Project")).getByRole("option", { name: "sample" })).toBeInTheDocument());
-  fireEvent.change(screen.getByLabelText("Project"), {
-    target: { value: project.project_id }
-  });
+  await selectNewChatProject("sample");
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Explain this repository" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByRole("heading", { name: "Explain this repository" })).toBeInTheDocument();
@@ -3209,8 +3263,7 @@ test("permission mode is selected before prompting and sent with the conversatio
   client.listProjects.mockResolvedValue({ projects: [project] });
   render(<App />);
 
-  await waitFor(() => expect(within(screen.getByLabelText("Project")).getByRole("option", { name: "sample" })).toBeInTheDocument());
-  fireEvent.change(screen.getByLabelText("Project"), { target: { value: project.project_id } });
+  await selectNewChatProject("sample");
   fireEvent.click(screen.getByLabelText("Change permissions"));
   fireEvent.click(screen.getByRole("menuitemradio", { name: /Approve for me/ }));
   expect(screen.getByLabelText("Change permissions")).toHaveTextContent("Approve for me");
@@ -3226,9 +3279,11 @@ test("permission mode is selected before prompting and sent with the conversatio
 test("team presets are selected before prompting and persisted with the conversation turn", async () => {
   render(<App />);
 
-  fireEvent.click(screen.getByLabelText("Change team preset"));
-  fireEvent.click(screen.getByRole("menuitemradio", { name: /Balanced/ }));
-  expect(screen.getByLabelText("Change team preset")).toHaveTextContent("Balanced");
+  const { dialog } = openNewChatRunSettings();
+  fireEvent.click(within(dialog).getByRole("button", { name: /^Team/ }));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Team preset" })).getByRole("menuitemradio", { name: /Balanced/ }));
+  fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
+  expect(within(screen.getByRole("dialog", { name: "New chat model, effort, speed, and team" })).getByRole("button", { name: /^Team/ })).toHaveTextContent("Balanced");
 
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Plan this with a balanced team" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -3556,7 +3611,7 @@ test("legacy blocked tasks do not crowd the normal new-chat workspace", async ()
   });
   render(<App />);
 
-  expect(await screen.findByRole("heading", { name: "What can I help with?" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "What should we build?" })).toBeVisible();
   expect(screen.queryByRole("button", { name: blockedTask.goal })).not.toBeInTheDocument();
   expect(client.retryTask).not.toHaveBeenCalled();
 });
@@ -3594,7 +3649,7 @@ test("legacy task approvals stay out of the normal new-chat workspace", async ()
   });
   render(<App />);
 
-  expect(await screen.findByRole("heading", { name: "What can I help with?" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "What should we build?" })).toBeVisible();
   expect(screen.queryByRole("button", { name: waitingTask.goal })).not.toBeInTheDocument();
   expect(client.approveRequest).not.toHaveBeenCalled();
   expect(client.resumeTask).not.toHaveBeenCalled();
@@ -3629,7 +3684,7 @@ test("legacy denied-task controls stay out of the normal new-chat workspace", as
   client.denyRequest.mockResolvedValue({ ...approval, state: "denied" });
   render(<App />);
 
-  expect(await screen.findByRole("heading", { name: "What can I help with?" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "What should we build?" })).toBeVisible();
   expect(screen.queryByRole("button", { name: waitingTask.goal })).not.toBeInTheDocument();
   expect(client.denyRequest).not.toHaveBeenCalled();
 });
@@ -3651,11 +3706,11 @@ test("native project selection discovers the folder and associates the new conve
   client.discoverProject.mockResolvedValue({ project });
   render(<App />);
 
-  const folderButton = screen.getByRole("button", { name: "Open folder" });
-  expect(folderButton).not.toHaveTextContent("Open folder");
-  fireEvent.click(folderButton);
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  const addMenu = screen.getByRole("menu", { name: "Add" });
+  fireEvent.click(within(addMenu).getByRole("menuitem", { name: /Open project folder/ }));
   expect((await screen.findAllByText("sample")).length).toBeGreaterThan(0);
-  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expectNewChatProject("sample");
   expect(document.querySelector(".selected-project")).toBeNull();
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Improve the sample" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -3747,7 +3802,11 @@ test("rediscovering a known Windows folder preserves its durable project identit
   client.discoverProject.mockResolvedValue({ project: { ...project, root: selectedRoot } });
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Open folder" }));
+  fireEvent.click(screen.getByLabelText("Choose project"));
+  await within(screen.getByRole("menu", { name: "Project choices" })).findByRole("menuitemradio", { name: /sample/ });
+  fireEvent.click(screen.getByLabelText("Choose project"));
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Open project folder/ }));
 
   await waitFor(() => expect(client.discoverProject).toHaveBeenCalledWith(selectedRoot, project.project_id));
 });
@@ -3815,7 +3874,7 @@ test("project intelligence stays advanced while project chat remains the simple 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
   expect(screen.getByRole("heading", { name: "New chat", level: 1 })).toBeInTheDocument();
-  expect(screen.getByLabelText("Project")).toHaveValue(project.project_id);
+  expectNewChatProject("remembered");
   expect(document.querySelector(".selected-project")).toBeNull();
   expect(screen.queryByLabelText("Project intelligence and memory")).not.toBeInTheDocument();
   await enableAdvancedMode();
@@ -4015,7 +4074,8 @@ test("project discovery errors remain visible on the Projects screen", async () 
   client.discoverProject.mockRejectedValue(new Error("Project discovery failed (405 Method Not Allowed)"));
   render(<App />);
 
-  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Open project folder/ }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Project discovery failed (405 Method Not Allowed)");
 });
