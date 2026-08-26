@@ -3064,6 +3064,7 @@ test("Coordinator lifecycle and tool traces are inline without a separate Agent 
   const coordinator = await screen.findByLabelText("Coordinator activity");
   expect(within(coordinator).getAllByText("Planning and assigning work").length).toBeGreaterThan(0);
   fireEvent.click(coordinator.querySelector(":scope > summary")!);
+  expect(within(coordinator).getByLabelText("Coordinator chat room")).toHaveAttribute("tabindex", "0");
   expect(within(coordinator).getByText("Coordinator started coordinating this request")).toBeInTheDocument();
   expect(within(coordinator).getAllByText(/delegate_code/).length).toBeGreaterThanOrEqual(2);
   expect(within(coordinator).getByText("Build the responsive shell")).toBeInTheDocument();

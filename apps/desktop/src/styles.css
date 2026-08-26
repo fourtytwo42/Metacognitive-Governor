@@ -882,7 +882,8 @@ body { background: var(--mcg-bg); }
 .coding-agent-actions { display: flex; flex-wrap: wrap; gap: 7px; padding-top: 4px; border-top: 1px solid var(--mcg-border); }
 .coding-agent-actions button { min-height: 32px; padding: 6px 10px; font-size: .72rem; }
 .coding-agent-patch { max-height: 320px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--mcg-border); border-radius: 8px; color: var(--mcg-text); background: var(--mcg-bg); font-size: .68rem; white-space: pre; }
-.agent-chat-room { display: grid; min-width: 0; gap: 12px; }
+.agent-chat-room { display: grid; box-sizing: border-box; min-width: 0; min-height: 0; max-height: min(58vh, 620px); gap: 12px; padding: 2px 7px 4px 2px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; touch-action: pan-y; }
+.agent-chat-room:focus-visible { outline: 2px solid color-mix(in srgb, var(--mcg-accent) 72%, transparent); outline-offset: 3px; }
 .agent-chat-transcript { display: grid; min-width: 0; gap: 16px; padding: 6px 2px; }
 .agent-chat-empty, .agent-live-activity-empty { margin: 0; color: var(--mcg-muted); font-size: .75rem; }
 .agent-chat-message { width: min(94%, 720px); min-width: 0; margin: 0; }

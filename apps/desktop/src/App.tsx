@@ -785,7 +785,7 @@ function AgentChatRoom({ session, sessions, messages, activities, children }: {
     }
     return message.content;
   };
-  return <section className="agent-chat-room" aria-label={`${session?.display_name || "Agent"} chat room`}>
+  return <section className="agent-chat-room" aria-label={`${session?.display_name || "Agent"} chat room`} tabIndex={0}>
     <div className="agent-chat-transcript chat-message-list">
       {chatMessages.length === 0
         ? <p className="agent-chat-empty">No agent messages recorded yet.</p>
