@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - Orphan legacy chats removed from General and v0.4.18 packaged
+
+- Context: Owner reported that two ITSM chats remained under General after restart and could not be archived. Fresh inspection showed they were legacy task projections for a project already removed from the catalog, not normal conversation records.
+- Decision: Preserve the immutable task/run evidence and stop projecting removed-project tasks as unrelated General chats. Restore the two real ExampleSite4/ExampleSite5 conversations that were initially misidentified and archived. Keep a recovery copy of the live SQLite database outside the repository before any diagnosis; no task history was deleted.
+- Files: `apps/desktop/src/{App.tsx,App.test.tsx}`, product/package manifests and locks, and `MEMORY.md`.
+- Commands/tests: Desktop typecheck, focused orphan-projection Vitest, packaging contracts, production build, and one-job Windows portable packaging passed. The first portable link hit Windows error 112; exact `target/debug` cleanup removed 102.1 MiB and targeted `cargo clean --release -p mcg-desktop` removed 6.0 GiB of disposable desktop build intermediates before the successful retry. Release sidecars, prior portables, source, user data, and the recovery database remained preserved.
+- Result: Removed-project task evidence no longer appears under General. `target/portable/MCG-Portable-Windows-x64-v0.4.18/MCG-Desktop-v0.4.18.exe` is one 513,676,800-byte payload with Product/FileVersion 0.4.18 and SHA-256 `24AC7F3FC1ED6C00FA1C288092485E6FAA9692E9F13A1D41DD5C45A6CA34E1E7`. Recovery copy: `%LOCALAPPDATA%\MCG\manual-backups\mcg-before-remove-orphan-general-tasks-20260825-194057.sqlite3`, SHA-256 `BD3FDB309563FA40E499648CB7B0C156FF0D68441D105D180C9FD118F3503692`.
+- Follow-up: Owner should close v0.4.17, launch v0.4.18, and confirm General is absent while the ExampleSite4/ExampleSite5 project conversations remain available.
+
 ### 2026-08-25 - New-logo Windows portable v0.4.17 built
 
 - Context: Owner requested a portable containing the newly approved geometric brain/android identity.

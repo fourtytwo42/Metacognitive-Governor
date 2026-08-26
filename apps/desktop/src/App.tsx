@@ -5627,9 +5627,13 @@ export function App() {
   // Schema migration normally materializes legacy task-backed chats as conversations.
   // Keep a projection fallback so an interrupted upgrade (and older API clients) never
   // makes durable work disappear from the sidebar before that migration is observed.
+  // A task whose project has been removed from the catalog is retained as runtime
+  // evidence, but must not be resurrected as an unrelated chat under General.
   const conversationIds = new Set(conversationChatSummaries.map((chat) => chat.id));
+  const knownSidebarProjectIds = new Set([...projects, ...archivedProjects].map((project) => project.project_id));
   const legacyTaskChatSummaries = tasks
     .filter((task) => !conversationIds.has(chatIdForTask(task)))
+    .filter((task) => !task.project_id || knownSidebarProjectIds.has(task.project_id))
     .filter((task) => !normalizedChatSearch || task.goal.toLocaleLowerCase().includes(normalizedChatSearch))
     .map((task) => ({
       id: chatIdForTask(task),

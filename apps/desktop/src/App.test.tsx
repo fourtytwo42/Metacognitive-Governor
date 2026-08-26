@@ -996,6 +996,30 @@ test("Codex-style sidebar groups project chats, searches them, and persists pins
   expect(screen.getByRole("heading", { name: task.goal, level: 3 })).toBeInTheDocument();
 });
 
+test("removed-project task evidence is not resurrected as a General chat", async () => {
+  client.listProjects.mockResolvedValue({ projects: [], archived_projects: [] });
+  client.listTasks.mockResolvedValue({ tasks: [{
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000613",
+    project_id: "00000000-0000-4000-8000-000000000614",
+    goal: "Legacy task from a removed project",
+    constraints: [],
+    success_conditions: [],
+    risk: "medium",
+    budget: {},
+    state: "blocked",
+    created_at: "2026-08-21T00:00:00Z",
+    updated_at: "2026-08-21T00:00:00Z"
+  }] });
+
+  render(<App />);
+
+  const projectTree = screen.getByLabelText("Projects");
+  await waitFor(() => expect(client.listTasks).toHaveBeenCalled());
+  expect(within(projectTree).queryByRole("button", { name: "General" })).not.toBeInTheDocument();
+  expect(within(projectTree).queryByRole("button", { name: "Legacy task from a removed project" })).not.toBeInTheDocument();
+});
+
 test("project sidebar icons archive, restore, and safely remove catalog entries", async () => {
   const active = {
     schema_version: 1,
