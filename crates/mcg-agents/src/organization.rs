@@ -41,6 +41,12 @@ impl OrganizationGenome {
             "Implement and repair project code through the governed tool plane.",
             &["filesystem.project", "process.project", "git.project"],
         );
+        let tester = default_role(
+            RoleKind::Tester,
+            "Tester",
+            "Exercise owner workflows through governed read-only browser access and report objective evidence without changing project files.",
+            &["filesystem.read", "browser.evaluate", "context.search"],
+        );
         let evaluator = default_role(
             RoleKind::Evaluator,
             "Evaluator",
@@ -106,6 +112,26 @@ impl OrganizationGenome {
                     to: coordinator.id,
                     kind: RelationshipKind::ReportsTo,
                 },
+                RoleRelationship {
+                    from: coordinator.id,
+                    to: tester.id,
+                    kind: RelationshipKind::DelegatesTo,
+                },
+                RoleRelationship {
+                    from: coordinator.id,
+                    to: tester.id,
+                    kind: RelationshipKind::SharesInformationWith,
+                },
+                RoleRelationship {
+                    from: tester.id,
+                    to: coordinator.id,
+                    kind: RelationshipKind::SharesInformationWith,
+                },
+                RoleRelationship {
+                    from: tester.id,
+                    to: coordinator.id,
+                    kind: RelationshipKind::ReportsTo,
+                },
             ])
             .collect();
 
@@ -122,6 +148,7 @@ impl OrganizationGenome {
                 conversation,
                 coordinator,
                 coder,
+                tester,
                 evaluator,
                 tool_worker,
             ],
@@ -216,6 +243,7 @@ mod tests {
                 RoleKind::Coordinator,
                 RoleKind::Conversation,
                 RoleKind::Coder,
+                RoleKind::Tester,
                 RoleKind::Evaluator,
                 RoleKind::ToolWorker,
             ])

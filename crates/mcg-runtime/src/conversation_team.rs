@@ -25,8 +25,9 @@ pub const CHAT_AGENT_TOOLS: [&str; 4] = [
     "read_blackboard",
     "write_blackboard",
 ];
-pub const COORDINATOR_AGENT_TOOLS: [&str; 8] = [
+pub const COORDINATOR_AGENT_TOOLS: [&str; 9] = [
     "delegate_code",
+    "delegate_test",
     "message_chat",
     "message_coder",
     "settle_delegation",
@@ -36,6 +37,13 @@ pub const COORDINATOR_AGENT_TOOLS: [&str; 8] = [
     "cancel_delegation",
 ];
 pub const CODER_AGENT_TOOLS: [&str; 5] = [
+    "message_coordinator",
+    "search_shared_context",
+    "read_blackboard",
+    "write_blackboard",
+    "report_result",
+];
+pub const TESTER_AGENT_TOOLS: [&str; 5] = [
     "message_coordinator",
     "search_shared_context",
     "read_blackboard",
@@ -90,6 +98,7 @@ impl AgentToolClaims {
             ConversationAgentKind::Chat => CHAT_AGENT_TOOLS.as_slice(),
             ConversationAgentKind::Coordinator => COORDINATOR_AGENT_TOOLS.as_slice(),
             ConversationAgentKind::Coder => CODER_AGENT_TOOLS.as_slice(),
+            ConversationAgentKind::Tester => TESTER_AGENT_TOOLS.as_slice(),
         }
         .iter()
         .map(|value| (*value).to_owned())
@@ -111,13 +120,20 @@ impl AgentToolClaims {
             ConversationAgentKind::Chat => CHAT_AGENT_TOOLS.as_slice(),
             ConversationAgentKind::Coordinator => COORDINATOR_AGENT_TOOLS.as_slice(),
             ConversationAgentKind::Coder => CODER_AGENT_TOOLS.as_slice(),
+            ConversationAgentKind::Tester => TESTER_AGENT_TOOLS.as_slice(),
         }
         .iter()
         .map(|value| (*value).to_owned())
         .collect();
         if self.allowed_tools != expected
-            || (self.role != ConversationAgentKind::Coder && self.delegation_id.is_some())
-            || (self.role == ConversationAgentKind::Coder && self.delegation_id.is_none())
+            || (!matches!(
+                self.role,
+                ConversationAgentKind::Coder | ConversationAgentKind::Tester
+            ) && self.delegation_id.is_some())
+            || (matches!(
+                self.role,
+                ConversationAgentKind::Coder | ConversationAgentKind::Tester
+            ) && self.delegation_id.is_none())
             || self.nonce_sha256.len() != 64
         {
             return Err(AgentAuthorityError::InvalidClaims);
@@ -439,7 +455,11 @@ mod tests {
         AgentToolClaims::for_role(
             ConversationId::new(),
             ConversationAgentSessionId::new(),
-            (role == ConversationAgentKind::Coder).then(AgentDelegationId::new),
+            matches!(
+                role,
+                ConversationAgentKind::Coder | ConversationAgentKind::Tester
+            )
+            .then(AgentDelegationId::new),
             ProjectId::new(),
             role,
             OrganizationRevisionId::new(),
@@ -488,6 +508,9 @@ mod tests {
             .authorize(&access.bearer, "delegate_code", now)
             .expect("Coordinator can delegate");
         registry
+            .authorize(&access.bearer, "delegate_test", now)
+            .expect("Coordinator can delegate read-only testing");
+        registry
             .authorize(&access.bearer, "message_chat", now)
             .expect("Coordinator can report to Chat");
         registry
@@ -496,6 +519,32 @@ mod tests {
         assert_eq!(
             registry.authorize(&access.bearer, "report_result", now),
             Err(AgentAuthorityError::ToolDenied("report_result".into()))
+        );
+    }
+
+    #[test]
+    fn tester_can_report_and_use_context_but_cannot_delegate_or_mutate() {
+        let registry = AgentToolCredentialRegistry::default();
+        let now = Utc::now();
+        let bootstrap = registry
+            .issue_bootstrap(claims(ConversationAgentKind::Tester), now)
+            .expect("bootstrap");
+        let access = registry
+            .exchange_bootstrap(&bootstrap, now)
+            .expect("exchange");
+        registry
+            .authorize(&access.bearer, "report_result", now)
+            .expect("report");
+        registry
+            .authorize(&access.bearer, "search_shared_context", now)
+            .expect("context");
+        assert_eq!(
+            registry.authorize(&access.bearer, "delegate_code", now),
+            Err(AgentAuthorityError::ToolDenied("delegate_code".into()))
+        );
+        assert_eq!(
+            registry.authorize(&access.bearer, "delegate_test", now),
+            Err(AgentAuthorityError::ToolDenied("delegate_test".into()))
         );
     }
 

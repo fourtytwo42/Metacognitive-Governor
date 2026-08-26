@@ -3047,7 +3047,7 @@ test("Coordinator lifecycle and tool traces are inline without a separate Agent 
         { schema_version: 4, id: "join", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "joined", room: "backstage", content: "Coordinator started coordinating this request", created_at: now },
         { schema_version: 4, id: "call", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "tool_call", room: "backstage", tool_name: "delegate_code", correlation_id: "trace-1", content: "Calling delegate_code", created_at: now },
         { schema_version: 4, id: "result", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coordinatorId, kind: "tool_result", room: "backstage", tool_name: "delegate_code", correlation_id: "trace-1", content: "delegate_code completed", created_at: now },
-        { schema_version: 4, id: "brief", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coderId, kind: "delegation", room: "backstage", content: "Build the responsive shell", created_at: now }
+        { schema_version: 4, id: "brief", conversation_id: conversationId, from_session_id: coordinatorId, to_session_id: coderId, kind: "delegation", room: "backstage", content: JSON.stringify({ objective: "Build the responsive shell", scope: ["src"], constraints: ["Keep it accessible"], success_conditions: ["Responsive shell renders"], context_references: [] }), created_at: now }
       ],
       context_checkpoints: [{ schema_version: 4, id: "checkpoint", conversation_id: conversationId, session_id: coordinatorId, room: "backstage", revision: 1, summary: "Delegated the responsive shell.", source_references: ["brief"], approximate_tokens: 8, created_at: now }]
       ,coordination_batches: [{ schema_version: 6, id: "room-batch", conversation_id: conversationId, origin_turn_id: "room-turn", coordinator_session_id: coordinatorId, state: "running", revision: 1, delegation_ids: [], coordinator_turn_count: 1, coordinator_approximate_tokens: 10, created_at: now, updated_at: now }]
@@ -3063,10 +3063,12 @@ test("Coordinator lifecycle and tool traces are inline without a separate Agent 
   expect(screen.queryByRole("navigation", { name: "Conversation rooms" })).not.toBeInTheDocument();
   const coordinator = await screen.findByLabelText("Coordinator activity");
   expect(within(coordinator).getAllByText("Planning and assigning work").length).toBeGreaterThan(0);
-  fireEvent.click(within(coordinator).getByText("Coordinator"));
+  fireEvent.click(coordinator.querySelector(":scope > summary")!);
   expect(within(coordinator).getByText("Coordinator started coordinating this request")).toBeInTheDocument();
   expect(within(coordinator).getAllByText(/delegate_code/).length).toBeGreaterThanOrEqual(2);
   expect(within(coordinator).getByText("Build the responsive shell")).toBeInTheDocument();
+  expect(within(coordinator).getByText("Keep it accessible")).toBeInTheDocument();
+  expect(within(coordinator).queryByText(/"objective":/)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Message")).toBeInTheDocument();
 });
 

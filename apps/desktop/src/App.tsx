@@ -758,18 +758,49 @@ function AgentChatRoom({ session, sessions, messages, activities, children }: {
 }) {
   const sessionName = (id: string) => sessions.find((candidate) => candidate.id === id)?.display_name || "Agent";
   const orderedMessages = messages.slice().sort((left, right) => left.created_at.localeCompare(right.created_at));
+  const chatMessages = orderedMessages.filter((message) => !["tool_call", "tool_result"].includes(message.kind));
+  const toolMessages = orderedMessages.filter((message) => ["tool_call", "tool_result"].includes(message.kind));
+  const displayContent = (message: AgentMessage): string => {
+    if (!message.content.trim().startsWith("{")) return message.content;
+    try {
+      const value = JSON.parse(message.content) as Record<string, unknown>;
+      if (message.kind === "delegation" && typeof value.objective === "string") {
+        const sections: Array<[string, unknown]> = [
+          ["Scope", value.scope], ["Constraints", value.constraints],
+          ["Success conditions", value.success_conditions], ["Context", value.context_references]
+        ];
+        return [`**${value.objective}**`, ...sections.flatMap(([label, items]) =>
+          Array.isArray(items) && items.length > 0 ? [`\n${label}`, ...items.map((item) => `- ${String(item)}`)] : []
+        )].join("\n");
+      }
+      if (message.kind === "report" && typeof value.summary === "string") {
+        const lines = [`**Result**\n\n${value.summary}`];
+        if (Array.isArray(value.checks) && value.checks.length > 0) lines.push(`\n**Checks**\n${value.checks.map((item) => `- ${String(item)}`).join("\n")}`);
+        if (Array.isArray(value.evidence) && value.evidence.length > 0) lines.push(`\n**Evidence**\n${value.evidence.map((item) => `- ${String(item)}`).join("\n")}`);
+        if (Array.isArray(value.unresolved_issues) && value.unresolved_issues.length > 0) lines.push(`\n**Unresolved**\n${value.unresolved_issues.map((item) => `- ${String(item)}`).join("\n")}`);
+        return lines.join("\n");
+      }
+    } catch {
+      // Preserve non-contract text that merely begins with a brace.
+    }
+    return message.content;
+  };
   return <section className="agent-chat-room" aria-label={`${session?.display_name || "Agent"} chat room`}>
-    <div className="agent-chat-transcript">
-      {orderedMessages.length === 0
+    <div className="agent-chat-transcript chat-message-list">
+      {chatMessages.length === 0
         ? <p className="agent-chat-empty">No agent messages recorded yet.</p>
-        : orderedMessages.map((message) => {
+        : chatMessages.map((message) => {
             const own = message.from_session_id === session?.id;
-            return <article className={`agent-chat-message ${own ? "from-agent" : "to-agent"}`} key={message.id}>
-              <small>{sessionName(message.from_session_id)} · {message.tool_name || message.kind.replaceAll("_", " ")}</small>
-              <MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
+            return <article className={`chat-message agent-chat-message ${own ? "assistant-message from-agent" : "user-message to-agent"}`} key={message.id}>
+              <span>{sessionName(message.from_session_id)}</span>
+              <MarkdownContent content={displayContent(message)} onOpenLink={openSiteExternalUrl} />
             </article>;
           })}
     </div>
+    {toolMessages.length > 0 && <details className="agent-tool-trace">
+      <summary><span className="chat-activity-icon" aria-hidden="true">⌘</span><span>{toolMessages.at(-1)?.tool_name || "Used an internal tool"}</span><small>{toolMessages.length} event{toolMessages.length === 1 ? "" : "s"}</small><span className="chat-activity-chevron" aria-hidden="true">⌄</span></summary>
+      <div className="agent-live-activity-scroll">{toolMessages.map((message) => <div className="agent-live-activity-event" key={message.id}><span className="chat-activity-icon" aria-hidden="true">{message.kind === "tool_call" ? "›" : "✓"}</span><span>{message.tool_name || message.kind.replaceAll("_", " ")}</span><small>{message.content}</small></div>)}</div>
+    </details>}
     <AgentLiveActivity activities={activities} />
     {children && <div className="agent-chat-children" aria-label="Sub-agent widgets">{children}</div>}
   </section>;
@@ -1234,6 +1265,8 @@ function CodingAgentCards({ team, conversationId, delegationIds, activities, onV
   return <section className="coding-agent-stack" aria-label="Coding agent activity">
     {visibleDelegations.map((delegation, index) => {
       const session = team.sessions.find((candidate) => candidate.id === delegation.coder_session_id);
+      const tester = session?.kind === "tester";
+      const roleLabel = tester ? "Tester" : "Coding Agent";
       const worktree = team.worktrees.find((candidate) => candidate.id === delegation.worktree_id);
       const messages = team.messages.filter((message) => message.delegation_id === delegation.id);
       const blackboard = team.blackboard.filter((entry) => entry.delegation_id === delegation.id);
@@ -1243,11 +1276,12 @@ function CodingAgentCards({ team, conversationId, delegationIds, activities, onV
         || (!activity.agent_session_id && !activity.delegation_id && visibleDelegations.length === 1)
       );
       const active = codingAgentIsActive(delegation.state);
+      const stateText = tester && delegation.state === "running" ? "Testing" : stateLabel(delegation.state);
       const tab = tabs[delegation.id] ?? "chat_room";
       const cancellable = ["requested", "preparing", "running", "waiting"].includes(delegation.state);
-      const reviewable = Boolean(worktree) && ["reported", "blocked", "failed", "cancelled"].includes(delegation.state);
-      const applicable = Boolean(worktree) && ["reported", "blocked"].includes(delegation.state);
-      const discardable = Boolean(worktree) && worktree?.state !== "removed" && !["preparing", "running", "integrating"].includes(delegation.state);
+      const reviewable = !tester && Boolean(worktree) && ["reported", "blocked", "failed", "cancelled"].includes(delegation.state);
+      const applicable = !tester && Boolean(worktree) && ["reported", "blocked"].includes(delegation.state);
+      const discardable = !tester && Boolean(worktree) && worktree?.state !== "removed" && !["preparing", "running", "integrating"].includes(delegation.state);
       const retryable = ["failed", "cancelled", "blocked"].includes(delegation.state);
       const governance = delegation.governance;
       const needsAttention = Boolean(governance && (governance.preflight.blockers.length > 0 || governance.failure_class !== "none"));
@@ -1255,19 +1289,19 @@ function CodingAgentCards({ team, conversationId, delegationIds, activities, onV
       const attemptHistory = delegationAttemptChain(delegation, allAttempts);
       return <details className={`coding-agent-card state-${delegation.state}`} key={delegation.id} open={needsAttention}>
         <summary>
-          <span className="coding-agent-glyph" aria-hidden="true">⌘</span>
+          <span className="coding-agent-glyph" aria-hidden="true">{tester ? "✓" : "⌘"}</span>
           <span className="coding-agent-title">
-            <strong>{session?.display_name || `Coding Agent ${index + 1}`}</strong>
+            <strong>{session?.display_name || `${roleLabel} ${index + 1}`}</strong>
             <small>{delegation.brief.objective}</small>
-            <span className="coding-agent-progress" role="progressbar" aria-label={`Coding Agent ${index + 1} progress: ${stateLabel(delegation.state)}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={codingAgentProgress(delegation.state)}><i style={{ width: `${codingAgentProgress(delegation.state)}%` }} /></span>
+            <span className="coding-agent-progress" role="progressbar" aria-label={`${roleLabel} ${index + 1} progress: ${stateText}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={codingAgentProgress(delegation.state)}><i style={{ width: `${codingAgentProgress(delegation.state)}%` }} /></span>
           </span>
-          <span className="coding-agent-state"><span>{stateLabel(delegation.state)}</span><CodingAgentElapsed createdAt={delegation.created_at} updatedAt={delegation.updated_at} active={active} />{active && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}</span>
+          <span className="coding-agent-state"><span>{stateText}</span><CodingAgentElapsed createdAt={delegation.created_at} updatedAt={delegation.updated_at} active={active} />{active && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}</span>
           <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
         </summary>
         <div className="coding-agent-detail">
-          <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["chat_room", "activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "chat_room" ? "Chat room" : value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
+          <div className="coding-agent-tabs" role="tablist" aria-label={`${roleLabel} ${index + 1} details`}>{(["chat_room", "activity", "exchange", "blackboard", "changes", "evidence"] as const).filter((value) => !tester || value !== "changes").map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "chat_room" ? "Chat room" : value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
           {tab === "chat_room" && <AgentChatRoom session={session} sessions={team.sessions} messages={messages} activities={sessionActivities} />}
-          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p><div className="coding-agent-meta">
+          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateText}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p><div className="coding-agent-meta">
             {session?.model && <span>Model <code>{session.model}</code></span>}
             <span>Prompt revision <code>{session?.prompt_revision ?? "—"}</code></span>
             {worktree && <span>Branch <code>{worktree.branch}</code></span>}

@@ -883,24 +883,26 @@ body { background: var(--mcg-bg); }
 .coding-agent-actions button { min-height: 32px; padding: 6px 10px; font-size: .72rem; }
 .coding-agent-patch { max-height: 320px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--mcg-border); border-radius: 8px; color: var(--mcg-text); background: var(--mcg-bg); font-size: .68rem; white-space: pre; }
 .agent-chat-room { display: grid; min-width: 0; gap: 12px; }
-.agent-chat-transcript { display: grid; min-width: 0; gap: 10px; }
+.agent-chat-transcript { display: grid; min-width: 0; gap: 16px; padding: 6px 2px; }
 .agent-chat-empty, .agent-live-activity-empty { margin: 0; color: var(--mcg-muted); font-size: .75rem; }
-.agent-chat-message { display: grid; width: min(92%, 650px); min-width: 0; gap: 5px; padding: 10px 12px; border-radius: 14px; color: var(--mcg-text); background: color-mix(in srgb, var(--mcg-surface-raised) 82%, transparent); }
+.agent-chat-message { width: min(94%, 720px); min-width: 0; margin: 0; }
 .agent-chat-message.from-agent { justify-self: start; }
-.agent-chat-message.to-agent { justify-self: end; background: color-mix(in srgb, var(--mcg-accent) 10%, var(--mcg-surface-raised)); }
-.agent-chat-message small { color: var(--mcg-muted); font-size: .66rem; text-transform: capitalize; }
-.agent-chat-message .markdown-content { font-size: .77rem; line-height: 1.48; }
+.agent-chat-message.to-agent { justify-self: end; }
+.agent-chat-message > span { color: var(--mcg-text-strong); font-size: .72rem; font-weight: 650; }
+.agent-chat-message .markdown-content { font-size: .82rem; line-height: 1.55; }
 .agent-chat-message .markdown-content > :first-child { margin-top: 0; }
 .agent-chat-message .markdown-content > :last-child { margin-bottom: 0; }
-.agent-live-activity { min-width: 0; overflow: hidden; border-top: 1px solid var(--mcg-border); }
-.agent-live-activity > summary { display: flex; min-width: 0; min-height: 36px; align-items: center; gap: 9px; padding: 4px 2px 0; cursor: pointer; list-style: none; color: var(--mcg-muted); font-size: .76rem; }
-.agent-live-activity > summary::-webkit-details-marker, .agent-live-activity-event > summary::-webkit-details-marker { display: none; }
-.agent-live-activity > summary:hover { color: var(--mcg-text); }
+.agent-live-activity, .agent-tool-trace { min-width: 0; overflow: hidden; border-top: 1px solid var(--mcg-border); }
+.agent-live-activity > summary, .agent-tool-trace > summary { display: flex; min-width: 0; min-height: 36px; align-items: center; gap: 9px; padding: 4px 2px 0; cursor: pointer; list-style: none; color: var(--mcg-muted); font-size: .76rem; }
+.agent-live-activity > summary::-webkit-details-marker, .agent-tool-trace > summary::-webkit-details-marker, .agent-live-activity-event > summary::-webkit-details-marker { display: none; }
+.agent-live-activity > summary:hover, .agent-tool-trace > summary:hover { color: var(--mcg-text); }
 .agent-live-activity-label { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-live-activity > summary small { flex: 0 0 auto; color: color-mix(in srgb, var(--mcg-muted) 72%, transparent); font-size: .68rem; }
-.agent-live-activity[open] > summary .chat-activity-chevron { transform: rotate(180deg); }
+.agent-live-activity[open] > summary .chat-activity-chevron, .agent-tool-trace[open] > summary .chat-activity-chevron { transform: rotate(180deg); }
 .agent-live-activity-scroll { display: grid; box-sizing: border-box; max-height: 280px; gap: 4px; margin-top: 5px; padding: 8px 4px 8px 12px; overflow: auto; overscroll-behavior: contain; border-left: 1px solid var(--mcg-border); scrollbar-gutter: stable; }
 .agent-live-activity-event, .agent-live-activity-event > summary { display: flex; min-width: 0; align-items: center; gap: 9px; color: var(--mcg-muted); font-size: .73rem; }
+.agent-tool-trace > summary > span:nth-child(2) { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-tool-trace .agent-live-activity-event small { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-live-activity-event > summary { width: 100%; cursor: pointer; list-style: none; }
 .agent-live-activity-event > span:nth-child(2), .agent-live-activity-event > summary > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-live-activity-event.state-failed, .agent-live-activity-event.state-declined { color: var(--mcg-danger); }

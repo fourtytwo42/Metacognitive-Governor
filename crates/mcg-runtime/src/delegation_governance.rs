@@ -38,6 +38,15 @@ pub fn deterministic_single_coder_brief(request: &str) -> Option<CodingDelegatio
         "investigate first",
         "acceptance criteria",
         "requirements:",
+        "uat",
+        "user acceptance test",
+        "acceptance test",
+        "/browser",
+        "in-app browser",
+        "test in the browser",
+        "browser testing",
+        "visual testing",
+        "accessibility testing",
     ];
     if coordinator_signals
         .iter()
@@ -426,6 +435,16 @@ mod tests {
             )
             .is_none(),
             "multi-requirement work needs Coordinator requirement preservation"
+        );
+        assert!(
+            deterministic_single_coder_brief("Can you do some UAT testing in the /browser?")
+                .is_none(),
+            "browser UAT must reach the Coordinator so it can assign a governed Tester"
+        );
+        assert!(
+            deterministic_single_coder_brief("Use the in-app browser for accessibility testing")
+                .is_none(),
+            "browser verification must never be routed directly to a Coder"
         );
         let brief = deterministic_single_coder_brief("Fix the typo in README.md")
             .expect("simple bounded work should bypass planning");

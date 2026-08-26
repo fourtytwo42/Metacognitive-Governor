@@ -399,6 +399,31 @@ impl CodexThreadInstructions {
         role_thread_config(mcp_command, bootstrap_file, true)
     }
 
+    /// Builds the read-only Tester configuration. Testers cannot use the shell or mutate the
+    /// project; they receive only the bundled in-app Browser plugin for governed UAT.
+    #[must_use]
+    pub fn isolated_tester_config(mcp_command: &str, bootstrap_file: &str) -> Value {
+        let mut config = role_thread_config(mcp_command, bootstrap_file, false);
+        config["features"]["browser_use"] = json!(true);
+        config["features"]["in_app_browser"] = json!(true);
+        config["features"]["apps"] = json!(true);
+        config["features"]["plugins"] = json!(true);
+        config["plugins"] = json!({
+            "browser@openai-bundled": { "enabled": true },
+            "sites@openai-bundled": { "enabled": false },
+            "chrome@openai-bundled": { "enabled": false },
+            "computer-use@openai-bundled": { "enabled": false },
+            "visualize@openai-bundled": { "enabled": false },
+            "codex-app-tools@openai-bundled": { "enabled": false },
+            "documents@openai-primary-runtime": { "enabled": false },
+            "pdf@openai-primary-runtime": { "enabled": false },
+            "spreadsheets@openai-primary-runtime": { "enabled": false },
+            "presentations@openai-primary-runtime": { "enabled": false },
+            "template-creator@openai-primary-runtime": { "enabled": false }
+        });
+        config
+    }
+
     /// Builds the Site-owning Coder configuration. It retains the ordinary Coder sandbox and
     /// enables only the bundled Sites plugin in addition to the role-scoped MCG bridge.
     #[must_use]
@@ -1945,6 +1970,19 @@ mod tests {
             site_coder["plugins"]["computer-use@openai-bundled"]["enabled"],
             false
         );
+
+        let tester = CodexThreadInstructions::isolated_tester_config(
+            "C:/MCG/mcg-agent-mcp.exe",
+            "C:/MCG/bootstrap/tester.json",
+        );
+        assert_eq!(tester["features"]["shell_tool"], false);
+        assert_eq!(tester["features"]["unified_exec"], false);
+        assert_eq!(tester["features"]["multi_agent"], false);
+        assert_eq!(tester["features"]["browser_use"], true);
+        assert_eq!(tester["features"]["in_app_browser"], true);
+        assert_eq!(tester["features"]["computer_use"], false);
+        assert_eq!(tester["plugins"]["browser@openai-bundled"]["enabled"], true);
+        assert_eq!(tester["plugins"]["chrome@openai-bundled"]["enabled"], false);
     }
 
     #[cfg(windows)]

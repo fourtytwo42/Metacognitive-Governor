@@ -104,6 +104,9 @@ async fn renew(
 fn tool_schema(name: &str) -> Value {
     let description = match name {
         "delegate_code" => "Delegate a bounded coding brief to an isolated MCG Coding Agent.",
+        "delegate_test" => {
+            "Delegate a bounded UAT or verification brief to a read-only MCG Tester with governed in-app Browser access."
+        }
         "message_coder" => "Answer or amend an active Coding Agent delegation.",
         "settle_delegation" => {
             "Accept or block a reported Coding Agent result after Coordinator review."
@@ -121,12 +124,12 @@ fn tool_schema(name: &str) -> Value {
         "write_blackboard" => "Append a typed entry to this conversation's shared blackboard.",
         "cancel_delegation" => "Cancel one active delegation belonging to this conversation.",
         "report_result" => {
-            "Required final step for a Coding Agent. Call exactly once after verification to report structured results to the Coordinator Agent."
+            "Required final step for a Coding Agent or Tester. Call exactly once after verification to report structured results to the Coordinator Agent."
         }
         _ => "MCG internal role-scoped tool.",
     };
     let input_schema = match name {
-        "delegate_code" => json!({
+        "delegate_code" | "delegate_test" => json!({
             "type":"object",
             "properties":{
                 "objective":{"type":"string","minLength":1},

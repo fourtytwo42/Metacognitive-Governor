@@ -380,7 +380,7 @@ export interface ConversationActivity {
   updated_at: string;
 }
 
-export type ConversationAgentKind = "chat" | "coordinator" | "coder";
+export type ConversationAgentKind = "chat" | "coordinator" | "coder" | "tester";
 export type ConversationAgentSessionState = "starting" | "ready" | "working" | "waiting" | "failed" | "retired";
 export interface ConversationAgentSession {
   schema_version: number;

@@ -1155,7 +1155,7 @@ pub struct PluginInvocationRecord {
 }
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
-pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 7;
+pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1163,6 +1163,7 @@ pub enum ConversationAgentKind {
     Chat,
     Coordinator,
     Coder,
+    Tester,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
