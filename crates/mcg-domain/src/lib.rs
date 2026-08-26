@@ -1971,6 +1971,10 @@ pub struct ConversationActivity {
     pub schema_version: u16,
     pub conversation_id: ConversationId,
     pub turn_id: ConversationTurnId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<ConversationAgentSessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_id: Option<AgentDelegationId>,
     pub codex_item_id: String,
     pub kind: ConversationActivityKind,
     pub state: ConversationActivityState,

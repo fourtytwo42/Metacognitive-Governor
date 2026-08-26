@@ -196,6 +196,8 @@ import {
   type GitHubRepository,
   type Conversation,
   type ConversationActivity,
+  type ConversationAgentSession,
+  type AgentMessage,
   type AgentDelegation,
   type ConversationTeamState,
   type CoordinationBatch,
@@ -688,6 +690,91 @@ function activityDuration(durationMs?: number): string | null {
   return durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
 }
 
+function conversationActivityPresentation(activity: ConversationActivity): [string, string] {
+  const presentation: Record<ConversationActivity["kind"], [string, string]> = {
+    working: ["…", "Working"], waiting: ["◷", "Waiting"], reasoning_summary: ["✦", "Reasoning"],
+    plan: ["☷", "Updated plan"], command: ["›_", "Ran commands"], file_change: ["✎", "Updated files"],
+    mcp_call: ["⌘", "Used a tool"], collaboration_call: ["⌘", "Delegated work"], web_search: ["⌕", "Searched the web"],
+    image_view: ["▧", "Viewed an image"], approval: ["!", "Approval"], elicitation: ["?", "Input requested"],
+    context_compaction: ["≡", activity.state === "running" ? "Context automatically compacting" : "Context automatically compacted"],
+    usage: ["◔", "Usage updated"], recovery: ["↻", "Recovering"], interruption: ["■", "Interrupted"],
+    failure: ["!", "Failed"], completion: ["✓", "Completed"]
+  };
+  return presentation[activity.kind];
+}
+
+function AgentLiveActivity({ activities }: { activities: ConversationActivity[] }) {
+  const visible = activities
+    .filter((activity) => activity.kind !== "usage")
+    .slice()
+    .sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at) || left.codex_item_id.localeCompare(right.codex_item_id));
+  if (visible.length === 0) return <div className="agent-live-activity-empty">No reasoning or tool activity recorded yet.</div>;
+  const latest = visible.at(-1)!;
+  const [latestIcon, latestFallback] = conversationActivityPresentation(latest);
+  const latestLabel = latest.command || latestFallback;
+  return <details className={`agent-live-activity state-${latest.state}`}>
+    <summary>
+      <span className="chat-activity-icon" aria-hidden="true">{latestIcon}</span>
+      <span className="agent-live-activity-label">{latestLabel}</span>
+      <small>{visible.length} event{visible.length === 1 ? "" : "s"}</small>
+      {latest.state === "running" && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}
+      <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
+    </summary>
+    <div className="agent-live-activity-scroll" aria-label="Agent activity history">
+      {visible.map((activity) => {
+        const [icon, fallback] = conversationActivityPresentation(activity);
+        const label = activity.command || fallback;
+        const duration = activityDuration(activity.duration_ms);
+        const hasDetails = Boolean(activity.cwd || activity.output || activity.exit_code !== undefined || duration);
+        const row = <>
+          <span className="chat-activity-icon" aria-hidden="true">{icon}</span>
+          <span>{label}</span>
+          {activity.state === "running" && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}
+        </>;
+        return hasDetails
+          ? <details className={`agent-live-activity-event state-${activity.state}`} key={activity.codex_item_id}>
+              <summary>{row}</summary>
+              <div className="chat-command-details">
+                {activity.cwd && <div><span>Directory</span><code>{activity.cwd}</code></div>}
+                {(activity.exit_code !== undefined || duration) && <div className="chat-command-meta">
+                  {activity.exit_code !== undefined && <span>Exit code {activity.exit_code}</span>}
+                  {duration && <span>{duration}</span>}
+                </div>}
+                {activity.output && <pre>{activity.output}</pre>}
+              </div>
+            </details>
+          : <div className={`agent-live-activity-event state-${activity.state}`} key={activity.codex_item_id}>{row}</div>;
+      })}
+    </div>
+  </details>;
+}
+
+function AgentChatRoom({ session, sessions, messages, activities, children }: {
+  session?: ConversationAgentSession;
+  sessions: ConversationAgentSession[];
+  messages: AgentMessage[];
+  activities: ConversationActivity[];
+  children?: ReactNode;
+}) {
+  const sessionName = (id: string) => sessions.find((candidate) => candidate.id === id)?.display_name || "Agent";
+  const orderedMessages = messages.slice().sort((left, right) => left.created_at.localeCompare(right.created_at));
+  return <section className="agent-chat-room" aria-label={`${session?.display_name || "Agent"} chat room`}>
+    <div className="agent-chat-transcript">
+      {orderedMessages.length === 0
+        ? <p className="agent-chat-empty">No agent messages recorded yet.</p>
+        : orderedMessages.map((message) => {
+            const own = message.from_session_id === session?.id;
+            return <article className={`agent-chat-message ${own ? "from-agent" : "to-agent"}`} key={message.id}>
+              <small>{sessionName(message.from_session_id)} · {message.tool_name || message.kind.replaceAll("_", " ")}</small>
+              <MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
+            </article>;
+          })}
+    </div>
+    <AgentLiveActivity activities={activities} />
+    {children && <div className="agent-chat-children" aria-label="Sub-agent widgets">{children}</div>}
+  </section>;
+}
+
 function ConversationCommandGroup({ commands }: { commands: ConversationActivity[] }) {
   const commandsRunning = commands.some((activity) => activity.state === "running");
   const commandsFailed = commands.some((activity) => activity.state === "failed" || activity.state === "declined");
@@ -735,6 +822,21 @@ type ConversationTimelineEntry =
   | { type: "activity"; timestamp: number; stableOrder: number; activity: ConversationActivity }
   | { type: "batch"; timestamp: number; stableOrder: number; batch: CoordinationBatch };
 
+function activityBelongsToBatch(activity: ConversationActivity, batch: CoordinationBatch, team?: ConversationTeamState): boolean {
+  if (activity.delegation_id && batch.delegation_ids.includes(activity.delegation_id)) return true;
+  if (activity.agent_session_id === batch.coordinator_session_id) return true;
+  if (activity.agent_session_id && team?.delegations.some((delegation) =>
+    batch.delegation_ids.includes(delegation.id) && delegation.coder_session_id === activity.agent_session_id
+  )) return true;
+  // Schema-44 and earlier activities predate durable agent attribution. A single-Coder
+  // batch can safely adopt its origin-turn trace because Chat and Coordinator cannot run
+  // project commands. New multi-agent activity is always attributed explicitly.
+  return !activity.agent_session_id
+    && !activity.delegation_id
+    && batch.delegation_ids.length === 1
+    && activity.turn_id === batch.origin_turn_id;
+}
+
 function ConversationActivityTimeline({ messages, activities, batches, team, conversationId, onView, onOpenPreview }: {
   messages: ConversationMessage[];
   activities: ConversationActivity[];
@@ -744,7 +846,10 @@ function ConversationActivityTimeline({ messages, activities, batches, team, con
   onView: (view: ConversationView) => void;
   onOpenPreview: (preview: ConversationPreview) => void;
 }) {
-  const visibleActivities = activities.filter((activity) => activity.kind !== "usage");
+  const agentActivityIds = new Set(activities
+    .filter((activity) => batches.some((batch) => activityBelongsToBatch(activity, batch, team)))
+    .map((activity) => activity.codex_item_id));
+  const visibleActivities = activities.filter((activity) => activity.kind !== "usage" && !agentActivityIds.has(activity.codex_item_id));
   let entries: ConversationTimelineEntry[] = [
     ...messages.map((message, stableOrder) => ({
       type: "message" as const,
@@ -798,23 +903,16 @@ function ConversationActivityTimeline({ messages, activities, batches, team, con
       continue;
     }
     if (entry.type === "batch") {
+      const batchActivities = activities.filter((activity) => activityBelongsToBatch(activity, entry.batch, team));
       content.push(<section className={`conversation-batch-card state-${entry.batch.state}`} key={`batch-${entry.batch.id}`} aria-label="Delegated agent progress">
         <header><strong>{entry.batch.delivery_target === "codex_sites" ? "Building with ChatGPT Sites" : "Agent team progress"}</strong><small>{entry.batch.delivery_rationale}</small></header>
-        <CoordinatorAgentCard team={team} batch={entry.batch} />
-        <CodingAgentCards team={team} conversationId={conversationId} delegationIds={entry.batch.delegation_ids} onView={onView} />
+        <CoordinatorAgentCard team={team} batch={entry.batch} activities={batchActivities}>
+          <CodingAgentCards team={team} conversationId={conversationId} delegationIds={entry.batch.delegation_ids} activities={batchActivities} onView={onView} />
+        </CoordinatorAgentCard>
       </section>);
     } else if (entry.type === "activity") {
       const activity = entry.activity;
-      const presentation: Record<ConversationActivity["kind"], [string, string]> = {
-        working: ["…", "Working"], waiting: ["◷", "Waiting"], reasoning_summary: ["✦", "Reasoning"],
-        plan: ["☷", "Updated plan"], command: ["›_", "Ran commands"], file_change: ["✎", "Updated files"],
-        mcp_call: ["⌘", "Used a tool"], collaboration_call: ["⌘", "Delegated work"], web_search: ["⌕", "Searched the web"],
-        image_view: ["▧", "Viewed an image"], approval: ["!", "Approval"], elicitation: ["?", "Input requested"],
-        context_compaction: ["≡", activity.state === "running" ? "Context automatically compacting" : "Context automatically compacted"],
-        usage: ["◔", "Usage updated"], recovery: ["↻", "Recovering"], interruption: ["■", "Interrupted"],
-        failure: ["!", "Failed"], completion: ["✓", "Completed"]
-      };
-      const [icon, fallbackLabel] = presentation[activity.kind];
+      const [icon, fallbackLabel] = conversationActivityPresentation(activity);
       const label = activity.command || fallbackLabel;
       const canExpand = Boolean(activity.output) && activity.kind !== "reasoning_summary";
       const row = <>
@@ -918,7 +1016,13 @@ function coordinatorStateLabel(batch: CoordinationBatch, activeCoders: number): 
   return "Planning and assigning work";
 }
 
-function CoordinatorAgentCard({ team, batch }: { team?: ConversationTeamState; batch: CoordinationBatch }) {
+function CoordinatorAgentCard({ team, batch, activities, children }: {
+  team?: ConversationTeamState;
+  batch: CoordinationBatch;
+  activities: ConversationActivity[];
+  children?: ReactNode;
+}) {
+  const [tab, setTab] = useState<"chat_room" | "activity" | "exchange" | "blackboard" | "evidence">("chat_room");
   if (!team) return null;
   const coordinator = team.sessions.slice().reverse().find((session) => session.kind === "coordinator");
   const delegationIds = new Set(batch.delegation_ids);
@@ -927,6 +1031,8 @@ function CoordinatorAgentCard({ team, batch }: { team?: ConversationTeamState; b
   const messages = team.messages.filter((message) =>
     message.from_session_id === coordinator?.id || message.to_session_id === coordinator?.id
   );
+  const blackboard = team.blackboard.filter((entry) => entry.author_session_id === coordinator?.id || (entry.delegation_id && delegationIds.has(entry.delegation_id)));
+  const coordinatorActivities = activities.filter((activity) => activity.agent_session_id === coordinator?.id);
   const label = coordinatorStateLabel(batch, activeCoders);
   const progress = batch.state === "completed" || batch.state === "failed" ? 100
     : batch.state === "reviewing" || batch.state === "review_pending" ? 82
@@ -944,20 +1050,18 @@ function CoordinatorAgentCard({ team, batch }: { team?: ConversationTeamState; b
       <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
     </summary>
     <div className="coding-agent-detail">
-      <div className="coding-agent-meta">
+      <div className="coding-agent-tabs" role="tablist" aria-label="Coordinator details">{(["chat_room", "activity", "exchange", "blackboard", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)} key={value}>{value === "chat_room" ? "Chat room" : value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
+      {tab === "chat_room" && <AgentChatRoom session={coordinator} sessions={team.sessions} messages={messages} activities={coordinatorActivities}>{children}</AgentChatRoom>}
+      {tab === "activity" && <section><h4>Activity</h4><p>{label}</p><p>{batch.routing_rationale || batch.delivery_rationale}</p><div className="coding-agent-meta">
         {coordinator?.model && <span>Model <code>{coordinator.model}</code></span>}
         <span>Route <code>{batch.coordinator_bypassed ? "deterministic single-Coder" : "Coordinator model"}</code></span>
         <span>Turns <code>{batch.coordinator_turn_count ?? 0}</code></span>
         <span>Estimated tokens <code>~{(batch.coordinator_approximate_tokens ?? 0).toLocaleString()}</code></span>
         <span>Owner interventions <code>{batch.owner_intervention_count ?? 0}</code></span>
-      </div>
-      <p>{batch.routing_rationale || batch.delivery_rationale}</p>
-      <section className="inline-agent-trace" aria-label="Coordinator trace">
-        {messages.length === 0 ? <p>No detailed activity recorded yet.</p> : messages.slice(-8).map((message) => <article key={message.id}>
-          <small>{message.tool_name || message.kind.replaceAll("_", " ")}</small>
-          <p>{message.content}</p>
-        </article>)}
-      </section>
+      </div></section>}
+      {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.tool_name || message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
+      {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
+      {tab === "evidence" && <section><h4>Evidence</h4><p>{batch.delegation_ids.length} delegated agent{batch.delegation_ids.length === 1 ? "" : "s"}</p><p>{batch.coordinator_turn_count ?? 0} Coordinator model turn{batch.coordinator_turn_count === 1 ? "" : "s"}</p><p>Approximate Coordinator tokens: {(batch.coordinator_approximate_tokens ?? 0).toLocaleString()}</p></section>}
     </div>
   </details>;
 }
@@ -1093,8 +1197,8 @@ function delegationAttemptChain(delegation: AgentDelegation, attempts: AgentDele
   return chain;
 }
 
-function CodingAgentCards({ team, conversationId, delegationIds, onView }: { team?: ConversationTeamState; conversationId?: string; delegationIds?: string[]; onView: (view: ConversationView) => void }) {
-  const [tabs, setTabs] = useState<Record<string, "activity" | "exchange" | "blackboard" | "changes" | "evidence">>({});
+function CodingAgentCards({ team, conversationId, delegationIds, activities, onView }: { team?: ConversationTeamState; conversationId?: string; delegationIds?: string[]; activities: ConversationActivity[]; onView: (view: ConversationView) => void }) {
+  const [tabs, setTabs] = useState<Record<string, "chat_room" | "activity" | "exchange" | "blackboard" | "changes" | "evidence">>({});
   const [patches, setPatches] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -1133,8 +1237,13 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
       const worktree = team.worktrees.find((candidate) => candidate.id === delegation.worktree_id);
       const messages = team.messages.filter((message) => message.delegation_id === delegation.id);
       const blackboard = team.blackboard.filter((entry) => entry.delegation_id === delegation.id);
+      const sessionActivities = activities.filter((activity) =>
+        activity.delegation_id === delegation.id
+        || activity.agent_session_id === session?.id
+        || (!activity.agent_session_id && !activity.delegation_id && visibleDelegations.length === 1)
+      );
       const active = codingAgentIsActive(delegation.state);
-      const tab = tabs[delegation.id] ?? "activity";
+      const tab = tabs[delegation.id] ?? "chat_room";
       const cancellable = ["requested", "preparing", "running", "waiting"].includes(delegation.state);
       const reviewable = Boolean(worktree) && ["reported", "blocked", "failed", "cancelled"].includes(delegation.state);
       const applicable = Boolean(worktree) && ["reported", "blocked"].includes(delegation.state);
@@ -1156,7 +1265,9 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
           <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
         </summary>
         <div className="coding-agent-detail">
-          <div className="coding-agent-meta">
+          <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["chat_room", "activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "chat_room" ? "Chat room" : value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
+          {tab === "chat_room" && <AgentChatRoom session={session} sessions={team.sessions} messages={messages} activities={sessionActivities} />}
+          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p><div className="coding-agent-meta">
             {session?.model && <span>Model <code>{session.model}</code></span>}
             <span>Prompt revision <code>{session?.prompt_revision ?? "—"}</code></span>
             {worktree && <span>Branch <code>{worktree.branch}</code></span>}
@@ -1165,9 +1276,7 @@ function CodingAgentCards({ team, conversationId, delegationIds, onView }: { tea
             {governance && <span>Preflight <code>{governance.preflight.passed ? "passed" : "blocked"}</code></span>}
             {governance && <span>Attempts <code>{governance.outcome.attempts}</code></span>}
             {governance?.outcome.latency_ms ? <span>Runtime <code>{Math.round(governance.outcome.latency_ms / 1000)}s</code></span> : null}
-          </div>
-          <div className="coding-agent-tabs" role="tablist" aria-label={`Coding Agent ${index + 1} details`}>{(["activity", "exchange", "blackboard", "changes", "evidence"] as const).map((value) => <button type="button" role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTabs((current) => ({ ...current, [delegation.id]: value }))} key={value}>{value === "exchange" ? "Agent Exchange" : value.replace(/^./, (letter) => letter.toUpperCase())}</button>)}</div>
-          {tab === "activity" && <section><h4>Activity</h4><p>Status: {stateLabel(delegation.state)}</p><p>Started {new Date(delegation.created_at).toLocaleString()}</p>{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{governance?.preflight.checks.map((check) => <p key={check}>✓ {check}</p>)}{governance?.preflight.blockers.map((blocker) => <p className="error-message" key={blocker}>Preflight: {blocker}</p>)}{latestContext && <p>Context receipt: ~{latestContext.approximate_tokens.toLocaleString()} / {latestContext.token_budget.toLocaleString()} tokens · {latestContext.source_count} attributed sources{latestContext.truncated ? " · truncated to budget" : ""}</p>}{governance && governance.failure_class !== "none" && <p className="error-message">Failure class: {governance.failure_class.replaceAll("_", " ")} · recovery: {governance.recovery.replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}{attemptHistory.length > 1 && <details><summary>Attempt history <span>{attemptHistory.length}</span></summary>{attemptHistory.map((attempt, attemptIndex) => <p key={attempt.id}>Attempt {attemptIndex + 1}: {stateLabel(attempt.state)} · <code>{attempt.id}</code>{attempt.error ? ` · ${attempt.error}` : ""}</p>)}</details>}</section>}
+          </div>{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{governance?.preflight.checks.map((check) => <p key={check}>✓ {check}</p>)}{governance?.preflight.blockers.map((blocker) => <p className="error-message" key={blocker}>Preflight: {blocker}</p>)}{latestContext && <p>Context receipt: ~{latestContext.approximate_tokens.toLocaleString()} / {latestContext.token_budget.toLocaleString()} tokens · {latestContext.source_count} attributed sources{latestContext.truncated ? " · truncated to budget" : ""}</p>}{governance && governance.failure_class !== "none" && <p className="error-message">Failure class: {governance.failure_class.replaceAll("_", " ")} · recovery: {governance.recovery.replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}{attemptHistory.length > 1 && <details><summary>Attempt history <span>{attemptHistory.length}</span></summary>{attemptHistory.map((attempt, attemptIndex) => <p key={attempt.id}>Attempt {attemptIndex + 1}: {stateLabel(attempt.state)} · <code>{attempt.id}</code>{attempt.error ? ` · ${attempt.error}` : ""}</p>)}</details>}</section>}
           {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
           {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
           {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch">{patches[delegation.id]}</pre>}</section>}

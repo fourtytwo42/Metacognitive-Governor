@@ -366,6 +366,8 @@ export interface ConversationActivity {
   schema_version: number;
   conversation_id: string;
   turn_id: string;
+  agent_session_id?: string;
+  delegation_id?: string;
   codex_item_id: string;
   kind: ConversationActivityKind;
   state: ConversationActivityState;

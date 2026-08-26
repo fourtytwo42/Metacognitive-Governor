@@ -4480,6 +4480,8 @@ impl AppRuntime {
                             false,
                             None,
                         ) {
+                            activity.agent_session_id = Some(coder_session.id);
+                            activity.delegation_id = Some(delegation.id);
                             activity.started_at = Utc::now();
                             activity.updated_at = activity.started_at;
                             let event = self.store()?.save_conversation_activity(&activity)?;
@@ -4491,13 +4493,15 @@ impl AppRuntime {
                         let item_id = item.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
                         let existing = self.store()?.conversation_view(conversation.id)?
                             .and_then(|view| view.activities.into_iter().find(|activity| activity.codex_item_id == item_id));
-                        if let Some(activity) = conversation_activity_from_codex_item(
+                        if let Some(mut activity) = conversation_activity_from_codex_item(
                             conversation.id,
                             activity_turn_id,
                             &item,
                             true,
                             existing.as_ref(),
                         ) {
+                            activity.agent_session_id = Some(coder_session.id);
+                            activity.delegation_id = Some(delegation.id);
                             let event = self.store()?.save_conversation_activity(&activity)?;
                             let _ = self.event_sender.send(event);
                         }
@@ -9135,6 +9139,7 @@ impl AppRuntime {
                             false,
                             None,
                         ) {
+                            activity.agent_session_id = Some(chat_session.id);
                             activity.started_at = next_conversation_timeline_at(&mut last_timeline_at);
                             activity.updated_at = activity.started_at;
                             let event = self.store()?.save_conversation_activity(&activity)?;
@@ -9152,13 +9157,14 @@ impl AppRuntime {
                     }
                     Some(CodexTurnProgress::ItemCompleted { item }) => {
                         let item_id = item.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
-                        if let Some(activity) = conversation_activity_from_codex_item(
+                        if let Some(mut activity) = conversation_activity_from_codex_item(
                             conversation_id,
                             turn.id,
                             &item,
                             true,
                             activities.get(item_id),
                         ) {
+                            activity.agent_session_id = Some(chat_session.id);
                             let event = self.store()?.save_conversation_activity(&activity)?;
                             let _ = self.event_sender.send(event);
                             activities.insert(activity.codex_item_id.clone(), activity);
@@ -9186,6 +9192,7 @@ impl AppRuntime {
                             &method,
                             &params,
                         ) {
+                            activity.agent_session_id = Some(chat_session.id);
                             activity.started_at = next_conversation_timeline_at(&mut last_timeline_at);
                             activity.updated_at = activity.started_at;
                             let event = self.store()?.save_conversation_activity(&activity)?;
@@ -23091,6 +23098,8 @@ fn conversation_activity_from_codex_item(
         schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
         conversation_id,
         turn_id,
+        agent_session_id: existing.and_then(|activity| activity.agent_session_id),
+        delegation_id: existing.and_then(|activity| activity.delegation_id),
         codex_item_id,
         kind,
         state,
@@ -23161,6 +23170,8 @@ fn conversation_activity_from_codex_notification(
         schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
         conversation_id,
         turn_id,
+        agent_session_id: None,
+        delegation_id: None,
         codex_item_id: format!("notification:{item_id}:{method}"),
         kind,
         state: ConversationActivityState::Completed,
@@ -23771,6 +23782,8 @@ mod tests {
                 schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
                 conversation_id: conversation.id,
                 turn_id: turn.id,
+                agent_session_id: None,
+                delegation_id: None,
                 codex_item_id: "site-deployment".into(),
                 kind: ConversationActivityKind::McpCall,
                 state: ConversationActivityState::Completed,

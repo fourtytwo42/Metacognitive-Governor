@@ -2881,7 +2881,10 @@ test("delegated coding work stays inline and Chat presents the final preview wit
       { schema_version: 1, id: "ack-message", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", role: "assistant", content: "The Coordinator accepted the request.", created_at: acknowledgedAt },
       { schema_version: 1, id: "final-message", conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", role: "assistant", content: "Your preview is ready.", created_at: completedAt }
     ],
-    activities: [],
+    activities: [
+      { schema_version: 1, conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", agent_session_id: "00000000-0000-4000-8000-000000000d08", delegation_id: "00000000-0000-4000-8000-000000000d01", codex_item_id: "reasoning-1", kind: "reasoning_summary" as const, state: "completed" as const, command: "Inspecting the requested site structure", started_at: "2026-08-24T18:00:02Z", updated_at: "2026-08-24T18:00:02Z" },
+      { schema_version: 1, conversation_id: conversationId, turn_id: "00000000-0000-4000-8000-000000000d05", agent_session_id: "00000000-0000-4000-8000-000000000d08", delegation_id: "00000000-0000-4000-8000-000000000d01", codex_item_id: "command-1", kind: "command" as const, state: "completed" as const, command: "npm test", output: "Tests passed", exit_code: 0, duration_ms: 1200, started_at: "2026-08-24T18:00:03Z", updated_at: "2026-08-24T18:00:04Z" }
+    ],
     team: {
       sessions: [
         { schema_version: 4, id: "00000000-0000-4000-8000-000000000d02", conversation_id: conversationId, role_id: "role-coordinator", organization_revision_id: "org", kind: "coordinator", display_name: "Coordinator", state: "retired", prompt_revision: 4, created_at: createdAt, updated_at: completedAt },
@@ -2983,17 +2986,27 @@ test("delegated coding work stays inline and Chat presents the final preview wit
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Build the site" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  const activity = await screen.findByRole("region", { name: "Coding agent activity" });
+  const coordinatorActivity = await screen.findByLabelText("Coordinator activity");
+  fireEvent.click(within(coordinatorActivity).getByText("Coordinator"));
+  const coordinatorTabs = within(coordinatorActivity).getByRole("tablist", { name: "Coordinator details" });
+  expect(within(coordinatorTabs).getByRole("tab", { name: "Chat room" })).toHaveAttribute("aria-selected", "true");
+  const activity = await within(coordinatorActivity).findByRole("region", { name: "Coding agent activity" });
   expect(within(activity).getByText("Build the Springfield plumbing website")).toBeInTheDocument();
   expect(within(activity).getByText("Completed")).toBeInTheDocument();
   expect(within(activity).getByRole("progressbar", { name: /Completed/ })).toHaveAttribute("aria-valuenow", "100");
-  const coordinatorActivity = screen.getByLabelText("Coordinator activity");
-  expect(coordinatorActivity).toBeInTheDocument();
-  fireEvent.click(within(coordinatorActivity).getByText("Coordinator"));
-  expect(within(coordinatorActivity).getByText("deterministic single-Coder")).toBeInTheDocument();
   fireEvent.click(within(activity).getByText("Coding Agent Atlas"));
+  expect(within(activity).getByRole("tab", { name: "Chat room" })).toHaveAttribute("aria-selected", "true");
+  const latestActivity = activity.querySelector<HTMLElement>(".agent-live-activity")!;
+  expect(latestActivity).not.toHaveAttribute("open");
+  expect(within(latestActivity).getAllByText("npm test").length).toBeGreaterThanOrEqual(1);
+  expect(within(latestActivity).getByText("2 events")).toBeInTheDocument();
+  fireEvent.click(latestActivity.querySelector(":scope > summary")!);
+  expect(within(latestActivity).getByLabelText("Agent activity history")).toHaveTextContent("Inspecting the requested site structure");
+  fireEvent.click(within(activity).getByRole("tab", { name: "Activity" }));
   expect(within(activity).getByText("project root exists and is a directory", { exact: false })).toBeInTheDocument();
   expect(within(activity).getByText(/Context receipt: ~640/)).toBeInTheDocument();
+  fireEvent.click(within(coordinatorTabs).getByRole("tab", { name: "Activity" }));
+  expect(within(coordinatorActivity).getByText("deterministic single-Coder")).toBeInTheDocument();
   const acknowledgement = screen.getByText("The Coordinator accepted the request.").closest("article")!;
   const batch = screen.getByRole("region", { name: "Delegated agent progress" });
   const completion = screen.getByText("Your preview is ready.").closest("article")!;
@@ -3052,7 +3065,7 @@ test("Coordinator lifecycle and tool traces are inline without a separate Agent 
   expect(within(coordinator).getAllByText("Planning and assigning work").length).toBeGreaterThan(0);
   fireEvent.click(within(coordinator).getByText("Coordinator"));
   expect(within(coordinator).getByText("Coordinator started coordinating this request")).toBeInTheDocument();
-  expect(within(coordinator).getAllByText("delegate_code").length).toBe(2);
+  expect(within(coordinator).getAllByText(/delegate_code/).length).toBeGreaterThanOrEqual(2);
   expect(within(coordinator).getByText("Build the responsive shell")).toBeInTheDocument();
   expect(screen.getByLabelText("Message")).toBeInTheDocument();
 });
