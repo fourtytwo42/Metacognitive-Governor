@@ -2,6 +2,12 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-26 - Release Computer Use immediately after testing
+
+- Context: The owner does not want Windows Computer Use left attached after UI testing is complete.
+- Decision: Use Computer Use only for the required bounded interaction, finish the relevant observations, and return control immediately. Perform packaging, documentation, source inspection, commits, and pushes without retaining Computer Use control.
+- Follow-up: If another UI check becomes necessary later, reacquire Computer Use only for that check and release it again as soon as it finishes.
+
 ### 2026-08-26 - Simple and Advanced UI unified in v0.4.23
 
 - Context: The owner approved one shared themed interface in which Simple keeps frequent and decision-critical controls while Advanced progressively discloses expert configuration, raw evidence, and identifiers.
@@ -3883,6 +3889,7 @@ When sources conflict, use this order:
 - Read `AGENTS.md` and `MEMORY.md` before making future changes in this workspace.
 - Update `MEMORY.md` after durable discoveries, decisions, fixes, verification results, blocked work, and handoffs.
 - Never store secrets, tokens, passwords, private keys, or sensitive personal data in `MEMORY.md`.
+- Release Windows Computer Use immediately after the requested UI testing is complete; do not leave it attached during packaging, documentation, commits, pushes, or unrelated work.
 - Commit and push every verified major change to the tracked GitHub branch unless the owner explicitly instructs otherwise; confirm local/remote commit parity after pushing.
 - Standing disposable-VM authority is operational, not merely preapproval: directly perform required installs, transfers, administrator actions, restarts, tests, process control, and temporary qualification cleanup without pausing or asking. Contact the owner only for a genuinely unavoidable identity-bound external-account action, and continue all independent work while that action is pending.
 
