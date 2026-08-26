@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-25 - Simplified brain/android logo adopted
+
+- Context: The owner approved the simplified geometric brain/android mark with four bold brain folds, an outlined cobalt-blue visor eye, angular jaw, neck, and shoulders because it remains legible at Windows icon sizes.
+- Decision: Replace the prior detailed identity with a transparent production master while preserving opaque white interior panels, then regenerate the complete Tauri Windows, macOS, Linux, Store, iOS, and Android icon family from the same approved source.
+- Files: `apps/desktop/src/assets/mcg-logo.png`, `apps/desktop/src-tauri/icons/`, and `MEMORY.md`.
+- Commands/tests: Tauri icon generation completed; 32 px, 128 px, and 512 px outputs were visually inspected; desktop typecheck and production build passed; focused MCG-branding Vitest passed 1/1. The first Vitest invocation used an unsupported Jest flag and was rerun with Vitest's supported single-worker option.
+- Result: Source UI and future native packages now consistently use the simplified high-legibility brain/android logo with a genuinely transparent exterior background.
+- Follow-up: Include this identity in the next portable build and perform native taskbar, executable-icon, sidebar, Agents, light-theme, and dark-theme UAT.
+
 ### 2026-08-25 - Orphan legacy chats removed from General and v0.4.18 packaged
 
 - Context: Owner reported that two ITSM chats remained under General after restart and could not be archived. Fresh inspection showed they were legacy task projections for a project already removed from the catalog, not normal conversation records.
@@ -2603,7 +2612,7 @@ Durable project context lives here. Update this file whenever information should
 ## Current State
 
 - MCG now has a compilable implementation foundation alongside its product specifications.
-- The canonical application identity is the transparent black, white, and cobalt-blue geometric brain/android mark in `apps/desktop/src/assets/mcg-logo.png`; the complete Tauri platform icon family is generated from the same approved master.
+- The canonical application identity is the simplified, high-legibility transparent black, white, and cobalt-blue geometric brain/android mark in `apps/desktop/src/assets/mcg-logo.png`; its four bold brain folds and outlined blue visor remain recognizable at 32 px, and the complete Tauri platform icon family is generated from the same approved master.
 - The complete vision remains in scope and will be delivered through integrated, end-to-end milestones rather than a throwaway narrow prototype.
 - Canonical requirements are indexed by `MCG_PRD.md` and split across `docs/spec/`; the encoding-damaged source is retained at `docs/archive/MCG_PRD.original.md`.
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
