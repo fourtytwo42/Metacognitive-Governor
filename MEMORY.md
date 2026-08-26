@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-26 - Codex-aligned New Chat packaged in v0.4.24
+
+- Context: After the New Chat composer was aligned with the owner's Codex screenshots, the owner requested a portable and established a standing preference that every future major change should include an updated portable build unless explicitly excluded.
+- Decision: Advance all product/package manifests and lockfiles from v0.4.23 to v0.4.24, preserve previous release and portable artifacts, and use a one-job non-incremental Windows release build with one codegen unit. Treat a verified portable as part of the default completion gate for major changes.
+- Files: `Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`, `apps/desktop/{package.json,index.html}`, `apps/desktop/src-tauri/tauri.conf.json`, and `MEMORY.md`.
+- Commands/tests: Packaging contracts and diff hygiene passed; complete release sidecars, static shadow runner, production frontend, and single-file Tauri desktop build passed. Independent inspection verified exactly one payload, Product/FileVersion 0.4.24, ProductName MCG, exact byte size, and SHA-256.
+- Result: `target/portable/MCG-Portable-Windows-x64-v0.4.24/MCG-Desktop-v0.4.24.exe` is the only payload, 502,277,120 bytes, with SHA-256 `3838A2126AE1A179832E1A70F9E3038FC9E313EB452D4D2E424CB17C44D882FD`. The repository is 36.97 GiB and `target/debug` is 17.94 GiB, below the 50 GiB cleanup threshold, so no generated cache or preserved artifact was removed.
+- Follow-up: Owner-native UAT should exercise the Codex-aligned New Chat composer at full and compact widths in dark/light themes, including every context/settings popup and the send transition.
+
 ### 2026-08-26 - New Chat aligned with the Codex composer model
 
 - Context: The owner supplied nine Codex New Chat references and requested that MCG match their information hierarchy and interactions instead of retaining a large permanent control row.
@@ -9,7 +18,7 @@ Durable project context lives here. Update this file whenever information should
 - Files: `apps/desktop/src/{App.tsx,App.test.tsx,styles.css}` and `MEMORY.md`.
 - Commands/tests: Desktop TypeScript passed; production Vite build passed; focused contextual-control and seven migrated selector regressions passed 8/8; verbose single-worker Vitest passed 87/87 in 205.75 seconds; `git diff --check` passed.
 - Result: Simple and Advanced now share the same Codex-aligned New Chat surface. Project-free chats remain possible, permissions and team/model decisions remain visible before sending, popovers are keyboard-addressable, compact layouts wrap without page-level horizontal overflow, and light-theme popovers/composer retain contrast.
-- Follow-up: Owner-native UAT should compare full-width and compact New Chat in dark/light themes, exercise every context/settings popup, and confirm the send transition into the normal chronological chat. This source change is not yet in the v0.4.23 portable.
+- Follow-up: Owner-native UAT should compare full-width and compact New Chat in dark/light themes, exercise every context/settings popup, and confirm the send transition into the normal chronological chat. The change is packaged in v0.4.24.
 
 ### 2026-08-26 - Release Computer Use immediately after testing
 
@@ -2687,8 +2696,8 @@ Durable project context lives here. Update this file whenever information should
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
-- Current task: Owner-native UAT of the screenshot-aligned New Chat surface at representative window sizes and in dark/light themes.
-- Last meaningful change: Refactored New Chat into the Codex composer hierarchy with a bottom-weighted draft, project/workspace/branch context strip, consolidated model/effort/speed/team menu, permission menu, Add menu, responsive wrapping, and full desktop regression coverage.
+- Current task: Owner-native UAT of the v0.4.24 screenshot-aligned New Chat surface at representative window sizes and in dark/light themes.
+- Last meaningful change: Packaged the Codex-aligned New Chat interface into independently verified one-file Windows portable v0.4.24 and adopted portable packaging as the default completion gate for future major changes.
 - Worktree/checkpoint: Preservation baseline commits are `1cd0894`, `1dbc8ea`, `be2987c`, and `df34462`; schema 39 is `5488128`; schema-40 authority/bridge is `d0630a1`; desktop/package projection is `5860038`; agent-sidecar packaging correction is `7f591af`; conversation recovery is `d69d96d`; Markdown chat is `487121c`; v0.3.23 retry/integration settlement is `1039ca8`; schema-43 event-driven coordination is `226177c`, all on `codex/v34-updater-version-binding`. The external recovery bundle is `C:\Users\hendo420\AppData\Local\MCG\cleanup-backups\20260823-141215`. Do not discard that bundle until the owner confirms the organized commits are sufficient.
 - Next step: Exercise New Chat project/workspace/branch, permission, run-settings, and Add popovers at full and compact widths, then continue shared Pull Requests, Scheduler, Plugins, Providers, MCP, Projects, Agents, Browser, and Sites workflow UAT in both modes.
 - Blockers: No discretionary VM permission is outstanding; the owner reconfirmed standing authority for all in-scope administration and qualification on the disposable VMs. Execute installs, administrator prompts, transfers, restarts, tests, browser/desktop interaction, trust changes, and temporary cleanup directly without asking or waiting. The current macOS OAuth page now requires the unavoidable owner-identity OpenAI sign-in; this is not a VM approval request. If one interaction is genuinely automation-inaccessible, treat it as a technical constraint, try another in-scope route, and continue every independent lane; contact the owner only for an unavoidable identity-bound external-account action, never for redundant VM permission. Exact-v34 disposable updater trust has already been removed and fresh ordinary HTTPS distrust proven. Trusted production signing/notarization identities remain external release gates. Credentials are intentionally not retained here.
@@ -2705,8 +2714,8 @@ Durable project context lives here. Update this file whenever information should
 - The Git repository uses `main`, with `origin` at `https://github.com/fourtytwo42/Metacognitive-Governor.git`; the GitHub repository is private (last verified 2026-08-13).
 - The workspace contains shared Rust crates, runnable `mcg-daemon` and `mcg` CLI applications, and a Tauri 2/React desktop shell with simple/advanced modes.
 - The Simple owner menu mirrors Codex's compact identity/Usage/Settings/session model. ChatGPT subscription identity, plan, model catalog, and allowance/reset windows now come from the shared global Codex account through pinned app-server account APIs; avatar enrichment remains separate because app-server has no avatar field. Existing Codex authentication is reused automatically. Managed browser login retains a three-minute timeout, disconnecting MCG does not modify global Codex authentication, and device-wide Codex logout remains separately confirmed.
-- The current delivered Windows portable is `target/portable/MCG-Portable-Windows-x64-v0.4.23/MCG-Desktop-v0.4.23.exe` (514,557,952 bytes; SHA-256 `BCA44ED250D8E68EAC573C939B80EDDA1AEAE5ED3982EDF7D15523A40009FB64`). It contains the unified Simple/Advanced interface, progressive technical disclosures, governed per-run team presets, the selected neon dual-helix brain identity, independently scrollable nested agent Chat rooms, and the governed read-only Browser Tester/UAT routing corrections.
-- Source after the v0.4.23 package now has a Codex-aligned New Chat surface: a centered contextual heading, compact project/local-workspace/current-branch strip, bottom composer, Add and permission menus, one nested model/effort/speed/team menu, and a circular send action. It is shared by Simple and Advanced, responsive down to compact widths, and not yet packaged into a later portable.
+- The current delivered Windows portable is `target/portable/MCG-Portable-Windows-x64-v0.4.24/MCG-Desktop-v0.4.24.exe` (502,277,120 bytes; SHA-256 `3838A2126AE1A179832E1A70F9E3038FC9E313EB452D4D2E424CB17C44D882FD`). It contains the unified Simple/Advanced interface, Codex-aligned New Chat composer, progressive technical disclosures, governed per-run team presets, selected neon dual-helix brain identity, independently scrollable nested agent Chat rooms, and governed read-only Browser Tester/UAT routing corrections.
+- New Chat uses a centered contextual heading, compact project/local-workspace/current-branch strip, bottom composer, Add and permission menus, one nested model/effort/speed/team menu, and a circular send action. It is shared by Simple and Advanced, responsive down to compact widths, and packaged in v0.4.24.
 - The v0.4.15 desktop aligns with the harness capabilities while keeping New Chat conversational in both modes: one inline chronological agent timeline, retry-leaf outcome aggregation with retained attempt history, a copyable batch verification receipt, Advanced owner-reviewed dormant-Governor controls, a complete durable Worktrees inventory, and no task-specification form embedded in chat.
 - Chat streaming follows the active scroll container only while the viewport is within 96 pixels of the bottom. Deliberate upward scrolling pauses following; returning near the bottom resumes it. Both the normal document viewport and the workspace viewport used with open side/bottom panels use this rule.
 - Active chats now use a Codex-style composer queue. Enter enqueues while active, Ctrl/Command+Enter steers immediately through native app-server `turn/steer`, Shift+Enter inserts a newline, and queued messages persist per conversation and dispatch FIFO once idle. The connected drawer stays compact and provides item-level Steer, Retry, and remove controls.
@@ -2871,6 +2880,8 @@ When sources conflict, use this order:
 - Linux browser packages use root-owned `/opt/metacognitive-governor/browser/chrome` plus `packaging/linux/apparmor.d/metacognitive-governor-browser` to selectively permit the Chromium user-namespace sandbox on restricted Ubuntu. Never use `--no-sandbox` or disable Ubuntu's global AppArmor user-namespace restriction.
 
 ## Verification Ledger
+
+- 2026-08-26: Codex-aligned New Chat v0.4.24 packaging passed packaging contracts, production frontend compilation, complete release-sidecar and static-shadow builds, one-job/non-incremental Tauri single-file packaging, and diff hygiene. Independent inspection proves one 502,277,120-byte payload with ProductName MCG, Product/FileVersion 0.4.24, and SHA-256 `3838A2126AE1A179832E1A70F9E3038FC9E313EB452D4D2E424CB17C44D882FD`. Repository size is 36.97 GiB with 17.94 GiB under `target/debug`, below the 50 GiB cleanup threshold.
 
 - 2026-08-26: Codex-aligned New Chat desktop checkpoint passed TypeScript, production Vite build, 8/8 focused contextual/legacy-selector regressions, complete verbose single-worker Vitest 87/87 in 205.75 seconds, and diff hygiene. No Computer Use session was acquired and no portable was built.
 
@@ -3856,7 +3867,7 @@ When sources conflict, use this order:
 
 ## Open Follow-ups
 
-- New Chat native UAT after the Codex-alignment source change: compare full-width and compact layouts in dark/light themes; verify project search/selection, no-project mode, Local/current-branch disclosures, Add, permission, nested model/effort/speed/team selection, keyboard focus, and the send transition. Package only when requested; v0.4.23 predates this source change.
+- New Chat v0.4.24 native UAT: compare full-width and compact layouts in dark/light themes; verify project search/selection, no-project mode, Local/current-branch disclosures, Add, permission, nested model/effort/speed/team selection, keyboard focus, and the send transition.
 
 - Governed Tester v0.4.21 native UAT: from a linked project, request UAT in `/browser`; confirm the deterministic single-Coder shortcut is bypassed, Coordinator assigns a named Tester, the Tester can use only MCG context tools plus the right-side in-app Browser, no shell/patch/Git/Sites/Chrome authority is present, the report contains no changed files, and Chat delivers the summarized result. Confirm delegation/report JSON is humanized in nested Chat and tool/reasoning history is one compact expandable row.
 
@@ -3904,6 +3915,7 @@ When sources conflict, use this order:
 - Update `MEMORY.md` after durable discoveries, decisions, fixes, verification results, blocked work, and handoffs.
 - Never store secrets, tokens, passwords, private keys, or sensitive personal data in `MEMORY.md`.
 - Release Windows Computer Use immediately after the requested UI testing is complete; do not leave it attached during packaging, documentation, commits, pushes, or unrelated work.
+- Treat a new verified portable as part of the completion gate for every major change unless the owner explicitly opts out; do not wait for a separate packaging request.
 - Commit and push every verified major change to the tracked GitHub branch unless the owner explicitly instructs otherwise; confirm local/remote commit parity after pushing.
 - Standing disposable-VM authority is operational, not merely preapproval: directly perform required installs, transfers, administrator actions, restarts, tests, process control, and temporary qualification cleanup without pausing or asking. Contact the owner only for a genuinely unavoidable identity-bound external-account action, and continue all independent work while that action is pending.
 
