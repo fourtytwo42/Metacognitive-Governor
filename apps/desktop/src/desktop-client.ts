@@ -271,6 +271,7 @@ export interface ProviderModelCatalog {
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | (string & {});
 export type ExecutionSpeed = "standard" | "fast";
+export type TeamPreset = "automatic" | "fast" | "balanced" | "thorough";
 export type ApprovalMode = "ask" | "auto_review" | "full_access";
 
 export interface GitHubAccount {
@@ -305,6 +306,7 @@ export interface ChatRunPreferences {
   speed: ExecutionSpeed;
   service_tier?: string;
   approval_mode: ApprovalMode;
+  team_preset: TeamPreset;
 }
 
 export interface ExecutionPreferences {
@@ -312,6 +314,7 @@ export interface ExecutionPreferences {
   reasoning_effort?: string;
   service_tier?: string;
   approval_mode?: ApprovalMode;
+  team_preset?: TeamPreset;
 }
 
 export type ConversationState = "active" | "archived";

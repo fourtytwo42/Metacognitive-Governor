@@ -216,6 +216,7 @@ import {
   type CodexLoginStart,
   type ReasoningEffort,
   type ExecutionSpeed,
+  type TeamPreset,
   type ProxyConversation,
   type ProxyUsageSummary,
   runTerminalCommand,
@@ -453,7 +454,8 @@ function assistantTextForRun(run?: AgentRunView): string | null {
 const DEFAULT_CHAT_RUN_PREFERENCES: ChatRunPreferences = {
   reasoning_effort: "medium",
   speed: "standard",
-  approval_mode: "ask"
+  approval_mode: "ask",
+  team_preset: "automatic"
 };
 
 const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -476,7 +478,8 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       reasoning_effort: parsed.reasoning_effort ?? "medium",
       speed: parsed.speed ?? "standard",
       service_tier: parsed.service_tier,
-      approval_mode: parsed.approval_mode ?? "ask"
+      approval_mode: parsed.approval_mode ?? "ask",
+      team_preset: parsed.team_preset ?? "automatic"
     };
   } catch {
     return DEFAULT_CHAT_RUN_PREFERENCES;
@@ -565,6 +568,40 @@ function PermissionSelector({
   </details>;
 }
 
+const TEAM_PRESET_DETAILS: Record<TeamPreset, { label: string; description: string }> = {
+  automatic: { label: "Automatic", description: "MCG chooses the smallest suitable team." },
+  fast: { label: "Fast", description: "Use at most one parallel specialist." },
+  balanced: { label: "Balanced", description: "Use up to three parallel specialists." },
+  thorough: { label: "Thorough", description: "Use the assigned team's capacity, up to eight." }
+};
+
+function TeamPresetSelector({ value = "automatic", onChange }: { value?: TeamPreset; onChange: (preset: TeamPreset) => void }) {
+  const selectedValue = TEAM_PRESET_DETAILS[value] ? value : "automatic";
+  const selected = TEAM_PRESET_DETAILS[selectedValue];
+  return <details className="team-preset-selector">
+    <summary aria-label="Change team preset" title={selected.description}>
+      <span aria-hidden="true">⌘</span><span>{selected.label}</span><span aria-hidden="true">⌄</span>
+    </summary>
+    <div className="team-preset-popover" role="menu" aria-label="Team preset">
+      <strong>Team preset</strong>
+      {(Object.entries(TEAM_PRESET_DETAILS) as [TeamPreset, (typeof TEAM_PRESET_DETAILS)[TeamPreset]][]).map(([preset, detail]) => <button
+        type="button"
+        role="menuitemradio"
+        aria-checked={selectedValue === preset}
+        key={preset}
+        onClick={(event) => { onChange(preset); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+      ><span><strong>{detail.label}</strong><small>{detail.description}</small></span>{selectedValue === preset && <span aria-hidden="true">✓</span>}</button>)}
+    </div>
+  </details>;
+}
+
+function TechnicalDetails({ title, summary, children }: { title: string; summary: string; children: React.ReactNode }) {
+  return <details className="technical-details">
+    <summary><span><strong>{title}</strong><small>{summary}</small></span><span aria-hidden="true">⌄</span></summary>
+    <div className="technical-details-content">{children}</div>
+  </details>;
+}
+
 function ChatRunSelector({
   providers,
   codexModels = [],
@@ -612,7 +649,8 @@ function ChatRunSelector({
       reasoning_effort: value.reasoning_effort,
       speed: value.speed,
       service_tier: value.service_tier,
-      approval_mode: value.approval_mode
+      approval_mode: value.approval_mode,
+      team_preset: value.team_preset
     });
   };
   const selectedCodexModel = value.model_id
@@ -1873,7 +1911,13 @@ export function App() {
   const [taskRunPreferences, setTaskRunPreferences] = useState<Record<string, ChatRunPreferences>>(() => {
     try {
       const stored = window.localStorage.getItem("mcg.chat-run-preferences.tasks");
-      return stored ? JSON.parse(stored) as Record<string, ChatRunPreferences> : {};
+      if (!stored) return {};
+      const parsed = JSON.parse(stored) as Record<string, Partial<ChatRunPreferences>>;
+      return Object.fromEntries(Object.entries(parsed).map(([taskId, preferences]) => [taskId, {
+        ...DEFAULT_CHAT_RUN_PREFERENCES,
+        ...preferences,
+        team_preset: preferences.team_preset ?? "automatic"
+      }])) as Record<string, ChatRunPreferences>;
     } catch {
       return {};
     }
@@ -2506,7 +2550,8 @@ export function App() {
         reasoning_effort: conversation.execution_preferences.reasoning_effort ?? current.reasoning_effort,
         service_tier: tier,
         speed: tier && /fast|priority/i.test(tier) ? "fast" : "standard",
-        approval_mode: conversation.execution_preferences.approval_mode ?? "ask"
+        approval_mode: conversation.execution_preferences.approval_mode ?? "ask",
+        team_preset: conversation.execution_preferences.team_preset ?? "automatic"
       }));
     }
     // A completed schema migration opens every chat as a conversation. If an
@@ -3221,14 +3266,11 @@ export function App() {
     if (!userSettings || settingsBusy) return;
     const restoreFocus = document.activeElement === modeButtonRef.current;
     const nextAdvanced = !advanced;
-    if (!nextAdvanced && scheduleKind !== "interval") {
-      setScheduleKind("interval");
-      setScheduleDetail("3600");
-      setScheduleSecondary("30");
-    }
     if (!nextAdvanced) {
       setBackupPassphrase("");
       setBackupConfirmation("");
+      setProviderCredential("");
+      setMcpCredential("");
     }
     await saveUserSettings(
       { ...userSettings, advanced_mode: nextAdvanced },
@@ -4009,7 +4051,8 @@ export function App() {
         model_id: preferences.model_id,
         reasoning_effort: preferences.reasoning_effort,
         service_tier: preferences.service_tier,
-        approval_mode: preferences.approval_mode
+        approval_mode: preferences.approval_mode,
+        team_preset: preferences.team_preset
       };
       const existing = targetConversation ?? (activeSurface === "threads" && selectedChatId
         ? conversations.find((conversation) => conversation.id === selectedChatId)
@@ -4099,7 +4142,8 @@ export function App() {
           model_id: uncertainTurn.execution_preferences.model_id,
           reasoning_effort: uncertainTurn.execution_preferences.reasoning_effort ?? newChatRunPreferences.reasoning_effort,
           service_tier: uncertainTurn.execution_preferences.service_tier,
-          approval_mode: uncertainTurn.execution_preferences.approval_mode ?? newChatRunPreferences.approval_mode
+          approval_mode: uncertainTurn.execution_preferences.approval_mode ?? newChatRunPreferences.approval_mode,
+          team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });
       }
       const refreshed = await getConversation(selectedChatId);
@@ -4743,6 +4787,32 @@ export function App() {
       ]);
       setSchedules(scheduleResponse.schedules);
       setScheduleNotifications(notificationResponse.notifications);
+    } catch (error) {
+      setScheduleError(errorMessage(error));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  async function duplicateSchedule(schedule: ScheduleDefinition) {
+    setScheduleBusy(true);
+    setScheduleError(null);
+    try {
+      const duplicate = await createSchedule({
+        schedule_id: freshScheduleId(),
+        name: `${schedule.name} copy`,
+        project_id: schedule.project_id,
+        goal: schedule.goal,
+        constraints: [],
+        success_conditions: [],
+        risk: "medium",
+        trigger: schedule.trigger,
+        context_token_budget: 8192,
+        requested_tools: [],
+        estimated_output_tokens: 8192,
+        max_model_calls: 16
+      });
+      replaceSchedule(duplicate);
     } catch (error) {
       setScheduleError(errorMessage(error));
     } finally {
@@ -6340,6 +6410,7 @@ export function App() {
             />
             <div className="composer-actions">
               <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(selectedProject)} />
+              <TeamPresetSelector value={newChatRunPreferences.team_preset} onChange={(team_preset) => setNewChatRunPreferences((current) => ({ ...current, team_preset }))} />
               <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, and speed" />
               {projects.length > 0 && <label className="project-select">
                 <span className="sr-only">Project</span>
@@ -6419,7 +6490,7 @@ export function App() {
               </section>}
               <div className="chat-followup-composer">
               <textarea aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message MCG..." />
-              <div className="composer-actions"><PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} /><ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, and speed" /><button className="primary" type="button" disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}>{conversationIsActive ? "Queue" : "Send"}</button></div>
+              <div className="composer-actions"><PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} /><TeamPresetSelector value={newChatRunPreferences.team_preset} onChange={(team_preset) => setNewChatRunPreferences((current) => ({ ...current, team_preset }))} /><ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, and speed" /><button className="primary" type="button" disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}>{conversationIsActive ? "Queue" : "Send"}</button></div>
               {taskError && <p className="error-message" role="alert">{taskError}</p>}
               </div>
             </div>
@@ -6443,7 +6514,8 @@ export function App() {
                   {task.state === "waiting_for_approval" && approvals.find((approval) => approval.task_id === task.id) && <div className="approval-summary">
                     <strong>Permission needed</strong>
                     <span>{approvals.find((approval) => approval.task_id === task.id)?.reason}</span>
-                    {advanced && <code>{approvals.find((approval) => approval.task_id === task.id)?.resource}</code>}
+                    <small>Affects: {approvals.find((approval) => approval.task_id === task.id)?.resource}</small>
+                    {advanced && <TechnicalDetails title="Permission evidence" summary="Exact governed resource"><code>{approvals.find((approval) => approval.task_id === task.id)?.resource}</code></TechnicalDetails>}
                   </div>}
                   {taskEvidence(task)}
                 </div>
@@ -6457,7 +6529,8 @@ export function App() {
                     onRefresh={() => void discoverModelCatalogs(providers, true)}
                     label={`Model, effort, and speed for ${task.goal}`}
                   />
-                  {task.state === "pending" && <label className="task-team-select"><span>Team</span><select aria-label={`Team for ${task.goal}`} value={taskOrganizationIds[task.id] ?? ""} onChange={(event) => setTaskOrganizationIds((current) => ({ ...current, [task.id]: event.target.value }))}>
+                  {task.state === "pending" && <TeamPresetSelector value={(taskRunPreferences[task.id] ?? newChatRunPreferences).team_preset} onChange={(team_preset) => setTaskRunPreferences((current) => ({ ...current, [task.id]: { ...(current[task.id] ?? newChatRunPreferences), team_preset } }))} />}
+                  {advanced && task.state === "pending" && <label className="task-team-select"><span>Custom organization</span><select aria-label={`Custom organization for ${task.goal}`} value={taskOrganizationIds[task.id] ?? ""} onChange={(event) => setTaskOrganizationIds((current) => ({ ...current, [task.id]: event.target.value }))}>
                     <option value="">Automatic team</option>
                     {organizations.map((organization) => <option value={organization.organization_id} key={`${task.id}-${organization.organization_id}`}>{organization.name}</option>)}
                   </select></label>}
@@ -6476,7 +6549,7 @@ export function App() {
         </section>}
 
         <section className="panel pull-request-panel" id="pull-requests" aria-label="Pull requests">
-          {!advanced ? <div className="pull-request-workspace">
+          <><div className="pull-request-workspace">
             <section className="pull-request-list-pane" aria-label="Pull request list">
               <div className="pull-request-tabs" role="tablist" aria-label="Pull request views">
                 {([['all', 'All'], ['reviewing', 'Reviewing'], ['authored', 'Authored']] as const).map(([value, label]) => <button
@@ -6542,7 +6615,7 @@ export function App() {
                 <button className="primary" type="button" onClick={() => openChat(selectedCodeReviewTask.id)}>Open review</button>
               </article> : <div className="pull-request-detail-empty"><span aria-hidden="true">⑂</span><strong>Select a review to view</strong><p>Choose a local review from the list, or start a new one.</p></div>}
             </section>
-          </div> : <>
+          </div>{advanced && <TechnicalDetails title="Technical review controls" summary="Runtime approvals and legacy review administration">
           <div className="section-heading">
             <div>
               <p className="eyebrow">CODE REVIEW</p>
@@ -6609,7 +6682,8 @@ export function App() {
             {tasks.filter((task) => task.state === "waiting_for_approval").length === 0 ? <p className="empty-state">No runtime approvals need attention.</p> : <div className="task-list">{tasks.filter((task) => task.state === "waiting_for_approval").map((task) => <article className="task-card" key={task.id}><div className="task-card-main"><span className="task-state state-waiting_for_approval">permission</span><h3>{task.goal}</h3><small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "General workspace"}</small></div><button className="secondary" type="button" onClick={() => openChat(task.id)}>Open chat</button></article>)}</div>}
           </div>}
           <p className="integration-note">GitHub pull request titles, comments, checks, and changed-file sync will appear here after the GitHub integration is connected. Local Git review works now.</p>
-          </>}
+          </TechnicalDetails>}
+          </>
         </section>
 
         <section className="grid" id="projects">
@@ -6629,13 +6703,13 @@ export function App() {
                 return <article className={`project-card${selected ? " selected" : ""}`} key={project.project_id}>
                   <div>
                     <h3>{name}</h3>
-                    {advanced && <p>{project.languages.length > 0 ? project.languages.join(", ") : "Language not detected"}</p>}
-                    {advanced && <div className="project-tags">
+                    <div className="project-tags">
                       {project.build_systems.map((system) => <span key={`build-${system}`}>{system}</span>)}
                       {project.test_systems.map((system) => <span key={`test-${system}`}>{system}</span>)}
                       {project.repository.is_git && <span>{project.repository.dirty ? "Git · changes" : "Git · clean"}</span>}
-                    </div>}
-                    {advanced && <><code>{project.root}</code><small>{project.repository.branch ? `Branch ${project.repository.branch} · ` : ""}{project.instructions.conflicts.length} instruction conflicts</small></>}
+                    </div>
+                    {project.repository.is_git && <small>{project.repository.branch ? `Branch ${project.repository.branch}` : "Git repository"}{project.instructions.conflicts.length > 0 ? ` · ${project.instructions.conflicts.length} instruction conflict${project.instructions.conflicts.length === 1 ? "" : "s"}` : ""}</small>}
+                    {advanced && <TechnicalDetails title="Project identity" summary="Filesystem path and detected instructions"><code>{project.root}</code><small>{project.languages.length > 0 ? project.languages.join(", ") : "Language not detected"}</small></TechnicalDetails>}
                   </div>
                   {advanced ? <button className={selected ? "project-selected" : "secondary"} type="button" disabled={selected} onClick={() => setSelectedProject(project)}>{selected ? "Selected" : "Use project"}</button> : <button className="primary" type="button" onClick={() => startNewChat(project)}>Start chat</button>}
                 </article>;
@@ -7423,7 +7497,7 @@ export function App() {
         </section>
 
         <section className="panel scheduler-panel" id="scheduler" aria-label="Scheduler">
-          {!advanced ? <>
+          <>
             <div className="section-heading">
               <div>
                 <p className="eyebrow">SCHEDULED</p>
@@ -7500,12 +7574,15 @@ export function App() {
                     </div>
                     <div className="task-actions">
                       {schedule.state === "enabled" ? <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "paused")}>Pause</button> : schedule.state === "paused" && <button className="primary" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "enabled")}>Resume</button>}
+                      {schedule.state !== "completed" && <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => requestScheduleWake(schedule.id)}>Run now</button>}
+                      <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => duplicateSchedule(schedule)}>Duplicate</button>
                       <button className="secondary" type="button" disabled={scheduleBusy} onClick={() => toggleScheduleHistory(schedule.id)}>{scheduleHistory[schedule.id] ? "Hide runs" : "Recent runs"}</button>
+                      {schedule.state !== "completed" && <button className="link-button" type="button" disabled={scheduleBusy} onClick={() => changeScheduleState(schedule.id, "completed")}>Delete</button>}
                     </div>
                   </article>)}
               </div>
             </div>
-          </> : <>
+          </>{advanced && <TechnicalDetails title="Exact scheduler controls" summary="Triggers, budgets, durable identities, and manual wake controls">
           <div className="section-heading">
             <div>
               <p className="eyebrow">ADVANCED SCHEDULER</p>
@@ -7589,7 +7666,6 @@ export function App() {
                   {scheduleBusy ? "Saving..." : "Create schedule"}
                 </button>
               </div>
-              {scheduleError && <p className="error-message" role="alert">{scheduleError}</p>}
             </div>
             <div className="scheduler-overview">
               {scheduleNotifications.length > 0 && <div className="notification-list" aria-label="Scheduler notifications">
@@ -7626,7 +7702,7 @@ export function App() {
             </div>
           </div>
           <p className="integration-note">Advanced RFC 5545 recurrence rules, multi-project schedules, dedicated worktrees, and explicit model/reasoning selection remain product work. Existing schedules retain their durable local execution and restart-recovery contract.</p>
-          </>}
+          </TechnicalDetails>}
         </section>
 
         <section className="panel provider-panel" id="providers">
@@ -7725,7 +7801,8 @@ export function App() {
               {providerAuth === "api_key" ? "API key" : "Bearer token"}
               <input type="password" autoComplete="off" value={providerCredential} onChange={(event) => setProviderCredential(event.target.value)} />
             </label>}
-            {advanced && <div className="advanced-fields provider-advanced">
+            {advanced && <TechnicalDetails title="Connection details" summary="Identifiers and optional OpenAI routing">
+              <div className="advanced-fields provider-advanced">
               <label>
                 Connection id
                 <input value={providerId} onChange={(event) => setProviderId(event.target.value)} placeholder="Generated from the name" />
@@ -7738,7 +7815,8 @@ export function App() {
                 OpenAI project (optional)
                 <input value={providerProject} onChange={(event) => setProviderProject(event.target.value)} />
               </label>
-            </div>}
+              </div>
+            </TechnicalDetails>}
             <p className="form-note">MCG discovers models from the endpoint before saving. Credentials go directly to the operating-system credential store.</p>
             <button className="primary" type="button" disabled={busy} onClick={addProvider}>{busy ? "Connecting…" : "Connect provider"}</button>
           </div>}
@@ -7825,6 +7903,7 @@ export function App() {
                 </label>
               )}
               {advanced && (
+                <TechnicalDetails title="Server transport" summary="Protocol, executable, identity, and authentication">
                 <div className="advanced-fields">
                   <label>
                     Transport
@@ -7897,6 +7976,7 @@ export function App() {
                     </label>
                   )}
                 </div>
+                </TechnicalDetails>
               )}
               <button className="primary" type="button" disabled={mcpBusy} onClick={addMcpServer}>
                 {mcpBusy ? "Checking server…" : "Add server"}
@@ -7933,7 +8013,7 @@ export function App() {
         </section>
 
         <section className="panel plugin-panel" id="plugins" aria-label="Plugins">
-          {!advanced ? <>
+          <>
             <div className="section-heading">
               <div>
                 <p className="eyebrow">PLUGINS</p>
@@ -8000,7 +8080,7 @@ export function App() {
                 </article>;
               })}
             </div>
-          </> : <>
+          </>{advanced && <TechnicalDetails title="Plugin administration" summary="Local packages, exact grants, structured invocation, and immutable evidence">
             <div className="section-heading">
               <div>
                 <p className="eyebrow">ADVANCED PLUGINS</p>
@@ -8093,7 +8173,7 @@ export function App() {
               </article>;
             })}
             </div>
-          </>}
+          </TechnicalDetails>}
         </section>
 
         <section className="panel settings-page" id="settings" aria-label="Settings">

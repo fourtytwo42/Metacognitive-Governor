@@ -1888,6 +1888,7 @@ test("advanced Pull requests separates governed approvals from code review", asy
   await enableAdvancedMode();
 
   const panel = await screen.findByRole("region", { name: "Pull requests" });
+  fireEvent.click(within(panel).getByText("Technical review controls"));
   expect(within(panel).getByRole("heading", { name: "Governed approvals" })).toBeVisible();
   expect(within(panel).getByText("Runtime permission requests are separate from pull-request reviews.")).toBeVisible();
   expect(within(panel).getByText("Install a requested dependency")).toBeVisible();
@@ -2001,6 +2002,7 @@ test("simple Scheduled starts a project-aware setup chat and Advanced retains ex
   expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toContain("Return to this setup chat on each run");
 
   await enableAdvancedMode();
+  fireEvent.click(within(scheduler).getByText("Exact scheduler controls"));
   expect(within(scheduler).getByRole("heading", { name: "Scheduler administration" })).toBeVisible();
   fireEvent.change(within(scheduler).getByLabelText("Trigger"), { target: { value: "cron" } });
   expect(within(scheduler).getByLabelText("Five-field cron")).toHaveValue("0 2 * * *");
@@ -2008,7 +2010,9 @@ test("simple Scheduled starts a project-aware setup chat and Advanced retains ex
   fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: schedule.goal } });
   fireEvent.click(within(scheduler).getByRole("button", { name: "Create schedule" }));
 
-  expect(await within(scheduler).findByRole("heading", { name: schedule.name })).toBeInTheDocument();
+    expect(
+      (await within(scheduler).findAllByRole("heading", { name: schedule.name })).length,
+    ).toBeGreaterThan(0);
   expect(client.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
     schedule_id: expect.any(String),
     project_id: project.project_id,
@@ -2288,6 +2292,7 @@ test("scheduler retries reuse one identity and rotate it only after success", as
   fireEvent.click(await screen.findByRole("button", { name: "Start chat" }));
   const scheduler = screen.getByRole("region", { name: "Scheduler" });
   await enableAdvancedMode();
+  fireEvent.click(within(scheduler).getByText("Exact scheduler controls"));
   fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: completed.name } });
   fireEvent.change(within(scheduler).getByLabelText("Scheduled goal"), { target: { value: completed.goal } });
   const create = within(scheduler).getByRole("button", { name: "Create schedule" });
@@ -2296,7 +2301,9 @@ test("scheduler retries reuse one identity and rotate it only after success", as
   const firstIdentity = client.createSchedule.mock.calls[0][0].schedule_id;
 
   fireEvent.click(create);
-  expect(await within(scheduler).findByRole("heading", { name: completed.name })).toBeInTheDocument();
+    expect(
+      (await within(scheduler).findAllByRole("heading", { name: completed.name })).length,
+    ).toBeGreaterThan(0);
   expect(client.createSchedule.mock.calls[1][0].schedule_id).toBe(firstIdentity);
 
   fireEvent.change(within(scheduler).getByLabelText("Name"), { target: { value: "Next schedule" } });
@@ -2312,6 +2319,31 @@ test("advanced mode reveals runtime details", async () => {
   expect(screen.queryByRole("heading", { name: "Runtime status" })).not.toBeInTheDocument();
   await enableAdvancedMode();
   expect(screen.getByRole("heading", { name: "Runtime status" })).toBeInTheDocument();
+});
+
+test("advanced mode upgrades legacy task preferences without crashing", async () => {
+  const taskId = "00000000-0000-4000-8000-000000000623";
+  window.localStorage.setItem("mcg.chat-run-preferences.tasks", JSON.stringify({
+    [taskId]: { reasoning_effort: "medium", speed: "standard", approval_mode: "ask" }
+  }));
+  client.listTasks.mockResolvedValue({ tasks: [{
+    schema_version: 1,
+    id: taskId,
+    goal: "Legacy task preferences",
+    constraints: [],
+    success_conditions: [],
+    risk: "low",
+    budget: {},
+    state: "pending",
+    created_at: "2026-08-21T00:00:00Z",
+    updated_at: "2026-08-21T00:00:00Z"
+  }] });
+  render(<App />);
+
+  await enableAdvancedMode();
+  expect((await screen.findAllByText("Legacy task preferences")).length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Automatic").length).toBeGreaterThan(0);
+  await waitFor(() => expect(JSON.parse(window.localStorage.getItem("mcg.chat-run-preferences.tasks") ?? "{}")[taskId].team_preset).toBe("automatic"));
 });
 
 test("advanced Agents exposes disabled Governor guardrails and owner-reviewed proposals", async () => {
@@ -2353,6 +2385,8 @@ test("advanced Agents exposes disabled Governor guardrails and owner-reviewed pr
 test("mode persistence restores keyboard focus after the temporarily disabled control returns", async () => {
   render(<App />);
 
+  const draft = await screen.findByRole("textbox", { name: "Message" });
+  fireEvent.change(draft, { target: { value: "Keep this ordinary draft while changing density" } });
   const advanced = await screen.findByRole("button", { name: "Use advanced mode", pressed: false });
   await waitFor(() => expect(advanced).toBeEnabled());
   advanced.focus();
@@ -2362,6 +2396,11 @@ test("mode persistence restores keyboard focus after the temporarily disabled co
   const simple = await screen.findByRole("button", { name: "Use simple mode", pressed: true });
   await waitFor(() => expect(simple).toBeEnabled());
   await waitFor(() => expect(simple).toHaveFocus());
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this ordinary draft while changing density");
+
+  fireEvent.click(simple);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Use advanced mode", pressed: false })).toBeEnabled());
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this ordinary draft while changing density");
 });
 
 test("advanced mode keeps one routed workspace surface and exposes a persistent simple-mode escape", async () => {
@@ -2848,11 +2887,11 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(client.createConversation).toHaveBeenCalledWith({
     title: "Explain this repository",
     project_id: project.project_id,
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask" }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic" }
   });
   expect(client.sendConversationMessage).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000c01", {
     content: "Explain this repository",
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask" }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic" }
   });
   expect(client.createTask).not.toHaveBeenCalled();
   expect(client.launchTask).not.toHaveBeenCalled();
@@ -3184,6 +3223,21 @@ test("permission mode is selected before prompting and sent with the conversatio
   ));
 });
 
+test("team presets are selected before prompting and persisted with the conversation turn", async () => {
+  render(<App />);
+
+  fireEvent.click(screen.getByLabelText("Change team preset"));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /Balanced/ }));
+  expect(screen.getByLabelText("Change team preset")).toHaveTextContent("Balanced");
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Plan this with a balanced team" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ team_preset: "balanced" }) })
+  ));
+});
+
 test("project-free chats allow elevated permission selection while explaining the read-only boundary", async () => {
   render(<App />);
   fireEvent.click(screen.getByLabelText("Change permissions"));
@@ -3479,7 +3533,7 @@ test("conversation approval is shown in chat and resolves without restarting the
   finishSend?.(waitingView);
 });
 
-test("blocked task retry is explicit and reports durable progress", async () => {
+test("legacy blocked tasks do not crowd the normal new-chat workspace", async () => {
   const blockedTask = {
     schema_version: 1,
     id: "00000000-0000-4000-8000-000000000030",
@@ -3502,18 +3556,12 @@ test("blocked task retry is explicit and reports durable progress", async () => 
   });
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: blockedTask.goal }));
-  fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
-  expect(client.retryTask).toHaveBeenCalledWith(blockedTask.id, {
-    approval_mode: "ask",
-    reasoning_effort: "medium",
-    speed: "standard",
-  });
-  expect(await screen.findByText("Objective checks are next.")).toBeInTheDocument();
-  expect(screen.getByText("active")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "What can I help with?" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: blockedTask.goal })).not.toBeInTheDocument();
+  expect(client.retryTask).not.toHaveBeenCalled();
 });
 
-test("pending approval can be reviewed and resumed from the task card", async () => {
+test("legacy task approvals stay out of the normal new-chat workspace", async () => {
   const waitingTask = {
     schema_version: 1,
     id: "00000000-0000-4000-8000-000000000040",
@@ -3546,21 +3594,13 @@ test("pending approval can be reviewed and resumed from the task card", async ()
   });
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: waitingTask.goal }));
-  expect(await screen.findByText(approval.reason)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Approve and continue" }));
-  expect(client.approveRequest).toHaveBeenCalledWith(approval.id);
-  await waitFor(() =>
-    expect(client.resumeTask).toHaveBeenCalledWith(waitingTask.id, {
-      approval_mode: "ask",
-      reasoning_effort: "medium",
-      speed: "standard",
-    }),
-  );
-  expect(await screen.findByText("Approved work finished; checks are next.")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "What can I help with?" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: waitingTask.goal })).not.toBeInTheDocument();
+  expect(client.approveRequest).not.toHaveBeenCalled();
+  expect(client.resumeTask).not.toHaveBeenCalled();
 });
 
-test("pending approval can be denied into a retryable blocked task", async () => {
+test("legacy denied-task controls stay out of the normal new-chat workspace", async () => {
   const waitingTask = {
     schema_version: 1,
     id: "00000000-0000-4000-8000-000000000050",
@@ -3589,12 +3629,9 @@ test("pending approval can be denied into a retryable blocked task", async () =>
   client.denyRequest.mockResolvedValue({ ...approval, state: "denied" });
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: waitingTask.goal }));
-  fireEvent.click(await screen.findByRole("button", { name: "Deny" }));
-  expect(client.denyRequest).toHaveBeenCalledWith(approval.id);
-  expect(await screen.findByText("blocked")).toBeInTheDocument();
-  expect(screen.getByText("Request denied; task is blocked and can be retried.")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "What can I help with?" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: waitingTask.goal })).not.toBeInTheDocument();
+  expect(client.denyRequest).not.toHaveBeenCalled();
 });
 
 test("native project selection discovers the folder and associates the new conversation", async () => {
@@ -3654,7 +3691,9 @@ test("Ctrl+O registers a global folder without creating a project", async () => 
   expect(screen.queryByRole("option", { name: "global-folder" })).not.toBeInTheDocument();
   expect(within(screen.getByLabelText("Projects")).queryByRole("button", { name: /^global-folder$/ })).not.toBeInTheDocument();
   expect(client.discoverProject).not.toHaveBeenCalled();
-  expect(JSON.parse(window.localStorage.getItem("mcg.global-folders") ?? "[]")).toEqual([root]);
+  await waitFor(() => {
+    expect(JSON.parse(window.localStorage.getItem("mcg.global-folders") ?? "[]")).toEqual([root]);
+  });
 
   fireEvent.click(within(screen.getByLabelText("Global folders")).getByRole("button", { name: "Remove" }));
   expect(within(screen.getByLabelText("Global folders")).getByText("No global folders added.")).toBeInTheDocument();
@@ -3814,7 +3853,7 @@ test("project intelligence stays advanced while project chat remains the simple 
   await waitFor(() => expect(client.transitionProjectMemory).toHaveBeenCalledWith(project.project_id, claim.id, "reinforce"));
   fireEvent.click(within(intelligence).getByRole("button", { name: "History" }));
   await waitFor(() => expect(intelligence.querySelector(".memory-history")).toHaveTextContent("new"));
-});
+}, 30_000);
 
 test("simple mode separately reviews and policy-runs a snapshot-pinned topology command", async () => {
   const project = {

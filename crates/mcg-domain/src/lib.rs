@@ -1997,6 +1997,29 @@ pub enum ApprovalMode {
     FullAccess,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamPreset {
+    #[default]
+    Automatic,
+    Fast,
+    Balanced,
+    Thorough,
+}
+
+impl TeamPreset {
+    /// Returns the owner-selected parallel specialist ceiling. Automatic and
+    /// Thorough defer to the pinned organization's policy.
+    #[must_use]
+    pub const fn parallel_specialist_limit(self) -> Option<u16> {
+        match self {
+            Self::Automatic | Self::Thorough => None,
+            Self::Fast => Some(1),
+            Self::Balanced => Some(3),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionPreferences {
     #[serde(default)]
@@ -2007,6 +2030,8 @@ pub struct ExecutionPreferences {
     pub service_tier: Option<String>,
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    #[serde(default)]
+    pub team_preset: TeamPreset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

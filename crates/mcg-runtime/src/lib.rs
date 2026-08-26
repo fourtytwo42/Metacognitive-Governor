@@ -2227,6 +2227,19 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
     }
 }
 
+fn effective_parallel_specialist_limit(
+    preferences: &ExecutionPreferences,
+    organization: &OrganizationGenome,
+) -> u16 {
+    let organization_limit = organization.policy.max_parallel_agents.min(8);
+    preferences
+        .team_preset
+        .parallel_specialist_limit()
+        .map_or(organization_limit, |preset_limit| {
+            organization_limit.min(preset_limit)
+        })
+}
+
 struct ActiveCoordinationBatchGuard<'a> {
     batches: &'a Mutex<BTreeMap<ConversationId, CoordinationBatchId>>,
     conversation_id: ConversationId,
@@ -4147,7 +4160,10 @@ impl AppRuntime {
             PreflightInput {
                 project_root: Path::new(&project.root),
                 project_is_git: project.repository.is_git,
-                parallel_limit: usize::from(organization.policy.max_parallel_agents.min(8)),
+                parallel_limit: usize::from(effective_parallel_specialist_limit(
+                    &conversation.execution_preferences,
+                    &organization,
+                )),
                 active_coders,
             },
             &current_team.delegations,
@@ -5892,7 +5908,8 @@ impl AppRuntime {
                 )
             })
             .count();
-        let parallel_limit = organization.policy.max_parallel_agents.min(8);
+        let parallel_limit =
+            effective_parallel_specialist_limit(&conversation.execution_preferences, &organization);
         if active >= usize::from(parallel_limit) {
             return Err(StorageError::Conflict(format!(
                 "the pinned organization allows at most {parallel_limit} parallel specialists (MCG's hard ceiling is 8)"
@@ -23541,6 +23558,40 @@ mod tests {
         ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
     };
     use tokio::net::TcpStream;
+
+    #[test]
+    fn team_presets_intersect_with_pinned_organization_capacity() {
+        let mut organization = OrganizationGenome::consumer_default(Utc::now());
+        organization.policy.max_parallel_agents = 6;
+        let mut preferences = ExecutionPreferences::default();
+
+        assert_eq!(
+            effective_parallel_specialist_limit(&preferences, &organization),
+            6
+        );
+        preferences.team_preset = mcg_domain::TeamPreset::Fast;
+        assert_eq!(
+            effective_parallel_specialist_limit(&preferences, &organization),
+            1
+        );
+        preferences.team_preset = mcg_domain::TeamPreset::Balanced;
+        assert_eq!(
+            effective_parallel_specialist_limit(&preferences, &organization),
+            3
+        );
+        preferences.team_preset = mcg_domain::TeamPreset::Thorough;
+        assert_eq!(
+            effective_parallel_specialist_limit(&preferences, &organization),
+            6
+        );
+
+        organization.policy.max_parallel_agents = 2;
+        preferences.team_preset = mcg_domain::TeamPreset::Balanced;
+        assert_eq!(
+            effective_parallel_specialist_limit(&preferences, &organization),
+            2
+        );
+    }
 
     #[tokio::test]
     async fn static_conversation_preview_is_loopback_only_and_rejects_traversal() {
