@@ -271,7 +271,7 @@ async function openOwnerSurface(page: import("@playwright/test").Page, name: str
     await menu.getByRole("button", { name: new RegExp(`^${name}`) }).click();
     return;
   }
-  const surface = ({ Projects: "projects", Providers: "providers", SSH: "ssh", Improvement: "improvement" } as Record<string, string>)[name];
+  const surface = ({ Projects: "projects", Providers: "providers", MCP: "mcp", SSH: "ssh", Improvement: "improvement" } as Record<string, string>)[name];
   if (!surface) throw new Error(`Unknown test surface ${name}`);
   await page.evaluate((target) => {
     window.history.pushState(null, "", `#${target}`);
@@ -285,13 +285,16 @@ async function enableAdvancedMode(page: import("@playwright/test").Page) {
   }
   await page.getByRole("button", { name: "General", exact: true }).click();
   await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await expect(page.getByRole("button", { name: "Use simple mode from settings" })).toBeVisible();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await expect(page.getByRole("heading", { name: "New chat", level: 1 })).toBeVisible();
 }
 
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "What would you like to talk about?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What should we build?" })).toBeVisible();
   await expect(page.locator("#projects")).toBeHidden();
   await page.getByRole("link", { name: "Pull requests", exact: true }).click();
   const pullRequests = page.getByRole("region", { name: "Pull requests" });
@@ -318,28 +321,37 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
 
   await enableAdvancedMode(page);
 
+  await openOwnerSurface(page, "Projects");
   await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
+  await openOwnerSurface(page, "MCP");
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
+  await page.getByText("Server transport", { exact: true }).click();
+  await expect(page.getByLabel("Connection id")).toBeVisible();
+  await expect(page.getByLabel("Protocol")).toHaveValue("auto");
+  await openOwnerSurface(page, "Settings");
   const settings = page.getByLabel("Owner settings");
   await expect(settings.getByLabel("Autonomy")).toHaveValue("autonomous");
   await expect(settings.getByLabel("Run opt-in shadow model experiments")).toBeChecked();
   await expect(settings.getByLabel("Settings revision history")).toContainText("Enabled advanced interface");
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Sites", exact: true }).click();
   const sites = page.getByRole("region", { name: "Sites" });
-  await expect(sites.getByRole("heading", { name: "Web properties" })).toBeVisible();
-  await expect(sites.getByLabel("Deployment executable")).toBeVisible();
-  await expect(sites.getByText(/Retry identity:/)).toBeVisible();
-  await expect(page.getByLabel("Connection id")).toBeVisible();
-  await expect(page.getByLabel("Protocol")).toHaveValue("auto");
+  await expect(sites.getByRole("heading", { name: "Sites" })).toBeVisible();
+  await expect(sites.getByRole("button", { name: "New site" })).toBeVisible();
+  await page.getByRole("link", { name: "Scheduled", exact: true }).click();
   const scheduler = page.getByRole("region", { name: "Scheduler" });
+  await scheduler.locator("summary").filter({ hasText: "Exact scheduler controls" }).click();
   await expect(scheduler.getByLabel("Trigger")).toBeVisible();
   await scheduler.getByLabel("Trigger").selectOption("cron");
   await expect(scheduler.getByLabel("Five-field cron")).toHaveValue("0 2 * * *");
 
+  await openOwnerSurface(page, "Providers");
   await page.getByRole("button", { name: "Add API or local provider" }).click();
   await expect(page.getByLabel("Provider type")).toHaveValue("open_ai_compatible");
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
 
-  await page.getByRole("button", { name: "Use simple mode" }).click();
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "Use simple mode from settings" }).click();
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Scheduled", exact: true }).click();
   await expect(scheduler.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
@@ -361,6 +373,7 @@ test("simple and advanced interfaces meet the WCAG A and AA accessibility baseli
   expect(simple.violations, "simple-mode accessibility violations").toEqual([]);
 
   await enableAdvancedMode(page);
+  await openOwnerSurface(page, "Projects");
   await expect(page.getByRole("heading", { name: "Runtime status" })).toBeVisible();
 
   const advanced = await new AxeBuilder({ page })
@@ -426,7 +439,7 @@ test("desktop menus mirror Codex commands without ChatGPT product branding", asy
   await expect(menu.getByRole("button", { name: /New Chat.*Ctrl\+N/ })).toBeVisible();
   await expect(menu.getByRole("button", { name: /Open Folder.*Ctrl\+O/ })).toBeVisible();
   await expect(menu.getByRole("button", { name: /New Temporary Chat/ })).toBeDisabled();
-  await expect(menu.getByRole("button", { name: /Quit MCG.*Ctrl\+Q/ })).toBeVisible();
+  await expect(menu.getByRole("button", { name: /Quit MetaCog.*Ctrl\+Q/ })).toBeVisible();
   await expect(menu.getByText("Quit ChatGPT")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Edit", exact: true }).click();
@@ -443,7 +456,7 @@ test("desktop menus mirror Codex commands without ChatGPT product branding", asy
   await page.getByRole("button", { name: "Help", exact: true }).click();
   menu = page.getByLabel("Help menu");
   await expect(menu.getByRole("button", { name: /Keyboard Shortcuts.*Ctrl\+\// })).toBeVisible();
-  await expect(menu.getByRole("button", { name: "About MCG" })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "About MetaCog" })).toBeVisible();
   await expect(menu.getByText("About ChatGPT")).toHaveCount(0);
 
   await page.keyboard.press("Escape");
@@ -524,7 +537,7 @@ test("account menu and Settings follow the compact Codex information architectur
   await expect(shortcutList.getByText("Toggle full screen")).toHaveCount(0);
 
   await settings.getByRole("button", { name: "Usage & billing" }).click();
-  await expect(page.getByText("MCG does not sell credits, collect subscription payments, or silently move subscription work to API billing.")).toBeVisible();
+  await expect(page.getByText("MetaCog does not sell credits, collect subscription payments, or silently move subscription work to API billing.")).toBeVisible();
 
   await settings.getByRole("button", { name: "Browser" }).click();
   await expect(page.getByRole("heading", { name: "Browser", level: 2 })).toBeVisible();
@@ -551,6 +564,32 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
 });
 
+test("the desktop shell prevents phantom document scrolling", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+
+  const layout = await page.evaluate(() => {
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    const frame = document.querySelector<HTMLElement>(".desktop-frame")!;
+    return {
+      htmlOverflowY: getComputedStyle(document.documentElement).overflowY,
+      bodyOverflowY: getComputedStyle(document.body).overflowY,
+      workspaceOverflowY: getComputedStyle(workspace).overflowY,
+      frameHeight: frame.getBoundingClientRect().height,
+      viewportHeight: window.innerHeight
+    };
+  });
+  expect(layout.htmlOverflowY).toBe("hidden");
+  expect(layout.bodyOverflowY).toBe("hidden");
+  expect(layout.workspaceOverflowY).toBe("auto");
+  expect(Math.round(layout.frameHeight)).toBe(layout.viewportHeight);
+
+  await page.locator(".workspace").evaluate((workspace) => { workspace.scrollTop = workspace.scrollHeight; });
+  await page.locator(".workspace").hover();
+  await page.mouse.wheel(0, 1_000);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});
+
 test("workspace navigation always opens a surface at its top", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");
@@ -558,12 +597,10 @@ test("workspace navigation always opens a surface at its top", async ({ page }) 
   await expect(page.getByLabel("Project intelligence and memory")).toHaveCount(0);
   await page.getByRole("button", { name: "Start chat" }).click();
   await expect(page.getByRole("heading", { name: "New chat", level: 1 })).toBeVisible();
-  await expect(page.getByLabel("Project", { exact: true })).toHaveValue("00000000-0000-4000-8000-000000000242");
+  await expect(page.getByRole("heading", { name: "What should we build in consumer-app?" })).toBeVisible();
+  await expect(page.getByLabel("Choose project")).toContainText("consumer-app");
   await expect(page.locator(".selected-project")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
-  const folderButton = page.getByRole("button", { name: "Open folder" });
-  await expect(folderButton).toHaveAttribute("title", "Create a project from a folder");
-  await expect(folderButton).not.toContainText("Open folder");
 
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(page.getByRole("region", { name: "Tasks" })).toBeHidden();
@@ -602,6 +639,8 @@ test("plugin permission review gates enablement and invocation", async ({ page }
   await expect(plugins.getByRole("heading", { name: "Weather helper" })).toBeVisible();
   await expect(plugins.getByLabel("Plugin input (JSON)")).toHaveCount(0);
   await enableAdvancedMode(page);
+  await page.getByRole("link", { name: "Plugins", exact: true }).click();
+  await plugins.locator("summary").filter({ hasText: "Plugin administration" }).click();
   await expect(plugins.getByRole("heading", { name: "Plugin administration" })).toBeVisible();
   await expect(plugins.getByRole("button", { name: "Enable" })).toBeDisabled();
   await plugins.getByLabel("Weather helper network origin").fill("https://weather.example");
@@ -685,6 +724,7 @@ test("consumer duplicates and inspects a portable organization without exposing 
   await expectOrganizationCardsToFit(organizations);
 
   await enableAdvancedMode(page);
+  await openOwnerSurface(page, "Improvement");
   await expectOrganizationCardsToFit(organizations);
   await organizations.getByRole("button", { name: "Show portable JSON" }).first().click();
   await expect(organizations.getByLabel("Portable organization JSON")).toContainText("cccccccc");

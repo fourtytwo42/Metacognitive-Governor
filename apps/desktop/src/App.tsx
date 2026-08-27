@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
 import metaCogLogo from "./assets/mcg-logo.png";
+import { scrollChainByDelta, wheelDeltaToPixels } from "./scroll-chain";
 
 export const CHAT_FOLLOW_THRESHOLD_PX = 96;
 const CHATGPT_SITES_LIBRARY_ENABLED = true;
@@ -47,6 +48,15 @@ export function isChatViewportNearBottom(
   threshold = CHAT_FOLLOW_THRESHOLD_PX
 ) {
   return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= threshold;
+}
+
+function handleScrollChainWheel(event: ReactWheelEvent<HTMLElement>) {
+  if (event.ctrlKey || event.shiftKey || event.deltaY === 0 || !(event.target instanceof Element)) return;
+  const origin = event.target.closest<HTMLElement>("[data-scroll-chain]");
+  if (!origin || !event.currentTarget.contains(origin)) return;
+  const deltaY = wheelDeltaToPixels(event.deltaY, event.deltaMode, origin.clientHeight);
+  scrollChainByDelta(origin, deltaY);
+  event.preventDefault();
 }
 
 function comparableSiteUrl(value: string) {
@@ -919,7 +929,7 @@ function AgentLiveActivity({ activities }: { activities: ConversationActivity[] 
       {latest.state === "running" && <span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>}
       <span className="chat-activity-chevron" aria-hidden="true">⌄</span>
     </summary>
-    <div className="agent-live-activity-scroll" aria-label="Agent activity history">
+    <div className="agent-live-activity-scroll" data-scroll-chain aria-label="Agent activity history">
       {visible.map((activity) => {
         const [icon, fallback] = conversationActivityPresentation(activity);
         const label = activity.command || fallback;
@@ -939,7 +949,7 @@ function AgentLiveActivity({ activities }: { activities: ConversationActivity[] 
                   {activity.exit_code !== undefined && <span>Exit code {activity.exit_code}</span>}
                   {duration && <span>{duration}</span>}
                 </div>}
-                {activity.output && <pre>{activity.output}</pre>}
+                {activity.output && <pre data-scroll-chain>{activity.output}</pre>}
               </div>
             </details>
           : <div className={`agent-live-activity-event state-${activity.state}`} key={activity.codex_item_id}>{row}</div>;
@@ -984,7 +994,7 @@ function AgentChatRoom({ session, sessions, messages, activities, children }: {
     }
     return message.content;
   };
-  return <section className="agent-chat-room" aria-label={`${session?.display_name || "Agent"} chat room`} tabIndex={0}>
+  return <section className="agent-chat-room" data-scroll-chain aria-label={`${session?.display_name || "Agent"} chat room`} tabIndex={0}>
     <div className="agent-chat-transcript chat-message-list">
       {chatMessages.length === 0
         ? <p className="agent-chat-empty">No agent messages recorded yet.</p>
@@ -998,7 +1008,7 @@ function AgentChatRoom({ session, sessions, messages, activities, children }: {
     </div>
     {toolMessages.length > 0 && <details className="agent-tool-trace">
       <summary><span className="chat-activity-icon" aria-hidden="true">⌘</span><span>{toolMessages.at(-1)?.tool_name || "Used an internal tool"}</span><small>{toolMessages.length} event{toolMessages.length === 1 ? "" : "s"}</small><span className="chat-activity-chevron" aria-hidden="true">⌄</span></summary>
-      <div className="agent-live-activity-scroll">{toolMessages.map((message) => <div className="agent-live-activity-event" key={message.id}><span className="chat-activity-icon" aria-hidden="true">{message.kind === "tool_call" ? "›" : "✓"}</span><span>{message.tool_name || message.kind.replaceAll("_", " ")}</span><small>{message.content}</small></div>)}</div>
+      <div className="agent-live-activity-scroll" data-scroll-chain>{toolMessages.map((message) => <div className="agent-live-activity-event" key={message.id}><span className="chat-activity-icon" aria-hidden="true">{message.kind === "tool_call" ? "›" : "✓"}</span><span>{message.tool_name || message.kind.replaceAll("_", " ")}</span><small>{message.content}</small></div>)}</div>
     </details>}
     <AgentLiveActivity activities={activities} />
     {children && <div className="agent-chat-children" aria-label="Sub-agent widgets">{children}</div>}
@@ -1038,7 +1048,7 @@ function ConversationCommandGroup({ commands }: { commands: ConversationActivity
                     {activity.exit_code !== undefined && <span>Exit code {activity.exit_code}</span>}
                     {duration && <span>{duration}</span>}
                   </div>}
-                  {activity.output && <pre>{activity.output}</pre>}
+                  {activity.output && <pre data-scroll-chain>{activity.output}</pre>}
                 </div>
               </details>
             : <div className={`chat-command state-${activity.state}`} key={activity.codex_item_id}>{summary}</div>;
@@ -1152,7 +1162,7 @@ function ConversationActivityTimeline({ messages, activities, batches, team, con
       </>;
       content.push(canExpand
         ? <details className={`chat-compaction state-${activity.state}`} key={activity.codex_item_id}>
-            <summary>{row}</summary><pre className="chat-activity-detail">{activity.output}</pre>
+            <summary>{row}</summary><pre className="chat-activity-detail" data-scroll-chain>{activity.output}</pre>
           </details>
         : <div className={`chat-compaction state-${activity.state}`} role="status" key={activity.codex_item_id}>{row}</div>);
     } else {
@@ -1512,7 +1522,7 @@ function CodingAgentCards({ team, conversationId, delegationIds, activities, onV
           </div>{worktree && <p>Isolation: {(worktree.workspace_mode ?? "git_worktree").replaceAll("_", " ")} · baseline {(worktree.baseline_confidence ?? "verified").replaceAll("_", " ")}</p>}{governance?.preflight.checks.map((check) => <p key={check}>✓ {check}</p>)}{governance?.preflight.blockers.map((blocker) => <p className="error-message" key={blocker}>Preflight: {blocker}</p>)}{latestContext && <p>Context receipt: ~{latestContext.approximate_tokens.toLocaleString()} / {latestContext.token_budget.toLocaleString()} tokens · {latestContext.source_count} attributed sources{latestContext.truncated ? " · truncated to budget" : ""}</p>}{governance && governance.failure_class !== "none" && <p className="error-message">Failure class: {governance.failure_class.replaceAll("_", " ")} · recovery: {governance.recovery.replaceAll("_", " ")}</p>}{worktree?.retained_reason && <p>Retained: {worktree.retained_reason}</p>}{attemptHistory.length > 1 && <details><summary>Attempt history <span>{attemptHistory.length}</span></summary>{attemptHistory.map((attempt, attemptIndex) => <p key={attempt.id}>Attempt {attemptIndex + 1}: {stateLabel(attempt.state)} · <code>{attempt.id}</code>{attempt.error ? ` · ${attempt.error}` : ""}</p>)}</details>}</section>}
           {tab === "exchange" && <section><h4>Agent exchange</h4>{messages.length === 0 ? <p>No messages recorded yet.</p> : messages.map((message) => <article key={message.id}><small>{message.kind.replaceAll("_", " ")}</small><p>{message.content}</p></article>)}</section>}
           {tab === "blackboard" && <section><h4>Blackboard</h4>{blackboard.length === 0 ? <p>No shared entries yet.</p> : blackboard.map((entry) => <article key={entry.id}><small>{entry.kind}</small><p>{entry.content}</p></article>)}</section>}
-          {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch">{patches[delegation.id]}</pre>}</section>}
+          {tab === "changes" && <section><h4>Changes</h4>{delegation.changed_files.length === 0 ? <p>No changed files reported yet.</p> : delegation.changed_files.map((file) => <code key={file}>{file}</code>)}{patches[delegation.id] && <pre className="coding-agent-patch" data-scroll-chain>{patches[delegation.id]}</pre>}</section>}
           {tab === "evidence" && <section><h4>Evidence</h4>{delegation.checks.length === 0 ? <p>No checks reported yet.</p> : delegation.checks.map((check) => <p key={check}>{check}</p>)}{(delegation.evidence ?? []).map((item) => <p key={item}>{item}</p>)}{(delegation.unresolved_issues ?? []).map((item) => <p className="error-message" key={item}>{item}</p>)}{delegation.summary && <p>{delegation.summary}</p>}{worktree?.baseline_exclusions?.map((item) => <p key={item.normalized_path}>{item.normalized_path}: {item.reason}{item.review_blocker ? " (review blocker)" : ""}</p>)}{worktree?.integration_journal && <p>Integration journal: {worktree.integration_journal.state.replaceAll("_", " ")}</p>}</section>}
           <div className="coding-agent-actions">{cancellable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "cancel")}>Cancel</button>}{reviewable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "review")}>Review</button>}{applicable && <button type="button" className="primary" disabled={busy !== null} onClick={() => void runAction(delegation, "apply")}>Apply</button>}{retryable && <button type="button" className="secondary" disabled={busy !== null} onClick={() => void runAction(delegation, "retry")}>Retry</button>}{discardable && <button type="button" className="secondary danger" disabled={busy !== null} onClick={() => void runAction(delegation, "discard", worktree?.revision)}>Discard</button>}</div>
           {(delegation.error || errors[delegation.id]) && <p className="error-message" role="alert">{errors[delegation.id] || delegation.error}</p>}
@@ -6310,7 +6320,7 @@ export function App() {
   </div>;
 
   return (
-    <div className={`desktop-frame${sidebarOpen ? "" : " sidebar-collapsed"}${workspaceSidePanelOpen && workspacePanelsVisible ? " side-panel-open" : ""}${workspaceBottomPanelOpen && workspacePanelsVisible ? " bottom-panel-open" : ""}`} style={workspaceLayoutStyle}>
+    <div className={`desktop-frame${sidebarOpen ? "" : " sidebar-collapsed"}${workspaceSidePanelOpen && workspacePanelsVisible ? " side-panel-open" : ""}${workspaceBottomPanelOpen && workspacePanelsVisible ? " bottom-panel-open" : ""}`} style={workspaceLayoutStyle} onWheelCapture={handleScrollChainWheel}>
       <header className="desktop-menubar" aria-label="Application menu">
         <div className="desktop-titlebar-brand" data-tauri-drag-region aria-label="MetaCog">
           <img src={metaCogLogo} alt="" />
@@ -6531,7 +6541,7 @@ export function App() {
         <button role="menuitem" type="button" onClick={() => void openSiteExternally(contextSite)}><span aria-hidden="true">↗</span>Open in external browser</button>
       </div>}
 
-      <main className="workspace" id="tasks" ref={workspaceRef}>
+      <main className="workspace" id="tasks" ref={workspaceRef} data-scroll-chain>
         <header className="topbar">
           <div className="topbar-title">
             <p className="eyebrow">METACOGNITIVE GOVERNOR</p>
@@ -6608,7 +6618,7 @@ export function App() {
 
         {(advanced || activeSurface === "threads" || (activeSurface === "tasks" && Boolean(workspaceTask))) && <section className="panel task-panel" hidden={activeSurface !== "threads" && !(activeSurface === "tasks" && Boolean(workspaceTask))} aria-label={activeSurface === "threads" ? "Chat conversation" : "Tasks"}>
           {activeSurface === "threads" ? <div className="chat-conversation">
-            <div className="chat-message-list" ref={chatViewportRef}>
+            <div className="chat-message-list" ref={chatViewportRef} data-scroll-chain>
               {!visibleConversation || (visibleConversation.messages.length === 0 && visibleConversation.turns.length === 0)
                 ? <p className="empty-state">This conversation has no messages yet.</p>
                 : visibleConversation.turns.map((turn) => <ConversationTurnTranscript

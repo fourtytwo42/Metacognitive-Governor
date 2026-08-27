@@ -41,7 +41,7 @@ function CodeBlock({ language, children }: { language?: string; children: ReactN
       <span>{language || "Code"}</span>
       <button type="button" aria-label="Copy code" onClick={() => void copyCode()}>{copied ? "Copied" : "Copy"}</button>
     </div>
-    <pre><code className={language ? `language-${language}` : undefined}>{code}</code></pre>
+    <pre data-scroll-chain><code className={language ? `language-${language}` : undefined}>{code}</code></pre>
   </div>;
 }
 
