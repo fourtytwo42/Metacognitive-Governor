@@ -320,6 +320,12 @@ export interface ExecutionPreferences {
 export type ConversationState = "active" | "archived";
 export type ConversationRole = "user" | "assistant" | "system";
 export type ConversationTurnState = "pending" | "streaming" | "waiting_for_approval" | "recovering" | "indeterminate" | "completed" | "failed" | "interrupted";
+export type ConversationMode = "default" | "plan";
+export type ConversationGoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+export interface ConversationGoal { threadId: string; objective: string; status: ConversationGoalStatus; tokenBudget?: number; tokensUsed: number; timeUsedSeconds: number; createdAt: number; updatedAt: number; }
+export interface ConversationInputOption { label: string; description: string; }
+export interface ConversationInputQuestion { id: string; header: string; question: string; isOther: boolean; isSecret: boolean; options?: ConversationInputOption[]; }
+export interface ConversationInputRequest { requestId: unknown; threadId: string; turnId: string; itemId: string; questions: ConversationInputQuestion[]; receivedAt: string; }
 
 export interface Conversation {
   schema_version: number;
@@ -328,6 +334,9 @@ export interface Conversation {
   project_id?: string;
   state: ConversationState;
   execution_preferences: ExecutionPreferences;
+  mode?: ConversationMode;
+  goal?: ConversationGoal;
+  pending_input_requests?: ConversationInputRequest[];
   created_at: string;
   updated_at: string;
 }
@@ -1862,6 +1871,19 @@ export function archiveConversation(conversationId: string, archived = true): Pr
 
 export function sendConversationMessage(conversationId: string, request: SendConversationMessageRequest): Promise<ConversationView> {
   return invoke("send_conversation_message", { conversationId, request });
+}
+
+export function updateConversationMode(conversationId: string, mode: ConversationMode): Promise<ConversationView> {
+  return invoke("update_conversation_mode", { conversationId, request: { mode } });
+}
+export function updateConversationGoal(conversationId: string, request: { objective?: string; status?: ConversationGoalStatus }): Promise<ConversationView> {
+  return invoke("update_conversation_goal", { conversationId, request });
+}
+export function clearConversationGoal(conversationId: string): Promise<ConversationView> {
+  return invoke("clear_conversation_goal", { conversationId });
+}
+export function answerConversationInput(conversationId: string, requestId: unknown, answers: Record<string, { answers: string[] }>): Promise<ConversationView> {
+  return invoke("answer_conversation_input", { conversationId, request: { request_id: requestId, answers } });
 }
 
 export function getConversationTeam(conversationId: string): Promise<ConversationTeamState> {

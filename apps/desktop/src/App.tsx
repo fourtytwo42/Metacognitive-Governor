@@ -29,13 +29,16 @@ import {
   Home,
   Laptop,
   ListTree,
+  ListChecks,
   Maximize2,
   Minus,
   PanelBottom,
   PanelLeft,
   PanelRight,
   PanelsTopLeft,
+  Pause,
   Pin,
+  Play,
   Plus,
   RotateCw,
   Search,
@@ -45,6 +48,7 @@ import {
   SlidersHorizontal,
   SquarePen,
   Terminal,
+  Target,
   Trash2,
   Users,
   Workflow,
@@ -189,6 +193,10 @@ import {
   getGovernorOverview,
   getGovernorControlPolicy,
   getConversation,
+  updateConversationMode,
+  updateConversationGoal,
+  clearConversationGoal,
+  answerConversationInput,
   updateConversation,
   getCodexModels,
   getCodexAccount,
@@ -264,6 +272,7 @@ import {
   type ConversationMessage,
   type ConversationTurn,
   type ConversationView,
+  type ConversationInputRequest,
   type ManagedWorktree,
   type CodexModel,
   type CodexAccount,
@@ -763,11 +772,13 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   </details>;
 }
 
-function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; existingChat?: boolean }) {
+function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; existingChat?: boolean }) {
   return <details className="new-chat-add-menu" data-transient-popover>
     <summary aria-label="Add files and more" title="Add files and more"><Plus aria-hidden="true" /></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
       <div className="context-popover-heading">Add</div>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onGoal(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target aria-hidden="true" /><span><strong>Goal</strong><small>Set a durable objective to keep pursuing</small></span></button>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onPlan(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks aria-hidden="true" /><span><strong>Plan mode</strong><small>Research, ask choices, and create a decision-complete plan</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => {
         onOpenFolder();
         event.currentTarget.closest("details")?.removeAttribute("open");
@@ -2124,6 +2135,10 @@ export function App() {
   const [codexReviewBusy, setCodexReviewBusy] = useState(false);
   const [draftThreadId, setDraftThreadId] = useState(() => crypto.randomUUID());
   const [taskGoal, setTaskGoal] = useState("");
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const [goalDraft, setGoalDraft] = useState("");
+  const [planningAnswers, setPlanningAnswers] = useState<Record<string, string>>({});
+  const [, setGoalClock] = useState(0);
   const [queuedChatMessages, setQueuedChatMessages] = useState<QueuedChatMessage[]>(storedChatQueue);
   const [steeringMessageId, setSteeringMessageId] = useState<string | null>(null);
   const [queueDispatchErrorId, setQueueDispatchErrorId] = useState<string | null>(null);
@@ -4409,6 +4424,63 @@ export function App() {
     if (!sent) setTaskGoal((current) => current || content);
   }
 
+  async function changeConversationMode(mode: "default" | "plan") {
+    if (!selectedChatId) return;
+    setTaskError(null);
+    try {
+      const view = await updateConversationMode(selectedChatId, mode);
+      setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
+      setConversations((current) => [view.conversation, ...current.filter((item) => item.id !== selectedChatId)]);
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    }
+  }
+
+  async function changeConversationGoal(objective?: string, status?: "active" | "paused") {
+    if (!selectedChatId) return;
+    setTaskError(null);
+    try {
+      const view = await updateConversationGoal(selectedChatId, { objective, status });
+      setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
+      setConversations((current) => [view.conversation, ...current.filter((item) => item.id !== selectedChatId)]);
+      setGoalEditOpen(false);
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    }
+  }
+
+  async function deleteConversationGoal() {
+    if (!selectedChatId) return;
+    setTaskError(null);
+    try {
+      const view = await clearConversationGoal(selectedChatId);
+      setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
+      setConversations((current) => [view.conversation, ...current.filter((item) => item.id !== selectedChatId)]);
+      setGoalEditOpen(false);
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    }
+  }
+
+  async function submitPlanningAnswers(request: ConversationInputRequest) {
+    if (!selectedChatId) return;
+    const answers = Object.fromEntries(request.questions.map((question) => [question.id, {
+      answers: [planningAnswers[`${request.itemId}:${question.id}`]?.trim() ?? ""]
+    }]));
+    if (Object.values(answers).some((answer) => !answer.answers[0])) {
+      setTaskError("Answer each planning question before continuing.");
+      return;
+    }
+    setTaskError(null);
+    try {
+      const view = await answerConversationInput(selectedChatId, request.requestId, answers);
+      setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
+      setPlanningAnswers((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${request.itemId}:`))));
+    } catch (error) {
+      setTaskError(errorMessage(error));
+    }
+  }
+
   async function recoverConversation(action: "resume" | "fork" | "retry") {
     if (!selectedChatId || !visibleConversation) return;
     const uncertainTurn = visibleConversation.turns.slice().reverse().find((turn) => turn.state === "indeterminate");
@@ -6192,6 +6264,25 @@ export function App() {
     : [];
   const conversationIsActive = Boolean(activeConversationTurn || taskBusy);
   const conversationTeamIsRunning = conversationTeamHasPendingDelivery(visibleConversation?.team);
+  const conversationGoal = visibleConversation?.conversation.goal;
+  const conversationGoalElapsed = conversationGoal
+    ? conversationGoal.timeUsedSeconds + (conversationGoal.status === "active"
+      ? Math.max(0, Math.floor(Date.now() / 1000) - conversationGoal.updatedAt)
+      : 0)
+    : 0;
+
+  useEffect(() => {
+    if (activeSurface !== "threads" || !selectedChatId || !conversationGoal) return;
+    const refresh = () => {
+      setGoalClock((value) => value + 1);
+      void getConversation(selectedChatId).then((view) => {
+        setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
+        setConversations((current) => [view.conversation, ...current.filter((item) => item.id !== selectedChatId)]);
+      }).catch(() => undefined);
+    };
+    const timer = window.setInterval(refresh, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSurface, selectedChatId, conversationGoal?.threadId, conversationGoal?.status]);
 
   useEffect(() => {
     if (activeSurface !== "threads" || !selectedChatId || !conversationTeamIsRunning) return;
@@ -6719,7 +6810,7 @@ export function App() {
                 placeholder="Do anything"
               />
               <div className="composer-actions">
-                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} />
+                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
                 <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam />
@@ -6769,8 +6860,36 @@ export function App() {
                 </div>
               </section>}
               {visibleConversation?.turns.filter((turn) => turn.error).map((turn) => <p className="error-message" role="alert" key={`${turn.id}-error`}>{turn.error}</p>)}
+              {(visibleConversation?.conversation.pending_input_requests ?? []).map((request) => <section className="planning-question-card" aria-label="Planning questions" key={request.itemId}>
+                <div className="planning-question-heading"><ListChecks aria-hidden="true" /><div><strong>Help shape the plan</strong><span>Choose one answer for each question. The recommended choice is listed first.</span></div></div>
+                {request.questions.map((question) => {
+                  const answerKey = `${request.itemId}:${question.id}`;
+                  const selectedAnswer = planningAnswers[answerKey] ?? "";
+                  return <fieldset key={question.id}>
+                    <legend><span>{question.header}</span>{question.question}</legend>
+                    {(question.options ?? []).map((option, index) => <label className={`planning-option${selectedAnswer === option.label ? " selected" : ""}`} key={option.label}>
+                      <input type="radio" name={answerKey} value={option.label} checked={selectedAnswer === option.label} onChange={() => setPlanningAnswers((current) => ({ ...current, [answerKey]: option.label }))} />
+                      <span><strong>{option.label}{index === 0 && <em>Recommended</em>}</strong>{option.description && <small>{option.description}</small>}</span>
+                    </label>)}
+                    {question.isOther && <label className="planning-other"><span>Other answer</span><input type={question.isSecret ? "password" : "text"} value={(question.options ?? []).some((option) => option.label === selectedAnswer) ? "" : selectedAnswer} onChange={(event) => setPlanningAnswers((current) => ({ ...current, [answerKey]: event.target.value }))} /></label>}
+                  </fieldset>;
+                })}
+                <div className="planning-question-actions"><button className="primary" type="button" onClick={() => void submitPlanningAnswers(request)}>Continue planning</button></div>
+              </section>)}
             </div>
             <div className={`chat-composer-stack${visibleQueuedMessages.length > 0 ? " has-queue" : ""}`}>
+              {(conversationGoal || visibleConversation?.conversation.mode === "plan") && <section className="conversation-control-strip" aria-label="Conversation controls">
+                {conversationGoal && <div className="conversation-goal-row">
+                  <Target aria-hidden="true" />
+                  {goalEditOpen ? <div className="conversation-goal-edit"><input aria-label="Goal objective" value={goalDraft} onChange={(event) => setGoalDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && goalDraft.trim()) void changeConversationGoal(goalDraft.trim()); }} /><button type="button" aria-label="Save goal" title="Save goal" disabled={!goalDraft.trim()} onClick={() => void changeConversationGoal(goalDraft.trim())}><Check aria-hidden="true" /></button><button type="button" aria-label="Cancel goal edit" title="Cancel" onClick={() => setGoalEditOpen(false)}><X aria-hidden="true" /></button></div> : <div className="conversation-goal-copy"><strong>Goal</strong><span title={conversationGoal.objective}>{conversationGoal.objective}</span><small>{conversationGoal.status.replaceAll(/([A-Z])/g, " $1").toLowerCase()} · {formatAgentElapsed(conversationGoalElapsed)}</small></div>}
+                  {!goalEditOpen && <div className="conversation-goal-actions">
+                    <button type="button" aria-label={conversationGoal.status === "paused" ? "Resume goal" : "Pause goal"} title={conversationGoal.status === "paused" ? "Resume goal" : "Pause after this round"} onClick={() => void changeConversationGoal(undefined, conversationGoal.status === "paused" ? "active" : "paused")}>{conversationGoal.status === "paused" ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}</button>
+                    <button type="button" aria-label="Edit goal" title="Edit goal" onClick={() => { setGoalDraft(conversationGoal.objective); setGoalEditOpen(true); }}><SquarePen aria-hidden="true" /></button>
+                    <button type="button" aria-label="Delete goal" title="Delete goal" onClick={() => void deleteConversationGoal()}><Trash2 aria-hidden="true" /></button>
+                  </div>}
+                </div>}
+                {visibleConversation?.conversation.mode === "plan" && <div className="conversation-mode-chip"><ListChecks aria-hidden="true" /><span><strong>Plan mode</strong><small>Read-only planning with guided questions</small></span><button type="button" aria-label="Exit plan mode" title="Exit plan mode" onClick={() => void changeConversationMode("default")}><X aria-hidden="true" /></button></div>}
+              </section>}
               {visibleQueuedMessages.length > 0 && <section className="chat-queue-drawer" aria-label="Queued messages">
                 <div className="chat-queue-heading">
                   <span aria-hidden="true">Ⅱ</span>
@@ -6795,7 +6914,7 @@ export function App() {
                   <label className="visually-hidden" htmlFor="chat-message">Message</label>
                   <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
                   <div className="composer-actions">
-                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} />
+                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} />
                     <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />

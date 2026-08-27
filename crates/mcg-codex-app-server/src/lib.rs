@@ -40,6 +40,7 @@ pub enum CodexTurnProgress {
     ItemCompleted { item: Value },
     CommandOutputDelta { item_id: String, delta: String },
     ApprovalRequested(CodexApprovalRequest),
+    UserInputRequested(CodexPendingRequest),
     Notification { method: String, params: Value },
 }
 
@@ -736,7 +737,7 @@ impl CodexAppServerHarness {
         drop(inner);
         self.request_started("initialize", json!({
             "clientInfo": {"name": "mcg", "title": "Metacognitive Governor", "version": env!("CARGO_PKG_VERSION")},
-            "capabilities": {"experimentalApi": false}
+            "capabilities": {"experimentalApi": true}
         })).await?;
         self.notify("initialized", json!({})).await?;
         self.inner.lock().await.status.initialized = true;
@@ -799,6 +800,22 @@ impl CodexAppServerHarness {
             }
         }))
         .await?;
+        let inner = self.inner.lock().await;
+        inner
+            .server_requests
+            .lock()
+            .await
+            .remove(&request_id.to_string());
+        Ok(())
+    }
+
+    pub async fn resolve_user_input_request(
+        &self,
+        request_id: &Value,
+        answers: Value,
+    ) -> Result<(), CodexHarnessError> {
+        self.write(&json!({"id": request_id, "result": {"answers": answers}}))
+            .await?;
         let inner = self.inner.lock().await;
         inner
             .server_requests
@@ -1092,6 +1109,25 @@ impl CodexAppServerHarness {
         .await
     }
 
+    pub async fn start_plan_turn_with_progress(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        preferences: &CodexExecutionPreferences,
+        progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
+    ) -> Result<CodexTurnResult, CodexHarnessError> {
+        self.start_turn_with_progress_and_schema_and_mode(
+            thread_id,
+            prompt,
+            preferences,
+            false,
+            progress,
+            None,
+            true,
+        )
+        .await
+    }
+
     pub async fn start_structured_turn(
         &self,
         thread_id: &str,
@@ -1120,10 +1156,42 @@ impl CodexAppServerHarness {
         progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
         output_schema: Option<&Value>,
     ) -> Result<CodexTurnResult, CodexHarnessError> {
+        self.start_turn_with_progress_and_schema_and_mode(
+            thread_id,
+            prompt,
+            preferences,
+            writable,
+            progress,
+            output_schema,
+            false,
+        )
+        .await
+    }
+
+    async fn start_turn_with_progress_and_schema_and_mode(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        preferences: &CodexExecutionPreferences,
+        writable: bool,
+        progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
+        output_schema: Option<&Value>,
+        plan_mode: bool,
+    ) -> Result<CodexTurnResult, CodexHarnessError> {
         let mut notifications = {
             self.ensure_started().await?;
             self.inner.lock().await.notifications.subscribe()
         };
+        let collaboration_mode = plan_mode.then(|| {
+            json!({
+                "mode": "plan",
+                "settings": {
+                    "model": preferences.model.clone().unwrap_or_default(),
+                    "reasoning_effort": preferences.effort,
+                    "developer_instructions": null
+                }
+            })
+        });
         let response = self
             .request(
                 "turn/start",
@@ -1137,6 +1205,7 @@ impl CodexAppServerHarness {
                     "approvalsReviewer": preferences.approval_mode.approvals_reviewer(),
                     "sandboxPolicy": preferences.approval_mode.turn_sandbox(writable),
                     "outputSchema": output_schema
+                    ,"collaborationMode": collaboration_mode
                 }),
             )
             .await?;
@@ -1184,6 +1253,24 @@ impl CodexAppServerHarness {
                     self.resolve_approval_request(&request, false).await?;
                 }
             }
+            if method == "item/tool/requestUserInput"
+                && params.get("turnId").and_then(Value::as_str) == Some(turn_id.as_str())
+            {
+                let request_id = notification.get("id").cloned().unwrap_or(Value::Null);
+                let request = CodexPendingRequest {
+                    request_id: request_id.clone(),
+                    method: method.to_owned(),
+                    params: params.clone(),
+                    supported: true,
+                    received_at: Utc::now(),
+                };
+                if let Some(progress) = &progress {
+                    let _ = progress.send(CodexTurnProgress::UserInputRequested(request));
+                } else {
+                    self.resolve_user_input_request(&request_id, json!({}))
+                        .await?;
+                }
+            }
             if method == "mcpServer/elicitation/request"
                 && params.get("turnId").and_then(Value::as_str) == Some(turn_id.as_str())
             {
@@ -1211,7 +1298,7 @@ impl CodexAppServerHarness {
                     self.resolve_mcp_elicitation(request_id, None).await?;
                 }
             }
-            if method == "item/agentMessage/delta"
+            if matches!(method, "item/agentMessage/delta" | "item/plan/delta")
                 && params.get("turnId").and_then(Value::as_str) == Some(turn_id.as_str())
             {
                 if let (Some(item_id), Some(delta)) = (
@@ -1432,14 +1519,25 @@ impl CodexAppServerHarness {
     pub async fn set_thread_goal(
         &self,
         thread_id: &str,
-        token_budget: u64,
-    ) -> Result<(), CodexHarnessError> {
+        objective: Option<&str>,
+        status: Option<&str>,
+        token_budget: Option<u64>,
+    ) -> Result<Value, CodexHarnessError> {
         self.request(
             "thread/goal/set",
-            json!({"threadId": thread_id, "goal": {"tokenBudget": token_budget}}),
+            json!({
+                "threadId": thread_id,
+                "objective": objective,
+                "status": status,
+                "tokenBudget": token_budget
+            }),
         )
         .await
-        .map(drop)
+    }
+
+    pub async fn get_thread_goal(&self, thread_id: &str) -> Result<Value, CodexHarnessError> {
+        self.request("thread/goal/get", json!({"threadId": thread_id}))
+            .await
     }
 
     pub async fn clear_thread_goal(&self, thread_id: &str) -> Result<(), CodexHarnessError> {
@@ -1634,7 +1732,9 @@ fn is_approval_request(method: &str) -> bool {
 
 fn is_supported_server_request(method: &str) -> bool {
     protocol_generated::is_known_server_request(method)
-        && (is_approval_request(method) || method == "mcpServer/elicitation/request")
+        && (is_approval_request(method)
+            || method == "mcpServer/elicitation/request"
+            || method == "item/tool/requestUserInput")
 }
 
 fn is_visible_turn_notification(method: &str) -> bool {
@@ -1814,7 +1914,7 @@ mod tests {
 
     #[test]
     fn unsupported_requests_fail_closed_without_becoming_approvals() {
-        assert!(!is_supported_server_request("tool/requestUserInput"));
+        assert!(is_supported_server_request("item/tool/requestUserInput"));
         assert!(!is_supported_server_request("future/unknown/request"));
         assert!(is_supported_server_request(
             "item/commandExecution/requestApproval"

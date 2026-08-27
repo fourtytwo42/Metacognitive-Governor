@@ -52,6 +52,10 @@ const client = vi.hoisted(() => ({
   updateConversation: vi.fn(),
   archiveConversation: vi.fn(),
   getConversation: vi.fn(),
+  updateConversationMode: vi.fn(),
+  updateConversationGoal: vi.fn(),
+  clearConversationGoal: vi.fn(),
+  answerConversationInput: vi.fn(),
   sendConversationMessage: vi.fn(),
   steerConversationTurn: vi.fn(),
   getCodexModels: vi.fn(),
@@ -234,6 +238,10 @@ vi.mock("./desktop-client", () => ({
   updateConversation: client.updateConversation,
   archiveConversation: client.archiveConversation,
   getConversation: client.getConversation,
+  updateConversationMode: client.updateConversationMode,
+  updateConversationGoal: client.updateConversationGoal,
+  clearConversationGoal: client.clearConversationGoal,
+  answerConversationInput: client.answerConversationInput,
   sendConversationMessage: client.sendConversationMessage,
   steerConversationTurn: client.steerConversationTurn,
   getCodexModels: client.getCodexModels,
@@ -2487,10 +2495,25 @@ test("new chat presents project, workspace, branch, add, permission, and run set
 
   fireEvent.click(screen.getByLabelText("Add files and more"));
   const addMenu = screen.getByRole("menu", { name: "Add" });
+  expect(within(addMenu).getByRole("menuitem", { name: /Goal/ })).toBeEnabled();
+  expect(within(addMenu).getByRole("menuitem", { name: /Plan mode/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Open project folder/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Remove project/ })).toBeEnabled();
   expect(screen.getByLabelText("Change permissions")).toBeInTheDocument();
   expect(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]')).toBeInTheDocument();
+});
+
+test("goal and plan commands are available from Add and prepare the composer", () => {
+  render(<App />);
+
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Goal/ }));
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("/goal ");
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "" } });
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Plan mode/ }));
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("/plan ");
 });
 
 test("new chat uses the shared icon system and stable run-setting choice columns", () => {

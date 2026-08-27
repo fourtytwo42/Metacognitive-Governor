@@ -36,20 +36,20 @@ use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComputerActionBatchId,
     ComputerUseCapability, ComputerUseTarget, Conversation, ConversationAgentSessionId,
-    ConversationId, ConversationPreview, ConversationPreviewId, ConversationTeamState,
-    ConversationTurnId, ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId,
-    ManagedWorktree, MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId,
-    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
-    PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId, RiskLevel, RoleId,
-    RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, SharedContextHit, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
-    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
-    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
-    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    ConversationGoalStatus, ConversationId, ConversationMode, ConversationPreview,
+    ConversationPreviewId, ConversationTeamState, ConversationTurnId, ConversationTurnState,
+    ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId, ManagedWorktree,
+    MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
+    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
+    SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
+    SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    SshWorkflow, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::EventEnvelope;
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -186,6 +186,25 @@ pub struct SendConversationMessageRequest {
     pub content: String,
     #[serde(default)]
     pub execution_preferences: Option<ExecutionPreferences>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateConversationModeRequest {
+    pub mode: ConversationMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateConversationGoalRequest {
+    #[serde(default)]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub status: Option<ConversationGoalStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerConversationInputRequest {
+    pub request_id: serde_json::Value,
+    pub answers: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1539,6 +1558,18 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/messages",
             post(send_conversation_message),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/mode",
+            post(update_conversation_mode),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/goal",
+            post(update_conversation_goal).delete(clear_conversation_goal),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/input",
+            post(answer_conversation_input),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/team",
@@ -3731,12 +3762,28 @@ async fn get_conversation(
     let conversation_id = conversation_id
         .parse::<ConversationId>()
         .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
-    Ok(Json(
-        state
-            .runtime
-            .conversation(conversation_id)
-            .map_err(map_runtime_error)?,
-    ))
+    let view = state
+        .runtime
+        .conversation(conversation_id)
+        .map_err(map_runtime_error)?;
+    if view.conversation.goal.is_some()
+        || view.turns.iter().any(|turn| {
+            matches!(
+                turn.state,
+                ConversationTurnState::Pending | ConversationTurnState::Streaming
+            )
+        })
+    {
+        Ok(Json(
+            state
+                .runtime
+                .refresh_conversation_goal(conversation_id)
+                .await
+                .map_err(map_runtime_error)?,
+        ))
+    } else {
+        Ok(Json(view))
+    }
 }
 
 async fn update_conversation(
@@ -3800,6 +3847,73 @@ async fn send_conversation_message(
                 request.content,
                 request.execution_preferences,
             )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn update_conversation_mode(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateConversationModeRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let id = id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .update_conversation_mode(id, request.mode)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn update_conversation_goal(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateConversationGoalRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let id = id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .update_conversation_goal(id, request.objective, request.status)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn clear_conversation_goal(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let id = id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .clear_conversation_goal(id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn answer_conversation_input(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(request): Json<AnswerConversationInputRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let id = id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .answer_conversation_input(id, request.request_id, request.answers)
             .await
             .map_err(map_runtime_error)?,
     ))

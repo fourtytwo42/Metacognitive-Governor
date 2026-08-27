@@ -1084,10 +1084,42 @@ body { background: var(--mcg-bg); }
 .chat-recovery { display: grid; gap: 10px; margin: 14px 0; padding: 14px; border: 1px solid color-mix(in srgb, var(--mcg-warning) 52%, var(--mcg-border)); border-radius: 12px; background: color-mix(in srgb, var(--mcg-warning) 7%, var(--mcg-surface-raised)); }
 .chat-recovery p { margin: 0; color: var(--mcg-muted); }
 .chat-recovery > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.planning-question-card { display: grid; gap: 16px; margin: 18px 0; padding: 18px; border: 1px solid color-mix(in srgb, var(--mcg-accent) 38%, var(--mcg-border)); border-radius: 16px; background: color-mix(in srgb, var(--mcg-accent) 5%, var(--mcg-surface-raised)); }
+.planning-question-heading { display: flex; align-items: center; gap: 12px; }
+.planning-question-heading > svg { width: 22px; height: 22px; color: var(--mcg-accent); }
+.planning-question-heading > div { display: grid; gap: 3px; }
+.planning-question-heading span { color: var(--mcg-muted); font-size: .78rem; }
+.planning-question-card fieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.planning-question-card legend { display: grid; gap: 4px; width: 100%; margin-bottom: 5px; color: var(--mcg-text); font-weight: 600; }
+.planning-question-card legend > span { color: var(--mcg-muted); font-size: .7rem; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+.planning-option { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 11px; min-width: 0; padding: 11px 12px; border: 1px solid var(--mcg-border); border-radius: 11px; cursor: pointer; background: var(--mcg-surface); }
+.planning-option:hover, .planning-option.selected { border-color: color-mix(in srgb, var(--mcg-accent) 58%, var(--mcg-border)); background: color-mix(in srgb, var(--mcg-accent) 8%, var(--mcg-surface)); }
+.planning-option input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--mcg-accent); }
+.planning-option > span { display: grid; gap: 3px; min-width: 0; }
+.planning-option strong { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.planning-option em { padding: 2px 7px; border-radius: 999px; color: var(--mcg-accent); background: color-mix(in srgb, var(--mcg-accent) 12%, transparent); font-size: .64rem; font-style: normal; font-weight: 650; }
+.planning-option small, .planning-other > span { color: var(--mcg-muted); }
+.planning-other { display: grid; gap: 6px; margin-top: 2px; }
+.planning-other input { min-width: 0; }
+.planning-question-actions { display: flex; justify-content: flex-end; }
 .mcg-details { margin-top: 16px; color: var(--mcg-muted); font-size: .78rem; }
 .mcg-details > summary { cursor: pointer; user-select: none; }
 .mcg-details[open] > summary { margin-bottom: 12px; }
 .chat-composer-stack { position: sticky; z-index: 4; bottom: 16px; display: grid; }
+.conversation-control-strip { display: grid; gap: 7px; margin: 0 26px -18px; padding: 9px 11px 25px; border: 1px solid var(--mcg-border); border-bottom: 0; border-radius: 16px 16px 0 0; background: color-mix(in srgb, var(--mcg-surface-raised) 95%, var(--mcg-bg)); box-shadow: 0 -8px 26px #0003; }
+.conversation-goal-row, .conversation-mode-chip { display: flex; align-items: center; min-width: 0; gap: 10px; min-height: 38px; padding: 5px 7px; border-radius: 10px; }
+.conversation-goal-row > svg, .conversation-mode-chip > svg { flex: 0 0 auto; width: 18px; height: 18px; color: var(--mcg-accent); }
+.conversation-goal-copy, .conversation-mode-chip > span { display: grid; min-width: 0; flex: 1 1 auto; gap: 1px; }
+.conversation-goal-copy > span { overflow: hidden; color: var(--mcg-text); font-size: .81rem; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-goal-copy strong, .conversation-mode-chip strong { font-size: .72rem; }
+.conversation-goal-copy small, .conversation-mode-chip small { color: var(--mcg-muted); font-size: .68rem; }
+.conversation-goal-actions { display: flex; flex: 0 0 auto; gap: 3px; }
+.conversation-goal-actions button, .conversation-mode-chip button, .conversation-goal-edit button { display: inline-grid; width: 32px; min-height: 32px; padding: 0; place-items: center; border: 0; border-radius: 8px; color: var(--mcg-muted); background: transparent; }
+.conversation-goal-actions button:hover, .conversation-mode-chip button:hover, .conversation-goal-edit button:hover { color: var(--mcg-text); background: color-mix(in srgb, var(--mcg-border) 55%, transparent); }
+.conversation-goal-actions svg, .conversation-mode-chip button svg, .conversation-goal-edit svg { width: 16px; height: 16px; }
+.conversation-goal-edit { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; min-width: 0; flex: 1 1 auto; gap: 4px; }
+.conversation-goal-edit input { min-width: 0; min-height: 34px; }
+.conversation-mode-chip { border-top: 1px solid var(--mcg-border); border-radius: 0; }
 .chat-queue-drawer { display: grid; max-height: 230px; margin: 0 26px -18px; padding: 10px 12px 25px; overflow: auto; border: 1px solid #414141; border-bottom: 0; border-radius: 16px 16px 0 0; background: color-mix(in srgb, var(--mcg-surface-raised) 94%, var(--mcg-bg)); box-shadow: 0 -8px 26px #0004; }
 .chat-queue-heading, .chat-queue-row { display: flex; align-items: center; min-width: 0; gap: 10px; }
 .chat-queue-heading { min-height: 30px; padding: 0 7px 7px; color: var(--mcg-muted); font-size: .76rem; }
@@ -2223,6 +2255,12 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
   background: linear-gradient(180deg, transparent, var(--mcg-bg) 12px);
 }
 .app-shell[data-active-surface="threads"] .active-chat-composer-shell { width: 100%; }
+@media (max-width: 720px) {
+  .conversation-control-strip, .chat-queue-drawer { margin-inline: 8px; }
+  .conversation-goal-row { align-items: flex-start; }
+  .conversation-goal-actions { align-self: center; }
+  .planning-question-card { padding: 14px; }
+}
 
 /* Light theme contrast pass.
    The consumer shell grew from dark-first surfaces, so every recurring text role

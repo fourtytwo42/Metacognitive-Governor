@@ -5,9 +5,9 @@ use mcg_agents::{
     ShadowExecutionReceipt, SupervisionObservation, TrustedOrganizationPublisher,
 };
 use mcg_api::{
-    AgentRunListResponse, ApplyComputerActionsRequest, ApprovalListResponse,
-    ArchiveConversationRequest, AttachBrowserSessionRequest, BackupListResponse,
-    BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
+    AgentRunListResponse, AnswerConversationInputRequest, ApplyComputerActionsRequest,
+    ApprovalListResponse, ArchiveConversationRequest, AttachBrowserSessionRequest,
+    BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
     CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
     CreateGitHubRepository, CreateMemoryClaimRequest, CreateOrganizationRequest,
     CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
@@ -38,7 +38,8 @@ use mcg_api::{
     SupervisionObservationListResponse, TaskEventsResponse, TaskListResponse, TaskMutationResponse,
     ToolAuditResponse, TransferProjectMemoryRequest, TransitionAgentRunRequest,
     TransitionExperimentRequest, TransitionMemoryClaimRequest, TransitionTaskRequest,
-    TrustOrganizationPublisherRequest, UpdateConversationRequest, UpdateSiteRequest,
+    TrustOrganizationPublisherRequest, UpdateConversationGoalRequest,
+    UpdateConversationModeRequest, UpdateConversationRequest, UpdateSiteRequest,
     UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
     WakeScheduleRequest, WorktreeMutationRequest,
 };
@@ -922,6 +923,63 @@ async fn send_conversation_message(
         )),
         Some(&request),
         "Conversation message",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn update_conversation_mode(
+    conversation_id: String,
+    request: UpdateConversationModeRequest,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/mode"
+        )),
+        Some(&request),
+        "Conversation mode",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn update_conversation_goal(
+    conversation_id: String,
+    request: UpdateConversationGoalRequest,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/goal"
+        )),
+        Some(&request),
+        "Conversation goal",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn clear_conversation_goal(conversation_id: String) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().delete(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/goal"
+        )),
+        None::<&()>,
+        "Conversation goal removal",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn answer_conversation_input(
+    conversation_id: String,
+    request: AnswerConversationInputRequest,
+) -> Result<ConversationView, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/input"
+        )),
+        Some(&request),
+        "Planning answer",
     )
     .await
 }
@@ -3757,6 +3815,10 @@ pub fn run() {
             update_conversation,
             archive_conversation,
             send_conversation_message,
+            update_conversation_mode,
+            update_conversation_goal,
+            clear_conversation_goal,
+            answer_conversation_input,
             get_conversation_team,
             review_conversation_delegation,
             cancel_conversation_delegation,

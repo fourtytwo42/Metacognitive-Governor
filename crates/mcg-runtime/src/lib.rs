@@ -61,8 +61,10 @@ use mcg_domain::{
     ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget, Conversation,
     ConversationActivity, ConversationActivityKind, ConversationActivityState,
     ConversationAgentKind, ConversationAgentSession, ConversationAgentSessionId,
-    ConversationAgentSessionState, ConversationDeliveryTarget, ConversationId, ConversationMessage,
-    ConversationMessageId, ConversationPreview, ConversationPreviewId, ConversationPreviewState,
+    ConversationAgentSessionState, ConversationDeliveryTarget, ConversationGoal,
+    ConversationGoalStatus, ConversationId, ConversationInputOption, ConversationInputQuestion,
+    ConversationInputRequest, ConversationMessage, ConversationMessageId, ConversationMode,
+    ConversationPreview, ConversationPreviewId, ConversationPreviewState,
     ConversationPreviewStrategy, ConversationRole, ConversationState, ConversationTurn,
     ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatch,
     CoordinationBatchId, CoordinationBatchState, CoordinatorReviewDecision, EvaluationId,
@@ -9107,6 +9109,236 @@ impl AppRuntime {
         Ok(self.codex_harness.logout().await?)
     }
 
+    pub async fn update_conversation_mode(
+        &self,
+        conversation_id: ConversationId,
+        mode: ConversationMode,
+    ) -> Result<ConversationView, RuntimeError> {
+        let mut conversation = self.conversation(conversation_id)?.conversation;
+        conversation.mode = mode;
+        conversation.updated_at = Utc::now();
+        let event = self.store()?.update_conversation(&conversation)?;
+        let _ = self.event_sender.send(event);
+        Ok(self.conversation(conversation_id)?)
+    }
+
+    pub async fn refresh_conversation_goal(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ConversationView, RuntimeError> {
+        let Some(binding) = self
+            .store()?
+            .codex_thread_binding_for_conversation(conversation_id)?
+        else {
+            return self.conversation(conversation_id);
+        };
+        let response = self
+            .codex_harness
+            .get_thread_goal(&binding.codex_thread_id)
+            .await?;
+        let mut view = self.conversation(conversation_id)?;
+        let had_goal = view.conversation.goal.is_some();
+        view.conversation.goal = response
+            .get("goal")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        for request in self.codex_harness.pending_server_requests().await {
+            if request.method == "item/tool/requestUserInput"
+                && request
+                    .params
+                    .get("threadId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(binding.codex_thread_id.as_str())
+            {
+                let pending = conversation_input_request(&request)?;
+                view.conversation
+                    .pending_input_requests
+                    .retain(|item| item.request_id != pending.request_id);
+                view.conversation.pending_input_requests.push(pending);
+            }
+        }
+        view.conversation.updated_at = Utc::now();
+        let event = self.store()?.update_conversation(&view.conversation)?;
+        let _ = self.event_sender.send(event);
+
+        if !had_goal && view.conversation.goal.is_none() {
+            return Ok(view);
+        }
+
+        let thread = self
+            .codex_harness
+            .read_thread(&binding.codex_thread_id)
+            .await?;
+        let codex_turns = thread
+            .pointer("/thread/turns")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for codex_turn in codex_turns {
+            let Some(codex_turn_id) = codex_turn
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let mut current = self.conversation(conversation_id)?;
+            let mut turn = current
+                .turns
+                .iter()
+                .find(|turn| turn.codex_turn_id.as_deref() == Some(codex_turn_id.as_str()))
+                .cloned()
+                .or_else(|| {
+                    current
+                        .turns
+                        .iter()
+                        .find(|turn| {
+                            turn.state == ConversationTurnState::Streaming
+                                && turn.codex_turn_id.is_none()
+                        })
+                        .cloned()
+                })
+                .unwrap_or_else(|| ConversationTurn {
+                    schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                    id: ConversationTurnId::new(),
+                    conversation_id,
+                    state: ConversationTurnState::Streaming,
+                    execution_preferences: current.conversation.execution_preferences.clone(),
+                    codex_thread_id: Some(binding.codex_thread_id.clone()),
+                    codex_turn_id: None,
+                    task_id: None,
+                    run_id: None,
+                    error: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                });
+            turn.codex_thread_id = Some(binding.codex_thread_id.clone());
+            turn.codex_turn_id = Some(codex_turn_id.clone());
+            turn.state = match codex_turn.get("status").and_then(serde_json::Value::as_str) {
+                Some("completed") => ConversationTurnState::Completed,
+                Some("interrupted" | "cancelled") => ConversationTurnState::Interrupted,
+                Some("failed") => ConversationTurnState::Failed,
+                _ => ConversationTurnState::Streaming,
+            };
+            turn.updated_at = Utc::now();
+            let event = self.store()?.save_conversation_turn(&turn)?;
+            let _ = self.event_sender.send(event);
+            if let Some(items) = codex_turn
+                .get("items")
+                .and_then(serde_json::Value::as_array)
+            {
+                for item in items {
+                    let item_type = item.get("type").and_then(serde_json::Value::as_str);
+                    if !matches!(item_type, Some("agentMessage" | "plan")) {
+                        continue;
+                    }
+                    let item_id = item
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    if current
+                        .messages
+                        .iter()
+                        .any(|message| message.codex_item_id.as_deref() == Some(item_id))
+                    {
+                        continue;
+                    }
+                    let text = item
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    let message = ConversationMessage {
+                        schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                        id: ConversationMessageId::new(),
+                        conversation_id,
+                        turn_id: turn.id,
+                        role: ConversationRole::Assistant,
+                        content: text.to_owned(),
+                        codex_item_id: Some(item_id.to_owned()),
+                        created_at: Utc::now(),
+                    };
+                    let event = self.store()?.save_conversation_message(&message)?;
+                    let _ = self.event_sender.send(event);
+                    current.messages.push(message);
+                }
+            }
+        }
+        Ok(self.conversation(conversation_id)?)
+    }
+
+    pub async fn update_conversation_goal(
+        &self,
+        conversation_id: ConversationId,
+        objective: Option<String>,
+        status: Option<ConversationGoalStatus>,
+    ) -> Result<ConversationView, RuntimeError> {
+        let binding = self.manageable_codex_binding(conversation_id)?;
+        let status_name = status.map(|value| match value {
+            ConversationGoalStatus::Active => "active",
+            ConversationGoalStatus::Paused => "paused",
+            ConversationGoalStatus::Blocked => "blocked",
+            ConversationGoalStatus::UsageLimited => "usageLimited",
+            ConversationGoalStatus::BudgetLimited => "budgetLimited",
+            ConversationGoalStatus::Complete => "complete",
+        });
+        let response = self
+            .codex_harness
+            .set_thread_goal(
+                &binding.codex_thread_id,
+                objective.as_deref(),
+                status_name,
+                None,
+            )
+            .await?;
+        let mut conversation = self.conversation(conversation_id)?.conversation;
+        conversation.goal = response
+            .get("goal")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        conversation.updated_at = Utc::now();
+        let event = self.store()?.update_conversation(&conversation)?;
+        let _ = self.event_sender.send(event);
+        Ok(self.conversation(conversation_id)?)
+    }
+
+    pub async fn clear_conversation_goal(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ConversationView, RuntimeError> {
+        let binding = self.manageable_codex_binding(conversation_id)?;
+        self.codex_harness
+            .clear_thread_goal(&binding.codex_thread_id)
+            .await?;
+        let mut conversation = self.conversation(conversation_id)?.conversation;
+        conversation.goal = None;
+        conversation.updated_at = Utc::now();
+        let event = self.store()?.update_conversation(&conversation)?;
+        let _ = self.event_sender.send(event);
+        Ok(self.conversation(conversation_id)?)
+    }
+
+    pub async fn answer_conversation_input(
+        &self,
+        conversation_id: ConversationId,
+        request_id: serde_json::Value,
+        answers: serde_json::Value,
+    ) -> Result<ConversationView, RuntimeError> {
+        self.codex_harness
+            .resolve_user_input_request(&request_id, answers)
+            .await?;
+        let mut conversation = self.conversation(conversation_id)?.conversation;
+        conversation
+            .pending_input_requests
+            .retain(|request| request.request_id != request_id);
+        conversation.updated_at = Utc::now();
+        let event = self.store()?.update_conversation(&conversation)?;
+        let _ = self.event_sender.send(event);
+        Ok(self.conversation(conversation_id)?)
+    }
+
     /// Sends one governed chat turn through the Codex app-server harness. Ordinary
     /// conversation turns remain task-free unless a later promotion explicitly links one.
     pub async fn send_conversation_message(
@@ -9115,7 +9347,32 @@ impl AppRuntime {
         content: String,
         turn_preferences: Option<ExecutionPreferences>,
     ) -> Result<ConversationView, RuntimeError> {
-        let prompt = content.trim();
+        let raw_prompt = content.trim();
+        let (requested_mode, requested_goal, prompt) = if let Some(rest) =
+            raw_prompt.strip_prefix("/plan")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            let text = rest.trim();
+            (
+                Some(ConversationMode::Plan),
+                None,
+                if text.is_empty() {
+                    "Interview me as needed, then create a decision-complete implementation plan with measurable success criteria."
+                } else {
+                    text
+                },
+            )
+        } else if let Some(rest) = raw_prompt.strip_prefix("/goal")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            let objective = rest.trim();
+            if objective.is_empty() {
+                return Err(StorageError::InvalidData("/goal requires an objective".into()).into());
+            }
+            (None, Some(objective.to_owned()), objective)
+        } else {
+            (None, None, raw_prompt)
+        };
         if prompt.is_empty() {
             return Err(
                 StorageError::InvalidData("conversation message cannot be empty".into()).into(),
@@ -9129,6 +9386,9 @@ impl AppRuntime {
         }
         let existing_view = self.conversation(conversation_id)?;
         let mut conversation = existing_view.conversation;
+        if let Some(mode) = requested_mode {
+            conversation.mode = mode;
+        }
         let preferences =
             turn_preferences.unwrap_or_else(|| conversation.execution_preferences.clone());
         conversation.execution_preferences = preferences.clone();
@@ -9258,6 +9518,27 @@ impl AppRuntime {
                 recovery_state: CodexRecoveryState::Healthy,
             })?;
 
+        if let Some(objective) = requested_goal.as_deref() {
+            let response = self
+                .codex_harness
+                .set_thread_goal(&thread_id, Some(objective), Some("active"), None)
+                .await?;
+            conversation.goal = response
+                .get("goal")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<ConversationGoal>(value).ok());
+            conversation.updated_at = Utc::now();
+            let event = self.store()?.update_conversation(&conversation)?;
+            let _ = self.event_sender.send(event);
+            turn.state = ConversationTurnState::Streaming;
+            turn.updated_at = Utc::now();
+            let event = self.store()?.save_conversation_turn(&turn)?;
+            let _ = self.event_sender.send(event);
+            // Native Codex Goals own the continuation loop. Keep the role thread loaded and
+            // subscribed so automatic turns can continue after this HTTP request returns.
+            return self.conversation(conversation_id);
+        }
+
         let decision_prompt = if self.config.two_agent_conversations {
             format!(
                 "Process this owner message as the Chat Agent. Answer conversational requests directly. When specialist reasoning or project work is needed, call `message_coordinator` with a precise request and then tell the owner that the Coordinator accepted it. Never delegate directly to a Coding Agent and never perform coding work yourself.\n\nOwner message:\n{prompt}"
@@ -9267,7 +9548,11 @@ impl AppRuntime {
                 "Process this owner message as the Chat Agent. If it can be answered conversationally without changing project files, return `respond` with the complete owner-facing answer. If fulfilling it requires creating, editing, deleting, moving, building, testing, formatting, or committing project code/files, return `delegate_code` with a precise brief for the Coding Agent. Do not perform coding work yourself.\n\nOwner message:\n{prompt}"
             )
         };
-        let decision_result = if self.config.two_agent_conversations {
+        let decision_result = if conversation.mode == ConversationMode::Plan {
+            Err(CodexHarnessError::Protocol(
+                "plan mode bypasses the routing decision turn".into(),
+            ))
+        } else if self.config.two_agent_conversations {
             self.codex_harness
                 .start_turn(&thread_id, &decision_prompt, &codex_preferences, false)
                 .await
@@ -9396,13 +9681,32 @@ impl AppRuntime {
         let defer_compatibility_text = !self.config.two_agent_conversations;
         let mut last_timeline_at = Utc::now();
         let mut accepted = false;
-        let turn_future = self.codex_harness.start_turn_with_progress(
-            &thread_id,
-            prompt,
-            &codex_preferences,
-            writable,
-            Some(progress_sender),
-        );
+        let turn_future = if conversation.mode == ConversationMode::Plan {
+            Box::pin(self.codex_harness.start_plan_turn_with_progress(
+                &thread_id,
+                prompt,
+                &codex_preferences,
+                Some(progress_sender),
+            ))
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    mcg_codex_app_server::CodexTurnResult,
+                                    CodexHarnessError,
+                                >,
+                            > + Send,
+                    >,
+                >
+        } else {
+            Box::pin(self.codex_harness.start_turn_with_progress(
+                &thread_id,
+                prompt,
+                &codex_preferences,
+                writable,
+                Some(progress_sender),
+            ))
+        };
         tokio::pin!(turn_future);
         let turn_result = loop {
             tokio::select! {
@@ -9486,7 +9790,24 @@ impl AppRuntime {
                             return Err(error);
                         }
                     }
+                    Some(CodexTurnProgress::UserInputRequested(request)) => {
+                        let pending = conversation_input_request(&request)?;
+                        conversation.pending_input_requests.retain(|item| item.request_id != pending.request_id);
+                        conversation.pending_input_requests.push(pending);
+                        conversation.updated_at = Utc::now();
+                        let event = self.store()?.update_conversation(&conversation)?;
+                        let _ = self.event_sender.send(event);
+                    }
                     Some(CodexTurnProgress::Notification { method, params }) => {
+                        if method == "thread/goal/updated"
+                            && let Some(goal) = params.get("goal").cloned()
+                            && let Ok(goal) = serde_json::from_value::<ConversationGoal>(goal)
+                        {
+                            conversation.goal = Some(goal);
+                            conversation.updated_at = Utc::now();
+                            let event = self.store()?.update_conversation(&conversation)?;
+                            let _ = self.event_sender.send(event);
+                        }
                         if let Some(mut activity) = conversation_activity_from_codex_notification(
                             conversation_id,
                             turn.id,
@@ -9696,8 +10017,20 @@ impl AppRuntime {
             .store()?
             .save_conversation_agent_session(&chat_session)?;
         let _ = self.event_sender.send(event);
-        let _ = self.codex_harness.archive_thread(&thread_id).await;
-        let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
+        let goal_response = self.codex_harness.get_thread_goal(&thread_id).await.ok();
+        let mut latest_conversation = self.conversation(conversation_id)?.conversation;
+        latest_conversation.goal = goal_response
+            .as_ref()
+            .and_then(|response| response.get("goal"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        latest_conversation.updated_at = Utc::now();
+        let event = self.store()?.update_conversation(&latest_conversation)?;
+        let _ = self.event_sender.send(event);
+        if latest_conversation.goal.is_none() {
+            let _ = self.codex_harness.archive_thread(&thread_id).await;
+            let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
+        }
         if let Some(task_id) = turn.task_id
             && let Some(task) = self.task(task_id)?
             && task.state == TaskState::Active
@@ -23353,6 +23686,88 @@ fn append_bounded_activity_output(output: &mut Option<String>, delta: &str) {
         value.drain(..boundary);
         value.insert_str(0, TRUNCATION_MARKER);
     }
+}
+
+fn conversation_input_request(
+    request: &CodexPendingRequest,
+) -> Result<ConversationInputRequest, RuntimeError> {
+    let params = &request.params;
+    let questions = params
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            StorageError::InvalidData("Codex planning question omitted questions".into())
+        })?
+        .iter()
+        .map(|question| {
+            let options = question
+                .get("options")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|option| ConversationInputOption {
+                            label: option
+                                .get("label")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                            description: option
+                                .get("description")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        })
+                        .collect()
+                });
+            ConversationInputQuestion {
+                id: question
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                header: question
+                    .get("header")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Question")
+                    .to_owned(),
+                question: question
+                    .get("question")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                is_other: question
+                    .get("isOther")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                is_secret: question
+                    .get("isSecret")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                options,
+            }
+        })
+        .collect();
+    Ok(ConversationInputRequest {
+        request_id: request.request_id.clone(),
+        thread_id: params
+            .get("threadId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        turn_id: params
+            .get("turnId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        item_id: params
+            .get("itemId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        questions,
+        received_at: request.received_at,
+    })
 }
 
 fn conversation_activity_from_codex_item(

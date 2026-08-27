@@ -1934,6 +1934,67 @@ pub enum ConversationTurnState {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationMode {
+    #[default]
+    Default,
+    Plan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationGoalStatus {
+    Active,
+    Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationGoal {
+    pub thread_id: String,
+    pub objective: String,
+    pub status: ConversationGoalStatus,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    pub time_used_seconds: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationInputOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub is_other: bool,
+    pub is_secret: bool,
+    pub options: Option<Vec<ConversationInputOption>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationInputRequest {
+    pub request_id: serde_json::Value,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub questions: Vec<ConversationInputQuestion>,
+    pub received_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationActivityKind {
@@ -2042,6 +2103,12 @@ pub struct Conversation {
     pub project_id: Option<ProjectId>,
     pub state: ConversationState,
     pub execution_preferences: ExecutionPreferences,
+    #[serde(default)]
+    pub mode: ConversationMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<ConversationGoal>,
+    #[serde(default)]
+    pub pending_input_requests: Vec<ConversationInputRequest>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -2057,6 +2124,9 @@ impl Conversation {
             project_id,
             state: ConversationState::Active,
             execution_preferences: ExecutionPreferences::default(),
+            mode: ConversationMode::Default,
+            goal: None,
+            pending_input_requests: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -2269,6 +2339,22 @@ mod tests {
 
         assert_eq!(decoded, task);
         assert_eq!(decoded.schema_version, TASK_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_conversation_defaults_to_normal_mode_without_goal_state() {
+        let conversation = Conversation::new("Legacy chat", None);
+        let mut document =
+            serde_json::to_value(conversation).expect("conversation should serialize");
+        let object = document.as_object_mut().expect("conversation object");
+        object.remove("mode");
+        object.remove("goal");
+        object.remove("pending_input_requests");
+
+        let decoded: Conversation = serde_json::from_value(document).expect("legacy conversation");
+        assert_eq!(decoded.mode, ConversationMode::Default);
+        assert!(decoded.goal.is_none());
+        assert!(decoded.pending_input_requests.is_empty());
     }
 
     #[test]
