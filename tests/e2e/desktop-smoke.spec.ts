@@ -584,6 +584,64 @@ test("the desktop shell prevents phantom document scrolling", async ({ page }) =
   expect(layout.workspaceOverflowY).toBe("auto");
   expect(Math.round(layout.frameHeight)).toBe(layout.viewportHeight);
 
+  const agentRoom = await page.evaluate(() => {
+    const shell = document.querySelector<HTMLElement>(".app-shell")!;
+    const host = document.querySelector<HTMLElement>(".workspace")!;
+    const previousSurface = shell.dataset.activeSurface;
+    shell.dataset.activeSurface = "threads";
+
+    const conversation = document.createElement("div");
+    conversation.className = "chat-conversation";
+    const outer = document.createElement("div");
+    outer.className = "chat-message-list";
+    outer.setAttribute("data-scroll-chain", "");
+    Object.assign(outer.style, { height: "160px", overflowY: "auto" });
+    const outerContent = document.createElement("div");
+    outerContent.style.height = "420px";
+    outer.appendChild(outerContent);
+    conversation.appendChild(outer);
+
+    const room = document.createElement("section");
+    room.className = "agent-chat-room";
+    room.setAttribute("data-scroll-chain", "");
+    Object.assign(room.style, { height: "100px", maxHeight: "100px" });
+    const transcript = document.createElement("div");
+    transcript.className = "agent-chat-transcript chat-message-list";
+    const transcriptContent = document.createElement("div");
+    transcriptContent.style.height = "360px";
+    transcript.appendChild(transcriptContent);
+    room.appendChild(transcript);
+    outerContent.appendChild(room);
+    host.appendChild(conversation);
+
+    const canceled = !transcriptContent.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 40 }));
+    const activity = document.createElement("div");
+    activity.className = "agent-live-activity-scroll";
+    activity.setAttribute("data-scroll-chain", "");
+    activity.style.height = "60px";
+    const activityContent = document.createElement("div");
+    activityContent.style.height = "180px";
+    activity.appendChild(activityContent);
+    room.appendChild(activity);
+    activityContent.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 30 }));
+    const result = {
+      canceled,
+      transcriptOverflowY: getComputedStyle(transcript).overflowY,
+      room: room.scrollTop,
+      activity: activity.scrollTop,
+      outer: outer.scrollTop
+    };
+    conversation.remove();
+    if (previousSurface) shell.dataset.activeSurface = previousSurface;
+    else delete shell.dataset.activeSurface;
+    return result;
+  });
+  expect(agentRoom.canceled).toBe(true);
+  expect(agentRoom.transcriptOverflowY).toBe("visible");
+  expect(agentRoom.room).toBe(40);
+  expect(agentRoom.activity).toBe(30);
+  expect(agentRoom.outer).toBe(0);
+
   const chained = await page.evaluate(() => {
     const host = document.querySelector<HTMLElement>(".workspace")!;
     const makeViewport = () => {
