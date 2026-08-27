@@ -4,19 +4,30 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   Archive,
+  ArrowUp,
   ArrowLeft,
   ArrowRight,
   Blocks,
+  BrainCircuit,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
+  Cloud,
   Copy,
+  Cpu,
   ExternalLink,
   Files,
   FolderOpen,
+  Gauge,
+  GitBranch,
+  GitFork,
   GitPullRequest,
   Globe2,
+  Hand,
   Home,
+  Laptop,
   ListTree,
   Maximize2,
   Minus,
@@ -29,10 +40,13 @@ import {
   RotateCw,
   Search,
   Share2,
+  ShieldAlert,
+  ShieldCheck,
   SlidersHorizontal,
   SquarePen,
   Terminal,
   Trash2,
+  Users,
   Workflow,
   X
 } from "lucide-react";
@@ -552,23 +566,26 @@ function storedChatQueue(): QueuedChatMessage[] {
   }
 }
 
-const APPROVAL_MODE_DETAILS: Record<ApprovalMode, { label: string; description: string; icon: string }> = {
+const APPROVAL_MODE_DETAILS: Record<ApprovalMode, { label: string; description: string }> = {
   ask: {
     label: "Ask for approval",
-    description: "Ask before editing outside the workspace or using restricted capabilities.",
-    icon: "✋"
+    description: "Ask before editing outside the workspace or using restricted capabilities."
   },
   auto_review: {
     label: "Approve for me",
-    description: "Codex reviews requests and only asks you when an action may be unsafe.",
-    icon: "⬡"
+    description: "Codex reviews requests and only asks you when an action may be unsafe."
   },
   full_access: {
     label: "Full access",
-    description: "Allow internet access and any file on this computer without asking.",
-    icon: "⚠"
+    description: "Allow internet access and any file on this computer without asking."
   }
 };
+
+function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
+  if (mode === "ask") return <Hand aria-hidden="true" />;
+  if (mode === "auto_review") return <ShieldCheck aria-hidden="true" />;
+  return <ShieldAlert aria-hidden="true" />;
+}
 
 function PermissionSelector({
   value,
@@ -582,9 +599,9 @@ function PermissionSelector({
   const selected = APPROVAL_MODE_DETAILS[value];
   return <details className={`permission-selector permission-${value}`}>
     <summary aria-label="Change permissions" title="Change permissions">
-      <span aria-hidden="true">{selected.icon}</span>
+      <ApprovalModeIcon mode={value} />
       <span>{selected.label}</span>
-      <span aria-hidden="true">⌄</span>
+      <ChevronDown aria-hidden="true" />
     </summary>
     <div className="permission-popover" role="menu" aria-label="How should MetaCog actions be approved?">
       <div className="permission-popover-heading">
@@ -603,9 +620,9 @@ function PermissionSelector({
             event.currentTarget.closest("details")?.removeAttribute("open");
           }}
         >
-          <span className="permission-option-icon" aria-hidden="true">{detail.icon}</span>
+          <span className="permission-option-icon"><ApprovalModeIcon mode={mode} /></span>
           <span><strong>{detail.label}</strong><small>{detail.description}</small></span>
-          {value === mode && <span className="permission-option-check" aria-hidden="true">✓</span>}
+          <span className="permission-option-check" aria-hidden="true">{value === mode && <Check />}</span>
         </button>;
       })}
       {!hasProject && <p>Your selection is saved. Project-free turns stay read-only until you attach a project.</p>}
@@ -625,7 +642,7 @@ function TeamPresetSelector({ value = "automatic", onChange }: { value?: TeamPre
   const selected = TEAM_PRESET_DETAILS[selectedValue];
   return <details className="team-preset-selector">
     <summary aria-label="Change team preset" title={selected.description}>
-      <span aria-hidden="true">⌘</span><span>{selected.label}</span><span aria-hidden="true">⌄</span>
+      <Users aria-hidden="true" /><span>{selected.label}</span><ChevronDown aria-hidden="true" />
     </summary>
     <div className="team-preset-popover" role="menu" aria-label="Team preset">
       <strong>Team preset</strong>
@@ -635,7 +652,7 @@ function TeamPresetSelector({ value = "automatic", onChange }: { value?: TeamPre
         aria-checked={selectedValue === preset}
         key={preset}
         onClick={(event) => { onChange(preset); event.currentTarget.closest("details")?.removeAttribute("open"); }}
-      ><span><strong>{detail.label}</strong><small>{detail.description}</small></span>{selectedValue === preset && <span aria-hidden="true">✓</span>}</button>)}
+      ><span><strong>{detail.label}</strong><small>{detail.description}</small></span><span aria-hidden="true">{selectedValue === preset && <Check />}</span></button>)}
     </div>
   </details>;
 }
@@ -663,10 +680,10 @@ function NewChatProjectSelector({
     if (!(event.currentTarget as HTMLDetailsElement).open) setQuery("");
   }}>
     <summary aria-label="Choose project" title={value?.root ?? "Choose a project for this chat"}>
-      <span aria-hidden="true">▱</span><span>{value ? projectDisplayName(value) : "Choose project"}</span><span aria-hidden="true">⌄</span>
+      <FolderOpen aria-hidden="true" /><span>{value ? projectDisplayName(value) : "Choose project"}</span><ChevronDown aria-hidden="true" />
     </summary>
     <div className="new-chat-context-popover project-context-popover">
-      {projects.length > 0 && <label className="context-search"><span aria-hidden="true">⌕</span><input aria-label="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects" /></label>}
+      {projects.length > 0 && <label className="context-search"><Search aria-hidden="true" /><input aria-label="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects" /></label>}
       <div className="context-option-list" role="menu" aria-label="Project choices">
         {visibleProjects.map((project) => <button
           type="button"
@@ -677,18 +694,18 @@ function NewChatProjectSelector({
             onChange(project);
             event.currentTarget.closest("details")?.removeAttribute("open");
           }}
-        ><span aria-hidden="true">▱</span><span><strong>{projectDisplayName(project)}</strong><small>{project.repository.is_git ? project.repository.branch ?? "Git repository" : "Local project"}</small></span>{value?.project_id === project.project_id && <span aria-hidden="true">✓</span>}</button>)}
+        ><FolderOpen aria-hidden="true" /><span><strong>{projectDisplayName(project)}</strong><small>{project.repository.is_git ? project.repository.branch ?? "Git repository" : "Local project"}</small></span><span className="context-option-check" aria-hidden="true">{value?.project_id === project.project_id && <Check />}</span></button>)}
         {projects.length > 0 && visibleProjects.length === 0 && <p>No projects match “{query}”.</p>}
       </div>
       <div className="context-popover-actions">
         <button type="button" disabled={disabled} onClick={(event) => {
           onOpenFolder();
           event.currentTarget.closest("details")?.removeAttribute("open");
-        }}><span aria-hidden="true">＋</span><span><strong>Open project folder</strong><small>Add or rediscover a local project</small></span></button>
+        }}><Plus aria-hidden="true" /><span><strong>Open project folder</strong><small>Add or rediscover a local project</small></span></button>
         <button type="button" disabled={!value} onClick={(event) => {
           onChange(null);
           event.currentTarget.closest("details")?.removeAttribute("open");
-        }}><span aria-hidden="true">×</span><span><strong>Don’t work in a project</strong><small>Keep this chat project-free and read-only</small></span></button>
+        }}><X aria-hidden="true" /><span><strong>Don’t work in a project</strong><small>Keep this chat project-free and read-only</small></span></button>
       </div>
     </div>
   </details>;
@@ -698,12 +715,12 @@ function ActiveChatProjectSelector({ project }: { project: ProjectModel | null }
   const name = project ? projectDisplayName(project) : "No project";
   return <details className="new-chat-context-selector new-chat-project-selector active-chat-project-selector">
     <summary aria-label={`Project: ${name}`} title={project?.root ?? "This conversation is project-free"}>
-      <span aria-hidden="true">▱</span><span>{name}</span><span aria-hidden="true">⌄</span>
+      <FolderOpen aria-hidden="true" /><span>{name}</span><ChevronDown aria-hidden="true" />
     </summary>
     <div className="new-chat-context-popover project-context-popover" role="menu" aria-label="Chat project">
       <div className="context-popover-heading">Conversation project</div>
       <button type="button" role="menuitemradio" aria-checked="true" onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}>
-        <span aria-hidden="true">▱</span><span><strong>{name}</strong><small>{project ? project.root : "Read-only until a project is attached to a new chat"}</small></span><span aria-hidden="true">✓</span>
+        <FolderOpen aria-hidden="true" /><span><strong>{name}</strong><small>{project ? project.root : "Read-only until a project is attached to a new chat"}</small></span><span className="context-option-check" aria-hidden="true"><Check /></span>
       </button>
       <p>A conversation keeps its original project. Use the Add menu to start another chat with a different workspace.</p>
     </div>
@@ -712,12 +729,12 @@ function ActiveChatProjectSelector({ project }: { project: ProjectModel | null }
 
 function NewChatWorkspaceSelector() {
   return <details className="new-chat-context-selector new-chat-workspace-selector">
-    <summary aria-label="Workspace: Local" title="Work on this device"><span aria-hidden="true">▰</span><span>Local</span><span aria-hidden="true">⌄</span></summary>
+    <summary aria-label="Workspace: Local" title="Work on this device"><Laptop aria-hidden="true" /><span>Local</span><ChevronDown aria-hidden="true" /></summary>
     <div className="new-chat-context-popover workspace-context-popover" role="menu" aria-label="Work in">
       <div className="context-popover-heading">Work in</div>
-      <button type="button" role="menuitemradio" aria-checked="true" onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}><span aria-hidden="true">▰</span><span><strong>Local</strong><small>Use this device</small></span><span aria-hidden="true">✓</span></button>
-      <button type="button" role="menuitem" disabled><span aria-hidden="true">↗</span><span><strong>New local worktree</strong><small>Coding agents create managed worktrees when needed</small></span></button>
-      <button type="button" role="menuitem" disabled><span aria-hidden="true">☁</span><span><strong>Cloud</strong><small>No cloud workspace is configured</small></span></button>
+      <button type="button" role="menuitemradio" aria-checked="true" onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}><Laptop aria-hidden="true" /><span><strong>Local</strong><small>Use this device</small></span><span className="context-option-check" aria-hidden="true"><Check /></span></button>
+      <button type="button" role="menuitem" disabled><GitFork aria-hidden="true" /><span><strong>New local worktree</strong><small>Coding agents create managed worktrees when needed</small></span></button>
+      <button type="button" role="menuitem" disabled><Cloud aria-hidden="true" /><span><strong>Cloud</strong><small>No cloud workspace is configured</small></span></button>
     </div>
   </details>;
 }
@@ -725,10 +742,10 @@ function NewChatWorkspaceSelector() {
 function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   const branch = project.repository.branch ?? "Current branch";
   return <details className="new-chat-context-selector new-chat-branch-selector">
-    <summary aria-label={`Branch: ${branch}`} title={branch}><span aria-hidden="true">⑂</span><span>{branch}</span><span aria-hidden="true">⌄</span></summary>
+    <summary aria-label={`Branch: ${branch}`} title={branch}><GitBranch aria-hidden="true" /><span>{branch}</span><ChevronDown aria-hidden="true" /></summary>
     <div className="new-chat-context-popover branch-context-popover" role="menu" aria-label="Git branch">
       <div className="context-popover-heading">Branch</div>
-      <button type="button" role="menuitemradio" aria-checked="true" onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}><span aria-hidden="true">⑂</span><span><strong>{branch}</strong><small>{project.repository.head ? `HEAD ${project.repository.head.slice(0, 10)}` : "Current checkout"}</small></span><span aria-hidden="true">✓</span></button>
+      <button type="button" role="menuitemradio" aria-checked="true" onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}><GitBranch aria-hidden="true" /><span><strong>{branch}</strong><small>{project.repository.head ? `HEAD ${project.repository.head.slice(0, 10)}` : "Current checkout"}</small></span><span className="context-option-check" aria-hidden="true"><Check /></span></button>
       <p>Branch changes remain governed by the project’s Git workflow.</p>
     </div>
   </details>;
@@ -736,17 +753,17 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
 
 function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; existingChat?: boolean }) {
   return <details className="new-chat-add-menu">
-    <summary aria-label="Add files and more" title="Add files and more"><span aria-hidden="true">＋</span></summary>
+    <summary aria-label="Add files and more" title="Add files and more"><Plus aria-hidden="true" /></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
       <div className="context-popover-heading">Add</div>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => {
         onOpenFolder();
         event.currentTarget.closest("details")?.removeAttribute("open");
-      }}><span aria-hidden="true">▱</span><span><strong>{existingChat ? "Start a project chat" : "Open project folder"}</strong><small>{existingChat ? "Choose another local workspace in a new chat" : "Work with files in a local project"}</small></span></button>
+      }}><FolderOpen aria-hidden="true" /><span><strong>{existingChat ? "Start a project chat" : "Open project folder"}</strong><small>{existingChat ? "Choose another local workspace in a new chat" : "Work with files in a local project"}</small></span></button>
       <button type="button" role="menuitem" disabled={!project} onClick={(event) => {
         onClearProject();
         event.currentTarget.closest("details")?.removeAttribute("open");
-      }}><span aria-hidden="true">×</span><span><strong>{existingChat ? "Start a project-free chat" : "Remove project"}</strong><small>{existingChat ? "Open a new read-only conversation" : "Continue without a linked workspace"}</small></span></button>
+      }}><X aria-hidden="true" /><span><strong>{existingChat ? "Start a project-free chat" : "Remove project"}</strong><small>{existingChat ? "Open a new read-only conversation" : "Continue without a linked workspace"}</small></span></button>
     </div>
   </details>;
 }
@@ -756,6 +773,32 @@ function TechnicalDetails({ title, summary, children }: { title: string; summary
     <summary><span><strong>{title}</strong><small>{summary}</small></span><span aria-hidden="true">⌄</span></summary>
     <div className="technical-details-content">{children}</div>
   </details>;
+}
+
+type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team";
+
+function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
+  if (panel === "model") return <Cpu aria-hidden="true" />;
+  if (panel === "effort") return <BrainCircuit aria-hidden="true" />;
+  if (panel === "speed") return <Gauge aria-hidden="true" />;
+  return <Users aria-hidden="true" />;
+}
+
+function ChatRunChoice({
+  selected,
+  label,
+  description,
+  onSelect
+}: {
+  selected: boolean;
+  label: string;
+  description?: string;
+  onSelect: (target: HTMLButtonElement) => void;
+}) {
+  return <button type="button" role="menuitemradio" aria-checked={selected} className="chat-run-choice" onClick={(event) => onSelect(event.currentTarget)}>
+    <span className="chat-run-choice-copy"><strong>{label}</strong>{description && <small>{description}</small>}</span>
+    <span className="chat-run-choice-check" aria-hidden="true">{selected && <Check />}</span>
+  </button>;
 }
 
 function ChatRunSelector({
@@ -779,7 +822,7 @@ function ChatRunSelector({
   label?: string;
   includeTeam?: boolean;
 }) {
-  const [panel, setPanel] = useState<"root" | "model" | "effort" | "speed" | "team">("root");
+  const [panel, setPanel] = useState<ChatRunPanel>("root");
   const providerModels = providers.flatMap((provider) => (provider.catalog?.models ?? []).map((model) => ({
     providerId: provider.connection.id,
     providerName: provider.connection.display_name,
@@ -818,6 +861,15 @@ function ChatRunSelector({
   const effortChoices = selectedCodexModel?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? ["none", "low", "medium", "high", "xhigh"];
   const tierChoices = selectedCodexModel?.serviceTiers ?? [];
   const effortLabel = (effort: string) => effort === "xhigh" ? "Extra high" : effort.charAt(0).toUpperCase() + effort.slice(1);
+  const effortDescription = (effort: string) => ({
+    none: "No additional reasoning",
+    low: "Quick, lightweight reasoning",
+    medium: "Balanced reasoning for most work",
+    high: "More deliberate problem solving",
+    xhigh: "Deep reasoning, higher usage",
+    max: "Maximum supported reasoning",
+    ultra: "Highest supported reasoning and usage"
+  } as Record<string, string>)[effort] ?? "Model-supported reasoning level";
   const speedLabel = /fast|priority/i.test(value.service_tier ?? "") || value.speed === "fast" ? "Fast" : "Standard";
   const teamValue = TEAM_PRESET_DETAILS[value.team_preset ?? "automatic"] ? value.team_preset ?? "automatic" : "automatic";
   const closeSelector = (target: HTMLElement) => target.closest("details")?.removeAttribute("open");
@@ -825,16 +877,16 @@ function ChatRunSelector({
     <summary aria-label={label} title={label}>
       <span>{summaryModel}</span>
       <small>{effortLabel(value.reasoning_effort)}</small>
-      <span aria-hidden="true">⌄</span>
+      <ChevronDown aria-hidden="true" />
     </summary>
-    <div className="chat-run-popover" role="dialog" aria-label={label}>
+    <div className="chat-run-popover" data-panel={panel} role="dialog" aria-label={label}>
       {panel === "root" ? <>
-        <button className="chat-run-menu-row" type="button" onClick={() => setPanel("model")}><span>Model</span><strong>{summaryModel}</strong><span aria-hidden="true">›</span></button>
-        <button className="chat-run-menu-row" type="button" onClick={() => setPanel("effort")}><span>Effort</span><strong>{effortLabel(value.reasoning_effort)}</strong><span aria-hidden="true">›</span></button>
-        <button className="chat-run-menu-row" type="button" onClick={() => setPanel("speed")}><span>Speed</span><strong>{speedLabel}</strong><span aria-hidden="true">›</span></button>
-        {includeTeam && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("team")}><span>Team</span><strong>{TEAM_PRESET_DETAILS[teamValue].label}</strong><span aria-hidden="true">›</span></button>}
+        <button className="chat-run-menu-row" type="button" onClick={() => setPanel("model")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="model" /></span><span className="chat-run-menu-copy"><strong>Model</strong><small>{summaryModel}</small></span><ChevronRight aria-hidden="true" /></button>
+        <button className="chat-run-menu-row" type="button" onClick={() => setPanel("effort")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="effort" /></span><span className="chat-run-menu-copy"><strong>Effort</strong><small>{effortLabel(value.reasoning_effort)}</small></span><ChevronRight aria-hidden="true" /></button>
+        <button className="chat-run-menu-row" type="button" onClick={() => setPanel("speed")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="speed" /></span><span className="chat-run-menu-copy"><strong>Speed</strong><small>{speedLabel}</small></span><ChevronRight aria-hidden="true" /></button>
+        {includeTeam && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("team")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="team" /></span><span className="chat-run-menu-copy"><strong>Team</strong><small>{TEAM_PRESET_DETAILS[teamValue].label}</small></span><ChevronRight aria-hidden="true" /></button>}
         <details className="chat-run-advanced">
-          <summary>Advanced <span aria-hidden="true">⌄</span></summary>
+          <summary>Advanced <ChevronDown aria-hidden="true" /></summary>
           <div className="chat-run-model-status">
             <small role={discoveryError ? "alert" : "status"}>{discovering
               ? "Loading available models…"
@@ -849,21 +901,21 @@ function ChatRunSelector({
           </div>
         </details>
       </> : <>
-        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><span aria-hidden="true">‹</span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team"}</button>
+        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team"}</span></button>
         <div className="chat-run-choice-list" role="menu" aria-label={panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team preset"}>
           {panel === "model" && <>
-            <button type="button" role="menuitemradio" aria-checked={!modelKey} onClick={(event) => { updateModel(""); closeSelector(event.currentTarget); setPanel("root"); }}><span><strong>Automatic</strong><small>Use the account default</small></span>{!modelKey && <span aria-hidden="true">✓</span>}</button>
+            <ChatRunChoice selected={!modelKey} label="Automatic" description="Use the account default" onSelect={(target) => { updateModel(""); closeSelector(target); setPanel("root"); }} />
             {models.map(({ providerId, providerName, model }) => {
               const key = `${providerId}\u0000${model.id}`;
-              return <button type="button" role="menuitemradio" aria-checked={modelKey === key} key={`${providerId}-${model.id}`} onClick={(event) => { updateModel(key); closeSelector(event.currentTarget); setPanel("root"); }}><span><strong>{model.display_name}</strong><small>{providerName}</small></span>{modelKey === key && <span aria-hidden="true">✓</span>}</button>;
+              return <ChatRunChoice selected={modelKey === key} label={model.display_name} description={providerName} key={`${providerId}-${model.id}`} onSelect={(target) => { updateModel(key); closeSelector(target); setPanel("root"); }} />;
             })}
           </>}
-          {panel === "effort" && effortChoices.map((effort) => <button type="button" role="menuitemradio" aria-checked={value.reasoning_effort === effort} key={effort} onClick={(event) => { onChange({ ...value, reasoning_effort: effort as ReasoningEffort }); closeSelector(event.currentTarget); setPanel("root"); }}><span><strong>{effortLabel(effort)}</strong>{effort === "xhigh" && <small>Consumes usage limits faster</small>}</span>{value.reasoning_effort === effort && <span aria-hidden="true">✓</span>}</button>)}
+          {panel === "effort" && effortChoices.map((effort) => <ChatRunChoice selected={value.reasoning_effort === effort} label={effortLabel(effort)} description={effortDescription(effort)} key={effort} onSelect={(target) => { onChange({ ...value, reasoning_effort: effort as ReasoningEffort }); closeSelector(target); setPanel("root"); }} />)}
           {panel === "speed" && [{ id: "", name: "Standard" }, ...(tierChoices.length > 0 ? tierChoices : [{ id: "fast", name: "Fast" }])].map((tier) => {
             const selectedTier = tier.id ? value.service_tier === tier.id : !value.service_tier;
-            return <button type="button" role="menuitemradio" aria-checked={selectedTier} key={tier.id || "standard"} onClick={(event) => { onChange({ ...value, service_tier: tier.id || undefined, speed: /fast|priority/i.test(tier.id) ? "fast" : "standard" as ExecutionSpeed }); closeSelector(event.currentTarget); setPanel("root"); }}><span><strong>{tier.name}</strong><small>{tier.id ? "Faster responses, more usage" : "Default speed"}</small></span>{selectedTier && <span aria-hidden="true">✓</span>}</button>;
+            return <ChatRunChoice selected={selectedTier} label={tier.name} description={tier.id ? "Faster responses, more usage" : "Default speed"} key={tier.id || "standard"} onSelect={(target) => { onChange({ ...value, service_tier: tier.id || undefined, speed: /fast|priority/i.test(tier.id) ? "fast" : "standard" as ExecutionSpeed }); closeSelector(target); setPanel("root"); }} />;
           })}
-          {panel === "team" && (Object.entries(TEAM_PRESET_DETAILS) as [TeamPreset, (typeof TEAM_PRESET_DETAILS)[TeamPreset]][]).map(([preset, detail]) => <button type="button" role="menuitemradio" aria-checked={teamValue === preset} key={preset} onClick={(event) => { onChange({ ...value, team_preset: preset }); closeSelector(event.currentTarget); setPanel("root"); }}><span><strong>{detail.label}</strong><small>{detail.description}</small></span>{teamValue === preset && <span aria-hidden="true">✓</span>}</button>)}
+          {panel === "team" && (Object.entries(TEAM_PRESET_DETAILS) as [TeamPreset, (typeof TEAM_PRESET_DETAILS)[TeamPreset]][]).map(([preset, detail]) => <ChatRunChoice selected={teamValue === preset} label={detail.label} description={detail.description} key={preset} onSelect={(target) => { onChange({ ...value, team_preset: preset }); closeSelector(target); setPanel("root"); }} />)}
         </div>
       </>}
     </div>
@@ -6616,7 +6668,7 @@ export function App() {
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam />
                 <button className="primary new-chat-send" type="button" aria-label="Send" title="Send message" disabled={taskBusy || !taskGoal.trim()} onClick={() => void addTask()}>
-                  <span aria-hidden="true">{taskBusy ? "…" : "↑"}</span>
+                  {taskBusy ? <span aria-hidden="true">…</span> : <ArrowUp aria-hidden="true" />}
                 </button>
               </div>
               {taskError && <p className="error-message" role="alert">{taskError}</p>}
@@ -6691,7 +6743,7 @@ export function App() {
                     <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />
-                    <button className="primary new-chat-send" type="button" aria-label={conversationIsActive ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}><span aria-hidden="true">↑</span></button>
+                    <button className="primary new-chat-send" type="button" aria-label={conversationIsActive ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>
                   </div>
                   {taskError && <p className="error-message" role="alert">{taskError}</p>}
                 </div>

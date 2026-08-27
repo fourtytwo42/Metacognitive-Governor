@@ -291,6 +291,7 @@ async function enableAdvancedMode(page: import("@playwright/test").Page) {
 }
 
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
+  test.slow();
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
@@ -361,6 +362,48 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await scheduler.getByLabel("Scheduled work").fill("Summarize important project changes every morning");
   await scheduler.getByRole("button", { name: "Set up in chat" }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(/Summarize important project changes every morning/);
+});
+
+test("new chat run menus stay compact, aligned, and use the shared icon set", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
+
+  for (const label of ["Choose project", "Workspace: Local", "Add files and more", "Change permissions"]) {
+    await expect(page.getByLabel(label).locator("svg").first()).toBeVisible();
+  }
+
+  const selector = page.locator('summary[aria-label="New chat model, effort, speed, and team"]');
+  await selector.click();
+  const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await expect(dialog.locator(".chat-run-menu-icon svg")).toHaveCount(4);
+  await dialog.getByRole("button", { name: /^Effort/ }).click();
+
+  const effortMenu = page.getByRole("menu", { name: "Effort" });
+  const choices = effortMenu.getByRole("menuitemradio");
+  await expect(choices).toHaveCount(5);
+  const layout = await choices.evaluateAll((rows) => rows.map((row) => {
+    const copy = row.querySelector<HTMLElement>(".chat-run-choice-copy");
+    const check = row.querySelector<HTMLElement>(".chat-run-choice-check");
+    if (!copy || !check) throw new Error("Run-setting choice columns are missing");
+    return {
+      copyLeft: Math.round(copy.getBoundingClientRect().left * 10) / 10,
+      checkLeft: Math.round(check.getBoundingClientRect().left * 10) / 10,
+      copyColor: getComputedStyle(copy).color,
+      hasCheck: Boolean(check.querySelector("svg"))
+    };
+  }));
+  expect(new Set(layout.map((row) => row.copyLeft)).size).toBe(1);
+  expect(new Set(layout.map((row) => row.checkLeft)).size).toBe(1);
+  expect(new Set(layout.map((row) => row.copyColor)).size).toBe(1);
+  expect(layout.filter((row) => row.hasCheck)).toHaveLength(1);
+
+  const selectorBox = await selector.boundingBox();
+  const dialogBox = await dialog.boundingBox();
+  expect(selectorBox).not.toBeNull();
+  expect(dialogBox).not.toBeNull();
+  expect(dialogBox?.width ?? 999).toBeLessThanOrEqual(350);
+  expect(Math.abs((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0) - ((selectorBox?.x ?? 0) + (selectorBox?.width ?? 0)))).toBeLessThanOrEqual(2);
+  expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
 });
 
 test("simple and advanced interfaces meet the WCAG A and AA accessibility baseline", async ({ page }) => {

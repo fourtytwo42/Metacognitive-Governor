@@ -2489,6 +2489,27 @@ test("new chat presents project, workspace, branch, add, permission, and run set
   expect(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]')).toBeInTheDocument();
 });
 
+test("new chat uses the shared icon system and stable run-setting choice columns", () => {
+  render(<App />);
+
+  expect(screen.getByLabelText("Choose project").querySelector("svg")).toBeInTheDocument();
+  expect(screen.getByLabelText("Workspace: Local").querySelector("svg")).toBeInTheDocument();
+  expect(screen.getByLabelText("Add files and more").querySelector("svg")).toBeInTheDocument();
+  expect(screen.getByLabelText("Change permissions").querySelector("svg")).toBeInTheDocument();
+
+  const { dialog } = openNewChatRunSettings();
+  expect(dialog.querySelectorAll(".chat-run-menu-icon svg")).toHaveLength(4);
+  fireEvent.click(within(dialog).getByRole("button", { name: /^Effort/ }));
+
+  const choices = within(screen.getByRole("menu", { name: "Effort" })).getAllByRole("menuitemradio");
+  expect(choices.length).toBeGreaterThanOrEqual(5);
+  for (const choice of choices) {
+    expect(choice.querySelector(":scope > .chat-run-choice-copy")).toBeInTheDocument();
+    expect(choice.querySelector(":scope > .chat-run-choice-check")).toBeInTheDocument();
+  }
+  expect(choices.filter((choice) => choice.querySelector(".chat-run-choice-check svg"))).toHaveLength(1);
+});
+
 test("OpenAI subscription browser login completes automatically after the callback", async () => {
   client.startCodexLogin.mockResolvedValue({ loginId: "fixture-session", authUrl: "https://auth.openai.com/oauth/authorize" });
   render(<App />);
