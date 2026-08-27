@@ -67,6 +67,7 @@ const client = vi.hoisted(() => ({
   getCodexStableDiscovery: vi.fn(),
   reconcileOwnedCodexThread: vi.fn(),
   forkOwnedCodexThread: vi.fn(),
+  compactOwnedCodexThread: vi.fn(),
   startOwnedCodexReview: vi.fn(),
   watchConversationProject: vi.fn(),
   unwatchConversationProject: vi.fn(),
@@ -253,6 +254,7 @@ vi.mock("./desktop-client", () => ({
   getCodexStableDiscovery: client.getCodexStableDiscovery,
   reconcileOwnedCodexThread: client.reconcileOwnedCodexThread,
   forkOwnedCodexThread: client.forkOwnedCodexThread,
+  compactOwnedCodexThread: client.compactOwnedCodexThread,
   startOwnedCodexReview: client.startOwnedCodexReview,
   watchConversationProject: client.watchConversationProject,
   unwatchConversationProject: client.unwatchConversationProject,
@@ -453,6 +455,7 @@ beforeEach(() => {
   client.getCodexStableDiscovery.mockReset();
   client.reconcileOwnedCodexThread.mockReset();
   client.forkOwnedCodexThread.mockReset();
+  client.compactOwnedCodexThread.mockReset();
   client.startOwnedCodexReview.mockReset();
   client.watchConversationProject.mockReset();
   client.unwatchConversationProject.mockReset();
@@ -694,6 +697,7 @@ beforeEach(() => {
   });
   client.reconcileOwnedCodexThread.mockResolvedValue({});
   client.forkOwnedCodexThread.mockResolvedValue({});
+  client.compactOwnedCodexThread.mockResolvedValue({});
   client.startOwnedCodexReview.mockResolvedValue({ reviewThreadId: "review-thread", turn: {}, delivery: "inline" });
   client.watchConversationProject.mockResolvedValue({ watchId: "mcg-conversation-test", path: "C:\\workspace" });
   client.unwatchConversationProject.mockResolvedValue({});
@@ -2497,6 +2501,7 @@ test("new chat presents project, workspace, branch, add, permission, and run set
   const addMenu = screen.getByRole("menu", { name: "Add" });
   expect(within(addMenu).getByRole("menuitem", { name: /Goal/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Plan mode/ })).toBeEnabled();
+  expect(within(addMenu).getByRole("menuitem", { name: /Slash commands/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Open project folder/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Remove project/ })).toBeEnabled();
   expect(screen.getByLabelText("Change permissions")).toBeInTheDocument();
@@ -2514,6 +2519,41 @@ test("goal and plan commands are available from Add and prepare the composer", (
   fireEvent.click(screen.getByLabelText("Add files and more"));
   fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Plan mode/ }));
   expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("/plan ");
+});
+
+test("slash command palette exposes the complete inventory and runs local command dialogs", () => {
+  render(<App />);
+
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Slash commands/ }));
+  const palette = screen.getByRole("listbox", { name: "Slash commands" });
+  expect(within(palette).getAllByRole("option")).toHaveLength(24);
+
+  fireEvent.pointerDown(screen.getByRole("heading", { name: "What should we build?" }));
+  expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "/cl" } });
+  expect(within(screen.getByRole("listbox", { name: "Slash commands" })).getAllByRole("option").map((option) => option.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("/cloud"), expect.stringContaining("/cloud-environment")]));
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "/status" } });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+  expect(screen.getByRole("dialog", { name: "Slash command status" })).toBeVisible();
+  expect(screen.getByText("Not started")).toBeVisible();
+});
+
+test("personality slash command persists into new conversation execution preferences", async () => {
+  render(<App />);
+  const input = screen.getByRole("textbox", { name: "Message" });
+
+  fireEvent.change(input, { target: { value: "/personality concise" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(await screen.findByText("Response personality changed to concise.")).toBeVisible();
+
+  fireEvent.change(input, { target: { value: "Explain the project" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.createConversation).toHaveBeenCalledWith(expect.objectContaining({
+    execution_preferences: expect.objectContaining({ personality: "concise" })
+  })));
 });
 
 test("new chat uses the shared icon system and stable run-setting choice columns", () => {

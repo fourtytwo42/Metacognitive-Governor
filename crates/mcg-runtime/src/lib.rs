@@ -9431,8 +9431,22 @@ impl AppRuntime {
 
         let chat_lock = self.conversation_chat_lock(conversation_id).await;
         let _chat_guard = chat_lock.lock().await;
-        let (mut chat_session, chat_instructions) =
+        let (mut chat_session, mut chat_instructions) =
             self.ensure_chat_agent_session(&conversation)?;
+        if let Some(personality) = preferences.personality.as_deref() {
+            let style = match personality {
+                "concise" => "Respond concisely and lead with the outcome.",
+                "friendly" => "Respond warmly and conversationally while remaining precise.",
+                "professional" => "Use a polished, direct professional tone.",
+                _ => "Use the default response style.",
+            };
+            let developer = chat_instructions.developer.get_or_insert_with(String::new);
+            if !developer.is_empty() {
+                developer.push_str("\n\n");
+            }
+            developer.push_str("Owner-selected response personality: ");
+            developer.push_str(style);
+        }
         // The user-facing Chat Agent receives a private, non-project scratch cwd. Its native
         // sandbox remains read-only; project mutation is reserved for separately leased Coders.
         let scratch = self

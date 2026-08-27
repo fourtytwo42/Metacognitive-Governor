@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Clock3,
   Cloud,
+  Command,
   Copy,
   Cpu,
   ExternalLink,
@@ -207,6 +208,7 @@ import {
   getCodexStableDiscovery,
   reconcileOwnedCodexThread,
   forkOwnedCodexThread,
+  compactOwnedCodexThread,
   watchConversationProject,
   unwatchConversationProject,
   startCodexLogin,
@@ -391,6 +393,7 @@ import {
   requestGovernorImplementation,
   wakeSchedule
 } from "./desktop-client";
+import { parseSlashCommand, slashCommandMatches, type SlashCommandName } from "./slash-commands";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -772,13 +775,14 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   </details>;
 }
 
-function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; existingChat?: boolean }) {
+function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, onCommands, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; onCommands: () => void; existingChat?: boolean }) {
   return <details className="new-chat-add-menu" data-transient-popover>
     <summary aria-label="Add files and more" title="Add files and more"><Plus aria-hidden="true" /></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
       <div className="context-popover-heading">Add</div>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onGoal(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target aria-hidden="true" /><span><strong>Goal</strong><small>Set a durable objective to keep pursuing</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onPlan(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks aria-hidden="true" /><span><strong>Plan mode</strong><small>Research, ask choices, and create a decision-complete plan</small></span></button>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onCommands(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Command aria-hidden="true" /><span><strong>Slash commands</strong><small>Browse every Codex-aligned chat command</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => {
         onOpenFolder();
         event.currentTarget.closest("details")?.removeAttribute("open");
@@ -789,6 +793,24 @@ function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPla
       }}><X aria-hidden="true" /><span><strong>{existingChat ? "Start a project-free chat" : "Remove project"}</strong><small>{existingChat ? "Open a new read-only conversation" : "Continue without a linked workspace"}</small></span></button>
     </div>
   </details>;
+}
+
+function SlashCommandPalette({ value, open, onSelect, hasProject, hasConversation }: { value: string; open: boolean; onSelect: (command: SlashCommandName) => void; hasProject: boolean; hasConversation: boolean }) {
+  const commands = slashCommandMatches(value);
+  if (!open || commands.length === 0) return null;
+  return <div className="slash-command-palette" role="listbox" aria-label="Slash commands" data-scroll-chain>
+    {commands.map((command) => {
+      const contextUnavailable = command.availability === "project" && !hasProject
+        ? "Choose a project first"
+        : command.availability === "chat" && !hasConversation
+          ? "Available after the chat starts"
+          : null;
+      return <button type="button" role="option" aria-selected="false" key={command.name} onClick={() => onSelect(command.name)}>
+        <span className="slash-command-name">/{command.name}</span>
+        <span><strong>{command.description}</strong>{contextUnavailable && <small>{contextUnavailable}</small>}</span>
+      </button>;
+    })}
+  </div>;
 }
 
 function TechnicalDetails({ title, summary, children }: { title: string; summary: string; children: React.ReactNode }) {
@@ -2135,6 +2157,11 @@ export function App() {
   const [codexReviewBusy, setCodexReviewBusy] = useState(false);
   const [draftThreadId, setDraftThreadId] = useState(() => crypto.randomUUID());
   const [taskGoal, setTaskGoal] = useState("");
+  const [slashPaletteOpen, setSlashPaletteOpen] = useState(false);
+  const [commandDialog, setCommandDialog] = useState<"status" | "feedback" | "personality" | "model" | "reasoning" | "notice" | null>(null);
+  const [commandNotice, setCommandNotice] = useState({ title: "", detail: "" });
+  const [feedbackDraft, setFeedbackDraft] = useState("");
+  const [feedbackIncludeDiagnostics, setFeedbackIncludeDiagnostics] = useState(false);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
   const [goalDraft, setGoalDraft] = useState("");
   const [planningAnswers, setPlanningAnswers] = useState<Record<string, string>>({});
@@ -2380,11 +2407,13 @@ export function App() {
       setCodeReviewFilterOpen(false);
       setChatContextMenu(null);
       setSiteContextMenu(null);
+      setSlashPaletteOpen(false);
     };
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       closeTransientDetails(target);
       closeStateMenusOutside(target);
+      if (!target?.closest(".slash-command-palette, #chat-message, #goal")) setSlashPaletteOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -2852,7 +2881,8 @@ export function App() {
         service_tier: tier,
         speed: tier && /fast|priority/i.test(tier) ? "fast" : "standard",
         approval_mode: conversation.execution_preferences.approval_mode ?? "ask",
-        team_preset: conversation.execution_preferences.team_preset ?? "automatic"
+        team_preset: conversation.execution_preferences.team_preset ?? "automatic",
+        personality: conversation.execution_preferences.personality
       }));
     }
     // A completed schema migration opens every chat as a conversation. If an
@@ -4353,7 +4383,8 @@ export function App() {
         reasoning_effort: preferences.reasoning_effort,
         service_tier: preferences.service_tier,
         approval_mode: preferences.approval_mode,
-        team_preset: preferences.team_preset
+        team_preset: preferences.team_preset,
+        personality: preferences.personality
       };
       const existing = targetConversation ?? (activeSurface === "threads" && selectedChatId
         ? conversations.find((conversation) => conversation.id === selectedChatId)
@@ -4413,6 +4444,187 @@ export function App() {
     }
   }
 
+  function showCommandNotice(title: string, detail: string) {
+    setCommandNotice({ title, detail });
+    setCommandDialog("notice");
+  }
+
+  function chooseSlashCommand(name: SlashCommandName) {
+    setTaskGoal(`/${name} `);
+    setSlashPaletteOpen(false);
+    setTaskError(null);
+    window.requestAnimationFrame(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>(activeSurface === "threads" ? "#chat-message" : "#goal");
+      textarea?.focus();
+      textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+  }
+
+  async function executeSlashCommand(content: string): Promise<boolean> {
+    const command = parseSlashCommand(content);
+    if (!command) return false;
+    const project = currentWorkspaceProject() ?? selectedProject ?? undefined;
+    const conversation = selectedChatId ? conversationViews[selectedChatId]?.conversation : undefined;
+    const argument = command.argument;
+    switch (command.name) {
+      case "plan":
+        if (selectedChatId && conversationIsActive) {
+          await changeConversationMode("plan");
+          if (argument) queueMessageContent(argument);
+          setWorkspaceActionStatus(argument ? "Plan mode enabled; the planning request is queued." : "Plan mode enabled for the active chat.");
+          return true;
+        }
+        return false;
+      case "goal":
+        if (selectedChatId && conversationIsActive && argument) {
+          await changeConversationGoal(argument, "active");
+          setWorkspaceActionStatus("Goal updated. It will govern the next continuation after this round finishes.");
+          return true;
+        }
+        return false;
+      case "approve": {
+        const pending = approvals.find((approval) => approval.state === "pending" && (!conversation || approval.task_id === activeConversationTurn?.task_id));
+        if (!pending) {
+          showCommandNotice("Nothing to approve", "There is no recent automatic-review denial or pending permission request in this chat.");
+          return true;
+        }
+        await resolveConversationApproval(pending.id, true);
+        setWorkspaceActionStatus("Approved the most recent pending request once.");
+        return true;
+      }
+      case "compact":
+        if (!selectedChatId) {
+          showCommandNotice("Start the chat first", "Context can be compacted after MetaCog has created the local Codex thread.");
+        } else {
+          await compactOwnedCodexThread(selectedChatId);
+          setWorkspaceActionStatus("Context compaction started.");
+        }
+        return true;
+      case "fast": {
+        const selectedModel = codexModels.find((model) => model.id === newChatRunPreferences.model_id) ?? codexModels.find((model) => model.isDefault);
+        const fastTier = selectedModel?.serviceTiers.find((tier) => /fast|priority/i.test(`${tier.id} ${tier.name}`))?.id ?? "fast";
+        const enabled = Boolean(newChatRunPreferences.service_tier);
+        setNewChatRunPreferences((current) => ({ ...current, service_tier: enabled ? undefined : fastTier, speed: enabled ? "standard" : "fast" }));
+        setWorkspaceActionStatus(`Fast responses ${enabled ? "off" : "on"}.`);
+        return true;
+      }
+      case "feedback":
+        setCommandDialog("feedback");
+        return true;
+      case "fork":
+        if (!selectedChatId) showCommandNotice("Start the chat first", "A local thread exists after the first message and can then be forked.");
+        else {
+          await forkOwnedCodexThread(selectedChatId);
+          setWorkspaceActionStatus("Forked the local Codex context for this MetaCog chat.");
+        }
+        return true;
+      case "init":
+        if (!project) {
+          showCommandNotice("Choose a project first", "/init writes an AGENTS.md scaffold in the selected project.");
+          return true;
+        }
+        await sendMessageContent("Create or update AGENTS.md for this project. Inspect the repository first, preserve existing instructions, and add concise, project-specific guidance for future coding agents.", conversation);
+        return true;
+      case "local":
+        showCommandNotice("Local workspace selected", project ? `This chat runs locally with ${projectDisplayName(project)}.` : "This project-free chat runs locally in MetaCog's read-only scratch workspace.");
+        return true;
+      case "mcp":
+        navigateSurface("mcp");
+        return true;
+      case "model": {
+        if (!argument) {
+          setCommandDialog("model");
+          return true;
+        }
+        const model = codexModels.find((candidate) => candidate.id.toLocaleLowerCase() === argument.toLocaleLowerCase() || candidate.displayName.toLocaleLowerCase() === argument.toLocaleLowerCase());
+        if (!model) {
+          setTaskError(`Model “${argument}” is not available for this account.`);
+          return true;
+        }
+        setNewChatRunPreferences((current) => ({ ...current, provider_id: "codex", model_id: model.id, model_label: model.displayName, reasoning_effort: model.defaultReasoningEffort ?? current.reasoning_effort, service_tier: model.defaultServiceTier }));
+        setWorkspaceActionStatus(`Model changed to ${model.displayName}.`);
+        return true;
+      }
+      case "reasoning": {
+        if (!argument) {
+          setCommandDialog("reasoning");
+          return true;
+        }
+        const normalized = argument.toLocaleLowerCase().replaceAll(" ", "");
+        const effort = normalized === "extrahigh" ? "xhigh" : normalized;
+        const model = codexModels.find((candidate) => candidate.id === newChatRunPreferences.model_id) ?? codexModels.find((candidate) => candidate.isDefault);
+        if (model && !model.supportedReasoningEfforts.some((item) => item.reasoningEffort === effort)) {
+          setTaskError(`Reasoning effort “${argument}” is not supported by ${model.displayName}.`);
+          return true;
+        }
+        setNewChatRunPreferences((current) => ({ ...current, reasoning_effort: effort as ReasoningEffort }));
+        setWorkspaceActionStatus(`Reasoning effort changed to ${argument}.`);
+        return true;
+      }
+      case "personality": {
+        if (!argument) {
+          setCommandDialog("personality");
+          return true;
+        }
+        const personality = argument.toLocaleLowerCase();
+        if (!["default", "concise", "friendly", "professional"].includes(personality)) {
+          setTaskError("Choose default, concise, friendly, or professional.");
+          return true;
+        }
+        setNewChatRunPreferences((current) => ({ ...current, personality: personality === "default" ? undefined : personality }));
+        setWorkspaceActionStatus(`Response personality changed to ${personality}.`);
+        return true;
+      }
+      case "project":
+        startNewChat(project ?? null);
+        window.requestAnimationFrame(() => document.querySelector<HTMLDetailsElement>(".new-chat-project-selector")?.setAttribute("open", ""));
+        return true;
+      case "review":
+        if (!project?.repository.is_git) {
+          showCommandNotice("Choose a Git project first", "/review requires a selected Git-backed project.");
+          return true;
+        }
+        await sendMessageContent(`${CODE_REVIEW_GOAL_PREFIX} in ${projectDisplayName(project)}: review ${argument || "all staged, unstaged, and untracked changes"}. Prioritize correctness, regressions, security, missing tests, and repository instructions. Report concise, actionable findings with file and line references, ordered by severity. Do not modify the working tree during the review.`, conversation);
+        return true;
+      case "side":
+        startNewChat(project ?? null);
+        setWorkspaceActionStatus("Side chat ready. The previous chat continues independently.");
+        return true;
+      case "status":
+        setCommandDialog("status");
+        return true;
+      case "task":
+        startNewChat(null);
+        setWorkspaceActionStatus("Started a project-free chat.");
+        return true;
+      case "worktree":
+        if (!project?.repository.is_git) {
+          showCommandNotice("Choose a Git project first", "/worktree requires a selected Git-backed project.");
+          return true;
+        }
+        if (!argument) {
+          setTaskError("Add the coding objective after /worktree.");
+          return true;
+        }
+        await sendMessageContent(`Complete this coding task through a managed Git worktree: ${argument}`, conversation);
+        return true;
+      case "cloud":
+      case "cloud-environment":
+        showCommandNotice("Cloud execution unavailable", "No Codex cloud environment is connected to MetaCog. Local projects and governed local worktrees remain available.");
+        return true;
+      case "ide-context":
+        showCommandNotice("Shared IDE context unavailable", "MetaCog is a standalone desktop app and does not currently receive editor-selection context.");
+        return true;
+      case "memories":
+        openSettings("general");
+        setWorkspaceActionStatus("Opened memory settings. Automatic cross-chat memories are currently off.");
+        return true;
+      case "pet":
+        showCommandNotice("Desktop pet unavailable", "MetaCog does not ship a desktop pet. This conditional Codex command remains listed for parity.");
+        return true;
+    }
+  }
+
   async function addTask() {
     const content = taskGoal.trim();
     if (!content) {
@@ -4420,6 +4632,18 @@ export function App() {
       return;
     }
     setTaskGoal("");
+    if (content.startsWith("/") && !parseSlashCommand(content)) {
+      setTaskError("Unknown slash command. Type / to browse available commands.");
+      setTaskGoal(content);
+      return;
+    }
+    try {
+      if (await executeSlashCommand(content)) return;
+    } catch (error) {
+      setTaskError(errorMessage(error));
+      setTaskGoal(content);
+      return;
+    }
     const sent = await sendMessageContent(content);
     if (!sent) setTaskGoal((current) => current || content);
   }
@@ -4531,8 +4755,8 @@ export function App() {
     }
   }
 
-  function queueDraftMessage() {
-    const content = taskGoal.trim();
+  function queueMessageContent(value: string) {
+    const content = value.trim();
     if (!content || !selectedChatId) return;
     setQueuedChatMessages((current) => [...current, {
       id: crypto.randomUUID(),
@@ -4541,6 +4765,12 @@ export function App() {
       preferences: { ...newChatRunPreferences },
       created_at: new Date().toISOString()
     }]);
+  }
+
+  function queueDraftMessage() {
+    const content = taskGoal.trim();
+    if (!content || !selectedChatId) return;
+    queueMessageContent(content);
     setTaskGoal("");
     setTaskError(null);
   }
@@ -4574,8 +4804,18 @@ export function App() {
   }
 
   function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    const commandMatches = slashCommandMatches(taskGoal);
+    if ((event.key === "Enter" || event.key === "Tab") && commandMatches.length > 0 && !parseSlashCommand(taskGoal) && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      chooseSlashCommand(commandMatches[0].name);
+      return;
+    }
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
+    if (parseSlashCommand(taskGoal)) {
+      void addTask();
+      return;
+    }
     const active = activeSurface === "threads" && Boolean(activeConversationTurn || taskBusy);
     if (active && (event.ctrlKey || event.metaKey)) {
       void steerMessage(taskGoal);
@@ -6805,12 +7045,13 @@ export function App() {
                 ref={goalInputRef}
                 id="goal"
                 value={taskGoal}
-                onChange={(event) => setTaskGoal(event.target.value)}
+                onChange={(event) => { setTaskGoal(event.target.value); setSlashPaletteOpen(slashCommandMatches(event.target.value).length > 0); }}
                 onKeyDown={handleComposerKeyDown}
                 placeholder="Do anything"
               />
+              <SlashCommandPalette value={taskGoal} open={slashPaletteOpen} onSelect={chooseSlashCommand} hasProject={Boolean(selectedProject)} hasConversation={false} />
               <div className="composer-actions">
-                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
+                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
                 <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam />
@@ -6912,13 +7153,14 @@ export function App() {
                 </div>
                 <div className="composer chat-input-composer chat-followup-composer">
                   <label className="visually-hidden" htmlFor="chat-message">Message</label>
-                  <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
+                  <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => { setTaskGoal(event.target.value); setSlashPaletteOpen(slashCommandMatches(event.target.value).length > 0); }} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
+                  <SlashCommandPalette value={taskGoal} open={slashPaletteOpen} onSelect={chooseSlashCommand} hasProject={Boolean(workspaceProject)} hasConversation={Boolean(selectedChatId)} />
                   <div className="composer-actions">
-                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} />
+                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
                     <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />
-                    <button className="primary new-chat-send" type="button" aria-label={conversationIsActive ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>
+                    <button className="primary new-chat-send" type="button" aria-label={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue message (Ctrl+Enter steers now)" : "Run command or send message"} onClick={() => conversationIsActive && !parseSlashCommand(taskGoal) ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>
                   </div>
                   {taskError && <p className="error-message" role="alert">{taskError}</p>}
                 </div>
@@ -9057,6 +9299,41 @@ export function App() {
           </div>
         </section>
       </main>
+      {commandDialog && <div className="slash-command-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandDialog(null); }}>
+        <section className="slash-command-dialog" role="dialog" aria-modal="true" aria-label={commandDialog === "notice" ? commandNotice.title : `Slash command ${commandDialog}`}>
+          <header><div><Command aria-hidden="true" /><strong>{commandDialog === "notice" ? commandNotice.title : `/${commandDialog}`}</strong></div><button type="button" aria-label="Close command dialog" onClick={() => setCommandDialog(null)}><X aria-hidden="true" /></button></header>
+          {commandDialog === "notice" && <p>{commandNotice.detail}</p>}
+          {commandDialog === "status" && <div className="slash-command-properties">
+            <div><span>Chat</span><strong>{selectedChatId ?? "Not started"}</strong></div>
+            <div><span>Project</span><strong>{currentWorkspaceProject() ? projectDisplayName(currentWorkspaceProject()!) : "None"}</strong></div>
+            <div><span>Model</span><strong>{newChatRunPreferences.model_label ?? newChatRunPreferences.model_id ?? "Automatic"}</strong></div>
+            <div><span>Context</span><strong>{visibleConversation ? `${visibleConversation.turns.length} turns` : "No turns"}</strong></div>
+            <div><span>Plan</span><strong>{codexRateLimits?.plan_type ?? codexAccount?.plan_type ?? "Unavailable"}</strong></div>
+            <div><span>Primary usage</span><strong>{codexRateLimits?.primary ? `${codexRateLimits.primary.remaining_percent}% remaining` : "Unavailable"}</strong></div>
+            <div><span>Secondary usage</span><strong>{codexRateLimits?.secondary ? `${codexRateLimits.secondary.remaining_percent}% remaining` : "Unavailable"}</strong></div>
+          </div>}
+          {commandDialog === "model" && <div className="slash-command-choices" role="listbox" aria-label="Models">
+            <button type="button" role="option" aria-selected={!newChatRunPreferences.model_id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: undefined, model_id: undefined, model_label: undefined })); setCommandDialog(null); }}><span><strong>Automatic</strong><small>Use the account default</small></span>{!newChatRunPreferences.model_id && <Check aria-hidden="true" />}</button>
+            {codexModels.filter((model) => !model.hidden).map((model) => <button type="button" role="option" aria-selected={newChatRunPreferences.model_id === model.id} key={model.id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: "codex", model_id: model.id, model_label: model.displayName, reasoning_effort: model.defaultReasoningEffort as ReasoningEffort, service_tier: model.defaultServiceTier })); setCommandDialog(null); }}><span><strong>{model.displayName}</strong><small>{model.description}</small></span>{newChatRunPreferences.model_id === model.id && <Check aria-hidden="true" />}</button>)}
+          </div>}
+          {commandDialog === "reasoning" && <div className="slash-command-choices" role="listbox" aria-label="Reasoning effort">
+            {(codexModels.find((model) => model.id === newChatRunPreferences.model_id)?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? ["low", "medium", "high", "xhigh"]).map((effort) => <button type="button" role="option" aria-selected={newChatRunPreferences.reasoning_effort === effort} key={effort} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, reasoning_effort: effort as ReasoningEffort })); setCommandDialog(null); }}><span><strong>{effort === "xhigh" ? "Extra high" : effort.charAt(0).toUpperCase() + effort.slice(1)}</strong><small>Model-supported reasoning level</small></span>{newChatRunPreferences.reasoning_effort === effort && <Check aria-hidden="true" />}</button>)}
+          </div>}
+          {commandDialog === "personality" && <div className="slash-command-choices" role="listbox" aria-label="Response personality">
+            {([
+              ["default", "Default", "Use the normal MetaCog response style"],
+              ["concise", "Concise", "Lead with the outcome and keep explanations compact"],
+              ["friendly", "Friendly", "Warm and conversational while remaining precise"],
+              ["professional", "Professional", "Polished, direct, and businesslike"]
+            ] as const).map(([id, label, description]) => { const selected = (newChatRunPreferences.personality ?? "default") === id; return <button type="button" role="option" aria-selected={selected} key={id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, personality: id === "default" ? undefined : id })); setCommandDialog(null); }}><span><strong>{label}</strong><small>{description}</small></span>{selected && <Check aria-hidden="true" />}</button>; })}
+          </div>}
+          {commandDialog === "feedback" && <form onSubmit={(event) => { event.preventDefault(); const details = feedbackIncludeDiagnostics ? `\n\nMetaCog diagnostics:\n- Version: ${codexHarnessStatus?.bundled_version ?? "unknown"}\n- Process: ${codexHarnessStatus?.process_state ?? "unknown"}\n- Protocol: ${codexHarnessStatus?.protocol_version ?? "unknown"}` : ""; const url = `https://github.com/fourtytwo42/Metacognitive-Governor/issues/new?title=${encodeURIComponent("MetaCog feedback")}&body=${encodeURIComponent(`${feedbackDraft.trim()}${details}`)}`; void openExternalUrl(url); setCommandDialog(null); }}>
+            <label><span>Feedback</span><textarea aria-label="Feedback" required value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder="What happened, and what should MetaCog do instead?" /></label>
+            <label className="slash-command-checkbox"><input type="checkbox" checked={feedbackIncludeDiagnostics} onChange={(event) => setFeedbackIncludeDiagnostics(event.target.checked)} /><span>Include non-secret version and runtime status</span></label>
+            <div className="slash-command-dialog-actions"><button className="secondary" type="button" onClick={() => setCommandDialog(null)}>Cancel</button><button className="primary" type="submit" disabled={!feedbackDraft.trim()}>Continue to GitHub</button></div>
+          </form>}
+        </section>
+      </div>}
       {workspaceSidePanelOpen && workspacePanelsVisible && <aside className="workspace-side-panel" aria-label="Workspace side panel">
         <div className="workspace-side-resizer" role="separator" aria-orientation="vertical" aria-label="Resize side panel" aria-valuemin={280} aria-valuemax={window.innerWidth <= 820 ? Math.max(320, window.innerWidth - 48) : Math.max(320, window.innerWidth - (sidebarOpen ? sidebarWidth : 0) - 320)} aria-valuenow={workspaceSideWidth} tabIndex={0} onPointerDown={beginSidePanelResize} onDoubleClick={() => setWorkspaceSideWidth(520)} onKeyDown={(event) => {
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;

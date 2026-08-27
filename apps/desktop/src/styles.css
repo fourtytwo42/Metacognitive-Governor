@@ -1568,6 +1568,7 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
 .workspace-context-popover { width: min(330px, calc(100vw - 48px)); }
 .branch-context-popover { width: min(320px, calc(100vw - 48px)); }
 .chat-input-composer {
+  position: relative;
   min-width: 0;
   padding: 13px 14px 11px;
   border: 1px solid #414141;
@@ -1575,6 +1576,43 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
   background: var(--mcg-surface-raised);
   box-shadow: 0 16px 48px #0005;
 }
+.slash-command-palette { position: absolute; z-index: 58; right: 12px; bottom: calc(100% - 2px); left: 12px; display: grid; max-height: min(420px, 52vh); overflow: auto; padding: 7px; border: 1px solid var(--mcg-border); border-radius: 14px; color: var(--mcg-text); background: var(--mcg-surface-raised); box-shadow: 0 22px 56px #000a; scrollbar-width: thin; }
+.slash-command-palette button { display: grid; grid-template-columns: minmax(118px, auto) minmax(0, 1fr); align-items: center; gap: 12px; width: 100%; padding: 9px 11px; border: 0; border-radius: 9px; color: inherit; background: transparent; text-align: left; }
+.slash-command-palette button:hover,
+.slash-command-palette button:focus-visible { background: color-mix(in srgb, var(--mcg-surface-raised) 72%, white 9%); }
+.slash-command-name { color: var(--mcg-text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .78rem; font-weight: 650; }
+.slash-command-palette button > span:last-child { display: grid; min-width: 0; gap: 2px; }
+.slash-command-palette strong { overflow: hidden; font-size: .75rem; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.slash-command-palette small { color: var(--mcg-accent); font-size: .67rem; }
+.slash-command-dialog-backdrop { position: fixed; z-index: 120; inset: var(--desktop-chrome-height) 0 0; display: grid; place-items: center; padding: 24px; background: #0008; backdrop-filter: blur(3px); }
+.slash-command-dialog { display: grid; width: min(560px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - var(--desktop-chrome-height) - 48px)); overflow: auto; border: 1px solid var(--mcg-border); border-radius: 16px; color: var(--mcg-text); background: var(--mcg-surface-raised); box-shadow: 0 28px 80px #000c; scrollbar-width: thin; }
+.slash-command-dialog > header { position: sticky; z-index: 1; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 54px; padding: 0 15px; border-bottom: 1px solid var(--mcg-border); background: inherit; }
+.slash-command-dialog > header > div { display: flex; align-items: center; gap: 9px; }
+.slash-command-dialog > header svg { width: 17px; height: 17px; }
+.slash-command-dialog > header > button { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; border: 0; border-radius: 8px; color: var(--mcg-muted); background: transparent; }
+.slash-command-dialog > header > button:hover { color: var(--mcg-text); background: color-mix(in srgb, var(--mcg-surface-raised) 72%, white 9%); }
+.slash-command-dialog > p { margin: 0; padding: 20px; color: var(--mcg-muted); line-height: 1.55; }
+.slash-command-properties { display: grid; padding: 10px; }
+.slash-command-properties > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 16px; padding: 11px 10px; border-bottom: 1px solid color-mix(in srgb, var(--mcg-border) 68%, transparent); }
+.slash-command-properties > div:last-child { border-bottom: 0; }
+.slash-command-properties span { color: var(--mcg-muted); font-size: .76rem; }
+.slash-command-properties strong { overflow-wrap: anywhere; font-size: .8rem; font-weight: 550; }
+.slash-command-choices { display: grid; gap: 3px; padding: 8px; }
+.slash-command-choices > button { display: grid; grid-template-columns: minmax(0, 1fr) 18px; align-items: center; gap: 12px; width: 100%; padding: 10px 11px; border: 0; border-radius: 9px; color: inherit; background: transparent; text-align: left; }
+.slash-command-choices > button:hover,
+.slash-command-choices > button[aria-selected="true"] { background: color-mix(in srgb, var(--mcg-surface-raised) 72%, white 9%); }
+.slash-command-choices > button > span { display: grid; gap: 2px; }
+.slash-command-choices strong { font-size: .8rem; }
+.slash-command-choices small { color: var(--mcg-muted); font-size: .7rem; line-height: 1.35; }
+.slash-command-choices svg { width: 16px; height: 16px; color: var(--mcg-accent); }
+.slash-command-dialog form { display: grid; gap: 16px; padding: 18px; }
+.slash-command-dialog form > label:not(.slash-command-checkbox) { display: grid; gap: 7px; color: var(--mcg-muted); font-size: .76rem; }
+.slash-command-dialog textarea { min-height: 150px; resize: vertical; }
+.slash-command-checkbox { display: flex; align-items: center; gap: 9px; color: var(--mcg-muted); font-size: .75rem; }
+.slash-command-checkbox input { width: 16px; height: 16px; }
+.slash-command-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+:root[data-theme="light"] .slash-command-palette,
+:root[data-theme="light"] .slash-command-dialog { box-shadow: 0 22px 55px rgba(25, 35, 50, .2); }
 .chat-input-composer > label[for="goal"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .chat-input-composer > textarea {
   min-height: 78px;

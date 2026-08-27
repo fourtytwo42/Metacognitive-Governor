@@ -307,6 +307,7 @@ export interface ChatRunPreferences {
   service_tier?: string;
   approval_mode: ApprovalMode;
   team_preset: TeamPreset;
+  personality?: string;
 }
 
 export interface ExecutionPreferences {
@@ -315,6 +316,7 @@ export interface ExecutionPreferences {
   service_tier?: string;
   approval_mode?: ApprovalMode;
   team_preset?: TeamPreset;
+  personality?: string;
 }
 
 export type ConversationState = "active" | "archived";

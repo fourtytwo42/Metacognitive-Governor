@@ -5982,6 +5982,7 @@ fn conversation_preferences(
         service_tier: speed,
         approval_mode: approval,
         team_preset: Default::default(),
+        personality: None,
     }
 }
 

@@ -2093,6 +2093,9 @@ pub struct ExecutionPreferences {
     pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub team_preset: TeamPreset,
+    /// Optional owner-selected response style. This never expands authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2347,12 +2350,18 @@ mod tests {
         let mut document =
             serde_json::to_value(conversation).expect("conversation should serialize");
         let object = document.as_object_mut().expect("conversation object");
+        object
+            .get_mut("execution_preferences")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("execution preferences")
+            .remove("personality");
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
 
         let decoded: Conversation = serde_json::from_value(document).expect("legacy conversation");
         assert_eq!(decoded.mode, ConversationMode::Default);
+        assert!(decoded.execution_preferences.personality.is_none());
         assert!(decoded.goal.is_none());
         assert!(decoded.pending_input_requests.is_empty());
     }
