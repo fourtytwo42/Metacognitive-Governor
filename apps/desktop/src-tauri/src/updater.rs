@@ -140,7 +140,7 @@ pub(crate) fn update_configuration() -> UpdateConfiguration {
             configured: true,
             current_version: env!("CARGO_PKG_VERSION").into(),
             trusted_origin: Some(trusted_origin(&config.endpoint)),
-            detail: "MCG will accept only packages signed by this build's trusted update key."
+            detail: "MetaCog will accept only packages signed by this build's trusted update key."
                 .into(),
             recovery_notice,
         },
@@ -209,7 +209,7 @@ fn update_check(update: Option<&Update>) -> UpdateCheck {
             notes: bounded_notes(update.body.clone()),
             published_at: update.date.map(|date| date.to_string()),
             target: Some(update.target.clone()),
-            detail: "A newer owner-signed MCG release is available.".into(),
+            detail: "A newer owner-signed MetaCog release is available.".into(),
         },
         None => UpdateCheck {
             schema_version: 1,
@@ -219,7 +219,7 @@ fn update_check(update: Option<&Update>) -> UpdateCheck {
             notes: None,
             published_at: None,
             target: tauri_plugin_updater::target(),
-            detail: "MCG is up to date.".into(),
+            detail: "MetaCog is up to date.".into(),
         },
     }
 }
@@ -292,7 +292,7 @@ fn validate_pre_update_backup(
         return Err("The pre-update backup digest or size is invalid.".into());
     }
     if summary.manifest.application_version != env!("CARGO_PKG_VERSION") {
-        return Err("The pre-update backup came from a different MCG version.".into());
+        return Err("The pre-update backup came from a different MetaCog version.".into());
     }
     if summary.manifest.secrets_included || summary.manifest.secret_encryption.is_some() {
         return Err("Automatic pre-update backups must not contain credentials.".into());
@@ -303,7 +303,7 @@ fn validate_pre_update_backup(
         .iter()
         .any(|entry| entry.path == "state/mcg.sqlite3" && entry.size_bytes > 0)
     {
-        return Err("The pre-update backup does not contain the MCG database.".into());
+        return Err("The pre-update backup does not contain the MetaCog database.".into());
     }
     let skew = TimeDelta::seconds(BACKUP_CLOCK_SKEW_SECONDS);
     if summary.manifest.created_at < requested_at - skew
@@ -371,16 +371,16 @@ fn launch_windows_update_supervisor(
 ) -> Result<(), String> {
     let config = mcg_config::AppConfig::default();
     let current = std::env::current_exe().map_err(|error| {
-        format!("The MCG desktop executable location could not be determined: {error}")
+        format!("The MetaCog desktop executable location could not be determined: {error}")
     })?;
     let parent = current.parent().ok_or_else(|| {
-        "The MCG desktop executable has no containing installation directory.".to_owned()
+        "The MetaCog desktop executable has no containing installation directory.".to_owned()
     })?;
     let supervisor =
         portable_runtime::packaged_executable(&config.data_directory, "mcg-updater.exe")?
             .unwrap_or_else(|| parent.join("mcg-updater.exe"));
     let metadata = fs::symlink_metadata(&supervisor).map_err(|error| {
-        format!("The packaged update supervisor is missing. Repair or reinstall MCG: {error}")
+        format!("The packaged update supervisor is missing. Repair or reinstall MetaCog: {error}")
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("The packaged update supervisor is not a regular installation file.".into());
@@ -547,7 +547,7 @@ mod tests {
         let result = update_check(None);
         assert!(result.configured);
         assert!(result.available_version.is_none());
-        assert_eq!(result.detail, "MCG is up to date.");
+        assert_eq!(result.detail, "MetaCog is up to date.");
     }
 
     fn backup_summary(backup_id: Uuid) -> mcg_api::BackupSummaryResponse {

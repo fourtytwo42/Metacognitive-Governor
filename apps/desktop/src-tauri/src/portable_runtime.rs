@@ -96,7 +96,7 @@ pub(crate) fn packaged_executable(
         let requested = PAYLOADS
             .iter()
             .find(|payload| payload.name == name)
-            .ok_or_else(|| format!("The embedded MCG runtime does not contain {name}"))?;
+            .ok_or_else(|| format!("The embedded MetaCog runtime does not contain {name}"))?;
         let runtime_root = data_directory
             .join("runtime")
             .join(format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -178,19 +178,19 @@ fn ensure_payload(runtime_root: &Path, payload: &Payload) -> Result<PathBuf, Str
 fn ensure_private_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| {
         format!(
-            "The private MCG runtime directory at {} could not be created: {error}",
+            "The private MetaCog runtime directory at {} could not be created: {error}",
             path.display()
         )
     })?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         format!(
-            "The private MCG runtime directory at {} could not be inspected: {error}",
+            "The private MetaCog runtime directory at {} could not be inspected: {error}",
             path.display()
         )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(format!(
-            "The private MCG runtime path at {} is not a regular directory",
+            "The private MetaCog runtime path at {} is not a regular directory",
             path.display()
         ));
     }

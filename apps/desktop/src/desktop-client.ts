@@ -2095,14 +2095,14 @@ export function listApprovals(): Promise<ApprovalListResponse> {
 export function approveRequest(approvalId: string): Promise<ApprovalRequest> {
   return invoke("resolve_approval", {
     approvalId,
-    request: { state: "approved", reason: "Approved in MCG desktop" }
+    request: { state: "approved", reason: "Approved in MetaCog desktop" }
   });
 }
 
 export function denyRequest(approvalId: string): Promise<ApprovalRequest> {
   return invoke("resolve_approval", {
     approvalId,
-    request: { state: "denied", reason: "Denied in MCG desktop" }
+    request: { state: "denied", reason: "Denied in MetaCog desktop" }
   });
 }
 

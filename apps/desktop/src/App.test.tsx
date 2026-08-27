@@ -709,7 +709,7 @@ beforeEach(() => {
     organization_id: "00000000-0000-4000-8000-000000000901",
     revision_id: "00000000-0000-4000-8000-000000000902",
     revision: 1,
-    name: "MCG Consumer Default",
+    name: "MetaCog Consumer Default",
     roles: [],
     relationships: [],
     policy: { prefer_minimal_organization: true, max_parallel_agents: 2, max_total_agents: 8, max_organizational_overhead_ratio: 0.25, default_lease_seconds: 900 },
@@ -791,7 +791,7 @@ beforeEach(() => {
     overall: "warning",
     checks: [
       { code: "database_integrity", label: "Database integrity", severity: "pass", detail: "SQLite quick-check completed successfully." },
-      { code: "provider_dispatch_recovery", label: "Provider dispatch recovery", severity: "warning", detail: "1 physical provider request(s) are active or indeterminate; 4 validated request(s) completed; 2 definite request(s) failed.", remediation: "Review the affected task and provider billing/logs, then retry with a new owner-authorized call identity; MCG will not resend an indeterminate request automatically." },
+      { code: "provider_dispatch_recovery", label: "Provider dispatch recovery", severity: "warning", detail: "1 physical provider request(s) are active or indeterminate; 4 validated request(s) completed; 2 definite request(s) failed.", remediation: "Review the affected task and provider billing/logs, then retry with a new owner-authorized call identity; MetaCog will not resend an indeterminate request automatically." },
       { code: "portable_backups", label: "Portable backups", severity: "warning", detail: "No portable backup has been created yet.", remediation: "Create and retain a portable backup before relying on the installation." }
     ],
     counts: { events: 4, tasks: 1, artifacts: 0, backups: 0, providers: 0, models: 0, mcp_connections: 0, mcp_tools: 0, schedules: 0, pending_approvals: 0, provider_dispatch_started: 1, provider_dispatch_completed: 4, provider_dispatch_failed: 2 }
@@ -876,9 +876,13 @@ test("custom desktop chrome invokes native minimize, maximize, and close control
 test("workspace toolbar toggles the docked side panel and project terminal", async () => {
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Toggle side panel" }));
+  const sidePanelToggle = await screen.findByRole("button", { name: "Toggle side panel" });
+  const bottomPanelToggle = screen.getByRole("button", { name: "Toggle bottom panel" });
+  expect(sidePanelToggle.querySelector("svg")).toBeInTheDocument();
+  expect(bottomPanelToggle.querySelector("svg")).toBeInTheDocument();
+  fireEvent.click(sidePanelToggle);
   expect(screen.getByRole("complementary", { name: "Workspace side panel" })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "Browser", selected: true })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Browser", selected: true }).querySelector("svg")).toBeInTheDocument();
   expect(window.localStorage.getItem("mcg.workspace-side-panel")).toBe("true");
   const sidePanelResizer = screen.getByRole("separator", { name: "Resize side panel" });
   expect(sidePanelResizer).toHaveAttribute("aria-valuenow", "520");
@@ -891,7 +895,9 @@ test("workspace toolbar toggles the docked side panel and project terminal", asy
   expect(screen.queryByRole("complementary", { name: "Workspace side panel" })).not.toBeInTheDocument();
 
   fireEvent.keyDown(window, { key: "j", ctrlKey: true });
-  expect(screen.getByRole("region", { name: "Terminal" })).toBeInTheDocument();
+  const terminal = screen.getByRole("region", { name: "Terminal" });
+  expect(terminal).toBeInTheDocument();
+  expect(within(terminal).getByRole("button", { name: "Terminal" }).querySelector("svg")).toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "Terminal command" })).toBeInTheDocument();
   expect(window.localStorage.getItem("mcg.workspace-bottom-panel")).toBe("true");
 });
@@ -957,7 +963,7 @@ test("Agents distinguishes the deterministic runtime from live model agents", as
 
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
-  expect(await screen.findByRole("heading", { name: "MCG runtime" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "MetaCog runtime" })).toBeInTheDocument();
   expect(screen.getByText(/not a model agent/i)).toBeInTheDocument();
   expect(screen.getByText("Product team · revision 3")).toBeInTheDocument();
   expect(screen.getByText("Policy enforcement")).toBeInTheDocument();
@@ -1176,11 +1182,11 @@ test("packaged local service readiness is visible and failures are not disguised
     launched: false,
     service: "mcg-daemon",
     version: "0.1.0",
-    detail: "The packaged service is missing. Repair or reinstall MCG."
+    detail: "The packaged service is missing. Repair or reinstall MetaCog."
   });
   render(<App />);
   const status = (await screen.findByText("Local runtime needs attention")).closest("[role='status']");
-  expect(status).toHaveAttribute("title", "The packaged service is missing. Repair or reinstall MCG.");
+  expect(status).toHaveAttribute("title", "The packaged service is missing. Repair or reinstall MetaCog.");
 });
 
 test("owner settings persist autonomy with optimistic revision control", async () => {
@@ -1214,8 +1220,8 @@ test("owner-signed updates require review and invoke verified backup installatio
     configured: true,
     current_version: "0.1.0",
     trusted_origin: "https://updates.example.test",
-    detail: "MCG will accept only packages signed by this build's trusted update key.",
-    recovery_notice: "The update did not complete. MCG restarted the previous installation and preserved its data."
+    detail: "MetaCog will accept only packages signed by this build's trusted update key.",
+    recovery_notice: "The update did not complete. MetaCog restarted the previous installation and preserved its data."
   });
   client.checkForUpdate.mockResolvedValue({
     schema_version: 1,
@@ -1225,13 +1231,13 @@ test("owner-signed updates require review and invoke verified backup installatio
     notes: "Security and recovery improvements.",
     published_at: "2026-08-18T12:00:00Z",
     target: "windows-x86_64-nsis",
-    detail: "A newer owner-signed MCG release is available."
+    detail: "A newer owner-signed MetaCog release is available."
   });
   render(<App />);
   const panel = await screen.findByLabelText("Application updates");
   expect(within(panel).getByRole("status")).toHaveTextContent(/restarted the previous installation/);
   fireEvent.click(within(panel).getByRole("button", { name: "Check for updates" }));
-  expect(await within(panel).findByText("MCG 0.2.0")).toBeInTheDocument();
+  expect(await within(panel).findByText("MetaCog 0.2.0")).toBeInTheDocument();
   expect(within(panel).getByText("Security and recovery improvements.")).toBeInTheDocument();
   expect(client.installUpdate).not.toHaveBeenCalled();
 
@@ -1754,9 +1760,9 @@ test("opening Sites refreshes AI-published sites from the durable library", asyn
 
   const panel = await screen.findByRole("region", { name: "Sites" });
   expect(await within(panel).findByRole("heading", { name: "Springfield IT Support" })).toBeVisible();
-  expect(within(panel).getByRole("button", { name: "Open in MCG browser" })).toBeVisible();
+  expect(within(panel).getByRole("button", { name: "Open in MetaCog browser" })).toBeVisible();
   fireEvent.click(within(panel).getByRole("button", { name: "More options for Springfield IT Support" }));
-  expect(screen.getByRole("menuitem", { name: "Open in MCG browser" })).toBeVisible();
+  expect(screen.getByRole("menuitem", { name: "Open in MetaCog browser" })).toBeVisible();
   expect(client.listSites).toHaveBeenCalledTimes(2);
 });
 
@@ -1816,7 +1822,7 @@ test("simple Sites merges the account inventory, renders thumbnails, and offers 
   const card = within(panel).getByRole("heading", { name: "Springfield's Best IT" }).closest("article");
   expect(card).not.toBeNull();
   fireEvent.contextMenu(card!);
-  fireEvent.click(screen.getByRole("menuitem", { name: "Open in MCG browser" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open in MetaCog browser" }));
   const browserPanel = await screen.findByRole("region", { name: "Browser" });
   expect(within(browserPanel).getByRole("tab", { name: /Springfield's Best IT/ })).toBeVisible();
   expect(within(browserPanel).getByRole("textbox", { name: "Address" })).toHaveValue(accountSites[0].public_url);
@@ -3116,7 +3122,7 @@ test("delegated coding work stays inline and Chat presents the final preview wit
     "00000000-0000-4000-8000-000000000d07"
   ));
   expect(await screen.findByRole("tab", { name: /Local preview/ })).toHaveAttribute("aria-selected", "true");
-  expect(screen.getByLabelText("MCG browser content")).toBeInTheDocument();
+  expect(screen.getByLabelText("MetaCog browser content")).toBeInTheDocument();
 });
 
 test("Coordinator lifecycle and tool traces are inline without a separate Agent Room", async () => {
@@ -3445,7 +3451,7 @@ test("conversation activity shows command lifecycle, details, and context compac
         state: "completed" as const,
         command: "Get-Content README.md",
         cwd: "C:\\workspace",
-        output: "# MCG",
+        output: "# MetaCog",
         exit_code: 0,
         duration_ms: 1250,
         started_at: "2026-08-22T00:00:02Z",
@@ -3528,7 +3534,7 @@ test("conversation activity shows command lifecycle, details, and context compac
   fireEvent.click(screen.getByText("Ran Get-Content README.md").closest("summary")!);
   expect(screen.getByText("C:\\workspace")).toBeInTheDocument();
   expect(screen.getByText("Exit code 0")).toBeInTheDocument();
-  expect(screen.getByText("# MCG")).toBeInTheDocument();
+  expect(screen.getByText("# MetaCog")).toBeInTheDocument();
 });
 
 test("conversation approval is shown in chat and resolves without restarting the task", async () => {
@@ -3754,11 +3760,19 @@ test("Ctrl+O registers a global folder without creating a project", async () => 
   expect(within(screen.getByLabelText("Global folders")).getByText("No global folders added.")).toBeInTheDocument();
 });
 
-test("desktop menus follow the Codex command structure with MCG branding", async () => {
+test("desktop menus follow the Codex command structure with MetaCog branding", async () => {
   render(<App />);
 
-  const brand = screen.getByLabelText("MetaCognitive Governor");
+  const applicationMenu = screen.getByLabelText("Application menu");
+  const titlebarBrand = within(applicationMenu).getByLabelText("MetaCog");
+  expect(titlebarBrand).toHaveTextContent("MetaCog");
+  expect(titlebarBrand.querySelector("img")).toHaveAttribute("src", expect.stringContaining("mcg-logo"));
+  const brand = within(screen.getByLabelText("Primary navigation")).getByLabelText("MetaCog");
   expect(brand.querySelector("img")).toHaveAttribute("src", expect.stringContaining("mcg-logo"));
+  expect(within(applicationMenu).getByRole("button", { name: "Hide sidebar" }).querySelector("svg")).toBeInTheDocument();
+  expect(within(applicationMenu).getByRole("button", { name: "Minimize" }).querySelector("svg")).toBeInTheDocument();
+  expect(within(applicationMenu).getByRole("button", { name: "Maximize or restore" }).querySelector("svg")).toBeInTheDocument();
+  expect(within(applicationMenu).getByRole("button", { name: "Close window" }).querySelector("svg")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "File" }));
   let menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
@@ -3766,7 +3780,7 @@ test("desktop menus follow the Codex command structure with MCG branding", async
   expect(menu.getByRole("button", { name: /New Chat.*Ctrl\+N/ })).toBeInTheDocument();
   expect(menu.getByRole("button", { name: /New Temporary Chat/ })).toBeDisabled();
   expect(menu.getByRole("button", { name: /Open Folder.*Ctrl\+O/ })).toBeInTheDocument();
-  expect(menu.getByRole("button", { name: /Quit MCG.*Ctrl\+Q/ })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: /Quit MetaCog.*Ctrl\+Q/ })).toBeInTheDocument();
   expect(menu.queryByText(/ChatGPT/)).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Edit" }));
@@ -3783,7 +3797,7 @@ test("desktop menus follow the Codex command structure with MCG branding", async
   fireEvent.click(screen.getByRole("button", { name: "Help" }));
   menu = within(document.querySelector(".desktop-menu-popover.open") as HTMLElement);
   expect(menu.getByRole("button", { name: /Keyboard Shortcuts.*Ctrl\+\// })).toBeInTheDocument();
-  expect(menu.getByRole("button", { name: "About MCG" })).toBeInTheDocument();
+  expect(menu.getByRole("button", { name: "About MetaCog" })).toBeInTheDocument();
   expect(menu.queryByText(/About ChatGPT/)).not.toBeInTheDocument();
 });
 

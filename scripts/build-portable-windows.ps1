@@ -9,14 +9,20 @@ if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
 }
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$previousCargoBuildJobs = $env:CARGO_BUILD_JOBS
+if ([string]::IsNullOrWhiteSpace($env:CARGO_BUILD_JOBS)) {
+    # The single-file desktop link is memory intensive on Windows. Serial release
+    # compilation prevents sibling rustc processes from exhausting available RAM.
+    $env:CARGO_BUILD_JOBS = "1"
+}
 $tauriConfigPath = Join-Path $repositoryRoot "apps\desktop\src-tauri\tauri.conf.json"
 $tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
 $version = [string]$tauriConfig.version
 if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
     throw "Tauri version is missing or invalid: $version"
 }
-$portableRoot = Join-Path $repositoryRoot "target\portable\MCG-Portable-Windows-x64-v$version"
-$desktopFileName = "MCG-Desktop-v$version.exe"
+$portableRoot = Join-Path $repositoryRoot "target\portable\MetaCog-Portable-Windows-x64-v$version"
+$desktopFileName = "MetaCog-Desktop-v$version.exe"
 
 Push-Location $repositoryRoot
 try {
@@ -58,4 +64,5 @@ try {
     Write-Output "$desktopFileName SHA-256: $hash"
 } finally {
     Pop-Location
+    $env:CARGO_BUILD_JOBS = $previousCargoBuildJobs
 }

@@ -7,7 +7,7 @@ import "./styles.css";
 const root = document.getElementById("root");
 
 if (!root) {
-  throw new Error("MCG root element was not found");
+  throw new Error("MetaCog root element was not found");
 }
 
 createRoot(root).render(

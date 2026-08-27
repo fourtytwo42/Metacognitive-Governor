@@ -1,8 +1,43 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  Activity,
+  Archive,
+  ArrowLeft,
+  ArrowRight,
+  Blocks,
+  Check,
+  ChevronDown,
+  Clock3,
+  Copy,
+  ExternalLink,
+  Files,
+  FolderOpen,
+  GitPullRequest,
+  Globe2,
+  Home,
+  ListTree,
+  Maximize2,
+  Minus,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
+  PanelsTopLeft,
+  Pin,
+  Plus,
+  RotateCw,
+  Search,
+  Share2,
+  SlidersHorizontal,
+  SquarePen,
+  Terminal,
+  Trash2,
+  Workflow,
+  X
+} from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
-import mcgLogo from "./assets/mcg-logo.png";
+import metaCogLogo from "./assets/mcg-logo.png";
 
 export const CHAT_FOLLOW_THRESHOLD_PX = 96;
 const CHATGPT_SITES_LIBRARY_ENABLED = true;
@@ -421,20 +456,20 @@ function EmbeddedSiteBrowser({ tabId, url, onError }: { tabId: string; url: stri
   }, [tabId, url, onError]);
 
   return <div className="embedded-site-browser">
-    <div ref={hostRef} className="embedded-site-browser-host" aria-label="MCG browser content" />
+    <div ref={hostRef} className="embedded-site-browser-host" aria-label="MetaCog browser content" />
   </div>;
 }
 
 function PinIcon({ solid = false }: { solid?: boolean }) {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path fill={solid ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M14.7 4.1 19.9 9.3l-2.6 1.3-2.8 4.5.2 2.4-1.1 1.1-3.2-3.2-4.7 4.7-.9-.9 4.7-4.7-3.2-3.2 1.1-1.1 2.4.2 4.5-2.8 1.3-2.6Z" /></svg>;
+  return <Pin aria-hidden="true" fill={solid ? "currentColor" : "none"} />;
 }
 
 function ArchiveIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M5 7l1 13h12l1-13M4 4h16v3H4zM9.5 11.5h5" /></svg>;
+  return <Archive aria-hidden="true" />;
 }
 
 function TrashIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M4.5 7h15M9 4h6l1 3H8l1-3Zm-2 3 1 13h7l1-13M10 11v5M14 11v5" /></svg>;
+  return <Trash2 aria-hidden="true" />;
 }
 
 function assistantTextForRun(run?: AgentRunView): string | null {
@@ -541,9 +576,9 @@ function PermissionSelector({
       <span>{selected.label}</span>
       <span aria-hidden="true">⌄</span>
     </summary>
-    <div className="permission-popover" role="menu" aria-label="How should MCG actions be approved?">
+    <div className="permission-popover" role="menu" aria-label="How should MetaCog actions be approved?">
       <div className="permission-popover-heading">
-        <strong>How should MCG actions be approved?</strong>
+        <strong>How should MetaCog actions be approved?</strong>
         <small>Applies to the next message and future turns in this chat.</small>
       </div>
       {(Object.entries(APPROVAL_MODE_DETAILS) as [ApprovalMode, (typeof APPROVAL_MODE_DETAILS)[ApprovalMode]][]).map(([mode, detail]) => {
@@ -569,7 +604,7 @@ function PermissionSelector({
 }
 
 const TEAM_PRESET_DETAILS: Record<TeamPreset, { label: string; description: string }> = {
-  automatic: { label: "Automatic", description: "MCG chooses the smallest suitable team." },
+  automatic: { label: "Automatic", description: "MetaCog chooses the smallest suitable team." },
   fast: { label: "Fast", description: "Use at most one parallel specialist." },
   balanced: { label: "Balanced", description: "Use up to three parallel specialists." },
   thorough: { label: "Thorough", description: "Use the assigned team's capacity, up to eight." }
@@ -1648,10 +1683,10 @@ interface TerminalEntry {
   error?: string;
 }
 
-const MCG_SHORTCUTS = [
+const METACOG_SHORTCUTS = [
   ["New chat", "Start a new chat", "Ctrl+N"],
   ["Open global folder", "Make a folder available to every project and general chat", "Ctrl+O"],
-  ["Settings", "Open MCG settings", "Ctrl+,"],
+  ["Settings", "Open MetaCog settings", "Ctrl+,"],
   ["Find a chat", "Search chats in the sidebar", "Ctrl+F"],
   ["Toggle sidebar", "Show or hide the sidebar", "Ctrl+B"],
   ["Toggle file tree", "Show or hide the project file tree", "Ctrl+Shift+E"],
@@ -2479,7 +2514,7 @@ export function App() {
     }
     new WebviewWindow(`mcg-${Date.now()}`, {
       url,
-      title: "MCG",
+      title: "MetaCog",
       decorations: false,
       width: Math.max(960, window.innerWidth),
       height: Math.max(700, window.innerHeight)
@@ -3033,7 +3068,7 @@ export function App() {
 
   async function deleteProject(project: ProjectModel) {
     const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
-    if (!window.confirm(`Remove ${name} from MCG?\n\nThis only removes the project from MCG. Its folder, local Git history, and GitHub repository will not be deleted.`)) return;
+    if (!window.confirm(`Remove ${name} from MetaCog?\n\nThis only removes the project from MetaCog. Its folder, local Git history, and GitHub repository will not be deleted.`)) return;
     setProjectMutationBusy(project.project_id);
     setProjectError(null);
     setTaskError(null);
@@ -3818,7 +3853,7 @@ export function App() {
       return;
     }
     const reader = new FileReader();
-    reader.onerror = () => setAccountAvatarError("MCG could not read that image.");
+    reader.onerror = () => setAccountAvatarError("MetaCog could not read that image.");
     reader.onload = () => {
       const dataUrl = typeof reader.result === "string" ? reader.result : "";
       if (!/^data:image\/(?:jpeg|png|webp|gif);base64,/i.test(dataUrl)) {
@@ -3830,7 +3865,7 @@ export function App() {
         window.localStorage.setItem(ACCOUNT_AVATAR_STORAGE_KEY, JSON.stringify(next));
         setStoredAccountAvatar(next);
       } catch {
-        setAccountAvatarError("MCG could not save that image locally.");
+        setAccountAvatarError("MetaCog could not save that image locally.");
       }
     };
     reader.readAsDataURL(file);
@@ -3857,7 +3892,7 @@ export function App() {
       }
       window.localStorage.setItem("mcg.codex-account-disconnected", "true");
       setCodexAccountDisconnected(true);
-      setProviderStatus("MCG disconnected from the shared Codex account");
+      setProviderStatus("MetaCog disconnected from the shared Codex account");
       setOwnerMenuOpen(false);
     } catch (error) {
       setProviderError(errorMessage(error));
@@ -4505,7 +4540,7 @@ export function App() {
       return;
     }
     if (!memoryKey.trim()) {
-      setMemoryError("Name the fact you want MCG to remember.");
+      setMemoryError("Name the fact you want MetaCog to remember.");
       return;
     }
     setMemoryBusy(true);
@@ -6138,7 +6173,7 @@ export function App() {
   ];
   const normalizedSettingsSearch = settingsSearch.trim().toLocaleLowerCase();
   const normalizedShortcutSearch = shortcutSearch.trim().toLocaleLowerCase();
-  const filteredShortcuts = MCG_SHORTCUTS.filter(([name, description, shortcut]) =>
+  const filteredShortcuts = METACOG_SHORTCUTS.filter(([name, description, shortcut]) =>
     !normalizedShortcutSearch || `${name} ${description} ${shortcut}`.toLocaleLowerCase().includes(normalizedShortcutSearch)
   );
   const selectedAgentRun = agentRuns.find((run) => run.run.id === selectedAgentRunId) ?? null;
@@ -6257,9 +6292,13 @@ export function App() {
   return (
     <div className={`desktop-frame${sidebarOpen ? "" : " sidebar-collapsed"}${workspaceSidePanelOpen && workspacePanelsVisible ? " side-panel-open" : ""}${workspaceBottomPanelOpen && workspacePanelsVisible ? " bottom-panel-open" : ""}`} style={workspaceLayoutStyle}>
       <header className="desktop-menubar" aria-label="Application menu">
-        <button type="button" className="chrome-button sidebar-toggle" aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"} aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((current) => !current)}><span aria-hidden="true">◧</span></button>
-        <button type="button" className="chrome-button" aria-label="Back" onClick={() => window.history.back()}><span aria-hidden="true">←</span></button>
-        <button type="button" className="chrome-button" aria-label="Forward" onClick={() => window.history.forward()}><span aria-hidden="true">→</span></button>
+        <div className="desktop-titlebar-brand" data-tauri-drag-region aria-label="MetaCog">
+          <img src={metaCogLogo} alt="" />
+          <strong>MetaCog</strong>
+        </div>
+        <button type="button" className="chrome-button sidebar-toggle" aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"} aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((current) => !current)}><PanelLeft aria-hidden="true" /></button>
+        <button type="button" className="chrome-button" aria-label="Back" title="Back" onClick={() => window.history.back()}><ArrowLeft aria-hidden="true" /></button>
+        <button type="button" className="chrome-button" aria-label="Forward" title="Forward" onClick={() => window.history.forward()}><ArrowRight aria-hidden="true" /></button>
         <div className="desktop-menu-list">
           {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
             <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
@@ -6274,7 +6313,7 @@ export function App() {
                 <button type="button" onClick={() => void closeCurrentWindow()}><span>Close</span><span className="menu-shortcut">Ctrl+W</span></button>
                 <hr />
                 <button type="button" disabled={!signedInWithOpenAi || busy} title={signedInWithOpenAi ? undefined : "No OpenAI subscription session is connected"} onClick={() => void logOutOfOpenAi()}><span>Log Out</span></button>
-                <button type="button" onClick={() => void closeCurrentWindow(true)}><span>Quit MCG</span><span className="menu-shortcut">Ctrl+Q</span></button>
+                <button type="button" onClick={() => void closeCurrentWindow(true)}><span>Quit MetaCog</span><span className="menu-shortcut">Ctrl+Q</span></button>
               </>}
               {menu === "Edit" && <>
                 <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runEditCommand("undo")}><span>Undo</span><span className="menu-shortcut">Ctrl+Z</span></button>
@@ -6317,7 +6356,7 @@ export function App() {
                 <button type="button" onClick={() => void toggleFullScreen()}><span>Toggle Full Screen</span><span className="menu-shortcut">F11</span></button>
               </>}
               {menu === "Help" && <>
-                <button type="button" disabled title="MCG documentation is being prepared"><span>Documentation</span></button>
+                <button type="button" disabled title="MetaCog documentation is being prepared"><span>Documentation</span></button>
                 <button type="button" onClick={() => openSettings("shortcuts")}><span>Keyboard Shortcuts</span><span className="menu-shortcut">Ctrl+/</span></button>
                 <button type="button" disabled title="Release notes are not available yet"><span>What's New</span></button>
                 <hr />
@@ -6329,16 +6368,16 @@ export function App() {
                 <button type="button" disabled title="Performance tracing is not available yet"><span>Start Performance Trace</span></button>
                 <hr />
                 <button type="button" disabled={updateBusy} onClick={() => { openSettings("configuration"); void checkUpdates(); }}><span>{updateBusy ? "Checking for Updates…" : "Check for Updates…"}</span></button>
-                <button type="button" onClick={() => openSettings("configuration")}><span>About MCG</span></button>
+                <button type="button" onClick={() => openSettings("configuration")}><span>About MetaCog</span></button>
               </>}
             </div>
           </div>)}
         </div>
         <div className="window-drag-region" data-tauri-drag-region onDoubleClick={() => void toggleCurrentWindowMaximized()} />
         <div className="window-controls" aria-label="Window controls">
-          <button type="button" aria-label="Minimize" title="Minimize" onClick={() => void minimizeCurrentWindow()}><span aria-hidden="true">—</span></button>
-          <button type="button" aria-label="Maximize or restore" title="Maximize or restore" onClick={() => void toggleCurrentWindowMaximized()}><span aria-hidden="true">□</span></button>
-          <button className="window-close" type="button" aria-label="Close window" title="Close" onClick={() => void closeCurrentWindow()}><span aria-hidden="true">×</span></button>
+          <button type="button" aria-label="Minimize" title="Minimize" onClick={() => void minimizeCurrentWindow()}><Minus aria-hidden="true" /></button>
+          <button type="button" aria-label="Maximize or restore" title="Maximize or restore" onClick={() => void toggleCurrentWindowMaximized()}><Maximize2 aria-hidden="true" /></button>
+          <button className="window-close" type="button" aria-label="Close window" title="Close" onClick={() => void closeCurrentWindow()}><X aria-hidden="true" /></button>
         </div>
       </header>
       <div
@@ -6347,17 +6386,23 @@ export function App() {
       >
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="sidebar-heading">
-          <div className="sidebar-brand-row"><div className="brand" aria-label="MetaCognitive Governor"><img className="brand-mark" src={mcgLogo} alt="" /><span>MCG</span></div><div className="sidebar-brand-actions">
-            <button type="button" aria-label="Search chats" title="Search" aria-pressed={sidebarSearchOpen} onClick={() => { setSidebarSearchOpen((current) => !current); window.requestAnimationFrame(() => chatSearchRef.current?.focus()); }}><span aria-hidden="true">⌕</span></button>
-            <button type="button" aria-label="Open activity" title="Activity" onClick={() => { setWorkspaceSidePanelTab("activity"); setWorkspaceSidePanelOpen(true); }}><span aria-hidden="true">♧</span></button>
+          <div className="sidebar-brand-row"><div className="brand" aria-label="MetaCog"><img className="brand-mark" src={metaCogLogo} alt="" /><span>MetaCog</span></div><div className="sidebar-brand-actions">
+            <button type="button" aria-label="Search chats" title="Search" aria-pressed={sidebarSearchOpen} onClick={() => { setSidebarSearchOpen((current) => !current); window.requestAnimationFrame(() => chatSearchRef.current?.focus()); }}><Search aria-hidden="true" /></button>
+            <button type="button" aria-label="Open activity" title="Activity" onClick={() => { setWorkspaceSidePanelTab("activity"); setWorkspaceSidePanelOpen(true); }}><Activity aria-hidden="true" /></button>
           </div></div>
-          <label className={`chat-search${sidebarSearchOpen || chatSearch ? " open" : ""}`}><span aria-hidden="true">⌕</span><span className="sr-only">Search chats</span><input ref={chatSearchRef} aria-label="Search chats" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} onBlur={() => { if (!chatSearch) setSidebarSearchOpen(false); }} placeholder="Search" /></label>
+          <label className={`chat-search${sidebarSearchOpen || chatSearch ? " open" : ""}`}><Search aria-hidden="true" /><span className="sr-only">Search chats</span><input ref={chatSearchRef} aria-label="Search chats" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} onBlur={() => { if (!chatSearch) setSidebarSearchOpen(false); }} placeholder="Search" /></label>
         </div>
         <nav className="sidebar-shortcuts" aria-label="Workspace pages">
-          <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={() => startNewChat()}><span className="shortcut-glyph" aria-hidden="true">✎</span>New chat</button>
-          {[(["pull-requests", "Pull requests", "⑂"]), (["sites", "Sites", "▦"]), (["scheduler", "Scheduled", "◷"]), (["agents", "Agents", "⌘"]), (["plugins", "Plugins", "◉"])].map(([surface, label, glyph]) => {
+          <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={() => startNewChat()}><SquarePen className="shortcut-glyph" aria-hidden="true" />New chat</button>
+          {([
+            { surface: "pull-requests", label: "Pull requests", Icon: GitPullRequest },
+            { surface: "sites", label: "Sites", Icon: PanelsTopLeft },
+            { surface: "scheduler", label: "Scheduled", Icon: Clock3 },
+            { surface: "agents", label: "Agents", Icon: Workflow },
+            { surface: "plugins", label: "Plugins", Icon: Blocks }
+          ]).map(({ surface, label, Icon }) => {
             const selected = activeSurface === surface || (surface === "agents" && activeSurface === "improvement");
-            return <a className={`nav-item${selected ? " active" : ""}`} href={`#${surface}`} aria-current={selected ? "page" : undefined} onClick={(event) => openSurface(event, surface)} key={surface}><span className="shortcut-glyph" aria-hidden="true">{glyph}</span>{label}</a>;
+            return <a className={`nav-item${selected ? " active" : ""}`} href={`#${surface}`} aria-current={selected ? "page" : undefined} onClick={(event) => openSurface(event, surface)} key={surface}><Icon className="shortcut-glyph" aria-hidden="true" />{label}</a>;
           })}
         </nav>
         <div className="sidebar-library">
@@ -6365,8 +6410,8 @@ export function App() {
           {projectTreeOpen && <section className="sidebar-section project-tree" aria-label="Projects"><h2>Projects</h2>{projects.length === 0 && <p>No active projects</p>}{projects.map((project) => {
             const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root;
             const projectChats = chatSummaries.filter((chat) => chat.conversation.project_id === project.project_id);
-            return <div className="project-tree-item" key={project.project_id}><div className="project-tree-heading"><button className="project-tree-name" type="button" onClick={() => startNewChat(project)}><span aria-hidden="true">▱</span>{name}</button><div className="project-tree-actions"><button className="project-action" type="button" aria-label={`New chat in ${name}`} title={`New chat in ${name}`} disabled={projectMutationBusy === project.project_id} onClick={() => startNewChat(project)}><span aria-hidden="true">＋</span></button><button className="project-action" type="button" aria-label={`Archive ${name}`} title="Archive project" disabled={projectMutationBusy === project.project_id} onClick={() => void setProjectArchived(project, true)}><ArchiveIcon /></button><button className="project-action project-delete" type="button" aria-label={`Delete ${name}`} title="Remove project from MCG" disabled={projectMutationBusy === project.project_id} onClick={() => void deleteProject(project)}><TrashIcon /></button></div></div>{projectChats.length === 0 ? <p>No chats</p> : projectChats.map((chat) => renderChatRow(chat, "project"))}</div>;
-          })}{archivedProjects.length > 0 && <div className="archived-projects"><button className="sidebar-section-toggle" type="button" aria-expanded={archivedProjectsOpen} onClick={() => setArchivedProjectsOpen((current) => { window.localStorage.setItem("mcg.sidebar-archived-projects-open", String(!current)); return !current; })}><span>Archived projects</span><span aria-hidden="true">{archivedProjectsOpen ? "⌄" : "›"}</span></button>{archivedProjectsOpen && archivedProjects.map((project) => { const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root; return <div className="project-tree-heading archived-project-row" key={`archived-project-${project.project_id}`}><span className="project-tree-name"><span aria-hidden="true">▱</span>{name}</span><div className="project-tree-actions"><button className="project-action" type="button" aria-label={`Restore ${name}`} title="Restore project" disabled={projectMutationBusy === project.project_id} onClick={() => void setProjectArchived(project, false)}><span aria-hidden="true">↶</span></button><button className="project-action project-delete" type="button" aria-label={`Delete ${name}`} title="Remove project from MCG" disabled={projectMutationBusy === project.project_id} onClick={() => void deleteProject(project)}><TrashIcon /></button></div></div>; })}</div>}{unassignedChats.length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{unassignedChats.map((chat) => renderChatRow(chat, "project"))}</div>}</section>}
+            return <div className="project-tree-item" key={project.project_id}><div className="project-tree-heading"><button className="project-tree-name" type="button" onClick={() => startNewChat(project)}><span aria-hidden="true">▱</span>{name}</button><div className="project-tree-actions"><button className="project-action" type="button" aria-label={`New chat in ${name}`} title={`New chat in ${name}`} disabled={projectMutationBusy === project.project_id} onClick={() => startNewChat(project)}><span aria-hidden="true">＋</span></button><button className="project-action" type="button" aria-label={`Archive ${name}`} title="Archive project" disabled={projectMutationBusy === project.project_id} onClick={() => void setProjectArchived(project, true)}><ArchiveIcon /></button><button className="project-action project-delete" type="button" aria-label={`Delete ${name}`} title="Remove project from MetaCog" disabled={projectMutationBusy === project.project_id} onClick={() => void deleteProject(project)}><TrashIcon /></button></div></div>{projectChats.length === 0 ? <p>No chats</p> : projectChats.map((chat) => renderChatRow(chat, "project"))}</div>;
+          })}{archivedProjects.length > 0 && <div className="archived-projects"><button className="sidebar-section-toggle" type="button" aria-expanded={archivedProjectsOpen} onClick={() => setArchivedProjectsOpen((current) => { window.localStorage.setItem("mcg.sidebar-archived-projects-open", String(!current)); return !current; })}><span>Archived projects</span><span aria-hidden="true">{archivedProjectsOpen ? "⌄" : "›"}</span></button>{archivedProjectsOpen && archivedProjects.map((project) => { const name = project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root; return <div className="project-tree-heading archived-project-row" key={`archived-project-${project.project_id}`}><span className="project-tree-name"><span aria-hidden="true">▱</span>{name}</span><div className="project-tree-actions"><button className="project-action" type="button" aria-label={`Restore ${name}`} title="Restore project" disabled={projectMutationBusy === project.project_id} onClick={() => void setProjectArchived(project, false)}><span aria-hidden="true">↶</span></button><button className="project-action project-delete" type="button" aria-label={`Delete ${name}`} title="Remove project from MetaCog" disabled={projectMutationBusy === project.project_id} onClick={() => void deleteProject(project)}><TrashIcon /></button></div></div>; })}</div>}{unassignedChats.length > 0 && <div className="project-tree-item"><button type="button" onClick={() => navigateSurface("threads")}><span aria-hidden="true">▱</span>General</button>{unassignedChats.map((chat) => renderChatRow(chat, "project"))}</div>}</section>}
           <section className="sidebar-section" aria-label="Recent chats">
             <button className="sidebar-section-toggle" type="button" aria-expanded={recentsOpen} onClick={() => setRecentsOpen((current) => { window.localStorage.setItem("mcg.sidebar-recents-open", String(!current)); return !current; })}><span>Recents</span><span aria-hidden="true">{recentsOpen ? "⌄" : "›"}</span></button>
             {recentsOpen && (recentChats.length === 0 ? <p>No recent chats</p> : recentChats.map((chat) => renderChatRow(chat, "recent")))}
@@ -6379,7 +6424,7 @@ export function App() {
         <div className="sidebar-account-area">
           <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "Not signed in"}</small></span><span aria-hidden="true">⋯</span></button>
           <div className={`owner-menu${ownerMenuOpen ? " open" : ""}`} aria-label="Owner menu">
-            <div className="owner-menu-identity"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "MCG workspace"}</small></span></div>
+            <div className="owner-menu-identity"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "MetaCog workspace"}</small></span></div>
             <button
               className="owner-menu-usage"
               type="button"
@@ -6462,7 +6507,7 @@ export function App() {
         onPointerDown={(event) => event.stopPropagation()}
         onContextMenu={(event) => event.preventDefault()}
       >
-        <button role="menuitem" type="button" title="Uses MCG's separate, persistent browser profile" onClick={() => void openSiteInApp(contextSite)}><span aria-hidden="true">◎</span>Open in MCG browser</button>
+        <button role="menuitem" type="button" title="Uses MetaCog's separate, persistent browser profile" onClick={() => void openSiteInApp(contextSite)}><span aria-hidden="true">◎</span>Open in MetaCog browser</button>
         <button role="menuitem" type="button" onClick={() => void openSiteExternally(contextSite)}><span aria-hidden="true">↗</span>Open in external browser</button>
       </div>}
 
@@ -6470,31 +6515,31 @@ export function App() {
         <header className="topbar">
           <div className="topbar-title">
             <p className="eyebrow">METACOGNITIVE GOVERNOR</p>
-            <h1><span aria-hidden="true">▱</span>{activeSurfaceTitle}</h1>
+            <h1><PanelsTopLeft aria-hidden="true" />{activeSurfaceTitle}</h1>
             <p className="topbar-subtitle">Build, review, and run work with a local AI team.</p>
           </div>
           <div className="workspace-toolbar" aria-label="Workspace controls">
-            <button className={`workspace-mode-toggle${advanced ? " advanced" : ""}`} type="button" aria-label={advanced ? "Use simple mode" : "Use advanced mode"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => void toggleAdvancedMode()}><span aria-hidden="true">{advanced ? "◐" : "◑"}</span>{advanced ? "Advanced" : "Simple"}</button>
+            <button className={`workspace-mode-toggle${advanced ? " advanced" : ""}`} type="button" aria-label={advanced ? "Use simple mode" : "Use advanced mode"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => void toggleAdvancedMode()}><SlidersHorizontal aria-hidden="true" />{advanced ? "Advanced" : "Simple"}</button>
             <span className={`runtime-dot${localService && !localService.ready ? " status-error" : ""}`} title={localService?.detail} role="status"><i />{localService?.ready ? `v${localService.version}` : "Local runtime needs attention"}</span>
             <div className="workspace-toolbar-menu">
-              <button className="workspace-icon-button" type="button" aria-label="Share" title="Share" aria-expanded={workspacePopover === "share"} onClick={() => setWorkspacePopover((current) => current === "share" ? null : "share")}><span aria-hidden="true">⇧</span></button>
+              <button className="workspace-icon-button" type="button" aria-label="Share" title="Share" aria-expanded={workspacePopover === "share"} onClick={() => setWorkspacePopover((current) => current === "share" ? null : "share")}><Share2 aria-hidden="true" /></button>
               {workspacePopover === "share" && <div className="workspace-popover share-popover" role="menu" aria-label="Share workspace">
-                <button type="button" role="menuitem" onClick={() => void shareWorkspaceSummary()}><span aria-hidden="true">⧉</span><span><strong>Copy share summary</strong><small>Chat, status, and project</small></span></button>
-                <button type="button" role="menuitem" disabled={!workspaceProject} onClick={() => workspaceProject && void copyWorkspaceText(workspaceProject.root, "Project path copied")}><span aria-hidden="true">▱</span><span><strong>Copy project path</strong><small>{workspaceProjectName}</small></span></button>
+                <button type="button" role="menuitem" onClick={() => void shareWorkspaceSummary()}><Copy aria-hidden="true" /><span><strong>Copy share summary</strong><small>Chat, status, and project</small></span></button>
+                <button type="button" role="menuitem" disabled={!workspaceProject} onClick={() => workspaceProject && void copyWorkspaceText(workspaceProject.root, "Project path copied")}><FolderOpen aria-hidden="true" /><span><strong>Copy project path</strong><small>{workspaceProjectName}</small></span></button>
               </div>}
             </div>
             <div className="workspace-toolbar-menu">
-              <button className="open-in-button" type="button" disabled={!workspaceProject} aria-haspopup="menu" aria-expanded={workspacePopover === "open-in"} title={workspaceProject ? `Open ${workspaceProjectName} in another application` : "Choose a project first"} onClick={() => setWorkspacePopover((current) => current === "open-in" ? null : "open-in")}><span aria-hidden="true">▣</span>Open in<span aria-hidden="true">⌄</span></button>
+              <button className="open-in-button" type="button" disabled={!workspaceProject} aria-haspopup="menu" aria-expanded={workspacePopover === "open-in"} title={workspaceProject ? `Open ${workspaceProjectName} in another application` : "Choose a project first"} onClick={() => setWorkspacePopover((current) => current === "open-in" ? null : "open-in")}><FolderOpen aria-hidden="true" />Open in<ChevronDown aria-hidden="true" /></button>
               {workspacePopover === "open-in" && <div className="workspace-popover open-in-popover" role="menu" aria-label="Open project in">
                 <div className="workspace-popover-heading"><strong>Open {workspaceProjectName} in</strong></div>
                 {openInApplications.filter((application) => application.available).map((application) => <button type="button" role="menuitem" key={application.id} onClick={() => void openCurrentWorkspace(application.id)}><span className="open-in-glyph" aria-hidden="true">{application.id === "file_explorer" ? "▱" : application.id === "terminal" || application.id === "git_bash" ? ">_" : "◆"}</span><span>{application.label}</span></button>)}
                 {openInApplications.filter((application) => application.available).length === 0 && <p>Available in the installed desktop app.</p>}
               </div>}
             </div>
-            <button className="workspace-icon-button" type="button" disabled={!selectedChatId || !workspaceProject || codexReviewBusy} aria-label="Review uncommitted changes" title="Review uncommitted project changes in this owned Codex thread" onClick={() => void startConversationReview()}><span aria-hidden="true">✓</span></button>
-            <button className={`workspace-icon-button${workspacePinnedSummaryOpen ? " active" : ""}`} type="button" aria-label="Toggle pinned summary" title="Toggle pinned summary" aria-pressed={workspacePinnedSummaryOpen} onClick={() => setWorkspacePinnedSummaryOpen((current) => !current)}><span aria-hidden="true">☷</span></button>
-            <button className={`workspace-icon-button${workspaceBottomPanelOpen ? " active" : ""}`} type="button" aria-label="Toggle bottom panel" title="Toggle bottom panel (Ctrl+J)" aria-pressed={workspaceBottomPanelOpen} onClick={() => setWorkspaceBottomPanelOpen((current) => !current)}><span aria-hidden="true">▱</span></button>
-            <button className={`workspace-icon-button${workspaceSidePanelOpen ? " active" : ""}`} type="button" aria-label="Toggle side panel" title="Toggle side panel (Ctrl+Alt+B)" aria-pressed={workspaceSidePanelOpen} onClick={() => setWorkspaceSidePanelOpen((current) => !current)}><span aria-hidden="true">◧</span></button>
+            <button className="workspace-icon-button" type="button" disabled={!selectedChatId || !workspaceProject || codexReviewBusy} aria-label="Review uncommitted changes" title="Review uncommitted project changes in this owned Codex thread" onClick={() => void startConversationReview()}><Check aria-hidden="true" /></button>
+            <button className={`workspace-icon-button${workspacePinnedSummaryOpen ? " active" : ""}`} type="button" aria-label="Toggle pinned summary" title="Toggle pinned summary" aria-pressed={workspacePinnedSummaryOpen} onClick={() => setWorkspacePinnedSummaryOpen((current) => !current)}><ListTree aria-hidden="true" /></button>
+            <button className={`workspace-icon-button${workspaceBottomPanelOpen ? " active" : ""}`} type="button" aria-label="Toggle bottom panel" title="Toggle bottom panel (Ctrl+J)" aria-pressed={workspaceBottomPanelOpen} onClick={() => setWorkspaceBottomPanelOpen((current) => !current)}><PanelBottom aria-hidden="true" /></button>
+            <button className={`workspace-icon-button${workspaceSidePanelOpen ? " active" : ""}`} type="button" aria-label="Toggle side panel" title="Toggle side panel (Ctrl+Alt+B)" aria-pressed={workspaceSidePanelOpen} onClick={() => setWorkspaceSidePanelOpen((current) => !current)}><PanelRight aria-hidden="true" /></button>
           </div>
         </header>
 
@@ -6507,7 +6552,7 @@ export function App() {
 
         {(advanced || activeSurface === "tasks") && <section className="hero-card new-chat-surface" hidden={activeSurface !== "tasks"}>
           <div className="new-chat-heading">
-            <img className="new-chat-mark" src={mcgLogo} alt="" />
+            <img className="new-chat-mark" src={metaCogLogo} alt="" />
             <h2>{selectedProject ? <>What should we build in <span>{projectDisplayName(selectedProject)}</span>?</> : "What should we build?"}</h2>
           </div>
           <div className="new-chat-composer-shell">
@@ -6569,7 +6614,7 @@ export function App() {
               </section>}
               {indeterminateConversationTurn && <section className="chat-recovery" aria-label="Codex turn recovery">
                 <strong>Completion could not be proven</strong>
-                <p>Codex accepted this turn before the harness disconnected. MCG will not resend it without your choice.</p>
+                <p>Codex accepted this turn before the harness disconnected. MetaCog will not resend it without your choice.</p>
                 <div>
                   <button className="primary" type="button" disabled={codexRecoveryBusy} onClick={() => void recoverConversation("resume")}>Resume safely</button>
                   <button className="secondary" type="button" disabled={codexRecoveryBusy} onClick={() => void recoverConversation("retry")}>Retry as a new turn</button>
@@ -6594,7 +6639,7 @@ export function App() {
                 </div>)}
               </section>}
               <div className="chat-followup-composer">
-              <textarea aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message MCG..." />
+              <textarea aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message MetaCog..." />
               <div className="composer-actions"><PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} /><span className="composer-action-spacer" /><ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam /><button className="primary" type="button" disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}>{conversationIsActive ? "Queue" : "Send"}</button></div>
               {taskError && <p className="error-message" role="alert">{taskError}</p>}
               </div>
@@ -6716,7 +6761,7 @@ export function App() {
               </div> : selectedCodeReviewTask ? <article className="pull-request-detail-card">
                 <header><span className="pull-request-detail-icon" aria-hidden="true">⑂</span><div><span className={`task-state state-${selectedCodeReviewTask.state}`}>{selectedCodeReviewTask.state.replaceAll("_", " ")}</span><h2>{selectedCodeReviewTask.goal.replace(CODE_REVIEW_GOAL_PREFIX, "").trim() || "Code review"}</h2><p>{projects.find((project) => project.project_id === selectedCodeReviewTask.project_id)?.root ?? "Repository unavailable"}</p></div></header>
                 <div className="pull-request-detail-summary"><div><span>Review type</span><strong>Local, read-only</strong></div><div><span>Updated</span><strong>{new Date(selectedCodeReviewTask.updated_at).toLocaleString()}</strong></div></div>
-                <p>The review findings and discussion live in the associated MCG chat.</p>
+                <p>The review findings and discussion live in the associated MetaCog chat.</p>
                 <button className="primary" type="button" onClick={() => openChat(selectedCodeReviewTask.id)}>Open review</button>
               </article> : <div className="pull-request-detail-empty"><span aria-hidden="true">⑂</span><strong>Select a review to view</strong><p>Choose a local review from the list, or start a new one.</p></div>}
             </section>
@@ -6829,7 +6874,7 @@ export function App() {
                 </div>
                 {topologyPlan && <span className="count-badge">{topologyPlan.status === "ready" ? `${topologyPlan.stages.length} stages` : topologyPlan.status.replaceAll("_", " ")}</span>}
               </div>
-              {topologyPlanError ? <p className="error-message" role="alert">The topology plan could not be loaded: {topologyPlanError}</p> : !topologyPlan ? <p className="empty-state">Loading the current topology plan…</p> : topologyPlan.status === "empty" ? <p className="empty-state">No explicit deployment dependencies were discovered.</p> : topologyPlan.status === "blocked_by_cycle" ? <div className="error-message" role="alert">Dependency cycle detected. MCG will not present partial execution stages.{advanced && topologyPlan.unresolved_nodes.length > 0 && <small>{topologyPlan.unresolved_nodes.map((node) => node.label).join(", ")}</small>}</div> : <ol className="topology-plan" aria-label="Project topology plan">
+              {topologyPlanError ? <p className="error-message" role="alert">The topology plan could not be loaded: {topologyPlanError}</p> : !topologyPlan ? <p className="empty-state">Loading the current topology plan…</p> : topologyPlan.status === "empty" ? <p className="empty-state">No explicit deployment dependencies were discovered.</p> : topologyPlan.status === "blocked_by_cycle" ? <div className="error-message" role="alert">Dependency cycle detected. MetaCog will not present partial execution stages.{advanced && topologyPlan.unresolved_nodes.length > 0 && <small>{topologyPlan.unresolved_nodes.map((node) => node.label).join(", ")}</small>}</div> : <ol className="topology-plan" aria-label="Project topology plan">
                 {topologyPlan.stages.map((stage) => <li key={stage.index}><strong>Stage {stage.index + 1}</strong><ul>{stage.nodes.map((node) => <li key={node.id}>{node.label}{advanced && <small>{node.kind} · {node.source}</small>}</li>)}</ul></li>)}
               </ol>}
               <div className="section-heading compact-heading">
@@ -6853,7 +6898,7 @@ export function App() {
                   <small><span>Retry identity</span><code>{reviewedTopologyPlanId}</code></small>
                 </div>}
                 <button className="primary" type="button" disabled={reviewedTopologyBusy || !reviewedTopologyReason.trim()} onClick={reviewTopologyExecution}>{reviewedTopologyBusy ? "Working…" : "Review this plan"}</button>
-              </div> : <p className="empty-state">A ready explicit topology and a manifest-discovered command are required before MCG can create an execution plan.</p>}
+              </div> : <p className="empty-state">A ready explicit topology and a manifest-discovered command are required before MetaCog can create an execution plan.</p>}
               {reviewedTopologyError && <p className="error-message" role="alert">{reviewedTopologyError}</p>}
               {reviewedTopologyPlans.length > 0 && <div className="memory-list" aria-label="Reviewed topology plans">
                 {reviewedTopologyPlans.map((plan) => <article className="memory-card reviewed-topology-card" key={plan.id}>
@@ -6881,7 +6926,7 @@ export function App() {
               </div>}
               <div className="section-heading compact-heading">
                 <div>
-                  <h3>What MCG remembers</h3>
+                  <h3>What MetaCog remembers</h3>
                   <p className="muted">Important project facts stay local, versioned, and tied to their source.</p>
                 </div>
                 <span className="count-badge">{memoryClaims.length} current</span>
@@ -6889,9 +6934,9 @@ export function App() {
               <div className="memory-composer">
                 {advanced && <label>Namespace<input aria-label="Memory namespace" value={memoryNamespace} onChange={(event) => setMemoryNamespace(event.target.value)} /></label>}
                 <label>Fact name<input aria-label="Memory fact name" value={memoryKey} onChange={(event) => setMemoryKey(event.target.value)} placeholder="package manager" /></label>
-                <label>What should MCG remember?<textarea aria-label="Memory value" value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} placeholder="This project uses pnpm." /></label>
+                <label>What should MetaCog remember?<textarea aria-label="Memory value" value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} placeholder="This project uses pnpm." /></label>
                 {advanced && <label>Confidence<input aria-label="Memory confidence" type="number" min="0" max="1" step="0.05" value={memoryConfidence} onChange={(event) => setMemoryConfidence(event.target.value)} /></label>}
-                {advanced && <label>Fresh until (optional)<input aria-label="Memory fresh until" type="datetime-local" value={memoryFreshUntil} onChange={(event) => setMemoryFreshUntil(event.target.value)} /><small>After this time, MCG automatically marks the fact stale and retains its history.</small></label>}
+                {advanced && <label>Fresh until (optional)<input aria-label="Memory fresh until" type="datetime-local" value={memoryFreshUntil} onChange={(event) => setMemoryFreshUntil(event.target.value)} /><small>After this time, MetaCog automatically marks the fact stale and retains its history.</small></label>}
                 <button className="primary" type="button" disabled={memoryBusy || !memoryKey.trim() || !memoryDraft.trim()} onClick={addProjectMemory}>Remember this</button>
               </div>
               {memoryError && <p className="error-message" role="alert">{memoryError}</p>}
@@ -6919,7 +6964,7 @@ export function App() {
               </div>}
               {memoryTransferSource && memoryTransferPreview && <div className="memory-composer" aria-label="Review project memory transfer">
                 <strong>Share “{memoryTransferSource.key}” with another project</strong>
-                <p className="muted">MCG will copy this exact fact once. Later changes stay separate in each project.</p>
+                <p className="muted">MetaCog will copy this exact fact once. Later changes stay separate in each project.</p>
                 <label>Target project<select aria-label="Memory transfer target project" value={memoryTransferTarget} onChange={(event) => setMemoryTransferTarget(event.target.value)}>
                   <option value="">Choose a project</option>
                   {projects.filter((project) => project.project_id !== selectedProject.project_id).map((project) => <option value={project.project_id} key={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
@@ -6974,7 +7019,7 @@ export function App() {
 
         {activeSurface === "agents" && <section className="panel agents-panel" id="agents" aria-label="Agents">
           <div className="agents-heading">
-            <div><p className="eyebrow">GOVERNED AGENTS</p><h2>Agents</h2><p className="muted">See how MCG governs teams, assignments, and live work.</p></div>
+            <div><p className="eyebrow">GOVERNED AGENTS</p><h2>Agents</h2><p className="muted">See how MetaCog governs teams, assignments, and live work.</p></div>
             <button className="secondary" type="button" disabled={agentBusy} onClick={() => void refreshAgents()}>{agentBusy ? "Refreshing…" : "Refresh"}</button>
           </div>
           <nav className="segmented-tabs agents-tabs" aria-label="Agents pages">
@@ -6986,8 +7031,8 @@ export function App() {
 
           {agentTab === "overview" && <div className="agents-stack">
             <article className="agent-governor-card">
-              <div className="governor-mark" aria-hidden="true"><img src={mcgLogo} alt="" /></div>
-              <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC RUNTIME · NOT A MODEL AGENT</span><h3>MCG runtime</h3><p>Enforces owner policy above the Chat, Coordinator, and Coding Agents. It brokers tools, permissions, budgets, leases, memory, and evidence. The metacognitive-governor model role remains dormant.</p></div>
+              <div className="governor-mark" aria-hidden="true"><img src={metaCogLogo} alt="" /></div>
+              <div className="agent-card-copy"><span className="agent-kicker">DETERMINISTIC RUNTIME · NOT A MODEL AGENT</span><h3>MetaCog runtime</h3><p>Enforces owner policy above the Chat, Coordinator, and Coding Agents. It brokers tools, permissions, budgets, leases, memory, and evidence. The metacognitive-governor model role remains dormant.</p></div>
               <div className="agent-status-summary"><span className={`agent-state state-${governorOverview?.status.state ?? "starting"}`}>{governorOverview?.status.state ?? "starting"}</span><strong>{governorOverview?.active_runs ?? 0}</strong><small>active runs</small></div>
               <details className="governor-details">
                 <summary>Subsystem status</summary>
@@ -7016,7 +7061,7 @@ export function App() {
 
             <article className="agent-section-card topology-card">
               <div className="section-heading compact-heading"><div><h3>Active team</h3><p className="muted">{activeOrganization ? `${activeOrganization.name} · revision ${activeOrganization.revision}` : "Loading assignment…"}</p></div>{activeOrganization && <button className="secondary" type="button" onClick={() => editOrganization(activeOrganization)}>Edit team</button>}</div>
-              {activeOrganization && <><div className="topology-diagram" aria-hidden="true"><div className="topology-governor">MCG runtime</div><span className="topology-line" /><div className="topology-team">{activeOrganization.name}</div><div className="topology-roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coordinator" || role.kind === "coder").map((role) => <div className={`topology-role role-${role.kind}`} key={role.id}><strong>{role.name}</strong><small>{role.kind}</small></div>)}</div></div><ul className="topology-accessible-list" aria-label="Active conversation roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coordinator" || role.kind === "coder").map((role) => <li key={`accessible-${role.id}`}><strong>{role.name}</strong><span>{role.kind.replaceAll("_", " ")} · {role.purpose}</span></li>)}</ul></>}
+              {activeOrganization && <><div className="topology-diagram" aria-hidden="true"><div className="topology-governor">MetaCog runtime</div><span className="topology-line" /><div className="topology-team">{activeOrganization.name}</div><div className="topology-roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coordinator" || role.kind === "coder").map((role) => <div className={`topology-role role-${role.kind}`} key={role.id}><strong>{role.name}</strong><small>{role.kind}</small></div>)}</div></div><ul className="topology-accessible-list" aria-label="Active conversation roles">{activeOrganization.roles.filter((role) => role.kind === "conversation" || role.kind === "coordinator" || role.kind === "coder").map((role) => <li key={`accessible-${role.id}`}><strong>{role.name}</strong><span>{role.kind.replaceAll("_", " ")} · {role.purpose}</span></li>)}</ul></>}
             </article>
 
             <div className="agent-overview-grid"><article className="agent-section-card"><h3>Current work</h3><strong className="agent-metric">{governorOverview?.active_runs ?? 0}</strong><p className="muted">running or waiting agent teams</p><button className="link-button" type="button" onClick={() => setAgentTab("activity")}>Inspect activity →</button></article><article className="agent-section-card"><h3>Recent outcomes</h3><strong className="agent-metric">{agentRuns.filter((run) => run.run.state === "completed").length}</strong><p className="muted">completed in the latest {governorOverview?.recent_runs ?? agentRuns.length} runs</p></article><article className="agent-section-card"><h3>Default assignment</h3><strong>{activeOrganization?.name ?? "Loading"}</strong><p className="muted">Projects and tasks can override this team.</p><button className="link-button" type="button" onClick={() => setAgentTab("teams")}>Manage assignments →</button></article></div>
@@ -7086,7 +7131,7 @@ export function App() {
                 </label>
                 <button className="secondary" type="button" disabled={organizationBusy || !organizationBaseId || !organizationName.trim()} onClick={addInheritedOrganization}>Create inherited organization</button>
                 <small>Inheritance pins the exact base revision. Later changes to the base cannot silently alter this organization.</small>
-                <label>Portable organization JSON<textarea aria-label="Portable organization JSON" value={portableOrganizationJson} onChange={(event) => setPortableOrganizationJson(event.target.value)} placeholder="Export a revision or paste a portable MCG organization" /></label>
+                <label>Portable organization JSON<textarea aria-label="Portable organization JSON" value={portableOrganizationJson} onChange={(event) => setPortableOrganizationJson(event.target.value)} placeholder="Export a revision or paste a portable MetaCog organization" /></label>
                 <button className="secondary" type="button" disabled={organizationBusy || !portableOrganizationJson.trim()} onClick={applyPortableOrganization}>Import as new organization</button>
                 <small>Retry identity: <code>{organizationImportId}</code>. It changes only after a confirmed import.</small>
                 <div className="inline-fields">
@@ -7122,7 +7167,7 @@ export function App() {
               <p className="muted">Verification creates a review only. Import remains a separate owner decision and never inherits publisher authority.</p>
               <label>
                 Signed organization package
-                <textarea aria-label="Signed organization package" value={organizationShareJson} onChange={(event) => setOrganizationShareJson(event.target.value)} placeholder="Paste a signed MCG organization package" />
+                <textarea aria-label="Signed organization package" value={organizationShareJson} onChange={(event) => setOrganizationShareJson(event.target.value)} placeholder="Paste a signed MetaCog organization package" />
               </label>
               <button className="secondary" type="button" disabled={organizationShareBusy || !organizationShareJson.trim()} onClick={reviewOrganizationShare}>
                 {organizationShareBusy ? "Checking..." : "Verify for review"}
@@ -7261,7 +7306,7 @@ export function App() {
                         <small>{project ? project.root.split(/[\\/]/).filter(Boolean).at(-1) : "ChatGPT Sites"}{deployment ? ` · ${deployment.state}` : " · Ready to refine"}</small>
                       </div>
                       <div className="site-library-actions">
-                        <button className="secondary" type="button" title="Uses MCG's separate, persistent browser profile" onClick={() => void openSiteInApp(entry)}>Open in MCG browser</button>
+                        <button className="secondary" type="button" title="Uses MetaCog's separate, persistent browser profile" onClick={() => void openSiteInApp(entry)}>Open in MetaCog browser</button>
                         <button className="secondary" type="button" onClick={() => continueSiteLibraryChat(entry)}>Continue editing</button>
                         <button className="site-more-button" type="button" aria-label={`More options for ${entry.displayName}`} onClick={(event) => openSiteContextMenu(event, entry.key)}>•••</button>
                       </div>
@@ -7347,7 +7392,7 @@ export function App() {
             <div>
               <p className="eyebrow">SSH</p>
               <h2>Remote Linux hosts</h2>
-              <p className="muted">Connect outbound with your SSH agent and an explicitly pinned host key. MCG never opens a remote control listener.</p>
+              <p className="muted">Connect outbound with your SSH agent and an explicitly pinned host key. MetaCog never opens a remote control listener.</p>
             </div>
             <span className="count-badge">{sshHosts.filter((host) => host.state === "active").length} active</span>
           </div>
@@ -7438,7 +7483,7 @@ export function App() {
             <div>
               <p className="eyebrow">COMPUTER &amp; BROWSER</p>
               <h2>Local execution sessions</h2>
-              <p className="muted">Reserve durable local sessions now. MCG reports them as requested until a real executor is attached.</p>
+              <p className="muted">Reserve durable local sessions now. MetaCog reports them as requested until a real executor is attached.</p>
             </div>
             <span className="count-badge">{platformSessions.filter((session) => ["requested", "active", "handed_off"].includes(session.state)).length} open</span>
           </div>
@@ -7490,9 +7535,9 @@ export function App() {
                 <small>Leave every field blank for the entire primary display. A smaller, static region is recommended before granting input because its pixels must remain unchanged between observation and action.</small>
               </fieldset>}
               {platformKind === "computer_use" && <p className="muted">
-                {platformComputerScreenOnly ? "MCG can see the primary display but cannot interact." : "MCG can see and use the primary display. Every input batch must match the latest captured pixels."}
+                {platformComputerScreenOnly ? "MetaCog can see the primary display but cannot interact." : "MetaCog can see and use the primary display. Every input batch must match the latest captured pixels."}
               </p>}
-              <p className="muted">Reservation is local and restart-safe. It will not be labeled active until MCG has attached a verified executor.</p>
+              <p className="muted">Reservation is local and restart-safe. It will not be labeled active until MetaCog has attached a verified executor.</p>
               <button className="primary" type="button" disabled={platformBusy} onClick={reservePlatformSession}>
                 {platformBusy ? "Saving..." : "Reserve session"}
               </button>
@@ -7549,8 +7594,8 @@ export function App() {
                     {platformBrowsers[session.id]?.mode === "visible" && <button className="secondary" type="button" disabled={platformBusy} onClick={() => handoffPlatformBrowser(session.id)}>Hand to me</button>}
                   </>}
                   {session.kind === "browser" && session.state === "handed_off" && <>
-                    <small>Returning control blanks the current page before MCG can read it.</small>
-                    <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformBrowser(session.id)}>Return control to MCG</button>
+                    <small>Returning control blanks the current page before MetaCog can read it.</small>
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformBrowser(session.id)}>Return control to MetaCog</button>
                   </>}
                   {session.kind === "computer_use" && session.state === "requested" && <button className="primary" type="button" disabled={platformBusy} onClick={() => attachPlatformComputer(session.id)}>Start computer session</button>}
                   {session.kind === "computer_use" && session.state === "active" && <>
@@ -7590,8 +7635,8 @@ export function App() {
                     <button className="secondary" type="button" disabled={platformBusy} onClick={() => handoffPlatformComputer(session.id)}>Hand control to me</button>
                   </>}
                   {session.kind === "computer_use" && session.state === "handed_off" && <>
-                    <small>MCG cannot see or control this display while it is yours. Returning control does not capture your activity.</small>
-                    <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformComputer(session.id)}>Return computer control to MCG</button>
+                    <small>MetaCog cannot see or control this display while it is yours. Returning control does not capture your activity.</small>
+                    <button className="primary" type="button" disabled={platformBusy} onClick={() => reclaimPlatformComputer(session.id)}>Return computer control to MetaCog</button>
                   </>}
                   <button className="secondary" type="button" disabled={platformBusy} onClick={() => togglePlatformHistory(session.id)}>{platformHistory[session.id] ? "Hide history" : "History"}</button>
                   {!(["closed", "failed"] as string[]).includes(session.state) && <button className="link-button" type="button" disabled={platformBusy} onClick={() => closePlatform(session.id)}>Close</button>}
@@ -7614,8 +7659,8 @@ export function App() {
             <div className="scheduled-simple-layout">
               <div className="scheduled-chat-card">
                 <div>
-                  <h3>What should MCG do on a schedule?</h3>
-                  <p>Describe the work. MCG will help refine the prompt, cadence, destination, and permissions before it runs unattended.</p>
+                  <h3>What should MetaCog do on a schedule?</h3>
+                  <p>Describe the work. MetaCog will help refine the prompt, cadence, destination, and permissions before it runs unattended.</p>
                 </div>
                 <div className="scheduled-field">
                   <span>Project</span>
@@ -7640,7 +7685,7 @@ export function App() {
                 </label>
                 <button className="primary" type="button" disabled={!selectedProject} onClick={startScheduleChat}>Set up in chat</button>
               </div>
-              <p className="scheduled-local-note">Local project schedules need this computer on, MCG running, and the project available. They currently run in the selected project; dedicated Git worktree isolation is planned.</p>
+              <p className="scheduled-local-note">Local project schedules need this computer on, MetaCog running, and the project available. They currently run in the selected project; dedicated Git worktree isolation is planned.</p>
               {scheduleError && <p className="error-message" role="alert">{scheduleError}</p>}
               <div className="scheduled-inbox-toolbar">
                 <label className="scheduled-search">
@@ -7838,13 +7883,13 @@ export function App() {
               <div className="oauth-card" role="status">
                 <p>{login.user_code
                   ? "Enter this one-time code on the device authorization page."
-                  : "Finish signing in in your browser. MCG will connect automatically."}</p>
+                  : "Finish signing in in your browser. MetaCog will connect automatically."}</p>
                 <button className="link-button" type="button" onClick={() => openVerification(login.verification_url)}>
                   {login.user_code ? "Open device authorization page" : "Open sign-in page"}
                 </button>
                 {login.user_code && <p className="device-code">Code: <strong>{login.user_code}</strong></p>}
                 <small>{login.user_code
-                  ? "MCG checks the device authorization automatically after you enter the code."
+                  ? "MetaCog checks the device authorization automatically after you enter the code."
                   : "The callback listener closes after 3 minutes. If it expires, the sign-in option will return here."}</small>
               </div>
             )}
@@ -7922,7 +7967,7 @@ export function App() {
               </label>
               </div>
             </TechnicalDetails>}
-            <p className="form-note">MCG discovers models from the endpoint before saving. Credentials go directly to the operating-system credential store.</p>
+            <p className="form-note">MetaCog discovers models from the endpoint before saving. Credentials go directly to the operating-system credential store.</p>
             <button className="primary" type="button" disabled={busy} onClick={addProvider}>{busy ? "Connecting…" : "Connect provider"}</button>
           </div>}
           <div className="provider-connections" aria-label="Configured model providers">
@@ -7979,7 +8024,7 @@ export function App() {
               <p className="eyebrow">CONNECTED TOOLS</p>
               <h2>MCP servers</h2>
               <p className="muted">
-                Add a tool server. MCG discovers its capabilities before saving it and
+                Add a tool server. MetaCog discovers its capabilities before saving it and
                 keeps remote actions inside normal permissions and approvals.
               </p>
             </div>
@@ -8156,7 +8201,7 @@ export function App() {
                     </div>
                     <span className={`status-chip ${installation.enabled ? "status-enabled" : "status-disabled"}`}>{installation.enabled ? "On" : "Off"}</span>
                   </div>
-                  <p className="plugin-directory-description">Adds a reusable sandboxed capability to MCG chats. Its requested access stays governed by the host policy.</p>
+                  <p className="plugin-directory-description">Adds a reusable sandboxed capability to MetaCog chats. Its requested access stays governed by the host policy.</p>
                   <div className="plugin-component-chips" aria-label={`${manifest.display_name} components`}>
                     <span>Capability</span>
                     {manifest.requested_capabilities.map((capability) => <span key={capability}>{capabilityLabel(capability)}</span>)}
@@ -8197,7 +8242,7 @@ export function App() {
             <div className="plugin-import" aria-label="Install local plugin">
               <div>
                 <h3>Install from this computer</h3>
-                <p className="form-note">Local plugins are imported disabled and unsigned. MCG does not grant access automatically.</p>
+                <p className="form-note">Local plugins are imported disabled and unsigned. MetaCog does not grant access automatically.</p>
               </div>
               <label>Manifest (.json)<input type="file" accept="application/json,.json" onChange={(event) => setPluginManifestFile(event.target.files?.[0] ?? null)} /></label>
               <label>Module (.wasm)<input type="file" accept="application/wasm,.wasm" onChange={(event) => setPluginModuleFile(event.target.files?.[0] ?? null)} /></label>
@@ -8314,7 +8359,7 @@ export function App() {
             <div className="settings-content" data-settings-tab={settingsTab}>
               <div className="settings-pane" data-settings-pane="general">
                 <div className="section-heading">
-                  <div><h2 id="settings-heading">General</h2><p className="muted">Choose how MCG works by default.</p></div>
+                  <div><h2 id="settings-heading">General</h2><p className="muted">Choose how MetaCog works by default.</p></div>
                   {userSettings && <span className="count-badge">Revision {userSettings.revision}</span>}
                 </div>
                 {userSettings ? <><h3>Permissions</h3><div className="provider-setup settings-card settings-card-stack" aria-label="Owner settings">
@@ -8369,16 +8414,16 @@ export function App() {
             </div>}
                 </div><h3>General</h3><div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>Default file destination</strong><small>Files and folders remain in their attached project or explicit global folder.</small></span><span className="count-badge">Project</span></div>
-                  <div className="settings-control"><span><strong>Agent environment</strong><small>MCG runs locally on this computer through the governed daemon.</small></span><span className="count-badge">Local</span></div>
+                  <div className="settings-control"><span><strong>Agent environment</strong><small>MetaCog runs locally on this computer through the governed daemon.</small></span><span className="count-badge">Local</span></div>
                   <div className="settings-control"><span><strong>Language</strong><small>Language for the app interface</small></span><span className="count-badge">Auto detect</span></div>
                   <div className="settings-control"><span><strong>Suggested prompts</strong><small>Show focused starting points on consumer workflows.</small></span><span className="count-badge">On</span></div>
                 </div><h3>Composer</h3><div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>Send shortcut</strong><small>Enter sends a prompt; Shift+Enter inserts a line.</small></span><span className="count-badge">Enter</span></div>
-                  <div className="settings-control"><span><strong>Follow-up behavior</strong><small>New messages are queued while MCG is working.</small></span><span className="count-badge">Queue</span></div>
-                </div><h3>Notifications</h3><div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Permission and question notifications</strong><small>MCG surfaces requests that require owner input without pretending a background action completed.</small></span><span className="count-badge">On</span></div></div></> : <p className="empty-state">Loading durable settings…</p>}
+                  <div className="settings-control"><span><strong>Follow-up behavior</strong><small>New messages are queued while MetaCog is working.</small></span><span className="count-badge">Queue</span></div>
+                </div><h3>Notifications</h3><div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Permission and question notifications</strong><small>MetaCog surfaces requests that require owner input without pretending a background action completed.</small></span><span className="count-badge">On</span></div></div></> : <p className="empty-state">Loading durable settings…</p>}
               </div>
               <div className="settings-pane" data-settings-pane="import">
-                <div className="section-heading"><div><h2>Import</h2><p className="muted">Bring local folders and portable MCG data into this installation.</p></div></div>
+                <div className="section-heading"><div><h2>Import</h2><p className="muted">Bring local folders and portable MetaCog data into this installation.</p></div></div>
           <h3>Import from another AI app</h3>
           <div className="settings-card settings-card-stack settings-unavailable" aria-label="Other AI app imports">
             <div className="settings-control"><span><strong>Keep imports in sync</strong><small>Continuous cross-app synchronization is not available.</small></span><span className="count-badge">Off</span></div>
@@ -8413,7 +8458,7 @@ export function App() {
             <div className="section-heading compact-heading">
               <div>
                 <h3>Application updates</h3>
-                <p className="muted">MCG checks only the trusted release service embedded by the owner-controlled build and accepts only packages signed by its embedded update key.</p>
+                <p className="muted">MetaCog checks only the trusted release service embedded by the owner-controlled build and accepts only packages signed by its embedded update key.</p>
               </div>
               {updateConfiguration && <span className="count-badge">Version {updateConfiguration.current_version}</span>}
             </div>
@@ -8422,7 +8467,7 @@ export function App() {
               {updateConfiguration.recovery_notice}
             </p>}
             {updateConfiguration && !updateConfiguration.configured && <p className="empty-state">
-              Updates are unavailable in this build. Install a newer owner-signed package manually; MCG will never accept an unsigned fallback.
+              Updates are unavailable in this build. Install a newer owner-signed package manually; MetaCog will never accept an unsigned fallback.
             </p>}
             {advanced && updateConfiguration && !updateConfiguration.configured && <p className="form-note">{updateConfiguration.detail}</p>}
             {updateConfiguration?.configured && <>
@@ -8434,7 +8479,7 @@ export function App() {
               {updateCheck && !updateCheck.available_version && <p role="status">{updateCheck.detail}</p>}
               {updateCheck?.available_version && <article className="provider-card update-card">
                 <div>
-                  <h3>MCG {updateCheck.available_version}</h3>
+                  <h3>MetaCog {updateCheck.available_version}</h3>
                   <p>{updateCheck.detail}</p>
                   {updateCheck.notes && <p className="update-notes">{updateCheck.notes}</p>}
                   {advanced && <small>
@@ -8445,8 +8490,8 @@ export function App() {
                 {!updateReview && <button className="primary" type="button" disabled={updateBusy} onClick={() => setUpdateReview(true)}>Review update</button>}
               </article>}
               {updateCheck?.available_version && updateReview && <div className="provider-form" aria-label="Confirm application update">
-                <h3>Install signed MCG {updateCheck.available_version}?</h3>
-                <p className="form-note">MCG will download and verify the signed package, create and verify a credential-free portable backup, stop the local service cleanly, install the update, and restart. It will stop without installing if any verification fails.</p>
+                <h3>Install signed MetaCog {updateCheck.available_version}?</h3>
+                <p className="form-note">MetaCog will download and verify the signed package, create and verify a credential-free portable backup, stop the local service cleanly, install the update, and restart. It will stop without installing if any verification fails.</p>
                 <div className="composer-actions">
                   <button className="primary" type="button" disabled={updateBusy} onClick={applyUpdate}>{updateBusy ? "Preparing verified update…" : "Back up and install"}</button>
                   <button className="secondary" type="button" disabled={updateBusy} onClick={() => setUpdateReview(false)}>Cancel</button>
@@ -8468,7 +8513,7 @@ export function App() {
             </div>
             {diagnosticsError && <p className="error-message" role="alert">{diagnosticsError}</p>}
             {diagnostics && <div aria-label="Diagnostic results">
-              <p><strong>Overall: {diagnostics.overall.toUpperCase()}</strong> · MCG {diagnostics.version} · {diagnostics.os}</p>
+              <p><strong>Overall: {diagnostics.overall.toUpperCase()}</strong> · MetaCog {diagnostics.version} · {diagnostics.os}</p>
               <ul className="history-list">
                 {diagnostics.checks
                   .filter((check) => advanced || check.severity !== "pass")
@@ -8519,7 +8564,7 @@ export function App() {
               </label>
               <button className="secondary" type="button" disabled={backupBusy || backupPassphrase.length < 12} onClick={makeEncryptedBackup}>Create encrypted backup</button>
             </div>}
-            <p className="form-note">Restore is intentionally offline: stop the daemon, then run <code>mcg backup restore PATH --confirm</code>. Add <code>--restore-secrets</code> only for an encrypted credential backup. MCG retains the previous database for rollback.</p>
+            <p className="form-note">Restore is intentionally offline: stop the daemon, then run <code>mcg backup restore PATH --confirm</code>. Add <code>--restore-secrets</code> only for an encrypted credential backup. MetaCog retains the previous database for rollback.</p>
           </div>
               </div>
 
@@ -8554,7 +8599,7 @@ export function App() {
                   <div><strong>{proxyUsage?.conversation_count.toLocaleString() ?? "—"}</strong><span>Conversations</span></div>
                   <div><strong>{projects.length.toLocaleString()}</strong><span>Projects</span></div>
                 </div>
-                <div className="settings-card"><div><strong>Private by design</strong><p>MCG shows only activity recorded by this local installation. It does not invent streaks, public handles, or subscription details that providers do not expose.</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Manage account</button></div>
+                <div className="settings-card"><div><strong>Private by design</strong><p>MetaCog shows only activity recorded by this local installation. It does not invent streaks, public handles, or subscription details that providers do not expose.</p></div><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Manage account</button></div>
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="appearance">
                 <h2>Appearance</h2>
@@ -8567,7 +8612,7 @@ export function App() {
                   <label className="settings-control"><span><strong>Reduce motion</strong><small>Reduce interface animation and transitions</small></span><input type="checkbox" checked={reduceMotion} onChange={(event) => setReduceMotion(event.target.checked)} /></label>
                   <div className="settings-control"><span><strong>UI font</strong><small>Use the operating system interface font</small></span><span className="count-badge">System default</span></div>
                   <div className="settings-control"><span><strong>Code font</strong><small>Use the operating system monospace font</small></span><span className="count-badge">System default</span></div>
-                  <div className="settings-control"><span><strong>UI font size</strong><small>Base size used throughout MCG</small></span><span className="count-badge">14 px</span></div>
+                  <div className="settings-control"><span><strong>UI font size</strong><small>Base size used throughout MetaCog</small></span><span className="count-badge">14 px</span></div>
                   <div className="settings-control"><span><strong>Diff markers</strong><small>Show changes using color and +/− markers</small></span><span className="count-badge">Color</span></div>
                 </div>
               </div>
@@ -8583,16 +8628,16 @@ export function App() {
                   <div className="settings-control"><span><strong>Voice chat hotkey</strong><small>Global voice activation remains off</small></span><span className="count-badge">Off</span></div>
                 </div>
                 <h3>Dictation</h3>
-                <div className="settings-card settings-card-stack settings-unavailable"><div className="settings-control"><span><strong>Dictation controls</strong><small>MCG will not request microphone authority or save recordings until this capability is implemented and tested.</small></span><span className="count-badge">Unavailable</span></div></div>
+                <div className="settings-card settings-card-stack settings-unavailable"><div className="settings-control"><span><strong>Dictation controls</strong><small>MetaCog will not request microphone authority or save recordings until this capability is implemented and tested.</small></span><span className="count-badge">Unavailable</span></div></div>
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="personalization">
                 <h2>Personalization</h2>
                 <h3>Custom instructions</h3>
-                <p className="muted">Give MCG durable guidance for future chats.</p>
+                <p className="muted">Give MetaCog durable guidance for future chats.</p>
                 <textarea className="settings-instructions" aria-label="Custom instructions" disabled placeholder="Custom instructions are not connected to the runtime yet." />
                 <h3>Working style</h3>
                 <div className="settings-card settings-card-stack">
-                  <div className="settings-control"><span><strong>Autonomy</strong><small>Choose how independently MCG acts within its owner constitution.</small></span><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>{userSettings?.autonomy ?? "Loading"}</button></div>
+                  <div className="settings-control"><span><strong>Autonomy</strong><small>Choose how independently MetaCog acts within its owner constitution.</small></span><button className="secondary" type="button" onClick={() => setSettingsTab("general")}>{userSettings?.autonomy ?? "Loading"}</button></div>
                   <div className="settings-control"><span><strong>Shadow verification</strong><small>Optional second-model checks are controlled in General settings.</small></span><span className="count-badge">{userSettings?.shadow_experiments ? "On" : "Off"}</span></div>
                   <div className="settings-control"><span><strong>Local memories</strong><small>Automatic cross-chat personal memory is not enabled. Project memory remains explicit and reviewable.</small></span><span className="count-badge">Off</span></div>
                 </div>
@@ -8604,7 +8649,7 @@ export function App() {
                   {filteredShortcuts.map(([name, description, shortcut]) => <div key={`${name}-${shortcut}`}><span><dt>{name}</dt><small>{description}</small></span><dd>{shortcut.split("+").map((key) => <kbd key={`${name}-${key}`}>{key}</kbd>)}</dd></div>)}
                 </dl>
                 {filteredShortcuts.length === 0 && <p className="empty-state">No shortcuts found.</p>}
-                <p className="form-note">Only shortcuts that work in this MCG build are listed. Shortcut reassignment will appear after conflict-safe binding is implemented.</p>
+                <p className="form-note">Only shortcuts that work in this MetaCog build are listed. Shortcut reassignment will appear after conflict-safe binding is implemented.</p>
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="usage">
                 <h2>Usage &amp; billing</h2>
@@ -8623,17 +8668,17 @@ export function App() {
                   {openAiProfile?.usage?.additional_rate_limits.flatMap((limit) => [limit.primary_window, limit.secondary_window].filter((window): window is CodexUsageWindow => Boolean(window)).map((window, index) => <div className="settings-control codex-usage-row" key={`${limit.name}-${index}`}><span><strong>{limit.name}</strong><small>{usageResetLabel(window.reset_at)}</small><i className="codex-usage-meter" aria-hidden="true"><b style={{ width: `${window.remaining_percent}%` }} /></i></span><span className="usage-remaining"><strong>{window.remaining_percent}%</strong><small>left</small></span></div>))}
                   {codexUsageWindows.length === 0 && (openAiProfile?.usage?.additional_rate_limits.length ?? 0) === 0 && <div className="settings-control"><span><strong>Usage unavailable</strong><small>OpenAI did not return rolling Codex limits for this account. Refresh later or check Codex directly.</small></span></div>}
                 </div>}
-                {!signedInWithOpenAi && <div className="settings-empty-card"><strong>Connect ChatGPT to see Codex usage</strong><p>Sign in from Account, then MCG can show the account plan and rolling limits OpenAI reports.</p><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Open Account</button></div>}
+                {!signedInWithOpenAi && <div className="settings-empty-card"><strong>Connect ChatGPT to see Codex usage</strong><p>Sign in from Account, then MetaCog can show the account plan and rolling limits OpenAI reports.</p><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>Open Account</button></div>}
                 <h3>Provider billing</h3>
                 <div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>ChatGPT subscription</strong><small>{signedInWithOpenAi ? `${openAiPlanLabel}. Connected through explicit OpenAI OAuth.` : "Not connected. You can sign in from Account without enabling API-key billing."}</small></span><button className="secondary" type="button" onClick={() => setSettingsTab("account")}>{signedInWithOpenAi ? "Manage" : "Connect"}</button></div>
                   <div className="settings-control"><span><strong>API and compatible providers</strong><small>API keys, OpenRouter, and OpenAI-compatible endpoints are billed by their provider. Unknown custom-model costs remain unknown.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Provider details</button></div>
                 </div>
-                <p className="form-note">MCG does not sell credits, collect subscription payments, or silently move subscription work to API billing.</p>
+                <p className="form-note">MetaCog does not sell credits, collect subscription payments, or silently move subscription work to API billing.</p>
               </div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="account"><h2>Account</h2><div className="settings-card account-card"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><div><strong>{signedInWithOpenAi ? openAiAccountName : "Connect your OpenAI subscription"}</strong><p>{signedInWithOpenAi ? `Signed in with ChatGPT${codexAccount?.email ? ` as ${codexAccount.email}` : openAiProfile?.email ? ` as ${openAiProfile.email}` : ""}.` : "A browser window will open for OpenAI sign-in and return authorization to MCG automatically."}</p><small>{signedInWithOpenAi ? `${openAiPlanLabel} · Using shared Codex account` : "Subscription OAuth never silently falls back to API-key billing."}</small></div>{signedInWithOpenAi ? <button className="secondary" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}>{busy ? "Disconnecting…" : "Disconnect MCG"}</button> : <button className="primary" type="button" disabled={busy || Boolean(login || codexLogin)} onClick={() => void startLogin("browser")}>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</button>}</div>
-                {codexAccount?.authenticated && <div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Shared Codex authentication</strong><small>MCG uses the global Codex account without changing its plugins or settings.</small></span><button className="secondary" type="button" disabled={busy} onClick={() => void signOutOfCodexDevice()}>Sign out of Codex on this device</button></div></div>}
-                {(login || codexLogin) && <div className="oauth-card" role="status"><p>Finish signing in in your browser. MCG will connect automatically.</p><button className="link-button" type="button" onClick={() => openVerification(codexLogin?.authUrl ?? login?.verification_url ?? "")}>Open sign-in page</button><small>The callback listener closes after 3 minutes. If it expires, the sign-in option will return here.</small></div>}
+              <div className="settings-pane settings-summary-pane" data-settings-pane="account"><h2>Account</h2><div className="settings-card account-card"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><div><strong>{signedInWithOpenAi ? openAiAccountName : "Connect your OpenAI subscription"}</strong><p>{signedInWithOpenAi ? `Signed in with ChatGPT${codexAccount?.email ? ` as ${codexAccount.email}` : openAiProfile?.email ? ` as ${openAiProfile.email}` : ""}.` : "A browser window will open for OpenAI sign-in and return authorization to MetaCog automatically."}</p><small>{signedInWithOpenAi ? `${openAiPlanLabel} · Using shared Codex account` : "Subscription OAuth never silently falls back to API-key billing."}</small></div>{signedInWithOpenAi ? <button className="secondary" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}>{busy ? "Disconnecting…" : "Disconnect MetaCog"}</button> : <button className="primary" type="button" disabled={busy || Boolean(login || codexLogin)} onClick={() => void startLogin("browser")}>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</button>}</div>
+                {codexAccount?.authenticated && <div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Shared Codex authentication</strong><small>MetaCog uses the global Codex account without changing its plugins or settings.</small></span><button className="secondary" type="button" disabled={busy} onClick={() => void signOutOfCodexDevice()}>Sign out of Codex on this device</button></div></div>}
+                {(login || codexLogin) && <div className="oauth-card" role="status"><p>Finish signing in in your browser. MetaCog will connect automatically.</p><button className="link-button" type="button" onClick={() => openVerification(codexLogin?.authUrl ?? login?.verification_url ?? "")}>Open sign-in page</button><small>The callback listener closes after 3 minutes. If it expires, the sign-in option will return here.</small></div>}
                 <p className="provider-state" role="status">{providerStatus}</p>{providerError && <p className="error-message" role="alert">{providerError}</p>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="plugins">
@@ -8649,7 +8694,7 @@ export function App() {
                 </div>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="browser">
-                <div className="settings-page-heading"><h2>Browser</h2><p>Manage MCG's governed browser sessions and site boundaries.</p></div>
+                <div className="settings-page-heading"><h2>Browser</h2><p>Manage MetaCog's governed browser sessions and site boundaries.</p></div>
                 <div className="settings-feature-card"><span className="settings-feature-icon" aria-hidden="true">▣</span><span><strong>Browser automation</strong><small>{browserCapability?.detail ?? "Checking browser capability on this computer…"}</small></span><label className="settings-switch"><span className="sr-only">Browser automation availability</span><input type="checkbox" checked={browserCapability?.availability === "available"} readOnly disabled /><i aria-hidden="true" /></label></div>
                 <div className="settings-section-heading"><strong>Sessions</strong><button className="secondary" type="button" onClick={() => navigateSurface("platform")}>Manage</button></div>
                 <div className="settings-card settings-card-stack">
@@ -8661,7 +8706,7 @@ export function App() {
                 <div className="settings-empty-card"><p>{activeBrowserSessions.length === 0 ? "No active site permissions." : `${activeBrowserSessions.length} governed browser session${activeBrowserSessions.length === 1 ? "" : "s"} currently hold explicit site boundaries.`}</p></div>
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="computer">
-                <div className="settings-page-heading"><h2>Computer use</h2><p>Manage how MCG uses other applications on this computer.</p></div>
+                <div className="settings-page-heading"><h2>Computer use</h2><p>Manage how MetaCog uses other applications on this computer.</p></div>
                 <div className="settings-section-heading"><strong>Control</strong><span>{activeComputerSessions.length} active</span></div>
                 <div className="settings-integration-list" aria-label="Computer use controls">
                   <div className="settings-integration-row"><span className="settings-app-icon settings-app-icon-gradient" aria-hidden="true">⌁</span><span className="settings-integration-copy"><strong>Governed app control</strong><small>{computerCapability?.detail ?? "Checking computer-use capability…"}</small></span><label className="settings-switch"><span className="sr-only">Computer use availability</span><input type="checkbox" checked={computerCapability?.availability === "available"} readOnly disabled /><i aria-hidden="true" /></label></div>
@@ -8677,18 +8722,18 @@ export function App() {
                 <div className="settings-page-heading"><h2>Git</h2><p>Choose defaults for governed repository workflows.</p></div>
                 <div className="settings-card account-card">
                   <span className="settings-app-icon" aria-hidden="true">⑂</span>
-                  <div><strong>{githubConnection?.connected ? githubConnection.account?.name ?? githubConnection.account?.login ?? "GitHub connected" : "Connect GitHub"}</strong><p>{githubConnection?.connected ? `Signed in as @${githubConnection.account?.login}. MCG can list repositories and perform only explicit repository actions.` : githubConnection?.configured ? "Sign in in your browser to grant MCG repository access through its GitHub App." : "This build needs an MCG GitHub App client ID before browser sign-in can start."}</p><small>Tokens are stored in the operating-system credential vault, never the project or SQLite database.</small></div>
+                  <div><strong>{githubConnection?.connected ? githubConnection.account?.name ?? githubConnection.account?.login ?? "GitHub connected" : "Connect GitHub"}</strong><p>{githubConnection?.connected ? `Signed in as @${githubConnection.account?.login}. MetaCog can list repositories and perform only explicit repository actions.` : githubConnection?.configured ? "Sign in in your browser to grant MetaCog repository access through its GitHub App." : "This build needs an MetaCog GitHub App client ID before browser sign-in can start."}</p><small>Tokens are stored in the operating-system credential vault, never the project or SQLite database.</small></div>
                   {githubConnection?.connected
                     ? <button className="secondary" type="button" disabled={githubBusy} onClick={() => void signOutOfGitHub()}>Disconnect</button>
                     : <button className="primary" type="button" disabled={githubBusy || githubConnection?.configured === false} onClick={() => void signInToGitHub()}>{githubBusy ? "Connecting…" : "Sign in to GitHub"}</button>}
                 </div>
                 {githubError && <p className="error-message" role="alert">{githubError}</p>}
                 <div className="settings-card settings-card-stack">
-                  <div className="settings-control"><span><strong>Branch prefix</strong><small>Prefix used when MCG creates a task branch.</small></span><span className="settings-value-field">codex/</span></div>
+                  <div className="settings-control"><span><strong>Branch prefix</strong><small>Prefix used when MetaCog creates a task branch.</small></span><span className="settings-value-field">codex/</span></div>
                   <div className="settings-control"><span><strong>Local Git by default</strong><small>Newly attached plain folders receive an empty local baseline commit. Existing files are not staged automatically.</small></span><span className="count-badge">On</span></div>
                   {workspaceProject && !workspaceProject.repository.is_git && <div className="settings-control"><span><strong>Selected project is still a folder</strong><small>Initialize its local version history now so managed agents can use isolated worktrees.</small></span><button className="secondary" type="button" disabled={githubBusy} onClick={() => void initializeSelectedProjectGit()}>Initialize local Git</button></div>}
                   <div className="settings-control"><span><strong>Pull request review</strong><small>Reviews are read-only and findings remain separate from fixes.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("pull-requests")}>Open reviews</button></div>
-                  <div className="settings-control"><span><strong>Force push</strong><small>MCG does not enable destructive history rewriting by default.</small></span><span className="count-badge">Off</span></div>
+                  <div className="settings-control"><span><strong>Force push</strong><small>MetaCog does not enable destructive history rewriting by default.</small></span><span className="count-badge">Off</span></div>
                   <div className="settings-control"><span><strong>Review delivery</strong><small>Keep review findings in the current task when possible.</small></span><span className="count-badge">Inline</span></div>
                 </div>
                 {githubConnection?.connected && <>
@@ -8709,7 +8754,7 @@ export function App() {
                 <textarea className="settings-instructions" aria-label="Commit instructions" disabled placeholder="Custom commit guidance is not connected yet." />
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="environments">
-                <div className="settings-page-heading settings-page-heading-actions"><div><h2>Environments</h2><p>Local environments tell MCG how each attached project is set up.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("projects")}>Add project</button></div>
+                <div className="settings-page-heading settings-page-heading-actions"><div><h2>Environments</h2><p>Local environments tell MetaCog how each attached project is set up.</p></div><button className="secondary" type="button" onClick={() => navigateSurface("projects")}>Add project</button></div>
                 <div className="settings-section-heading"><strong>Select a project</strong><span>{projects.length} attached</span></div>
                 {projects.length === 0 ? <div className="settings-empty-card"><strong>No projects attached</strong><p>Add a project to discover its repository, languages, tools, and runnable commands.</p><button className="secondary" type="button" onClick={() => navigateSurface("projects")}>Add project</button></div> : <div className="settings-project-list" aria-label="Project environments">{projects.map((project) => <button type="button" onClick={() => navigateSurface("projects")} key={project.id}><span className="settings-app-icon" aria-hidden="true">▤</span><span><strong>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.project_id}</strong><small>{project.repository.is_git ? `${project.repository.branch ?? "Git repository"}${project.repository.dirty ? " · changes present" : ""}` : "Local project"}</small></span><i aria-hidden="true">＋</i></button>)}</div>}
               </div>
@@ -8741,25 +8786,29 @@ export function App() {
         }} />
         <header>
           <div className="workspace-panel-tabs" role="tablist" aria-label="Side panel tools">
-            {([["browser", "Browser", "◎"], ["files", "Files", "▱"], ["activity", "Activity", "◷"]] as Array<[WorkspacePanelTab, string, string]>).map(([tab, label, glyph]) => <button type="button" role="tab" aria-selected={workspaceSidePanelTab === tab} className={workspaceSidePanelTab === tab ? "active" : ""} onClick={() => setWorkspaceSidePanelTab(tab)} key={tab}><span aria-hidden="true">{glyph}</span>{label}</button>)}
+            {([
+              { tab: "browser", label: "Browser", Icon: Globe2 },
+              { tab: "files", label: "Files", Icon: Files },
+              { tab: "activity", label: "Activity", Icon: Activity }
+            ] as Array<{ tab: WorkspacePanelTab; label: string; Icon: typeof Globe2 }>).map(({ tab, label, Icon }) => <button type="button" role="tab" aria-selected={workspaceSidePanelTab === tab} className={workspaceSidePanelTab === tab ? "active" : ""} onClick={() => setWorkspaceSidePanelTab(tab)} key={tab}><Icon aria-hidden="true" />{label}</button>)}
           </div>
-          <button type="button" aria-label="Close side panel" title="Close side panel" onClick={() => setWorkspaceSidePanelOpen(false)}>×</button>
+          <button type="button" aria-label="Close side panel" title="Close side panel" onClick={() => setWorkspaceSidePanelOpen(false)}><X aria-hidden="true" /></button>
         </header>
         <div className={`workspace-side-content${workspaceSidePanelTab === "browser" && siteBrowserTabs.length > 0 ? " browser-workspace" : ""}`}>
           {workspaceSidePanelTab === "browser" && <section className={`side-browser${siteBrowserTabs.length > 0 ? " tabbed-browser" : ""}`} aria-label="Browser">
             {siteBrowserTabs.length > 0 ? <>
               <div className="browser-tab-strip" role="tablist" aria-label="Browser tabs">
                 {siteBrowserTabs.map((tab) => <div className={`browser-tab${tab.id === activeSiteBrowserTabId ? " active" : ""}`} role="tab" aria-selected={tab.id === activeSiteBrowserTabId} tabIndex={tab.id === activeSiteBrowserTabId ? 0 : -1} onClick={() => selectSiteBrowserTab(tab)} key={tab.id}>
-                  <span aria-hidden="true">◎</span><span title={tab.title}>{tab.title}</span><button type="button" aria-label={`Close ${tab.title}`} onClick={(event) => { event.stopPropagation(); closeSiteBrowserTab(tab.id); }}>×</button>
+                  <Globe2 aria-hidden="true" /><span title={tab.title}>{tab.title}</span><button type="button" aria-label={`Close ${tab.title}`} onClick={(event) => { event.stopPropagation(); closeSiteBrowserTab(tab.id); }}><X aria-hidden="true" /></button>
                 </div>)}
-                <button className="browser-new-tab" type="button" aria-label="New browser tab" title="New tab" onClick={createSiteBrowserTab}>＋</button>
+                <button className="browser-new-tab" type="button" aria-label="New browser tab" title="New tab" onClick={createSiteBrowserTab}><Plus aria-hidden="true" /></button>
               </div>
               <form className="browser-toolbar" onSubmit={(event) => { event.preventDefault(); navigateSiteBrowserPanel(); }}>
-                <button type="button" aria-label="Back" title="Back" disabled={!activeSiteBrowserTab?.url} onClick={() => activeSiteBrowserTab && void controlSiteInAppBrowser(activeSiteBrowserTab.id, "back").catch((error) => setPlatformError(errorMessage(error)))}>←</button>
-                <button type="button" aria-label="Forward" title="Forward" disabled={!activeSiteBrowserTab?.url} onClick={() => activeSiteBrowserTab && void controlSiteInAppBrowser(activeSiteBrowserTab.id, "forward").catch((error) => setPlatformError(errorMessage(error)))}>→</button>
-                <button type="button" aria-label="Reload" title="Reload" disabled={!activeSiteBrowserTab?.url} onClick={() => activeSiteBrowserTab && void controlSiteInAppBrowser(activeSiteBrowserTab.id, "reload").catch((error) => setPlatformError(errorMessage(error)))}>↻</button>
+                <button type="button" aria-label="Back" title="Back" disabled={!activeSiteBrowserTab?.url} onClick={() => activeSiteBrowserTab && void controlSiteInAppBrowser(activeSiteBrowserTab.id, "back").catch((error) => setPlatformError(errorMessage(error)))}><ArrowLeft aria-hidden="true" /></button>
+                <button type="button" aria-label="Forward" title="Forward" disabled={!activeSiteBrowserTab?.url} onClick={() => activeSiteBrowserTab && void controlSiteInAppBrowser(activeSiteBrowserTab.id, "forward").catch((error) => setPlatformError(errorMessage(error)))}><ArrowRight aria-hidden="true" /></button>
+                <button type="button" aria-label="Reload" title="Reload" disabled={!activeSiteBrowserTab?.url} onClick={() => activeSiteBrowserTab && void controlSiteInAppBrowser(activeSiteBrowserTab.id, "reload").catch((error) => setPlatformError(errorMessage(error)))}><RotateCw aria-hidden="true" /></button>
                 <input aria-label="Address" type="url" value={sideBrowserUrl} onChange={(event) => setSideBrowserUrl(event.target.value)} placeholder="Enter a URL" />
-                <button type="submit" aria-label="Go" title="Go">↗</button>
+                <button type="submit" aria-label="Go" title="Go"><ExternalLink aria-hidden="true" /></button>
               </form>
             </> : <>
               <div className="side-panel-heading"><div><strong>Governed browser</strong><small>Each session is restricted to its allowed site.</small></div><button type="button" onClick={() => navigateSurface("platform")}>Manage</button></div>
@@ -8771,14 +8820,14 @@ export function App() {
             {platformError && <p className="workspace-panel-error" role="alert">{platformError}</p>}
             {activeSiteBrowserTab ? activeSiteBrowserTab.url
               ? <EmbeddedSiteBrowser tabId={activeSiteBrowserTab.id} url={activeSiteBrowserTab.url} onError={setPlatformError} />
-              : <div className="browser-start-page"><span aria-hidden="true">◎</span><strong>Start browsing</strong><p>Enter a URL to open a page</p></div>
+              : <div className="browser-start-page"><Globe2 aria-hidden="true" /><strong>Start browsing</strong><p>Enter a URL to open a page</p></div>
               : <><div className="side-session-list">
-              {activeBrowserSessions.length === 0 && <div className="workspace-panel-empty"><span aria-hidden="true">◎</span><strong>No browser sessions</strong><p>Enter a URL to start a private, governed session.</p></div>}
+              {activeBrowserSessions.length === 0 && <div className="workspace-panel-empty"><Globe2 aria-hidden="true" /><strong>No browser sessions</strong><p>Enter a URL to start a private, governed session.</p></div>}
               {activeBrowserSessions.map((session) => {
                 const browser = platformBrowsers[session.id];
                 const selected = selectedBrowserSession?.id === session.id;
                 return <article className={`side-session${selected ? " selected" : ""}`} key={session.id}>
-                  <div><span className="session-favicon" aria-hidden="true">◎</span><span><strong>{browser?.title || session.display_name}</strong><small>{browser?.safe_url || session.allowed_origins.join(", ")}</small></span><i className={`session-state state-${session.state}`} title={session.state} /></div>
+                  <div><span className="session-favicon" aria-hidden="true"><Globe2 /></span><span><strong>{browser?.title || session.display_name}</strong><small>{browser?.safe_url || session.allowed_origins.join(", ")}</small></span><i className={`session-state state-${session.state}`} title={session.state} /></div>
                   {session.state === "requested" && <button type="button" disabled={platformBusy} onClick={() => void attachPlatformBrowser(session.id, false)}>Start</button>}
                   {session.state === "active" && <form onSubmit={(event) => { event.preventDefault(); void navigatePlatformBrowser(session.id); }}><input aria-label={`URL for ${session.display_name}`} value={platformBrowserUrls[session.id] ?? browser?.safe_url ?? ""} onChange={(event) => setPlatformBrowserUrls((current) => ({ ...current, [session.id]: event.target.value }))} /><button type="submit" disabled={platformBusy}>Go</button></form>}
                   {session.state === "active" && !selected && <button type="button" onClick={() => setSelectedBrowserSessionId(session.id)}>View</button>}
@@ -8795,10 +8844,10 @@ export function App() {
           {workspaceSidePanelTab === "files" && <section className="side-files" aria-label="Project files">
             <div className="side-panel-heading"><div><strong>{workspaceProjectName}</strong><small>{workspaceProject?.repository.is_git ? workspaceProject.repository.branch ?? "Git repository" : workspaceProject ? "Local project" : "Choose a project"}</small></div></div>
             {workspaceProject ? <>
-              <button className="side-project-root" type="button" onClick={() => void openCurrentWorkspace("file_explorer")}><span aria-hidden="true">▱</span><span><strong>Project root</strong><small title={workspaceProject.root}>{workspaceProject.root}</small></span><span aria-hidden="true">↗</span></button>
+              <button className="side-project-root" type="button" onClick={() => void openCurrentWorkspace("file_explorer")}><FolderOpen aria-hidden="true" /><span><strong>Project root</strong><small title={workspaceProject.root}>{workspaceProject.root}</small></span><ExternalLink aria-hidden="true" /></button>
               <div className="side-detail-list"><div><span>Repository</span><strong>{workspaceProject.repository.is_git ? "Git" : "Folder"}</strong></div><div><span>Branch</span><strong>{workspaceProject.repository.branch ?? "—"}</strong></div><div><span>Changes</span><strong>{workspaceProject.repository.dirty ? "Present" : "Clean"}</strong></div></div>
               <button className="secondary" type="button" onClick={() => { setWorkspaceBottomPanelOpen(true); if (workspaceProject.root) setTerminalWorkingDirectory(workspaceProject.root); }}>Open project terminal</button>
-            </> : <div className="workspace-panel-empty"><span aria-hidden="true">▱</span><strong>No project selected</strong><p>Choose a project or open one from the left sidebar.</p></div>}
+            </> : <div className="workspace-panel-empty"><FolderOpen aria-hidden="true" /><strong>No project selected</strong><p>Choose a project or open one from the left sidebar.</p></div>}
           </section>}
           {workspaceSidePanelTab === "activity" && <section className="side-activity" aria-label="Task activity">
             <div className="side-panel-heading"><div><strong>Task activity</strong><small>Current state and durable evidence.</small></div></div>
@@ -8806,13 +8855,13 @@ export function App() {
               <article className="side-task-summary"><span className={`task-state state-${workspaceTask.state}`}>{workspaceTask.state.replaceAll("_", " ")}</span><strong>{workspaceTask.goal}</strong><small>{workspaceProjectName}</small></article>
               <button className="secondary" type="button" disabled={taskBusy} onClick={() => void toggleTaskHistory(workspaceTask.id)}>{taskHistory[workspaceTask.id] ? "Refresh evidence" : "Load evidence"}</button>
               {taskHistory[workspaceTask.id] && <div className="side-event-list">{taskHistory[workspaceTask.id]!.events.slice(-12).reverse().map((event) => <div key={event.sequence}><span>{event.kind.replaceAll("_", " ")}</span><time>{new Date(event.occurred_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div>)}</div>}
-            </> : <div className="workspace-panel-empty"><span aria-hidden="true">◷</span><strong>No task selected</strong><p>Open a chat to inspect its live activity.</p></div>}
+            </> : <div className="workspace-panel-empty"><Activity aria-hidden="true" /><strong>No task selected</strong><p>Open a chat to inspect its live activity.</p></div>}
           </section>}
         </div>
       </aside>}
       {workspaceBottomPanelOpen && workspacePanelsVisible && <section className="workspace-bottom-panel" aria-label="Terminal">
         <div className="workspace-bottom-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" onMouseDown={beginBottomPanelResize} />
-        <header><div className="terminal-tabs"><button className="active" type="button"><span aria-hidden="true">›_</span>Terminal</button><button type="button" aria-label="New terminal" title="Clear terminal" onClick={() => setTerminalEntries([])}>＋</button></div><div><button type="button" disabled={!workspaceProject} title="Use project root" onClick={() => workspaceProject && setTerminalWorkingDirectory(workspaceProject.root)}>⌂</button><button type="button" aria-label="Close terminal" title="Close terminal" onClick={() => setWorkspaceBottomPanelOpen(false)}>×</button></div></header>
+        <header><div className="terminal-tabs"><button className="active" type="button"><Terminal aria-hidden="true" />Terminal</button><button type="button" aria-label="Clear terminal" title="Clear terminal" onClick={() => setTerminalEntries([])}><Plus aria-hidden="true" /></button></div><div><button type="button" disabled={!workspaceProject} aria-label="Use project root" title="Use project root" onClick={() => workspaceProject && setTerminalWorkingDirectory(workspaceProject.root)}><Home aria-hidden="true" /></button><button type="button" aria-label="Close terminal" title="Close terminal" onClick={() => setWorkspaceBottomPanelOpen(false)}><X aria-hidden="true" /></button></div></header>
         <div className="terminal-output" ref={terminalOutputRef} role="log" aria-live="polite">
           {terminalEntries.length === 0 && <div className="terminal-welcome"><strong>{navigator.userAgent.includes("Windows") ? "Windows PowerShell" : "Project shell"}</strong><span>Commands run in the selected project. Type <code>clear</code> to clear this panel.</span></div>}
           {terminalEntries.map((entry) => <div className="terminal-entry" key={entry.id}><div><span className="terminal-prompt">{entry.workingDirectory}&gt;</span> <span>{entry.command}</span></div>{entry.result?.output && <pre>{entry.result.output}</pre>}{entry.result && entry.result.exit_code !== 0 && <small>Process exited with code {entry.result.exit_code}</small>}{entry.error && <p role="alert">{entry.error}</p>}</div>)}

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop-window",
-  "description": "Allow MCG's custom title bar to control its native desktop windows.",
+  "description": "Allow MetaCog's custom title bar to control its native desktop windows.",
   "windows": ["*"],
   "permissions": [
     "core:default",

@@ -25,7 +25,7 @@ const requiredDesktopWindowPermissions = [
   "core:window:allow-start-dragging"
 ];
 if (JSON.stringify(desktopWindowCapability.windows) !== JSON.stringify(["*"])) {
-  throw new Error("The custom desktop title bar capability must cover every MCG-owned window.");
+  throw new Error("The custom desktop title bar capability must cover every MetaCog-owned window.");
 }
 for (const permission of requiredDesktopWindowPermissions) {
   if (!desktopWindowCapability.permissions?.includes(permission)) {
@@ -47,13 +47,16 @@ if (
 ) {
   throw new Error("Cargo, npm, desktop, and Tauri application versions must remain identical.");
 }
-if (developmentConfig.app?.windows?.[0]?.title !== `MCG v${applicationVersion}`) {
+if (developmentConfig.productName !== "MetaCog") {
+  throw new Error("The packaged desktop product name must use the MetaCog brand.");
+}
+if (developmentConfig.app?.windows?.[0]?.title !== `MetaCog v${applicationVersion}`) {
   throw new Error("The native window title must expose the exact application version.");
 }
-requireText(desktopHtml, `<title>MCG v${applicationVersion}</title>`, "desktop HTML title");
+requireText(desktopHtml, `<title>MetaCog v${applicationVersion}</title>`, "desktop HTML title");
 for (const invariant of [
-  'MCG-Portable-Windows-x64-v$version',
-  'MCG-Desktop-v$version.exe',
+  'MetaCog-Portable-Windows-x64-v$version',
+  'MetaCog-Desktop-v$version.exe',
   '--features single-file-portable',
   'one self-contained executable'
 ]) requireText(portableWindowsBuilder, invariant, "Windows portable builder");

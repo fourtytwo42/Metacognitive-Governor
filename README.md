@@ -1,10 +1,10 @@
-# MCG — MetaCognitive Governor
+# MetaCog — MetaCognitive Governor
 
-MCG is a consumer-friendly, cross-platform AI runtime that works directly on
+MetaCog is a consumer-friendly, cross-platform AI runtime that works directly on
 projects and computers while governing how models, agents, tools, memory,
 permissions, and budgets are used.
 
-MCG is designed as one persistent Rust runtime with every primary interface:
+MetaCog is designed as one persistent Rust runtime with every primary interface:
 
 - Native Tauri desktop application
 - Interactive and machine-readable CLI
@@ -18,7 +18,7 @@ OpenAI-compatible servers, and arbitrary OpenAI-compatible endpoints.
 
 ## Status
 
-MCG is in active implementation. M0 through M8 have substantial qualified
+MetaCog is in active implementation. M0 through M8 have substantial qualified
 checkpoints, while M9 and M10 remain partial and the signed/updatable M11 consumer
 release is not complete. M12 remains a long-term implementation milestone. The
 full vision remains in scope and is delivered through tested, end-to-end
@@ -81,9 +81,9 @@ npm run build:portable:windows
 ```
 
 This command prepares the release sidecars and runs Tauri's production build
-before assembling a versioned `target/portable/MCG-Portable-Windows-x64-v*/MCG-Desktop-v*.exe`.
+before assembling a versioned `target/portable/MetaCog-Portable-Windows-x64-v*/MetaCog-Desktop-v*.exe`.
 The Windows portable output is one self-contained executable. On first launch it verifies and
-extracts its version-matched private service helpers beneath the normal MCG local data directory;
+extracts its version-matched private service helpers beneath the normal MetaCog local data directory;
 no adjacent files are required or searched. Do not substitute
 `cargo build -p mcg-desktop`: a raw Cargo build can retain Tauri's development
 URL instead of embedding the production frontend.
@@ -129,7 +129,7 @@ immutable reasoned history, and apply to new authority decisions; startup-only
 trust roots such as data paths, loopback binding, and executable locations are
 not mutable through this surface.
 
-Owner-signed release builds also expose an explicit update flow in Settings. MCG
+Owner-signed release builds also expose an explicit update flow in Settings. MetaCog
 rechecks the reviewed version, verifies the complete package against its embedded
 minisign public key, creates and verifies a credential-free backup, stops the local
 service cleanly, installs, and restarts. Development and unsigned UAT builds show
@@ -320,20 +320,20 @@ executed. `CONFIG VALIDATES exact discovered command` is the typed configuration
 counterpart: it is accepted only for an exact currently discovered command and
 retains configuration-validation evidence instead of generic custom-command
 evidence. Advanced lines can also use
-`HTTP STATUS URL` (for example, `HTTP 200 http://127.0.0.1:3000/health`). MCG
+`HTTP STATUS URL` (for example, `HTTP 200 http://127.0.0.1:3000/health`). MetaCog
 performs one governed, body-bounded GET to that exact credential-free URL, captures
 the response artifact, and compares the observed status exactly, including expected
 non-2xx responses. Browser rendering remains a distinct evaluator rather than being
 approximated by an HTTP fetch. Use `PAGE RENDERS URL` for a real ephemeral Chromium
-render at 1280x720. MCG permits only credential-free GET/HEAD traffic to the exact
+render at 1280x720. MetaCog permits only credential-free GET/HEAD traffic to the exact
 condition origin, blocks cross-origin requests and state-changing methods before
 send, evaluates DOM readiness/layout after JavaScript, and captures rendered HTML
 plus a viewport PNG. Verification uses a configured `MCG_BROWSER_EXECUTABLE` or an
 installed Chrome/Chromium discovered locally; it never downloads a browser at task
 execution time. Linux packages install the managed browser at
 `/opt/metacognitive-governor/browser/chrome` with a path-specific AppArmor profile;
-MCG never disables Chromium's sandbox or Ubuntu's global user-namespace restriction.
-For non-HTTP services, use `PORT LISTENING tcp://host:port`. MCG performs only a
+MetaCog never disables Chromium's sandbox or Ubuntu's global user-namespace restriction.
+For non-HTTP services, use `PORT LISTENING tcp://host:port`. MetaCog performs only a
 bounded TCP handshake through the normal capability, lease, approval, and audit
 broker; it sends no application bytes, accepts no credentials/path/query/fragment,
 and records artifact-free `governed_tcp_port` evidence. This does not substitute
@@ -357,14 +357,14 @@ credential-free same-origin start URL, and 1-64 typed steps: `assert_element`,
 }
 ```
 
-MCG hashes the workflow before model work and re-reads it through governed project
+MetaCog hashes the workflow before model work and re-reads it through governed project
 authority immediately before execution. The interpreter never accepts arbitrary
 JavaScript. It confines navigation and assertions to the start origin, allows only
 GET/HEAD traffic, and rejects downloads, new browsing contexts, and mutating forms.
 The workflow JSON, final HTML, final screenshot, and per-step pass/fail evidence are
 retained for audit and replay.
 Use `SCREENSHOT MATCHES URL project/relative/baseline.png` for visual regression
-evidence. MCG binds the baseline SHA-256 before model work, renders the URL at
+evidence. MetaCog binds the baseline SHA-256 before model work, renders the URL at
 1280x720, decodes both PNGs with dimension/allocation limits, and compares pixels.
 The consumer default tolerates channel noise up to 8 and at most 1% changed pixels;
 structured plans retain explicit thresholds. Baseline, actual screenshot, and HTML
@@ -373,7 +373,7 @@ remain content-addressed evidence. Missing or changed baselines fail closed.
 Use `RESEARCH EVIDENCE project/relative/report.json` for source-backed research.
 The report scope must exactly equal the task goal and must contain at least two
 distinct credential-free HTTP(S) sources by default. Each claim names one or more
-source URLs and a short quotation that MCG can locate in the freshly fetched body;
+source URLs and a short quotation that MetaCog can locate in the freshly fetched body;
 optional conflict records must reference at least two known claim IDs. For example:
 
 ```json
@@ -407,7 +407,7 @@ optional conflict records must reference at least two known claim IDs. For examp
 }
 ```
 
-MCG first captures the JSON file through governed project read authority, binds its
+MetaCog first captures the JSON file through governed project read authority, binds its
 exact bytes to SHA-256, then authorizes only the declared source origins and fetches
 at most 32 sources with a shared timeout and a 1 MiB limit per response. The JSON
 and every fetched source remain content-addressed artifacts. Optional structured
@@ -424,7 +424,7 @@ the endpoint catalog before saving, labels subscription/usage/endpoint-reported
 billing explicitly, and shows known per-model prices or `Cost unknown`. Connect an OpenAI subscription through the panel or with
 `mcg provider login openai-subscription "OpenAI Subscription"`. Use
 `--method device-code` on a headless machine. The default desktop and CLI method
-opens normal browser sign-in and returns through MCG's loopback callback; it does
+opens normal browser sign-in and returns through MetaCog's loopback callback; it does
 not require a Codex CLI pairing code. The optional device-code method deliberately
 shows a separate one-time pairing code. Subscription OAuth and API-key
 billing are separate connections; an OAuth failure never switches billing modes.
@@ -440,7 +440,7 @@ retaining secret-free usage and audit history. Expired subscription access token
 refresh automatically once per failure burst and retry only the same subscription
 route; they never fall back to API billing.
 
-External local harnesses can use MCG itself as an OpenAI-compatible provider at
+External local harnesses can use MetaCog itself as an OpenAI-compatible provider at
 `/v1/models`, `/v1/responses`, and `/v1/chat/completions` with the installation
 bearer token. Initial aliases are `mcg:auto`, `mcg:coder`, `mcg:reasoner`,
 `mcg:cheap`, and `mcg:local`; see
@@ -458,17 +458,17 @@ evidence-validated evaluation, and atomic governed agent-run tools under strict
 MCP 2026-07-28 metadata, header, and loopback-Origin validation. Complete MCP
 tasks share the desktop/CLI decomposition, independent evaluation, objective
 verification, durable replay, and terminal settlement path. Callers can opt
-`mcg_run_task` into request-scoped SSE progress with `_meta.progressToken`; MCG
+`mcg_run_task` into request-scoped SSE progress with `_meta.progressToken`; MetaCog
 streams only durable task event kinds/sequences, returns the final tool result on
 the same response, and cancels nonterminal task/run authority if that response is
 closed. An owner-local contract test pins the official
 `@modelcontextprotocol/client` 2.0.0 package and exercises discovery, bearer
 authentication, listing, calls, progress, replay, and stream-close cancellation
-against a real MCG loopback server. See
+against a real MetaCog loopback server. See
 [`docs/architecture/mcp.md`](docs/architecture/mcp.md) for the exact contract and
 remaining native interoperability work.
 
-MCG can also connect to Streamable HTTP or local stdio MCP servers. Use
+MetaCog can also connect to Streamable HTTP or local stdio MCP servers. Use
 `mcg mcp add-http ID NAME URL`; select `--auth bearer-token` and pipe the secret
 on standard input when needed. `mcg mcp list`, `tools`, and `discover` inspect
 the secret-free durable catalog. Public endpoints require HTTPS, credentials are
@@ -482,7 +482,7 @@ five-second current probe with same-process legacy fallback. The desktop include
 simple URL-first setup plus advanced HTTP/stdio, id, protocol, bearer, command,
 and one-argument-per-line controls with durable tool counts.
 Agent work can explicitly request a
-discovered tool as `mcp::SERVER_ID::REMOTE_TOOL`; MCG exposes a provider-safe
+discovered tool as `mcp::SERVER_ID::REMOTE_TOOL`; MetaCog exposes a provider-safe
 alias only within that lease and executes the call through its normal policy,
 approval, audit, and execution-lease plane.
 

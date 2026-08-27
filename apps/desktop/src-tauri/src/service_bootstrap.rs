@@ -80,14 +80,14 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
                     request_authenticated_shutdown(address, &token)?;
                     wait_for_service_stop(address, SHUTDOWN_TIMEOUT).map_err(|error| {
                         format!(
-                            "The authenticated MCG service version {} could not be replaced: {error}",
+                            "The authenticated MetaCog service version {} could not be replaced: {error}",
                             health.version
                         )
                     })?;
                 }
                 std::cmp::Ordering::Greater => {
                     return Err(format!(
-                        "The running MCG service is version {}, which is newer than this desktop version {}. Open the newer MCG desktop instead.",
+                        "The running MetaCog service is version {}, which is newer than this desktop version {}. Open the newer MetaCog desktop instead.",
                         health.version,
                         env!("CARGO_PKG_VERSION")
                     ));
@@ -108,7 +108,7 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
     .map_or_else(
         || {
             packaged_daemon_path(&std::env::current_exe().map_err(|error| {
-                format!("The MCG desktop executable location could not be determined: {error}")
+                format!("The MetaCog desktop executable location could not be determined: {error}")
             })?)
         },
         Ok,
@@ -141,7 +141,7 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
                 authenticate_running_service(&health, &config, address)?;
                 if compare_service_version(&health.version)? != std::cmp::Ordering::Equal {
                     return Err(format!(
-                        "The packaged MCG service started as version {}, but desktop version {} was required.",
+                        "The packaged MetaCog service started as version {}, but desktop version {} was required.",
                         health.version,
                         env!("CARGO_PKG_VERSION")
                     ));
@@ -152,7 +152,7 @@ pub fn ensure_local_service(endpoint: &str) -> Result<LocalServiceStatus, String
         }
     }
     Err(format!(
-        "The packaged MCG service did not become ready within {} seconds. Run {} directly for diagnostics.",
+        "The packaged MetaCog service did not become ready within {} seconds. Run {} directly for diagnostics.",
         STARTUP_TIMEOUT.as_secs(),
         executable.display()
     ))
@@ -164,17 +164,17 @@ fn authenticate_running_service(
     address: SocketAddr,
 ) -> Result<String, String> {
     if health.status != "ok" || health.service != "mcg-daemon" {
-        return Err("The loopback port answered with an invalid MCG health contract".into());
+        return Err("The loopback port answered with an invalid MetaCog health contract".into());
     }
     let token_path = config.auth_token_path();
     let token = fs::read_to_string(&token_path).map_err(|error| {
         format!(
-            "The local MCG service is running, but its authentication token cannot be read at {}: {error}",
+            "The local MetaCog service is running, but its authentication token cannot be read at {}: {error}",
             token_path.display()
         )
     })?;
     if token.trim().is_empty() {
-        return Err("The local MCG service authentication token is empty".into());
+        return Err("The local MetaCog service authentication token is empty".into());
     }
     let token = token.trim();
     if token.len() > 4096
@@ -182,12 +182,13 @@ fn authenticate_running_service(
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
     {
-        return Err("The local MCG service authentication token is not header-safe".into());
+        return Err("The local MetaCog service authentication token is not header-safe".into());
     }
     let authenticated = probe_authenticated_status(address, token)?;
     if authenticated.service != health.service || authenticated.version != health.version {
         return Err(
-            "The authenticated local MCG status does not match its public health identity".into(),
+            "The authenticated local MetaCog status does not match its public health identity"
+                .into(),
         );
     }
     Ok(token.to_owned())
@@ -209,17 +210,17 @@ fn ready_status(health: HealthDocument, launched: bool) -> LocalServiceStatus {
 
 fn compare_service_version(version: &str) -> Result<std::cmp::Ordering, String> {
     let running = Version::parse(version).map_err(|_| {
-        format!("The authenticated MCG service reported an invalid version: {version}")
+        format!("The authenticated MetaCog service reported an invalid version: {version}")
     })?;
     let desktop = Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|_| "The MCG desktop has an invalid build version".to_owned())?;
+        .map_err(|_| "The MetaCog desktop has an invalid build version".to_owned())?;
     Ok(running.cmp(&desktop))
 }
 
 /// Stops the authenticated local service and waits briefly for its loopback listener to close.
 ///
 /// # Errors
-/// Returns an error when the endpoint is unsafe, the listener cannot prove its MCG identity, the
+/// Returns an error when the endpoint is unsafe, the listener cannot prove its MetaCog identity, the
 /// authenticated shutdown request is rejected, or the listener remains active past the timeout.
 pub fn shutdown_local_service(endpoint: &str) -> Result<(), String> {
     let config = AppConfig::default();
@@ -233,24 +234,25 @@ pub fn shutdown_local_service(endpoint: &str) -> Result<(), String> {
 }
 
 fn request_authenticated_shutdown(address: SocketAddr, token: &str) -> Result<(), String> {
-    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-        .map_err(|error| format!("The local MCG shutdown request could not connect: {error}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|error| {
+        format!("The local MetaCog shutdown request could not connect: {error}")
+    })?;
     stream
         .set_read_timeout(Some(SHUTDOWN_REQUEST_TIMEOUT))
-        .map_err(|error| format!("The local MCG shutdown timeout could not be set: {error}"))?;
+        .map_err(|error| format!("The local MetaCog shutdown timeout could not be set: {error}"))?;
     stream
         .set_write_timeout(Some(SHUTDOWN_REQUEST_TIMEOUT))
-        .map_err(|error| format!("The local MCG shutdown timeout could not be set: {error}"))?;
+        .map_err(|error| format!("The local MetaCog shutdown timeout could not be set: {error}"))?;
     write!(
         stream,
         "POST /api/v1/system/shutdown HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     )
-    .map_err(|error| format!("The local MCG shutdown request failed: {error}"))?;
+    .map_err(|error| format!("The local MetaCog shutdown request failed: {error}"))?;
     let mut response = Vec::new();
     stream
         .take(MAX_HEALTH_RESPONSE_BYTES)
         .read_to_end(&mut response)
-        .map_err(|error| format!("The local MCG shutdown response failed: {error}"))?;
+        .map_err(|error| format!("The local MetaCog shutdown response failed: {error}"))?;
     parse_success_response(&response, "shutdown")
 }
 
@@ -258,9 +260,9 @@ fn parse_success_response(response: &[u8], operation: &str) -> Result<(), String
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| format!("The local MCG {operation} response was malformed"))?;
+        .ok_or_else(|| format!("The local MetaCog {operation} response was malformed"))?;
     let headers = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| format!("The local MCG {operation} response headers were not UTF-8"))?;
+        .map_err(|_| format!("The local MetaCog {operation} response headers were not UTF-8"))?;
     let successful = headers.lines().next().is_some_and(|line| {
         line.split_whitespace()
             .nth(1)
@@ -271,7 +273,7 @@ fn parse_success_response(response: &[u8], operation: &str) -> Result<(), String
         Ok(())
     } else {
         Err(format!(
-            "The authenticated local MCG {operation} request was rejected"
+            "The authenticated local MetaCog {operation} request was rejected"
         ))
     }
 }
@@ -285,14 +287,14 @@ fn wait_for_service_stop(address: SocketAddr, timeout: Duration) -> Result<(), S
         }
     }
     Err(format!(
-        "The local MCG service did not stop within {} seconds",
+        "The local MetaCog service did not stop within {} seconds",
         timeout.as_secs()
     ))
 }
 
 fn endpoint_address(endpoint: &str) -> Result<SocketAddr, String> {
     let url = reqwest::Url::parse(endpoint)
-        .map_err(|error| format!("Invalid local MCG service endpoint: {error}"))?;
+        .map_err(|error| format!("Invalid local MetaCog service endpoint: {error}"))?;
     let host = url
         .host_str()
         .and_then(|value| {
@@ -328,26 +330,26 @@ fn probe(address: SocketAddr) -> Result<ProbeResult, String> {
         }
         Err(error) => {
             return Err(format!(
-                "The local MCG service could not be probed: {error}"
+                "The local MetaCog service could not be probed: {error}"
             ));
         }
     };
     stream
         .set_read_timeout(Some(CONNECT_TIMEOUT))
-        .map_err(|error| format!("The local MCG health timeout could not be set: {error}"))?;
+        .map_err(|error| format!("The local MetaCog health timeout could not be set: {error}"))?;
     stream
         .set_write_timeout(Some(CONNECT_TIMEOUT))
-        .map_err(|error| format!("The local MCG health timeout could not be set: {error}"))?;
+        .map_err(|error| format!("The local MetaCog health timeout could not be set: {error}"))?;
     write!(
         stream,
         "GET /api/v1/system/health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
     )
-    .map_err(|error| format!("The local MCG health request could not be sent: {error}"))?;
+    .map_err(|error| format!("The local MetaCog health request could not be sent: {error}"))?;
     let mut response = Vec::new();
     stream
         .take(MAX_HEALTH_RESPONSE_BYTES)
         .read_to_end(&mut response)
-        .map_err(|error| format!("The local MCG health response could not be read: {error}"))?;
+        .map_err(|error| format!("The local MetaCog health response could not be read: {error}"))?;
     parse_health_response(&response).map(ProbeResult::Ready)
 }
 
@@ -356,28 +358,30 @@ fn probe_authenticated_status(
     token: &str,
 ) -> Result<RuntimeStatusDocument, String> {
     let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|error| {
-        format!("The authenticated local MCG status could not connect: {error}")
+        format!("The authenticated local MetaCog status could not connect: {error}")
     })?;
     stream
         .set_read_timeout(Some(CONNECT_TIMEOUT))
         .map_err(|error| {
-            format!("The authenticated local MCG timeout could not be set: {error}")
+            format!("The authenticated local MetaCog timeout could not be set: {error}")
         })?;
     stream
         .set_write_timeout(Some(CONNECT_TIMEOUT))
         .map_err(|error| {
-            format!("The authenticated local MCG timeout could not be set: {error}")
+            format!("The authenticated local MetaCog timeout could not be set: {error}")
         })?;
     write!(
         stream,
         "GET /api/v1/system/status HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     )
-    .map_err(|error| format!("The authenticated local MCG status request failed: {error}"))?;
+    .map_err(|error| format!("The authenticated local MetaCog status request failed: {error}"))?;
     let mut response = Vec::new();
     stream
         .take(MAX_HEALTH_RESPONSE_BYTES)
         .read_to_end(&mut response)
-        .map_err(|error| format!("The authenticated local MCG status response failed: {error}"))?;
+        .map_err(|error| {
+            format!("The authenticated local MetaCog status response failed: {error}")
+        })?;
     parse_authenticated_status_response(&response)
 }
 
@@ -394,10 +398,10 @@ fn parse_health_response(response: &[u8]) -> Result<HealthDocument, String> {
         .next()
         .is_some_and(|line| line.starts_with("HTTP/1.1 200 ") || line.starts_with("HTTP/1.0 200 "))
     {
-        return Err("The loopback port did not return a successful MCG health response".into());
+        return Err("The loopback port did not return a successful MetaCog health response".into());
     }
     serde_json::from_slice(&response[header_end + separator.len()..]).map_err(|error| {
-        format!("The loopback port returned an invalid MCG health document: {error}")
+        format!("The loopback port returned an invalid MetaCog health document: {error}")
     })
 }
 
@@ -406,23 +410,25 @@ fn parse_authenticated_status_response(response: &[u8]) -> Result<RuntimeStatusD
     let header_end = response
         .windows(separator.len())
         .position(|window| window == separator)
-        .ok_or_else(|| "The authenticated local MCG status was malformed".to_owned())?;
+        .ok_or_else(|| "The authenticated local MetaCog status was malformed".to_owned())?;
     let headers = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| "The authenticated local MCG status headers were not UTF-8".to_owned())?;
+        .map_err(|_| "The authenticated local MetaCog status headers were not UTF-8".to_owned())?;
     if !headers
         .lines()
         .next()
         .is_some_and(|line| line.starts_with("HTTP/1.1 200 ") || line.starts_with("HTTP/1.0 200 "))
     {
-        return Err("The local MCG service rejected its installation authentication token".into());
+        return Err(
+            "The local MetaCog service rejected its installation authentication token".into(),
+        );
     }
     serde_json::from_slice(&response[header_end + separator.len()..])
-        .map_err(|error| format!("The authenticated local MCG status was invalid: {error}"))
+        .map_err(|error| format!("The authenticated local MetaCog status was invalid: {error}"))
 }
 
 fn packaged_daemon_path(current_executable: &Path) -> Result<PathBuf, String> {
     let parent = current_executable.parent().ok_or_else(|| {
-        "The MCG desktop executable has no containing installation directory".to_owned()
+        "The MetaCog desktop executable has no containing installation directory".to_owned()
     })?;
     let candidate = parent.join(if cfg!(windows) {
         "mcg-service.exe"
@@ -431,7 +437,7 @@ fn packaged_daemon_path(current_executable: &Path) -> Result<PathBuf, String> {
     });
     let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
         format!(
-            "The packaged local service is missing at {}: {error}. Repair or reinstall MCG.",
+            "The packaged local service is missing at {}: {error}. Repair or reinstall MetaCog.",
             candidate.display()
         )
     })?;
@@ -490,21 +496,21 @@ fn spawn_reaped_process(
                     return;
                 }
                 let result = child.wait().map_err(|error| {
-                    format!("The packaged local MCG service could not be reaped: {error}")
+                    format!("The packaged local MetaCog service could not be reaped: {error}")
                 });
                 let _ = completed_tx.send(result);
             }
             Err(error) => {
                 let _ = started_tx.send(Err(format!(
-                    "The packaged local MCG service could not be started from {executable}: {error}"
+                    "The packaged local MetaCog service could not be started from {executable}: {error}"
                 )));
             }
         })
         .map_err(|error| {
-            format!("The packaged local MCG service reaper could not start: {error}")
+            format!("The packaged local MetaCog service reaper could not start: {error}")
         })?;
     started_rx.recv().map_err(|_| {
-        "The packaged local MCG service reaper stopped before reporting startup".to_owned()
+        "The packaged local MetaCog service reaper stopped before reporting startup".to_owned()
     })??;
     Ok(completed_rx)
 }

@@ -144,7 +144,7 @@ impl Drop for ConfigureMcpCommand {
 
 #[tauri::command]
 const fn runtime_label() -> &'static str {
-    "MCG desktop scaffold"
+    "MetaCog desktop scaffold"
 }
 
 #[tauri::command]
@@ -183,7 +183,7 @@ fn daemon_token() -> Result<String, String> {
         .map(|token| token.trim().to_owned())
         .map_err(|error| {
             format!(
-                "Cannot connect to the local MCG service at {}: {error}",
+                "Cannot connect to the local MetaCog service at {}: {error}",
                 path.display()
             )
         })
@@ -191,7 +191,7 @@ fn daemon_token() -> Result<String, String> {
 
 fn validate_local_daemon(endpoint: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(endpoint)
-        .map_err(|error| format!("Invalid local MCG service endpoint: {error}"))?;
+        .map_err(|error| format!("Invalid local MetaCog service endpoint: {error}"))?;
     let loopback = url
         .host_str()
         .and_then(|host| {
@@ -210,7 +210,7 @@ fn validate_local_daemon(endpoint: &str) -> Result<(), String> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("The MCG desktop service endpoint must be an explicit HTTP loopback address and port without credentials, paths, query strings, or fragments".into());
+        return Err("The MetaCog desktop service endpoint must be an explicit HTTP loopback address and port without credentials, paths, query strings, or fragments".into());
     }
     Ok(())
 }
@@ -3164,21 +3164,21 @@ async fn open_site_in_app_browser(
     let label = site_browser_label(&tab_id)?;
 
     if let Some(webview) = app.get_webview(&label) {
-        webview
-            .navigate(target)
-            .map_err(|error| format!("The MCG browser could not navigate to the Site: {error}"))?;
+        webview.navigate(target).map_err(|error| {
+            format!("The MetaCog browser could not navigate to the Site: {error}")
+        })?;
         webview
             .set_position(position)
-            .map_err(|error| format!("The MCG browser could not be positioned: {error}"))?;
+            .map_err(|error| format!("The MetaCog browser could not be positioned: {error}"))?;
         webview
             .set_size(size)
-            .map_err(|error| format!("The MCG browser could not be resized: {error}"))?;
+            .map_err(|error| format!("The MetaCog browser could not be resized: {error}"))?;
         webview
             .show()
-            .map_err(|error| format!("The MCG browser could not be shown: {error}"))?;
+            .map_err(|error| format!("The MetaCog browser could not be shown: {error}"))?;
         webview
             .set_focus()
-            .map_err(|error| format!("The MCG browser could not be focused: {error}"))?;
+            .map_err(|error| format!("The MetaCog browser could not be focused: {error}"))?;
         return Ok(());
     }
 
@@ -3186,11 +3186,11 @@ async fn open_site_in_app_browser(
         .data_directory
         .join("site-browser-profile");
     std::fs::create_dir_all(&profile_directory)
-        .map_err(|error| format!("The MCG browser profile could not be prepared: {error}"))?;
+        .map_err(|error| format!("The MetaCog browser profile could not be prepared: {error}"))?;
 
     let parent = app
         .get_window("main")
-        .ok_or_else(|| "The main MCG window is unavailable".to_string())?;
+        .ok_or_else(|| "The main MetaCog window is unavailable".to_string())?;
     let popup_app = app.clone();
     let popup_label = label.clone();
     let builder = tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External(target))
@@ -3209,7 +3209,7 @@ async fn open_site_in_app_browser(
         });
     parent
         .add_child(builder, position, size)
-        .map_err(|error| format!("The MCG browser could not be opened: {error}"))?;
+        .map_err(|error| format!("The MetaCog browser could not be opened: {error}"))?;
 
     Ok(())
 }
@@ -3229,19 +3229,19 @@ async fn update_site_in_app_browser(
     if !visible {
         return webview
             .hide()
-            .map_err(|error| format!("The MCG browser could not be hidden: {error}"));
+            .map_err(|error| format!("The MetaCog browser could not be hidden: {error}"));
     }
-    let bounds = bounds.ok_or_else(|| "Visible MCG browser bounds are required".to_string())?;
+    let bounds = bounds.ok_or_else(|| "Visible MetaCog browser bounds are required".to_string())?;
     let (position, size) = validate_site_browser_bounds(&bounds)?;
     webview
         .set_position(position)
-        .map_err(|error| format!("The MCG browser could not be positioned: {error}"))?;
+        .map_err(|error| format!("The MetaCog browser could not be positioned: {error}"))?;
     webview
         .set_size(size)
-        .map_err(|error| format!("The MCG browser could not be resized: {error}"))?;
+        .map_err(|error| format!("The MetaCog browser could not be resized: {error}"))?;
     webview
         .show()
-        .map_err(|error| format!("The MCG browser could not be shown: {error}"))
+        .map_err(|error| format!("The MetaCog browser could not be shown: {error}"))
 }
 
 #[tauri::command]
@@ -3252,7 +3252,7 @@ async fn close_site_in_app_browser(app: tauri::AppHandle, tab_id: String) -> Res
     };
     webview
         .close()
-        .map_err(|error| format!("The MCG browser tab could not be closed: {error}"))
+        .map_err(|error| format!("The MetaCog browser tab could not be closed: {error}"))
 }
 
 #[tauri::command]
@@ -3264,14 +3264,14 @@ async fn control_site_in_app_browser(
     let label = site_browser_label(&tab_id)?;
     let webview = app
         .get_webview(&label)
-        .ok_or_else(|| "The MCG browser tab is unavailable".to_string())?;
+        .ok_or_else(|| "The MetaCog browser tab is unavailable".to_string())?;
     match action.as_str() {
         "back" => webview.eval("history.back()"),
         "forward" => webview.eval("history.forward()"),
         "reload" => webview.reload(),
-        _ => return Err("Unsupported MCG browser action".to_string()),
+        _ => return Err("Unsupported MetaCog browser action".to_string()),
     }
-    .map_err(|error| format!("The MCG browser action failed: {error}"))
+    .map_err(|error| format!("The MetaCog browser action failed: {error}"))
 }
 
 fn site_browser_label(tab_id: &str) -> Result<String, String> {
@@ -3281,7 +3281,7 @@ fn site_browser_label(tab_id: &str) -> Result<String, String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
-        return Err("The MCG browser tab identity is invalid".to_string());
+        return Err("The MetaCog browser tab identity is invalid".to_string());
     }
     Ok(format!("site-browser-{tab_id}"))
 }
@@ -3306,7 +3306,7 @@ fn validate_site_browser_bounds(
         || !(1.0..=10_000.0).contains(&bounds.width)
         || !(1.0..=10_000.0).contains(&bounds.height)
     {
-        return Err("The MCG browser panel bounds are invalid".into());
+        return Err("The MetaCog browser panel bounds are invalid".into());
     }
     Ok((
         tauri::LogicalPosition::new(bounds.x, bounds.y),
@@ -3854,7 +3854,7 @@ pub fn run() {
             run_terminal_command
         ])
         .build(tauri::generate_context!())
-        .expect("error while building MCG desktop application")
+        .expect("error while building MetaCog desktop application")
         .run(move |_app, event| {
             if shutdown_service_on_exit && matches!(event, tauri::RunEvent::Exit) {
                 let _ = service_bootstrap::shutdown_local_service(LOCAL_DAEMON);
