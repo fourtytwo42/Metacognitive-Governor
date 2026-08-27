@@ -174,7 +174,6 @@ import {
   getCodexStableDiscovery,
   reconcileOwnedCodexThread,
   forkOwnedCodexThread,
-  startOwnedCodexReview,
   watchConversationProject,
   unwatchConversationProject,
   startCodexLogin,
@@ -684,6 +683,22 @@ function NewChatProjectSelector({
   </details>;
 }
 
+function ActiveChatProjectSelector({ project }: { project: ProjectModel | null }) {
+  const name = project ? projectDisplayName(project) : "No project";
+  return <details className="new-chat-context-selector new-chat-project-selector active-chat-project-selector">
+    <summary aria-label={`Project: ${name}`} title={project?.root ?? "This conversation is project-free"}>
+      <span aria-hidden="true">▱</span><span>{name}</span><span aria-hidden="true">⌄</span>
+    </summary>
+    <div className="new-chat-context-popover project-context-popover" role="menu" aria-label="Chat project">
+      <div className="context-popover-heading">Conversation project</div>
+      <button type="button" role="menuitemradio" aria-checked="true" onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}>
+        <span aria-hidden="true">▱</span><span><strong>{name}</strong><small>{project ? project.root : "Read-only until a project is attached to a new chat"}</small></span><span aria-hidden="true">✓</span>
+      </button>
+      <p>A conversation keeps its original project. Use the Add menu to start another chat with a different workspace.</p>
+    </div>
+  </details>;
+}
+
 function NewChatWorkspaceSelector() {
   return <details className="new-chat-context-selector new-chat-workspace-selector">
     <summary aria-label="Workspace: Local" title="Work on this device"><span aria-hidden="true">▰</span><span>Local</span><span aria-hidden="true">⌄</span></summary>
@@ -708,7 +723,7 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   </details>;
 }
 
-function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void }) {
+function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; existingChat?: boolean }) {
   return <details className="new-chat-add-menu">
     <summary aria-label="Add files and more" title="Add files and more"><span aria-hidden="true">＋</span></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
@@ -716,11 +731,11 @@ function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject }: { p
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => {
         onOpenFolder();
         event.currentTarget.closest("details")?.removeAttribute("open");
-      }}><span aria-hidden="true">▱</span><span><strong>Open project folder</strong><small>Work with files in a local project</small></span></button>
+      }}><span aria-hidden="true">▱</span><span><strong>{existingChat ? "Start a project chat" : "Open project folder"}</strong><small>{existingChat ? "Choose another local workspace in a new chat" : "Work with files in a local project"}</small></span></button>
       <button type="button" role="menuitem" disabled={!project} onClick={(event) => {
         onClearProject();
         event.currentTarget.closest("details")?.removeAttribute("open");
-      }}><span aria-hidden="true">×</span><span><strong>Remove project</strong><small>Continue without a linked workspace</small></span></button>
+      }}><span aria-hidden="true">×</span><span><strong>{existingChat ? "Start a project-free chat" : "Remove project"}</strong><small>{existingChat ? "Open a new read-only conversation" : "Continue without a linked workspace"}</small></span></button>
     </div>
   </details>;
 }
@@ -4302,12 +4317,16 @@ export function App() {
   }
 
   async function startConversationReview() {
-    if (!selectedChatId || !workspaceProject) return;
+    if (!selectedChatId || !workspaceProject || !visibleConversation) return;
     setCodexReviewBusy(true);
     setTaskError(null);
     try {
-      const result = await startOwnedCodexReview(selectedChatId, { type: "uncommittedChanges" }, "inline");
-      setWorkspaceActionStatus(`Review started on owned Codex thread ${result.reviewThreadId.slice(0, 8)}…`);
+      const projectName = projectDisplayName(workspaceProject);
+      const sent = await sendMessageContent(
+        `${CODE_REVIEW_GOAL_PREFIX} in ${projectName}: review all staged, unstaged, and untracked changes. Prioritize correctness, regressions, security, missing tests, and repository instructions. Report concise, actionable findings with file and line references, ordered by severity. Do not modify the working tree during the review.`,
+        visibleConversation.conversation
+      );
+      if (sent) setWorkspaceActionStatus("The uncommitted-changes review was added to this chat.");
     } catch (error) {
       setTaskError(errorMessage(error));
     } finally {
@@ -6202,7 +6221,8 @@ export function App() {
             : activeSurface.charAt(0).toUpperCase() + activeSurface.slice(1);
   const workspaceTask = selectedChatId ? tasks.find((task) => chatIdForTask(task) === selectedChatId) : undefined;
   const workspaceConversation = selectedChatId ? conversations.find((conversation) => conversation.id === selectedChatId) : undefined;
-  const workspaceProject = projects.find((project) => project.project_id === (workspaceConversation?.project_id ?? workspaceTask?.project_id)) ?? selectedProject ?? undefined;
+  const workspaceProjectId = visibleConversation?.conversation.project_id ?? workspaceConversation?.project_id ?? workspaceTask?.project_id;
+  const workspaceProject = projects.find((project) => project.project_id === workspaceProjectId) ?? (selectedChatId ? undefined : selectedProject ?? undefined);
   const workspaceProjectName = workspaceProject?.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "No project selected";
   const activeLocalSites = sites.filter((site) => site.state !== "archived" && isChatGptSiteUrl(site.public_url));
   const localSitesByUrl = new Map(activeLocalSites.map((site) => [comparableSiteUrl(site.public_url), site]));
@@ -6536,7 +6556,7 @@ export function App() {
                 {openInApplications.filter((application) => application.available).length === 0 && <p>Available in the installed desktop app.</p>}
               </div>}
             </div>
-            <button className="workspace-icon-button" type="button" disabled={!selectedChatId || !workspaceProject || codexReviewBusy} aria-label="Review uncommitted changes" title="Review uncommitted project changes in this owned Codex thread" onClick={() => void startConversationReview()}><Check aria-hidden="true" /></button>
+            <button className="workspace-icon-button" type="button" disabled={!selectedChatId || !workspaceProject || codexReviewBusy || conversationIsActive || taskBusy} aria-label="Review uncommitted changes" title="Review uncommitted project changes in this chat" onClick={() => void startConversationReview()}><Check aria-hidden="true" /></button>
             <button className={`workspace-icon-button${workspacePinnedSummaryOpen ? " active" : ""}`} type="button" aria-label="Toggle pinned summary" title="Toggle pinned summary" aria-pressed={workspacePinnedSummaryOpen} onClick={() => setWorkspacePinnedSummaryOpen((current) => !current)}><ListTree aria-hidden="true" /></button>
             <button className={`workspace-icon-button${workspaceBottomPanelOpen ? " active" : ""}`} type="button" aria-label="Toggle bottom panel" title="Toggle bottom panel (Ctrl+J)" aria-pressed={workspaceBottomPanelOpen} onClick={() => setWorkspaceBottomPanelOpen((current) => !current)}><PanelBottom aria-hidden="true" /></button>
             <button className={`workspace-icon-button${workspaceSidePanelOpen ? " active" : ""}`} type="button" aria-label="Toggle side panel" title="Toggle side panel (Ctrl+Alt+B)" aria-pressed={workspaceSidePanelOpen} onClick={() => setWorkspaceSidePanelOpen((current) => !current)}><PanelRight aria-hidden="true" /></button>
@@ -6561,7 +6581,7 @@ export function App() {
               <NewChatWorkspaceSelector />
               {selectedProject?.repository.is_git && <NewChatBranchSelector project={selectedProject} />}
             </div>
-            <div className="composer">
+            <div className="composer chat-input-composer">
               <label htmlFor="goal">Message</label>
               <textarea
                 ref={goalInputRef}
@@ -6638,10 +6658,24 @@ export function App() {
                   <button className="chat-queue-remove" type="button" aria-label="Remove queued message" title="Remove" onClick={() => setQueuedChatMessages((current) => current.filter((item) => item.id !== message.id))}>⌫</button>
                 </div>)}
               </section>}
-              <div className="chat-followup-composer">
-              <textarea aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message MetaCog..." />
-              <div className="composer-actions"><PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} /><span className="composer-action-spacer" /><ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam /><button className="primary" type="button" disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}>{conversationIsActive ? "Queue" : "Send"}</button></div>
-              {taskError && <p className="error-message" role="alert">{taskError}</p>}
+              <div className="new-chat-composer-shell active-chat-composer-shell">
+                <div className="new-chat-context-bar" aria-label="Chat workspace context">
+                  <ActiveChatProjectSelector project={workspaceProject ?? null} />
+                  <NewChatWorkspaceSelector />
+                  {workspaceProject?.repository.is_git && <NewChatBranchSelector project={workspaceProject} />}
+                </div>
+                <div className="composer chat-input-composer chat-followup-composer">
+                  <label className="visually-hidden" htmlFor="chat-message">Message</label>
+                  <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => setTaskGoal(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
+                  <div className="composer-actions">
+                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} />
+                    <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} />
+                    <span className="composer-action-spacer" />
+                    <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />
+                    <button className="primary new-chat-send" type="button" aria-label={conversationIsActive ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive ? "Queue message (Ctrl+Enter steers now)" : "Send message"} onClick={() => conversationIsActive ? queueDraftMessage() : void addTask()}><span aria-hidden="true">↑</span></button>
+                  </div>
+                  {taskError && <p className="error-message" role="alert">{taskError}</p>}
+                </div>
               </div>
             </div>
           </div> : <>

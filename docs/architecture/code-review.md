@@ -44,6 +44,10 @@ GitHub-hosted build or test execution.
 The desktop client can start and retain project-bound local code-review chats now.
 It displays review history from durable MCG tasks whose goal is a code review.
 Repository discovery supplies Git status, branch, head, commits, and instructions.
+The conversation-toolbar review action submits the same explicit read-only review
+request into the visible project chat, so progress and findings remain chronological.
+The lower-level owned-thread review API creates a fresh project-rooted read-only
+Codex thread; it never reuses archived Chat, Coordinator, or specialist role threads.
 
 MCG now supports browser authorization through a configured GitHub App public
 client ID, keeps the bearer token in the operating-system credential vault, lists

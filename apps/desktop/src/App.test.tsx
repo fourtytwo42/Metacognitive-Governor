@@ -2958,6 +2958,62 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(screen.getByText("Fixture response")).toBeInTheDocument();
 });
 
+test("established chat keeps the New Chat composer and routes uncommitted review through the visible conversation", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: true },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.sendConversationMessage.mockImplementation(async (conversationId: string, request: { content: string; execution_preferences?: Record<string, unknown> }) => ({
+    conversation: {
+      schema_version: 1,
+      id: conversationId,
+      title: "Inspect this project",
+      project_id: project.project_id,
+      state: "active",
+      execution_preferences: request.execution_preferences ?? {},
+      created_at: "2026-08-22T00:00:00Z",
+      updated_at: "2026-08-22T00:00:01Z"
+    },
+    turns: [{ schema_version: 1, id: crypto.randomUUID(), conversation_id: conversationId, state: "completed", execution_preferences: request.execution_preferences ?? {}, created_at: "2026-08-22T00:00:00Z", updated_at: "2026-08-22T00:00:01Z" }],
+    messages: [],
+    activities: []
+  }));
+  render(<App />);
+
+  await selectNewChatProject("sample");
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Inspect this project" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(await screen.findByRole("heading", { name: "Inspect this project" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Chat workspace context")).toBeInTheDocument();
+  expect(screen.getByLabelText("Project: sample")).toBeInTheDocument();
+  expect(screen.getByLabelText("Workspace: Local")).toBeInTheDocument();
+  expect(screen.getByLabelText("Branch: main")).toBeInTheDocument();
+  expect(screen.getByLabelText("Add files and more")).toBeInTheDocument();
+  expect(screen.getByLabelText("Change permissions")).toBeInTheDocument();
+  expect(document.querySelector('summary[aria-label="Chat model, effort, speed, and team"]')).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Send" })).toHaveClass("new-chat-send");
+
+  client.sendConversationMessage.mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "Review uncommitted changes" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({
+      content: expect.stringMatching(/Review code changes in sample: review all staged, unstaged, and untracked changes[\s\S]*Do not modify the working tree/)
+    })
+  ));
+  expect(client.startOwnedCodexReview).not.toHaveBeenCalled();
+  expect(await screen.findByText("The uncommitted-changes review was added to this chat.")).toBeInTheDocument();
+});
+
 test("delegated coding work stays inline and Chat presents the final preview without expanding an agent", async () => {
   const createdAt = new Date(Date.now() - 5_000).toISOString();
   const acknowledgedAt = new Date(Date.now() - 4_000).toISOString();

@@ -1091,10 +1091,7 @@ body { background: var(--mcg-bg); }
 .chat-queue-steer, .chat-queue-remove { min-height: 28px; padding: 3px 7px; border: 0; color: var(--mcg-muted); background: transparent; font-size: .75rem; }
 .chat-queue-steer:hover, .chat-queue-remove:hover { color: var(--mcg-text); background: color-mix(in srgb, var(--mcg-border) 55%, transparent); }
 .chat-queue-remove { width: 28px; font-size: .9rem; }
-.chat-followup-composer { display: grid; gap: 10px; padding: 13px; border: 1px solid #414141; border-radius: 20px; background: var(--mcg-surface-raised); box-shadow: 0 12px 38px #0007; }
-.chat-followup-composer > textarea { min-height: 78px; padding: 7px; border: 0; background: transparent; box-shadow: none; resize: vertical; }
-.chat-followup-composer .composer-actions { align-items: center; }
-.chat-followup-composer .primary { border-radius: 999px; }
+.chat-followup-composer { display: grid; gap: 10px; }
 .simple-mode #projects { grid-template-columns: minmax(0, 1fr); }
 .simple-mode #projects > .runtime-panel { display: none; }
 .settings-page { min-height: calc(100vh - 132px); align-content: start; gap: 18px; border: 0; background: transparent; }
@@ -1525,7 +1522,7 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
 .context-popover-actions { display: grid; padding: 7px; border-top: 1px solid var(--mcg-border); }
 .workspace-context-popover { width: min(330px, calc(100vw - 48px)); }
 .branch-context-popover { width: min(320px, calc(100vw - 48px)); }
-.app-shell[data-active-surface="tasks"] .composer {
+.chat-input-composer {
   min-width: 0;
   padding: 13px 14px 11px;
   border: 1px solid #414141;
@@ -1533,8 +1530,8 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
   background: var(--mcg-surface-raised);
   box-shadow: 0 16px 48px #0005;
 }
-.app-shell[data-active-surface="tasks"] .composer > label[for="goal"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-.app-shell[data-active-surface="tasks"] .composer > textarea {
+.chat-input-composer > label[for="goal"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.chat-input-composer > textarea {
   min-height: 78px;
   max-height: 220px;
   padding: 7px 8px;
@@ -1543,13 +1540,13 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
   box-shadow: none;
   resize: vertical;
 }
-.app-shell[data-active-surface="tasks"] .composer-actions { min-width: 0; flex-wrap: nowrap; align-items: center; justify-content: flex-start; }
-.app-shell[data-active-surface="tasks"] .composer-actions .permission-selector > summary { border-color: transparent; background: transparent; }
-.app-shell[data-active-surface="tasks"] .composer-actions .permission-selector > summary:hover { background: color-mix(in srgb, var(--mcg-surface-raised) 74%, white 7%); }
+.chat-input-composer .composer-actions { min-width: 0; flex-wrap: nowrap; align-items: center; justify-content: flex-start; }
+.chat-input-composer .composer-actions .permission-selector > summary { border-color: transparent; background: transparent; }
+.chat-input-composer .composer-actions .permission-selector > summary:hover { background: color-mix(in srgb, var(--mcg-surface-raised) 74%, white 7%); }
 .composer-action-spacer { flex: 1 1 auto; min-width: 8px; }
-.app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector { flex: 0 1 275px; min-width: 170px; max-width: 310px; }
-.app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector > summary { border-color: transparent; background: transparent; }
-.app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector > summary:hover { background: color-mix(in srgb, var(--mcg-surface-raised) 74%, white 7%); }
+.chat-input-composer .composer-actions .chat-run-selector { flex: 0 1 275px; min-width: 170px; max-width: 310px; }
+.chat-input-composer .composer-actions .chat-run-selector > summary { border-color: transparent; background: transparent; }
+.chat-input-composer .composer-actions .chat-run-selector > summary:hover { background: color-mix(in srgb, var(--mcg-surface-raised) 74%, white 7%); }
 .new-chat-send { display: grid; flex: 0 0 42px; width: 42px; height: 42px; place-items: center; padding: 0; border-radius: 50%; font-size: 1.15rem; }
 .new-chat-send:disabled { border-color: color-mix(in srgb, var(--mcg-border) 70%, transparent); color: var(--mcg-muted); background: color-mix(in srgb, var(--mcg-surface-raised) 82%, white 8%); }
 .new-chat-add-menu { position: relative; flex: 0 0 auto; }
@@ -1571,10 +1568,10 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
   .new-chat-context-bar { flex-wrap: wrap; margin: 0 8px; }
   .new-chat-project-selector { flex: 1 1 190px; }
   .new-chat-context-selector > summary > span:nth-child(2) { max-width: min(210px, 42vw); }
-  .app-shell[data-active-surface="tasks"] .composer-actions { flex-wrap: wrap; }
-  .app-shell[data-active-surface="tasks"] .composer-actions .permission-selector { width: auto; }
-  .app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector { flex: 1 1 190px; width: auto; max-width: none; }
-  .app-shell[data-active-surface="tasks"] .composer-actions .chat-run-popover { right: 0; left: auto; }
+  .chat-input-composer .composer-actions { flex-wrap: wrap; }
+  .chat-input-composer .composer-actions .permission-selector { width: auto; }
+  .chat-input-composer .composer-actions .chat-run-selector { flex: 1 1 190px; width: auto; max-width: none; }
+  .chat-input-composer .composer-actions .chat-run-popover { right: 0; left: auto; }
   .new-chat-context-popover,
   .new-chat-add-popover,
   .permission-popover,
@@ -1584,15 +1581,15 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
   .new-chat-context-bar { margin: 0; padding-inline: 5px; border-radius: 15px 15px 0 0; }
   .new-chat-context-selector > summary { padding-inline: 7px; }
   .new-chat-context-selector > summary > span:nth-child(2) { max-width: min(165px, 36vw); }
-  .app-shell[data-active-surface="tasks"] .composer { padding: 10px; border-radius: 0 0 18px 18px; }
-  .app-shell[data-active-surface="tasks"] .composer > textarea { min-height: 72px; }
-  .app-shell[data-active-surface="tasks"] .composer-actions { gap: 4px; }
-  .app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector { flex-basis: 145px; min-width: 130px; }
-  .app-shell[data-active-surface="tasks"] .composer-actions .chat-run-selector > summary small { display: none; }
+  .chat-input-composer { padding: 10px; border-radius: 0 0 18px 18px; }
+  .chat-input-composer > textarea { min-height: 72px; }
+  .chat-input-composer .composer-actions { gap: 4px; }
+  .chat-input-composer .composer-actions .chat-run-selector { flex-basis: 145px; min-width: 130px; }
+  .chat-input-composer .composer-actions .chat-run-selector > summary small { display: none; }
   .new-chat-send { width: 40px; height: 40px; flex-basis: 40px; }
 }
 :root[data-theme="light"] .new-chat-context-bar,
-:root[data-theme="light"] .app-shell[data-active-surface="tasks"] .composer {
+:root[data-theme="light"] .chat-input-composer {
   border-color: var(--mcg-border);
   background: var(--mcg-surface-raised);
   box-shadow: 0 16px 42px rgba(25, 35, 50, .1);
@@ -2196,6 +2193,7 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
   padding: 10px 0 16px;
   background: linear-gradient(180deg, transparent, var(--mcg-bg) 12px);
 }
+.app-shell[data-active-surface="threads"] .active-chat-composer-shell { width: 100%; }
 
 /* Light theme contrast pass.
    The consumer shell grew from dark-first surfaces, so every recurring text role

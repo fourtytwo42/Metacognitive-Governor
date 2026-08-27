@@ -8885,11 +8885,56 @@ impl AppRuntime {
         target: CodexReviewTarget,
         delivery: CodexReviewDelivery,
     ) -> Result<CodexReviewResult, RuntimeError> {
-        let binding = self.manageable_codex_binding(conversation_id)?;
-        Ok(self
+        // Chat, Coordinator, and specialist role threads intentionally run in private scratch or
+        // isolated worktree directories and are archived while idle. Reusing whichever role last
+        // wrote the conversation binding made `review/start` target an archived, usually non-Git
+        // cwd and surfaced as an opaque 500. A review receives its own read-only project-rooted
+        // thread so role authority, instructions, cwd, and lifecycle never bleed into one another.
+        let conversation = self.conversation(conversation_id)?.conversation;
+        let project_id = conversation.project_id.ok_or_else(|| {
+            StorageError::InvalidData("code review requires a project-bound conversation".into())
+        })?;
+        let project = self.project(project_id)?.ok_or_else(|| {
+            StorageError::InvalidData("code review project is no longer available".into())
+        })?;
+        if !project.repository.is_git {
+            return Err(StorageError::InvalidData(
+                "code review requires a Git-backed project".into(),
+            )
+            .into());
+        }
+        let project_root = fs::canonicalize(&project.root).map_err(|error| {
+            StorageError::InvalidData(format!("code review project cannot be resolved: {error}"))
+        })?;
+        let project_root = project_root.to_string_lossy().into_owned();
+        let preferences = CodexExecutionPreferences {
+            model: conversation.execution_preferences.model_id.clone(),
+            effort: conversation.execution_preferences.reasoning_effort.clone(),
+            service_tier: conversation.execution_preferences.service_tier.clone(),
+            approval_mode: CodexApprovalMode::Ask,
+        };
+        let host_thread_id = self
             .codex_harness
-            .start_review(&binding.codex_thread_id, target, delivery)
-            .await?)
+            .start_thread(Some(&project_root), &preferences, false)
+            .await?;
+        match self
+            .codex_harness
+            .start_review(&host_thread_id, target, delivery)
+            .await
+        {
+            Ok(result) => {
+                if delivery == CodexReviewDelivery::Detached {
+                    let _ = self.codex_harness.archive_thread(&host_thread_id).await;
+                    let _ = self.codex_harness.unsubscribe_thread(&host_thread_id).await;
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = self.codex_harness.archive_thread(&host_thread_id).await;
+                let _ = self.codex_harness.unsubscribe_thread(&host_thread_id).await;
+                Err(error.into())
+            }
+        }
     }
 
     pub async fn exec_governed_codex_command(
