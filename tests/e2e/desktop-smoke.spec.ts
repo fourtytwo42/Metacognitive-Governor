@@ -584,6 +584,35 @@ test("the desktop shell prevents phantom document scrolling", async ({ page }) =
   expect(layout.workspaceOverflowY).toBe("auto");
   expect(Math.round(layout.frameHeight)).toBe(layout.viewportHeight);
 
+  const chained = await page.evaluate(() => {
+    const host = document.querySelector<HTMLElement>(".workspace")!;
+    const makeViewport = () => {
+      const viewport = document.createElement("div");
+      viewport.setAttribute("data-scroll-chain", "");
+      Object.assign(viewport.style, { height: "100px", overflowY: "auto" });
+      const content = document.createElement("div");
+      content.style.height = "300px";
+      viewport.appendChild(content);
+      return { viewport, content };
+    };
+    const outer = makeViewport();
+    const middle = makeViewport();
+    const inner = makeViewport();
+    outer.content.appendChild(middle.viewport);
+    middle.content.appendChild(inner.viewport);
+    host.appendChild(outer.viewport);
+    const firstCanceled = !inner.viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 40 }));
+    const first = [inner.viewport.scrollTop, middle.viewport.scrollTop, outer.viewport.scrollTop];
+    inner.viewport.scrollTop = inner.viewport.scrollHeight;
+    inner.viewport.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 40 }));
+    const second = [inner.viewport.scrollTop, middle.viewport.scrollTop, outer.viewport.scrollTop];
+    outer.viewport.remove();
+    return { firstCanceled, first, second };
+  });
+  expect(chained.firstCanceled).toBe(true);
+  expect(chained.first).toEqual([40, 0, 0]);
+  expect(chained.second).toEqual([200, 40, 0]);
+
   await page.locator(".workspace").evaluate((workspace) => { workspace.scrollTop = workspace.scrollHeight; });
   await page.locator(".workspace").hover();
   await page.mouse.wheel(0, 1_000);

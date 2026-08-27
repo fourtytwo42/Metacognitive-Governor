@@ -39,6 +39,17 @@ test("nested wheel movement continues through every scrollable ancestor", () => 
   expect(outer.scrollTop).toBe(150);
 });
 
+test("an inner viewport consumes ordinary movement without moving its ancestors", () => {
+  const outer = scrollViewport(null, 30, 100, 300);
+  const middle = scrollViewport(outer, 40, 100, 300);
+  const inner = scrollViewport(middle, 20, 100, 300);
+
+  expect(scrollChainByDelta(inner, 50)).toBe(0);
+  expect(inner.scrollTop).toBe(70);
+  expect(middle.scrollTop).toBe(40);
+  expect(outer.scrollTop).toBe(30);
+});
+
 test("locked ancestors are skipped without acquiring a phantom scroll offset", () => {
   const outer = scrollViewport(null, 20, 100, 300);
   const locked = scrollViewport(outer, 0, 100, 500);

@@ -4094,7 +4094,7 @@ test("simple mode reviews and transfers one durable fact to an explicitly chosen
     confidence: 0.95,
     provenance: { source_kind: "user", source: "Desktop owner" },
     observed_at: "2026-08-20T12:01:00Z",
-    fresh_until: "2026-08-27T12:01:00Z",
+    fresh_until: "2036-08-27T12:01:00Z",
     correction_count: 0,
     usefulness_count: 2
   };

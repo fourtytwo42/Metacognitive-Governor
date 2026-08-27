@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -50,10 +50,11 @@ export function isChatViewportNearBottom(
   return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= threshold;
 }
 
-function handleScrollChainWheel(event: ReactWheelEvent<HTMLElement>) {
+function handleScrollChainWheel(event: WheelEvent) {
   if (event.ctrlKey || event.shiftKey || event.deltaY === 0 || !(event.target instanceof Element)) return;
   const origin = event.target.closest<HTMLElement>("[data-scroll-chain]");
-  if (!origin || !event.currentTarget.contains(origin)) return;
+  const root = event.currentTarget;
+  if (!origin || !(root instanceof HTMLElement) || !root.contains(origin)) return;
   const deltaY = wheelDeltaToPixels(event.deltaY, event.deltaMode, origin.clientHeight);
   scrollChainByDelta(origin, deltaY);
   event.preventDefault();
@@ -1890,6 +1891,7 @@ export function App() {
   const terminalInputRef = useRef<HTMLInputElement>(null);
   const terminalOutputRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
+  const scrollChainRootRef = useRef<HTMLDivElement>(null);
   const chatViewportRef = useRef<HTMLDivElement>(null);
   const chatShouldFollowRef = useRef(true);
   const queueDispatchingRef = useRef<string | null>(null);
@@ -2252,6 +2254,13 @@ export function App() {
   const [experimentEvidence, setExperimentEvidence] = useState<Record<string, { shadow: number; benchmarks: number; decisions: number }>>({});
   const [experimentBusy, setExperimentBusy] = useState(false);
   const [experimentError, setExperimentError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const root = scrollChainRootRef.current;
+    if (!root) return;
+    root.addEventListener("wheel", handleScrollChainWheel, { capture: true, passive: false });
+    return () => root.removeEventListener("wheel", handleScrollChainWheel, true);
+  }, []);
 
   useEffect(() => {
     const previousScrollRestoration = window.history.scrollRestoration;
@@ -6320,7 +6329,7 @@ export function App() {
   </div>;
 
   return (
-    <div className={`desktop-frame${sidebarOpen ? "" : " sidebar-collapsed"}${workspaceSidePanelOpen && workspacePanelsVisible ? " side-panel-open" : ""}${workspaceBottomPanelOpen && workspacePanelsVisible ? " bottom-panel-open" : ""}`} style={workspaceLayoutStyle} onWheelCapture={handleScrollChainWheel}>
+    <div ref={scrollChainRootRef} className={`desktop-frame${sidebarOpen ? "" : " sidebar-collapsed"}${workspaceSidePanelOpen && workspacePanelsVisible ? " side-panel-open" : ""}${workspaceBottomPanelOpen && workspacePanelsVisible ? " bottom-panel-open" : ""}`} style={workspaceLayoutStyle}>
       <header className="desktop-menubar" aria-label="Application menu">
         <div className="desktop-titlebar-brand" data-tauri-drag-region aria-label="MetaCog">
           <img src={metaCogLogo} alt="" />
