@@ -367,7 +367,6 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
 test("new chat run menus stay compact, aligned, and use the shared icon set", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
-
   for (const label of ["Choose project", "Workspace: Local", "Add files and more", "Change permissions"]) {
     await expect(page.getByLabel(label).locator("svg").first()).toBeVisible();
   }
@@ -404,6 +403,50 @@ test("new chat run menus stay compact, aligned, and use the shared icon set", as
   expect(dialogBox?.width ?? 999).toBeLessThanOrEqual(350);
   expect(Math.abs((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0) - ((selectorBox?.x ?? 0) + (selectorBox?.width ?? 0)))).toBeLessThanOrEqual(2);
   expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
+});
+
+test("transient menus dismiss outside, on Escape, and when the app loses focus", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
+  const outsideTarget = page.locator(".desktop-titlebar-brand");
+
+  const permissionTrigger = page.getByLabel("Change permissions");
+  const permissionDetails = permissionTrigger.locator("xpath=..");
+  await permissionTrigger.click();
+  await expect(permissionDetails).toHaveAttribute("open", "");
+  await outsideTarget.click();
+  await expect(permissionDetails).not.toHaveAttribute("open", "");
+
+  const workspaceTrigger = page.getByLabel("Workspace: Local");
+  const workspaceDetails = workspaceTrigger.locator("xpath=..");
+  await workspaceTrigger.click();
+  await expect(workspaceDetails).toHaveAttribute("open", "");
+  await page.keyboard.press("Escape");
+  await expect(workspaceDetails).not.toHaveAttribute("open", "");
+  await expect(workspaceTrigger).toBeFocused();
+
+  const ownerTrigger = page.getByRole("button", { name: /Local owner/ });
+  await ownerTrigger.click();
+  await expect(page.locator(".owner-menu")).toBeVisible();
+  await outsideTarget.click();
+  await expect(page.locator(".owner-menu")).toBeHidden();
+
+  await page.getByRole("button", { name: "Share" }).click();
+  await expect(page.getByRole("menu", { name: "Share workspace" })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(page.getByRole("menu", { name: "Share workspace" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "File", exact: true }).click();
+  await expect(page.getByLabel("File menu")).toBeVisible();
+  await outsideTarget.click();
+  await expect(page.getByLabel("File menu")).toBeHidden();
+
+  await page.getByRole("link", { name: "Pull requests", exact: true }).click();
+  const reviewPanel = page.getByRole("region", { name: "Pull requests" });
+  await reviewPanel.getByRole("button", { name: "Filter pull requests" }).click();
+  await expect(reviewPanel.getByRole("menu", { name: "Pull request filters" })).toBeVisible();
+  await reviewPanel.getByRole("searchbox", { name: "Search pull requests" }).click();
+  await expect(reviewPanel.getByRole("menu", { name: "Pull request filters" })).toHaveCount(0);
 });
 
 test("simple and advanced interfaces meet the WCAG A and AA accessibility baseline", async ({ page }) => {

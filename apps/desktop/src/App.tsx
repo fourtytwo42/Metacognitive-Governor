@@ -581,6 +581,18 @@ const APPROVAL_MODE_DETAILS: Record<ApprovalMode, { label: string; description: 
   }
 };
 
+const TRANSIENT_DETAILS_SELECTOR = "details[data-transient-popover]";
+
+function closeTransientDetails(except?: Element | null) {
+  const closed: HTMLDetailsElement[] = [];
+  document.querySelectorAll<HTMLDetailsElement>(`${TRANSIENT_DETAILS_SELECTOR}[open]`).forEach((details) => {
+    if (except && details.contains(except)) return;
+    details.removeAttribute("open");
+    closed.push(details);
+  });
+  return closed;
+}
+
 function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
   if (mode === "ask") return <Hand aria-hidden="true" />;
   if (mode === "auto_review") return <ShieldCheck aria-hidden="true" />;
@@ -597,7 +609,7 @@ function PermissionSelector({
   hasProject: boolean;
 }) {
   const selected = APPROVAL_MODE_DETAILS[value];
-  return <details className={`permission-selector permission-${value}`}>
+  return <details className={`permission-selector permission-${value}`} data-transient-popover>
     <summary aria-label="Change permissions" title="Change permissions">
       <ApprovalModeIcon mode={value} />
       <span>{selected.label}</span>
@@ -640,7 +652,7 @@ const TEAM_PRESET_DETAILS: Record<TeamPreset, { label: string; description: stri
 function TeamPresetSelector({ value = "automatic", onChange }: { value?: TeamPreset; onChange: (preset: TeamPreset) => void }) {
   const selectedValue = TEAM_PRESET_DETAILS[value] ? value : "automatic";
   const selected = TEAM_PRESET_DETAILS[selectedValue];
-  return <details className="team-preset-selector">
+  return <details className="team-preset-selector" data-transient-popover>
     <summary aria-label="Change team preset" title={selected.description}>
       <Users aria-hidden="true" /><span>{selected.label}</span><ChevronDown aria-hidden="true" />
     </summary>
@@ -676,7 +688,7 @@ function NewChatProjectSelector({
 }) {
   const [query, setQuery] = useState("");
   const visibleProjects = projects.filter((project) => projectDisplayName(project).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  return <details className="new-chat-context-selector new-chat-project-selector" onToggle={(event) => {
+  return <details className="new-chat-context-selector new-chat-project-selector" data-transient-popover onToggle={(event) => {
     if (!(event.currentTarget as HTMLDetailsElement).open) setQuery("");
   }}>
     <summary aria-label="Choose project" title={value?.root ?? "Choose a project for this chat"}>
@@ -713,7 +725,7 @@ function NewChatProjectSelector({
 
 function ActiveChatProjectSelector({ project }: { project: ProjectModel | null }) {
   const name = project ? projectDisplayName(project) : "No project";
-  return <details className="new-chat-context-selector new-chat-project-selector active-chat-project-selector">
+  return <details className="new-chat-context-selector new-chat-project-selector active-chat-project-selector" data-transient-popover>
     <summary aria-label={`Project: ${name}`} title={project?.root ?? "This conversation is project-free"}>
       <FolderOpen aria-hidden="true" /><span>{name}</span><ChevronDown aria-hidden="true" />
     </summary>
@@ -728,7 +740,7 @@ function ActiveChatProjectSelector({ project }: { project: ProjectModel | null }
 }
 
 function NewChatWorkspaceSelector() {
-  return <details className="new-chat-context-selector new-chat-workspace-selector">
+  return <details className="new-chat-context-selector new-chat-workspace-selector" data-transient-popover>
     <summary aria-label="Workspace: Local" title="Work on this device"><Laptop aria-hidden="true" /><span>Local</span><ChevronDown aria-hidden="true" /></summary>
     <div className="new-chat-context-popover workspace-context-popover" role="menu" aria-label="Work in">
       <div className="context-popover-heading">Work in</div>
@@ -741,7 +753,7 @@ function NewChatWorkspaceSelector() {
 
 function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   const branch = project.repository.branch ?? "Current branch";
-  return <details className="new-chat-context-selector new-chat-branch-selector">
+  return <details className="new-chat-context-selector new-chat-branch-selector" data-transient-popover>
     <summary aria-label={`Branch: ${branch}`} title={branch}><GitBranch aria-hidden="true" /><span>{branch}</span><ChevronDown aria-hidden="true" /></summary>
     <div className="new-chat-context-popover branch-context-popover" role="menu" aria-label="Git branch">
       <div className="context-popover-heading">Branch</div>
@@ -752,7 +764,7 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
 }
 
 function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; existingChat?: boolean }) {
-  return <details className="new-chat-add-menu">
+  return <details className="new-chat-add-menu" data-transient-popover>
     <summary aria-label="Add files and more" title="Add files and more"><Plus aria-hidden="true" /></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
       <div className="context-popover-heading">Add</div>
@@ -873,7 +885,9 @@ function ChatRunSelector({
   const speedLabel = /fast|priority/i.test(value.service_tier ?? "") || value.speed === "fast" ? "Fast" : "Standard";
   const teamValue = TEAM_PRESET_DETAILS[value.team_preset ?? "automatic"] ? value.team_preset ?? "automatic" : "automatic";
   const closeSelector = (target: HTMLElement) => target.closest("details")?.removeAttribute("open");
-  return <details className="chat-run-selector">
+  return <details className="chat-run-selector" data-transient-popover onToggle={(event) => {
+    if (!(event.currentTarget as HTMLDetailsElement).open) setPanel("root");
+  }}>
     <summary aria-label={label} title={label}>
       <span>{summaryModel}</span>
       <small>{effortLabel(value.reasoning_effort)}</small>
@@ -2332,18 +2346,63 @@ export function App() {
   }, [unreadChatIds]);
 
   useEffect(() => {
-    if (!chatContextMenu && !siteContextMenu) return;
-    const close = () => {
+    const inside = (target: Element | null, name: string) => Boolean(target?.closest(`[data-transient-popover-root="${name}"]`));
+    const closeStateMenusOutside = (target: Element | null) => {
+      if (!inside(target, "desktop-menu")) setDesktopMenu(null);
+      if (!inside(target, "owner-menu")) setOwnerMenuOpen(false);
+      if (!inside(target, "workspace-menu")) setWorkspacePopover(null);
+      if (!inside(target, "review-filter")) setCodeReviewFilterOpen(false);
+      if (!inside(target, "context-menu")) {
+        setChatContextMenu(null);
+        setSiteContextMenu(null);
+      }
+    };
+    const closeAll = () => {
+      closeTransientDetails();
+      setDesktopMenu(null);
+      setOwnerMenuOpen(false);
+      setWorkspacePopover(null);
+      setCodeReviewFilterOpen(false);
       setChatContextMenu(null);
       setSiteContextMenu(null);
     };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("blur", close);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("blur", close);
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      closeTransientDetails(target);
+      closeStateMenusOutside(target);
     };
-  }, [chatContextMenu, siteContextMenu]);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const activeElement = document.activeElement instanceof Element ? document.activeElement : null;
+      const activeDetails = activeElement?.closest<HTMLDetailsElement>(`${TRANSIENT_DETAILS_SELECTOR}[open]`)
+        ?? document.querySelector<HTMLDetailsElement>(`${TRANSIENT_DETAILS_SELECTOR}[open]`);
+      const expandedTrigger = activeElement?.closest<HTMLElement>("[data-transient-popover-root]")?.querySelector<HTMLElement>('[aria-expanded="true"]')
+        ?? document.querySelector<HTMLElement>('[data-transient-popover-root] [aria-expanded="true"]');
+      const hadOpenMenu = Boolean(activeDetails || expandedTrigger);
+      closeAll();
+      if (!hadOpenMenu) return;
+      event.preventDefault();
+      window.requestAnimationFrame(() => {
+        (activeDetails?.querySelector<HTMLElement>(":scope > summary") ?? expandedTrigger)?.focus();
+      });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") closeAll();
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("blur", closeAll);
+    window.addEventListener("keydown", handleEscape);
+    window.addEventListener("pagehide", closeAll);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+      window.removeEventListener("blur", closeAll);
+      window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("pagehide", closeAll);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem("mcg.global-folders", JSON.stringify(globalFolders));
@@ -2469,11 +2528,6 @@ export function App() {
     const handleAppShortcut = (event: KeyboardEvent) => {
       const command = event.ctrlKey || event.metaKey;
       const key = event.key.toLocaleLowerCase();
-      if (event.key === "Escape") {
-        setDesktopMenu(null);
-        setWorkspacePopover(null);
-        return;
-      }
       if (event.key === "F11") {
         event.preventDefault();
         void toggleFullScreen();
@@ -6390,7 +6444,7 @@ export function App() {
         <button type="button" className="chrome-button sidebar-toggle" aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"} aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((current) => !current)}><PanelLeft aria-hidden="true" /></button>
         <button type="button" className="chrome-button" aria-label="Back" title="Back" onClick={() => window.history.back()}><ArrowLeft aria-hidden="true" /></button>
         <button type="button" className="chrome-button" aria-label="Forward" title="Forward" onClick={() => window.history.forward()}><ArrowRight aria-hidden="true" /></button>
-        <div className="desktop-menu-list">
+        <div className="desktop-menu-list" data-transient-popover-root="desktop-menu">
           {["File", "Edit", "View", "Help"].map((menu) => <div className="desktop-menu" key={menu}>
             <button type="button" aria-expanded={desktopMenu === menu} onClick={() => setDesktopMenu((current) => current === menu ? null : menu)}>{menu}</button>
             <div className={`desktop-menu-popover desktop-menu-${menu.toLocaleLowerCase()}${desktopMenu === menu ? " open" : ""}`} aria-label={`${menu} menu`}>
@@ -6512,7 +6566,7 @@ export function App() {
             {archivedChatsOpen && (archivedConversations.length === 0 ? <p>No archived chats</p> : archivedConversations.map(renderArchivedChatRow))}
           </section>
         </div>
-        <div className="sidebar-account-area">
+        <div className="sidebar-account-area" data-transient-popover-root="owner-menu">
           <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "Not signed in"}</small></span><span aria-hidden="true">⋯</span></button>
           <div className={`owner-menu${ownerMenuOpen ? " open" : ""}`} aria-label="Owner menu">
             <div className="owner-menu-identity"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "MetaCog workspace"}</small></span></div>
@@ -6561,6 +6615,7 @@ export function App() {
 
       {chatContextMenu && contextChat && <div
         className="chat-context-menu"
+        data-transient-popover-root="context-menu"
         role="menu"
         aria-label={`${chatContextMenu.source === "pinned" ? "Pinned" : "Project"} chat menu`}
         style={{ left: chatContextMenu.x, top: chatContextMenu.y }}
@@ -6592,6 +6647,7 @@ export function App() {
 
       {siteContextMenu && contextSite && <div
         className="chat-context-menu site-context-menu"
+        data-transient-popover-root="context-menu"
         role="menu"
         aria-label={`${contextSite.displayName} site menu`}
         style={{ left: siteContextMenu.x, top: siteContextMenu.y }}
@@ -6612,14 +6668,14 @@ export function App() {
           <div className="workspace-toolbar" aria-label="Workspace controls">
             <button className={`workspace-mode-toggle${advanced ? " advanced" : ""}`} type="button" aria-label={advanced ? "Use simple mode" : "Use advanced mode"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => void toggleAdvancedMode()}><SlidersHorizontal aria-hidden="true" />{advanced ? "Advanced" : "Simple"}</button>
             <span className={`runtime-dot${localService && !localService.ready ? " status-error" : ""}`} title={localService?.detail} role="status"><i />{localService?.ready ? `v${localService.version}` : "Local runtime needs attention"}</span>
-            <div className="workspace-toolbar-menu">
+            <div className="workspace-toolbar-menu" data-transient-popover-root="workspace-menu">
               <button className="workspace-icon-button" type="button" aria-label="Share" title="Share" aria-expanded={workspacePopover === "share"} onClick={() => setWorkspacePopover((current) => current === "share" ? null : "share")}><Share2 aria-hidden="true" /></button>
               {workspacePopover === "share" && <div className="workspace-popover share-popover" role="menu" aria-label="Share workspace">
                 <button type="button" role="menuitem" onClick={() => void shareWorkspaceSummary()}><Copy aria-hidden="true" /><span><strong>Copy share summary</strong><small>Chat, status, and project</small></span></button>
                 <button type="button" role="menuitem" disabled={!workspaceProject} onClick={() => workspaceProject && void copyWorkspaceText(workspaceProject.root, "Project path copied")}><FolderOpen aria-hidden="true" /><span><strong>Copy project path</strong><small>{workspaceProjectName}</small></span></button>
               </div>}
             </div>
-            <div className="workspace-toolbar-menu">
+            <div className="workspace-toolbar-menu" data-transient-popover-root="workspace-menu">
               <button className="open-in-button" type="button" disabled={!workspaceProject} aria-haspopup="menu" aria-expanded={workspacePopover === "open-in"} title={workspaceProject ? `Open ${workspaceProjectName} in another application` : "Choose a project first"} onClick={() => setWorkspacePopover((current) => current === "open-in" ? null : "open-in")}><FolderOpen aria-hidden="true" />Open in<ChevronDown aria-hidden="true" /></button>
               {workspacePopover === "open-in" && <div className="workspace-popover open-in-popover" role="menu" aria-label="Open project in">
                 <div className="workspace-popover-heading"><strong>Open {workspaceProjectName} in</strong></div>
@@ -6818,7 +6874,7 @@ export function App() {
               </div>
               <div className="pull-request-search-row">
                 <label className="pull-request-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search pull requests</span><input type="search" aria-label="Search pull requests" value={codeReviewSearch} onChange={(event) => setCodeReviewSearch(event.target.value)} placeholder="Search pull requests" /></label>
-                <div className="pull-request-filter-menu">
+                <div className="pull-request-filter-menu" data-transient-popover-root="review-filter">
                   <button className={`pull-request-filter${codeReviewFilterOpen || codeReviewStatusFilter !== "all" ? " active" : ""}`} type="button" aria-label="Filter pull requests" title="Filter" aria-expanded={codeReviewFilterOpen} onClick={() => setCodeReviewFilterOpen((current) => !current)}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16l-6.2 7.1v5.2l-3.6 1.8v-7z" /></svg></button>
                   {codeReviewFilterOpen && <div className="pull-request-filter-popover" role="menu" aria-label="Pull request filters"><strong>Review state</strong>{([['all', 'All'], ['open', 'Open'], ['finished', 'Finished']] as const).map(([value, label]) => <button type="button" role="menuitemradio" aria-checked={codeReviewStatusFilter === value} onClick={() => { setCodeReviewStatusFilter(value); setCodeReviewFilterOpen(false); }} key={value}><span aria-hidden="true">{codeReviewStatusFilter === value ? "●" : "○"}</span>{label}</button>)}<hr /><button type="button" role="menuitem" onClick={() => { setCodeReviewFilterOpen(false); setCodeReviewSetupOpen(true); setSelectedCodeReviewTaskId(null); }}><span aria-hidden="true">＋</span>New local review</button></div>}
                 </div>

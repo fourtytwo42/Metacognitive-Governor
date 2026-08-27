@@ -1111,9 +1111,13 @@ test("project and pinned chat menus pin, archive, and expose the expected distin
   const projectChat = await within(projectTree).findByRole("button", { name: conversation.title });
   fireEvent.contextMenu(projectChat, { clientX: 220, clientY: 200 });
 
-  const projectMenu = screen.getByRole("menu", { name: "Project chat menu" });
+  let projectMenu = screen.getByRole("menu", { name: "Project chat menu" });
   expect(within(projectMenu).getByRole("menuitem", { name: "Pin" })).toBeInTheDocument();
   expect(within(projectMenu).queryByRole("menuitem", { name: "Move up" })).not.toBeInTheDocument();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "New chat" }));
+  expect(screen.queryByRole("menu", { name: "Project chat menu" })).not.toBeInTheDocument();
+  fireEvent.contextMenu(projectChat, { clientX: 220, clientY: 200 });
+  projectMenu = screen.getByRole("menu", { name: "Project chat menu" });
   fireEvent.click(within(projectMenu).getByRole("menuitem", { name: "Pin" }));
 
   const pinned = screen.getByLabelText("Pinned chats");
@@ -2508,6 +2512,55 @@ test("new chat uses the shared icon system and stable run-setting choice columns
     expect(choice.querySelector(":scope > .chat-run-choice-check")).toBeInTheDocument();
   }
   expect(choices.filter((choice) => choice.querySelector(".chat-run-choice-check svg"))).toHaveLength(1);
+});
+
+test("transient menus close on outside interaction, Escape, and app focus loss", async () => {
+  render(<App />);
+
+  const permissionTrigger = screen.getByLabelText("Change permissions");
+  const permissionDetails = permissionTrigger.closest("details") as HTMLDetailsElement;
+  fireEvent.click(permissionTrigger);
+  expect(permissionDetails.open).toBe(true);
+
+  fireEvent.pointerDown(screen.getByRole("heading", { name: "What should we build?" }));
+  expect(permissionDetails.open).toBe(false);
+
+  fireEvent.click(permissionTrigger);
+  const runTrigger = document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement;
+  fireEvent.pointerDown(runTrigger);
+  fireEvent.click(runTrigger);
+  const runDetails = runTrigger.closest("details") as HTMLDetailsElement;
+  expect(permissionDetails.open).toBe(false);
+  expect(runDetails.open).toBe(true);
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(runDetails.open).toBe(false);
+  await waitFor(() => expect(runTrigger).toHaveFocus());
+
+  const ownerTrigger = screen.getByRole("button", { name: /Local owner/ });
+  fireEvent.click(ownerTrigger);
+  expect(screen.getByLabelText("Owner menu")).toHaveClass("open");
+  fireEvent.pointerDown(screen.getByRole("textbox", { name: "Message" }));
+  expect(screen.getByLabelText("Owner menu")).not.toHaveClass("open");
+
+  const shareTrigger = screen.getByRole("button", { name: "Share" });
+  fireEvent.click(shareTrigger);
+  expect(screen.getByRole("menu", { name: "Share workspace" })).toBeInTheDocument();
+  fireEvent.pointerDown(screen.getByRole("heading", { name: "What should we build?" }));
+  expect(screen.queryByRole("menu", { name: "Share workspace" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("link", { name: "Pull requests" }));
+  const reviewPanel = screen.getByRole("region", { name: "Pull requests" });
+  fireEvent.click(within(reviewPanel).getByRole("button", { name: "Filter pull requests" }));
+  expect(within(reviewPanel).getByRole("menu", { name: "Pull request filters" })).toBeInTheDocument();
+  fireEvent.pointerDown(within(reviewPanel).getByRole("searchbox", { name: "Search pull requests" }));
+  expect(within(reviewPanel).queryByRole("menu", { name: "Pull request filters" })).not.toBeInTheDocument();
+
+  const fileMenuTrigger = within(document.querySelector(".desktop-menubar") as HTMLElement).getByRole("button", { name: "File" });
+  fireEvent.click(fileMenuTrigger);
+  expect(screen.getByLabelText("File menu")).toHaveClass("open");
+  fireEvent(window, new Event("blur"));
+  expect(screen.getByLabelText("File menu")).not.toHaveClass("open");
 });
 
 test("OpenAI subscription browser login completes automatically after the callback", async () => {
