@@ -14,11 +14,26 @@ mcg -C path/to/project run --json "fix issue 419"
 mcg -C path/to/project run --stream-json "fix issue 419"
 ```
 
-With a terminal and no arguments, `mcg` opens a small prompt; `:quit` and
-`:exit` close it. Each entered goal becomes a separately durable task. Without
-a terminal, argument-free standard input becomes the goal. When a goal is also
-present, piped UTF-8 is attached as owner-supplied task context. Standard input
-is rejected above 1 MiB and goals are rejected above 32,768 characters.
+With a terminal and no arguments, `mcg` opens a persistent, durable conversation;
+`Ctrl+C`, `/exit`, `/quit`, `:exit`, and `:quit` close it. Typing `/` at the start
+of the composer opens the interactive command picker. Typing `@` at a token
+boundary opens bounded project-reference and enabled-plugin search. Arrow keys
+move through either picker, Enter or Tab selects, Escape dismisses, and selected
+mentions are sent through the same structured validation and pinning used by the
+desktop. Literal email addresses remain ordinary text.
+
+Interactive `/plan` enables the native read-only planning mode and presents any
+multi-question choice requests in the terminal, with the agent's recommended
+answer first. `/goal` can set, view, edit, pause, resume, or clear the durable
+goal. `/mention` attaches a file or folder to the next message; plugins remain
+searchable through `@`. The remaining interactive commands expose the same supported local conversation
+controls as the desktop; `/help` is the authoritative inventory. Explicit
+`conversation send --mention file:...|folder:...|plugin:...` remains available
+for scripts and non-interactive callers.
+
+Without a terminal, argument-free standard input becomes the goal. When a goal
+is also present, piped UTF-8 is attached as owner-supplied task context. Standard
+input is rejected above 1 MiB and goals are rejected above 32,768 characters.
 
 `-C/--project` selects a directory and defaults to the current directory. MCG
 canonicalizes and discovers a new project, or refreshes the matching existing

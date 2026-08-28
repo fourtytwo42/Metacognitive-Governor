@@ -53,7 +53,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.35"
+version = "0.4.36"
 edition = "2024"
 license = "UNLICENSED"
 rust-version = "1.93"
@@ -69,6 +69,7 @@ chromiumoxide = "0.9.1"
 mcg-browser-contracts = { path = "crates/mcg-browser-contracts" }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.6", features = ["derive"] }
+crossterm = "0.29.0"
 enigo = "0.6.1"
 eventsource-stream = "0.2.3"
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["fast", "zeroize"] }

@@ -2,11 +2,13 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     fs::OpenOptions,
-    io::{BufRead, IsTerminal, Read, Write},
+    io::{IsTerminal, Read, Write},
     path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
     str::FromStr,
 };
+
+mod interactive;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -21,25 +23,26 @@ use mcg_agents::{
     SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_api::{
-    ApplyComputerActionsRequest, ApprovalListResponse, ArchiveConversationRequest,
-    ArchiveProjectRequest, AssembleContextRequest, AttachBrowserSessionRequest, BackupListResponse,
-    BackupSummaryResponse, CheckSiteHealthRequest, CorrectMemoryClaimRequest,
-    CreateConversationRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
-    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
-    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DecideSharedOrganizationRequest, DelegationMutationRequest, DelegationRetryRequest,
-    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
-    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
-    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
-    OrganizationHistoryResponse, OrganizationListResponse, OrganizationMutationResponse,
-    OrganizationPublisherListResponse, OrganizationShareReviewListResponse, PlanAgentRunRequest,
-    PlanWorkRequest, PlatformSessionHistoryResponse, PlatformSessionListResponse,
-    PluginInvocationHistoryResponse, PluginListResponse, ProjectHistoryResponse,
-    ProjectListResponse, ProjectMemoryTransferListResponse, ProviderListResponse,
-    ResolveApprovalRequest, ReviewSharedOrganizationRequest, ReviewedTopologyPlanListResponse,
+    AnswerConversationInputRequest, ApplyComputerActionsRequest, ApprovalListResponse,
+    ArchiveConversationRequest, ArchiveProjectRequest, AssembleContextRequest,
+    AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
+    CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
+    CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
+    DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
+    ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
+    ExperimentListResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
+    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    MentionCandidateListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
+    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
+    OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
+    PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
+    PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
+    ProjectMemoryTransferListResponse, ProviderListResponse, ResolveApprovalRequest,
+    ReviewSharedOrganizationRequest, ReviewedTopologyPlanListResponse,
     RevokeOrganizationPublisherRequest, RunSshOperationRequest, ScheduleHistoryResponse,
     ScheduleListResponse, SchedulerNotificationListResponse, SendConversationMessageRequest,
     SetPluginEnabledRequest, SetPluginGrantsRequest, SetScheduleStateRequest,
@@ -50,22 +53,24 @@ use mcg_api::{
     TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
     TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
     TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
-    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
-    UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
+    UpdateConversationGoalRequest, UpdateConversationModeRequest, UpdateSiteRequest,
+    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
+    WakeScheduleRequest, WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
-    ComputerUseTarget, Conversation, ConversationRole, ConversationTurnId, ConversationTurnState,
-    ConversationView, CoordinationBatchState, ExecutionPreferences, MemoryClaimId,
-    MemoryTransferId, MentionKind, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
-    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
-    PluginSignatureState, ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
-    SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationMode, ConversationRole,
+    ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatchState,
+    ExecutionPreferences, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
+    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
+    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
+    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
     effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
@@ -102,6 +107,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
+
+use interactive::{
+    Composer, ComposerOutcome, PaletteCandidate, PaletteKind, PaletteRequest, SlashCandidate,
+    SubmittedLine, prompt_for_question,
+};
 
 #[derive(Serialize)]
 struct ProviderConfigurePayload {
@@ -2079,42 +2089,908 @@ async fn run_interactive(
     token: &str,
     project: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("MCG interactive mode · project {}", project.display());
-    println!("Enter a goal, or :quit to exit.");
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
+    let canonical_root = std::fs::canonicalize(project)?;
+    let root = canonical_root
+        .to_str()
+        .ok_or("project directory must be valid Unicode")?
+        .to_owned();
+    let resolved = resolve_consumer_project(client, host, token, &root).await?;
+    let mut project_id = Some(resolved.project.project_id);
+    let mut project_root = Some(canonical_root);
+    let mut preferences = conversation_preferences(None, None, None, ApprovalMode::FullAccess);
+    let mut conversation = create_interactive_conversation(
+        client,
+        host,
+        token,
+        project_id,
+        &preferences,
+        "MetaCog CLI",
+    )
+    .await?;
+    let mut composer = Composer::default();
+    let mut pending_mentions = Vec::<String>::new();
+
+    println!("MetaCog interactive · project {root}");
+    println!("Type / for commands, @ for project references, or /help for shortcuts.");
+    println!("Conversation: {}", conversation.id);
     loop {
-        print!("mcg> ");
-        std::io::stdout().flush()?;
-        let mut goal = String::new();
-        if input.read_line(&mut goal)? == 0 {
+        let plugin_candidates = interactive_plugin_candidates(client, host, token).await?;
+        let outcome = composer
+            .read_line(|request| {
+                interactive_palette_candidates(
+                    client,
+                    host,
+                    token,
+                    project_id,
+                    &plugin_candidates,
+                    request,
+                )
+            })
+            .await?;
+        let ComposerOutcome::Submit(line) = outcome else {
             break;
-        }
-        let goal = goal.trim();
-        if matches!(goal, ":quit" | ":exit") {
-            break;
-        }
-        if goal.is_empty() {
+        };
+        if line.content.trim().is_empty() {
             continue;
         }
-        let goal = validated_goal(goal)?;
-        if let Err(error) = run_consumer_submission(
+        if matches!(line.content.trim(), ":quit" | ":exit") {
+            break;
+        }
+        if line.content.trim_start().starts_with('/') {
+            match run_interactive_slash(
+                client,
+                host,
+                token,
+                &mut conversation,
+                &mut project_id,
+                &mut project_root,
+                &mut preferences,
+                &mut pending_mentions,
+                line,
+            )
+            .await
+            {
+                Ok(InteractiveControl::Continue) => {}
+                Ok(InteractiveControl::Exit) => break,
+                Err(error) => eprintln!("Command failed: {error}"),
+            }
+            continue;
+        }
+        match send_interactive_message(
             client,
             host,
             token,
-            project,
-            &goal,
-            None,
-            ConsumerOutput::Human,
-            conversation_preferences(None, None, None, ApprovalMode::FullAccess),
-            &[],
+            &conversation,
+            &preferences,
+            line,
+            &pending_mentions,
         )
         .await
         {
-            eprintln!("Task could not be submitted: {error}");
+            Err(error) => eprintln!("Message failed: {error}"),
+            Ok(view) => {
+                conversation = view.conversation;
+                pending_mentions.clear();
+            }
         }
     }
     Ok(())
+}
+
+const INTERACTIVE_SLASH_COMMANDS: &[SlashCandidate] = &[
+    SlashCandidate {
+        name: "approve",
+        description: "Approve the latest pending request once",
+    },
+    SlashCandidate {
+        name: "clear",
+        description: "Clear the terminal without deleting the chat",
+    },
+    SlashCandidate {
+        name: "cloud",
+        description: "Show the local-execution boundary",
+    },
+    SlashCandidate {
+        name: "cloud-environment",
+        description: "Show the cloud-environment boundary",
+    },
+    SlashCandidate {
+        name: "compact",
+        description: "Compact the current Codex context",
+    },
+    SlashCandidate {
+        name: "exit",
+        description: "Exit MetaCog",
+    },
+    SlashCandidate {
+        name: "fast",
+        description: "Toggle fast response service",
+    },
+    SlashCandidate {
+        name: "feedback",
+        description: "Show feedback instructions",
+    },
+    SlashCandidate {
+        name: "fork",
+        description: "Fork the current local Codex context",
+    },
+    SlashCandidate {
+        name: "goal",
+        description: "Set, view, edit, pause, resume, or clear the goal",
+    },
+    SlashCandidate {
+        name: "help",
+        description: "Show interactive commands and keyboard controls",
+    },
+    SlashCandidate {
+        name: "ide-context",
+        description: "Show the IDE-context boundary",
+    },
+    SlashCandidate {
+        name: "init",
+        description: "Create or improve this project's AGENTS.md",
+    },
+    SlashCandidate {
+        name: "local",
+        description: "Show the selected local workspace",
+    },
+    SlashCandidate {
+        name: "mcp",
+        description: "List connected MCP servers",
+    },
+    SlashCandidate {
+        name: "memories",
+        description: "Show memory configuration guidance",
+    },
+    SlashCandidate {
+        name: "mention",
+        description: "Attach a file or folder path to the next message",
+    },
+    SlashCandidate {
+        name: "model",
+        description: "Choose the model for later turns",
+    },
+    SlashCandidate {
+        name: "new",
+        description: "Start a new chat in this CLI session",
+    },
+    SlashCandidate {
+        name: "permissions",
+        description: "Choose ask, auto-review, or full-access",
+    },
+    SlashCandidate {
+        name: "pet",
+        description: "Show the desktop-pet compatibility boundary",
+    },
+    SlashCandidate {
+        name: "personality",
+        description: "Choose a response personality",
+    },
+    SlashCandidate {
+        name: "plan",
+        description: "Enter Plan mode with an optional planning request",
+    },
+    SlashCandidate {
+        name: "project",
+        description: "Switch to another local project",
+    },
+    SlashCandidate {
+        name: "quit",
+        description: "Exit MetaCog",
+    },
+    SlashCandidate {
+        name: "reasoning",
+        description: "Choose the reasoning effort",
+    },
+    SlashCandidate {
+        name: "review",
+        description: "Review current project changes",
+    },
+    SlashCandidate {
+        name: "side",
+        description: "Start a separate chat in the same project",
+    },
+    SlashCandidate {
+        name: "status",
+        description: "Show chat, project, model, mode, and goal state",
+    },
+    SlashCandidate {
+        name: "task",
+        description: "Start a project-free chat",
+    },
+    SlashCandidate {
+        name: "worktree",
+        description: "Run coding work through a managed worktree",
+    },
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InteractiveControl {
+    Continue,
+    Exit,
+}
+
+async fn create_interactive_conversation(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_id: Option<ProjectId>,
+    preferences: &ExecutionPreferences,
+    title: &str,
+) -> Result<Conversation, Box<dyn std::error::Error>> {
+    decode_api_response(
+        client
+            .post(format!("{host}/api/v1/conversations"))
+            .bearer_auth(token)
+            .json(&CreateConversationRequest {
+                title: Some(title.to_owned()),
+                project_id,
+                execution_preferences: preferences.clone(),
+            })
+            .send()
+            .await?,
+        "create interactive conversation",
+    )
+    .await
+}
+
+async fn interactive_plugin_candidates(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> Result<Vec<MentionCandidate>, Box<dyn std::error::Error>> {
+    let catalog: PluginListResponse = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/plugins"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "list plugins for interactive mentions",
+    )
+    .await?;
+    Ok(catalog
+        .plugins
+        .into_iter()
+        .filter(|plugin| plugin.installation.enabled)
+        .map(|plugin| MentionCandidate {
+            kind: MentionKind::Plugin,
+            label: plugin.active_revision.manifest.display_name,
+            resource: plugin.installation.plugin_id,
+            detail: Some("Enabled plugin".into()),
+            plugin_revision_id: Some(plugin.active_revision.id),
+            installation_revision: Some(plugin.installation.revision),
+        })
+        .collect())
+}
+
+async fn interactive_palette_candidates(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_id: Option<ProjectId>,
+    plugins: &[MentionCandidate],
+    request: PaletteRequest,
+) -> Vec<PaletteCandidate> {
+    let needle = request.query.to_ascii_lowercase();
+    if request.kind == PaletteKind::Slash {
+        return INTERACTIVE_SLASH_COMMANDS
+            .iter()
+            .filter(|command| command.name.starts_with(&needle))
+            .cloned()
+            .map(PaletteCandidate::Slash)
+            .collect();
+    }
+    let mut candidates = if let Some(project_id) = project_id {
+        match client
+            .get(format!("{host}/api/v1/projects/{project_id}/mentions"))
+            .query(&[("q", request.query.as_str()), ("limit", "100")])
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response
+                .json::<MentionCandidateListResponse>()
+                .await
+                .map_or_else(|_| Vec::new(), |response| response.candidates),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    candidates.extend(
+        plugins
+            .iter()
+            .filter(|candidate| {
+                needle.is_empty()
+                    || candidate.label.to_ascii_lowercase().contains(&needle)
+                    || candidate.resource.to_ascii_lowercase().contains(&needle)
+            })
+            .cloned(),
+    );
+    candidates
+        .into_iter()
+        .take(100)
+        .map(PaletteCandidate::Mention)
+        .collect()
+}
+
+async fn send_interactive_message(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &Conversation,
+    preferences: &ExecutionPreferences,
+    line: SubmittedLine,
+    pending_mentions: &[String],
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    let (content, appended_mentions) =
+        resolve_cli_mentions(client, host, token, line.content, pending_mentions).await?;
+    let mut mentions = line.mentions;
+    mentions.extend(appended_mentions);
+    mentions.sort_by_key(|mention| mention.byte_start);
+    let mut view: ConversationView = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{}/messages",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .json(&SendConversationMessageRequest {
+                content,
+                execution_preferences: Some(preferences.clone()),
+                mentions,
+            })
+            .send()
+            .await?,
+        "send interactive message",
+    )
+    .await?;
+    let turn_id = view
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ConversationRole::User)
+        .map(|message| message.turn_id)
+        .ok_or("interactive response did not contain the submitted user turn")?;
+    view = wait_for_interactive_conversation(
+        client,
+        host,
+        token,
+        &conversation.id.to_string(),
+        turn_id,
+        3_600,
+        1,
+    )
+    .await?;
+    if let Some(message) =
+        view.messages.iter().rev().find(|message| {
+            message.turn_id == turn_id && message.role == ConversationRole::Assistant
+        })
+    {
+        println!("\n{}\n", message.content);
+    }
+    Ok(view)
+}
+
+async fn wait_for_interactive_conversation(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: &str,
+    origin_turn_id: ConversationTurnId,
+    timeout_seconds: u64,
+    poll_seconds: u64,
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(timeout_seconds.clamp(1, 86_400));
+    let interval = std::time::Duration::from_secs(poll_seconds.clamp(1, 60));
+    loop {
+        let mut view = fetch_conversation(client, host, token, id).await?;
+        let requests = view.conversation.pending_input_requests.clone();
+        for request in requests {
+            let mut answers = serde_json::Map::new();
+            for question in &request.questions {
+                let answer = prompt_for_question(question)?;
+                answers.insert(
+                    question.id.clone(),
+                    serde_json::json!({ "answers": [answer] }),
+                );
+            }
+            view = decode_api_response(
+                client
+                    .post(format!("{host}/api/v1/conversations/{id}/input"))
+                    .bearer_auth(token)
+                    .json(&AnswerConversationInputRequest {
+                        request_id: request.request_id,
+                        answers: serde_json::Value::Object(answers),
+                    })
+                    .send()
+                    .await?,
+                "answer planning questions",
+            )
+            .await?;
+        }
+        if conversation_settled(&view, origin_turn_id) {
+            return Ok(view);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "conversation {id} did not settle within {timeout_seconds} seconds; durable work remains inspectable with `mcg conversation team {id}`"
+            )
+            .into());
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn parse_interactive_slash(line: &SubmittedLine) -> Option<(&str, usize, &str)> {
+    let trimmed_start = line.content.trim_start();
+    if !trimmed_start.starts_with('/') {
+        return None;
+    }
+    let leading = line.content.len() - trimmed_start.len();
+    let command_end = trimmed_start
+        .find(char::is_whitespace)
+        .unwrap_or(trimmed_start.len());
+    let name = &trimmed_start[1..command_end];
+    let remainder = &trimmed_start[command_end..];
+    let argument = remainder.trim_start();
+    let argument_start = leading + command_end + (remainder.len() - argument.len());
+    Some((name, argument_start, argument))
+}
+
+fn slash_argument_line(line: SubmittedLine, argument_start: usize) -> SubmittedLine {
+    let content = line.content[argument_start..].to_owned();
+    let mentions = line
+        .mentions
+        .into_iter()
+        .filter_map(|mut mention| {
+            let start = usize::try_from(mention.byte_start).ok()?;
+            if start < argument_start {
+                return None;
+            }
+            let offset = u32::try_from(argument_start).ok()?;
+            mention.byte_start -= offset;
+            mention.byte_end -= offset;
+            Some(mention)
+        })
+        .collect();
+    SubmittedLine { content, mentions }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_interactive_slash(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &mut Conversation,
+    project_id: &mut Option<ProjectId>,
+    project_root: &mut Option<PathBuf>,
+    preferences: &mut ExecutionPreferences,
+    pending_mentions: &mut Vec<String>,
+    line: SubmittedLine,
+) -> Result<InteractiveControl, Box<dyn std::error::Error>> {
+    let (name, argument_start, argument) =
+        parse_interactive_slash(&line).ok_or("invalid slash command")?;
+    let name = name.to_ascii_lowercase();
+    if !INTERACTIVE_SLASH_COMMANDS
+        .iter()
+        .any(|command| command.name == name)
+    {
+        return Err(format!("unknown command /{name}; type /help to list commands").into());
+    }
+    match name.as_str() {
+        "exit" | "quit" => return Ok(InteractiveControl::Exit),
+        "help" => {
+            println!(
+                "\nKeyboard: type / or @ to open a live picker; ↑/↓ select; Enter/Tab inserts; Escape closes."
+            );
+            println!(
+                "Left/Right/Home/End edit, Up/Down recall history when no picker is open, Ctrl+C exits.\n"
+            );
+            for command in INTERACTIVE_SLASH_COMMANDS {
+                println!("/{:<18} {}", command.name, command.description);
+            }
+        }
+        "clear" => {
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                crossterm::cursor::MoveTo(0, 0)
+            )?;
+        }
+        "new" | "side" => {
+            *conversation = create_interactive_conversation(
+                client,
+                host,
+                token,
+                *project_id,
+                preferences,
+                if name == "side" {
+                    "MetaCog CLI side chat"
+                } else {
+                    "MetaCog CLI"
+                },
+            )
+            .await?;
+            pending_mentions.clear();
+            println!("Started conversation {}.", conversation.id);
+            if !argument.is_empty() {
+                let view = send_interactive_message(
+                    client,
+                    host,
+                    token,
+                    conversation,
+                    preferences,
+                    slash_argument_line(line, argument_start),
+                    pending_mentions,
+                )
+                .await?;
+                *conversation = view.conversation;
+            }
+        }
+        "plan" => {
+            let view: ConversationView = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/mode",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&UpdateConversationModeRequest {
+                        mode: ConversationMode::Plan,
+                    })
+                    .send()
+                    .await?,
+                "enter plan mode",
+            )
+            .await?;
+            *conversation = view.conversation;
+            println!("Plan mode enabled.");
+            if !argument.is_empty() {
+                let view = send_interactive_message(
+                    client,
+                    host,
+                    token,
+                    conversation,
+                    preferences,
+                    slash_argument_line(line, argument_start),
+                    pending_mentions,
+                )
+                .await?;
+                *conversation = view.conversation;
+                pending_mentions.clear();
+            }
+        }
+        "goal" => {
+            let (objective, status, clear) = if argument.is_empty() {
+                let view =
+                    fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+                if let Some(goal) = &view.conversation.goal {
+                    println!(
+                        "Goal: {}\nStatus: {:?}\nTokens: {}",
+                        goal.objective, goal.status, goal.tokens_used
+                    );
+                } else {
+                    println!("No active goal. Use /goal <objective>.");
+                }
+                *conversation = view.conversation;
+                return Ok(InteractiveControl::Continue);
+            } else if argument.eq_ignore_ascii_case("clear") {
+                (None, None, true)
+            } else if argument.eq_ignore_ascii_case("pause") {
+                (None, Some(ConversationGoalStatus::Paused), false)
+            } else if argument.eq_ignore_ascii_case("resume") {
+                (None, Some(ConversationGoalStatus::Active), false)
+            } else if let Some(objective) = argument.strip_prefix("edit ") {
+                (
+                    Some(validated_goal(objective)?),
+                    Some(ConversationGoalStatus::Active),
+                    false,
+                )
+            } else {
+                (
+                    Some(validated_goal(argument)?),
+                    Some(ConversationGoalStatus::Active),
+                    false,
+                )
+            };
+            let response = if clear {
+                client
+                    .delete(format!(
+                        "{host}/api/v1/conversations/{}/goal",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?
+            } else {
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/goal",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&UpdateConversationGoalRequest { objective, status })
+                    .send()
+                    .await?
+            };
+            let view: ConversationView = decode_api_response(response, "update goal").await?;
+            *conversation = view.conversation;
+            println!("Goal {}.", if clear { "cleared" } else { "updated" });
+        }
+        "mention" => {
+            if argument.is_empty() {
+                println!("Type @ to search the project, or use /mention <path>.");
+            } else {
+                let path = PathBuf::from(argument);
+                let resolved_path = if path.is_absolute() {
+                    path
+                } else if let Some(root) = project_root.as_ref() {
+                    root.join(path)
+                } else {
+                    path
+                };
+                let metadata = std::fs::metadata(&resolved_path).map_err(|error| {
+                    format!("cannot attach {}: {error}", resolved_path.display())
+                })?;
+                let resource = if let Some(root) = project_root.as_ref() {
+                    resolved_path.strip_prefix(root).map_or_else(
+                        |_| resolved_path.to_string_lossy().into_owned(),
+                        |relative| relative.to_string_lossy().replace('\\', "/"),
+                    )
+                } else {
+                    resolved_path.to_string_lossy().into_owned()
+                };
+                pending_mentions.push(format!(
+                    "{}:{resource}",
+                    if metadata.is_dir() { "folder" } else { "file" }
+                ));
+                println!("Attached {resource} to the next message.");
+            }
+        }
+        "model" => {
+            if argument.is_empty() {
+                println!(
+                    "Current model: {}",
+                    preferences.model_id.as_deref().unwrap_or("Automatic")
+                );
+            } else {
+                preferences.model_id = Some(argument.to_owned());
+                println!("Model set to {argument} for later turns.");
+            }
+        }
+        "reasoning" => {
+            if argument.is_empty() {
+                println!(
+                    "Current reasoning effort: {}",
+                    preferences
+                        .reasoning_effort
+                        .as_deref()
+                        .unwrap_or("Automatic")
+                );
+            } else {
+                let effort = argument.to_ascii_lowercase().replace(' ', "");
+                let effort = if effort == "extrahigh" {
+                    "xhigh".to_owned()
+                } else {
+                    effort
+                };
+                if !["low", "medium", "high", "xhigh", "max", "ultra"].contains(&effort.as_str()) {
+                    return Err(
+                        "reasoning must be low, medium, high, extra high, max, or ultra".into(),
+                    );
+                }
+                preferences.reasoning_effort = Some(effort.clone());
+                println!("Reasoning effort set to {effort}.");
+            }
+        }
+        "fast" => {
+            let enabled = preferences.service_tier.is_some();
+            preferences.service_tier = (!enabled).then(|| "fast".into());
+            println!("Fast responses {}.", if enabled { "off" } else { "on" });
+        }
+        "permissions" => {
+            if argument.is_empty() {
+                println!(
+                    "Current permissions: {:?}. Choose ask, auto-review, or full-access.",
+                    preferences.approval_mode
+                );
+            } else {
+                preferences.approval_mode = match argument.to_ascii_lowercase().as_str() {
+                    "ask" => ApprovalMode::Ask,
+                    "auto" | "auto-review" | "approve-for-me" => ApprovalMode::AutoReview,
+                    "full" | "full-access" => ApprovalMode::FullAccess,
+                    _ => return Err("permissions must be ask, auto-review, or full-access".into()),
+                };
+                println!("Permissions set to {:?}.", preferences.approval_mode);
+            }
+        }
+        "personality" => {
+            if argument.is_empty() {
+                println!(
+                    "Current personality: {}",
+                    preferences.personality.as_deref().unwrap_or("default")
+                );
+            } else {
+                let value = argument.to_ascii_lowercase();
+                if !["default", "concise", "friendly", "professional"].contains(&value.as_str()) {
+                    return Err(
+                        "personality must be default, concise, friendly, or professional".into(),
+                    );
+                }
+                preferences.personality = (value != "default").then_some(value.clone());
+                println!("Personality set to {value}.");
+            }
+        }
+        "status" => {
+            let view =
+                fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+            println!("Conversation: {}", view.conversation.id);
+            println!(
+                "Project: {}",
+                project_root
+                    .as_ref()
+                    .map_or_else(|| "None".into(), |root| root.display().to_string())
+            );
+            println!("Mode: {:?}", view.conversation.mode);
+            println!(
+                "Model: {}",
+                preferences.model_id.as_deref().unwrap_or("Automatic")
+            );
+            println!(
+                "Reasoning: {}",
+                preferences
+                    .reasoning_effort
+                    .as_deref()
+                    .unwrap_or("Automatic")
+            );
+            println!("Permissions: {:?}", preferences.approval_mode);
+            println!(
+                "Goal: {}",
+                view.conversation
+                    .goal
+                    .as_ref()
+                    .map_or("None", |goal| goal.objective.as_str())
+            );
+            *conversation = view.conversation;
+        }
+        "compact" | "fork" => {
+            let operation = name.as_str();
+            let _: serde_json::Value = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/codex/owned-threads/{}/{operation}",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                operation,
+            )
+            .await?;
+            println!("Context {operation} completed.");
+        }
+        "approve" => {
+            let approvals: ApprovalListResponse = decode_api_response(
+                client
+                    .get(format!("{host}/api/v1/approvals?state=pending"))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "list pending approvals",
+            )
+            .await?;
+            if let Some(approval) = approvals.approvals.last() {
+                resolve_approval(
+                    client,
+                    host,
+                    token,
+                    &approval.id.to_string(),
+                    ApprovalState::Approved,
+                    Some("Approved once from the interactive CLI".into()),
+                )
+                .await?;
+            } else {
+                println!("No pending approvals.");
+            }
+        }
+        "project" => {
+            if argument.is_empty() {
+                println!(
+                    "Current project: {}",
+                    project_root
+                        .as_ref()
+                        .map_or_else(|| "None".into(), |root| root.display().to_string())
+                );
+            } else {
+                let canonical = std::fs::canonicalize(argument)?;
+                let root = canonical
+                    .to_str()
+                    .ok_or("project directory must be valid Unicode")?
+                    .to_owned();
+                let resolved = resolve_consumer_project(client, host, token, &root).await?;
+                *project_id = Some(resolved.project.project_id);
+                *project_root = Some(canonical);
+                *conversation = create_interactive_conversation(
+                    client,
+                    host,
+                    token,
+                    *project_id,
+                    preferences,
+                    "MetaCog CLI",
+                )
+                .await?;
+                pending_mentions.clear();
+                println!("Switched to {root}; conversation {}.", conversation.id);
+            }
+        }
+        "task" => {
+            *project_id = None;
+            *project_root = None;
+            *conversation = create_interactive_conversation(
+                client,
+                host,
+                token,
+                None,
+                preferences,
+                "MetaCog CLI task",
+            )
+            .await?;
+            pending_mentions.clear();
+            println!("Started project-free conversation {}.", conversation.id);
+        }
+        "review" | "init" | "worktree" => {
+            if project_id.is_none() {
+                return Err(format!("/{name} requires a project").into());
+            }
+            let message = match name.as_str() {
+                "review" => format!("Review {}. Prioritize correctness, regressions, security, missing tests, and repository instructions. Report actionable findings with file and line references. Do not modify the working tree.", if argument.is_empty() { "all staged, unstaged, and untracked changes" } else { argument }),
+                "init" => "Create or update AGENTS.md for this project. Inspect the repository first, preserve existing instructions, and add concise project-specific guidance.".into(),
+                "worktree" if !argument.is_empty() => format!("Complete this coding task through a managed Git worktree: {argument}"),
+                "worktree" => return Err("add the coding objective after /worktree".into()),
+                _ => unreachable!(),
+            };
+            let view = send_interactive_message(
+                client,
+                host,
+                token,
+                conversation,
+                preferences,
+                SubmittedLine {
+                    content: message,
+                    mentions: Vec::new(),
+                },
+                pending_mentions,
+            )
+            .await?;
+            *conversation = view.conversation;
+            pending_mentions.clear();
+        }
+        "local" => println!(
+            "Local workspace: {}",
+            project_root.as_ref().map_or_else(
+                || "project-free read-only chat".into(),
+                |root| root.display().to_string()
+            )
+        ),
+        "mcp" => run_mcp(client, host, token, McpCommand::List { json: false }).await?,
+        "feedback" => println!(
+            "Use `mcg doctor` for a support report and include it with your GitHub feedback."
+        ),
+        "memories" => println!(
+            "Memory controls are available through `mcg project memory --help` and MetaCog Settings."
+        ),
+        "cloud" | "cloud-environment" => println!(
+            "Cloud execution is not connected; this CLI uses governed local projects and worktrees."
+        ),
+        "ide-context" => println!(
+            "IDE selection context is unavailable in the standalone CLI; use @ references instead."
+        ),
+        "pet" => println!("MetaCog does not ship a desktop pet."),
+        _ => unreachable!("all commands are handled above"),
+    }
+    Ok(InteractiveControl::Continue)
 }
 
 async fn run_consumer_submission(
