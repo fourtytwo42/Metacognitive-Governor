@@ -1,18 +1,29 @@
 use std::{
-    future::Future,
+    collections::VecDeque,
     io::{self, Write},
+    time::{Duration, Instant},
 };
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind},
     execute,
-    style::{Attribute, Print, SetAttribute},
-    terminal::{self, ClearType},
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use mcg_domain::{ComposerMentionInput, ConversationInputQuestion, MentionCandidate};
+use mcg_domain::{
+    ComposerMentionInput, ConversationActivityKind, ConversationActivityState,
+    ConversationInputQuestion, ConversationRole, ConversationTurnState, ConversationView,
+    MentionCandidate,
+};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+};
 
-const PROMPT: &str = "metacog> ";
 const MAX_VISIBLE_CHOICES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,29 +80,809 @@ pub struct SubmittedLine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComposerOutcome {
+pub enum TuiAction {
     Submit(SubmittedLine),
-    Eof,
+    Steer(SubmittedLine),
+    Queue(SubmittedLine),
+    CopyLatest,
+    ForkPrevious,
+    AnswerInput {
+        request_id: serde_json::Value,
+        answers: serde_json::Value,
+    },
+    Exit,
 }
 
-pub struct RawModeGuard;
+#[derive(Debug, Clone)]
+struct QuestionOverlay {
+    request_id: serde_json::Value,
+    questions: Vec<ConversationInputQuestion>,
+    question_index: usize,
+    selected: usize,
+    text: String,
+    other_mode: bool,
+    answers: serde_json::Map<String, serde_json::Value>,
+}
 
-impl RawModeGuard {
+impl QuestionOverlay {
+    fn new(request: &mcg_domain::ConversationInputRequest) -> Self {
+        Self {
+            request_id: request.request_id.clone(),
+            questions: request.questions.clone(),
+            question_index: 0,
+            selected: 0,
+            text: String::new(),
+            other_mode: false,
+            answers: serde_json::Map::new(),
+        }
+    }
+
+    fn question(&self) -> &ConversationInputQuestion {
+        &self.questions[self.question_index]
+    }
+}
+
+pub struct TuiTerminal {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl TuiTerminal {
     pub fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        Ok(Self)
+        let mut stdout = io::stdout();
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            event::EnableMouseCapture,
+            cursor::Hide
+        )?;
+        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        Ok(Self { terminal })
+    }
+
+    pub fn draw(&mut self, model: &mut TuiModel) -> io::Result<()> {
+        self.terminal.draw(|frame| model.render(frame))?;
+        Ok(())
     }
 }
 
-impl Drop for RawModeGuard {
+impl Drop for TuiTerminal {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            event::DisableMouseCapture,
+            LeaveAlternateScreen,
+            cursor::Show
+        );
+        let _ = self.terminal.show_cursor();
     }
 }
 
-#[derive(Default)]
-pub struct Composer {
+pub struct TuiModel {
+    editor: EditorState,
     history: Vec<String>,
+    history_index: usize,
+    history_search: Option<String>,
+    candidates: Vec<PaletteCandidate>,
+    view: ConversationView,
+    project: String,
+    branch: String,
+    transcript_scroll: u16,
+    queued: VecDeque<SubmittedLine>,
+    status: String,
+    details_expanded: bool,
+    last_escape: Option<Instant>,
+    question_overlay: Option<QuestionOverlay>,
+}
+
+impl TuiModel {
+    #[must_use]
+    pub fn new(view: ConversationView, project: String, branch: String) -> Self {
+        Self {
+            editor: EditorState::default(),
+            history: Vec::new(),
+            history_index: 0,
+            history_search: None,
+            candidates: Vec::new(),
+            view,
+            project,
+            branch,
+            transcript_scroll: 0,
+            queued: VecDeque::new(),
+            status: "Ready".into(),
+            details_expanded: false,
+            last_escape: None,
+            question_overlay: None,
+        }
+    }
+
+    pub fn set_view(&mut self, view: ConversationView) {
+        self.view = view;
+        if self.question_overlay.is_none() {
+            self.question_overlay = self
+                .view
+                .conversation
+                .pending_input_requests
+                .first()
+                .map(QuestionOverlay::new);
+        }
+        self.status = if self.is_active() {
+            "Working".into()
+        } else {
+            "Ready".into()
+        };
+    }
+
+    pub fn set_status(&mut self, value: impl Into<String>) {
+        self.status = value.into();
+    }
+
+    pub fn set_workspace(&mut self, project: String, branch: String) {
+        self.project = project;
+        self.branch = branch;
+    }
+
+    pub fn set_candidates(&mut self, candidates: Vec<PaletteCandidate>) {
+        self.candidates = candidates;
+        self.editor.clamp_selection(self.candidates.len());
+    }
+
+    #[must_use]
+    pub fn palette_request(&self) -> Option<PaletteRequest> {
+        self.editor.palette_request()
+    }
+
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.view.turns.iter().any(|turn| {
+            matches!(
+                turn.state,
+                ConversationTurnState::Pending
+                    | ConversationTurnState::Streaming
+                    | ConversationTurnState::WaitingForApproval
+                    | ConversationTurnState::Recovering
+                    | ConversationTurnState::Indeterminate
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn active_turn(&self) -> Option<mcg_domain::ConversationTurn> {
+        self.view
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| {
+                matches!(
+                    turn.state,
+                    ConversationTurnState::Pending
+                        | ConversationTurnState::Streaming
+                        | ConversationTurnState::WaitingForApproval
+                        | ConversationTurnState::Recovering
+                        | ConversationTurnState::Indeterminate
+                )
+            })
+            .cloned()
+    }
+
+    #[must_use]
+    pub fn queued_len(&self) -> usize {
+        self.queued.len()
+    }
+
+    pub fn queue(&mut self, line: SubmittedLine) {
+        self.queued.push_back(line);
+    }
+
+    pub fn pop_queue(&mut self) -> Option<SubmittedLine> {
+        self.queued.pop_front()
+    }
+
+    #[must_use]
+    pub fn latest_assistant_text(&self) -> Option<&str> {
+        self.view
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ConversationRole::Assistant)
+            .map(|message| message.content.as_str())
+    }
+
+    pub fn handle_event(
+        &mut self,
+        input: Event,
+    ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        match input {
+            Event::Key(key) if key.kind != event::KeyEventKind::Release => self.handle_key(key),
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.transcript_scroll = self.transcript_scroll.saturating_add(3)
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.transcript_scroll = self.transcript_scroll.saturating_sub(3)
+                    }
+                    _ => {}
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        if self.question_overlay.is_some() {
+            return self.handle_question_key(key);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('d') if self.editor.buffer.is_empty() => {
+                    return Ok(Some(TuiAction::Exit));
+                }
+                KeyCode::Char('o') => return Ok(Some(TuiAction::CopyLatest)),
+                KeyCode::Char('r') => {
+                    self.history_search = Some(String::new());
+                    return Ok(None);
+                }
+                KeyCode::Char('e') => {
+                    self.details_expanded = !self.details_expanded;
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+        if let Some(search) = self.history_search.as_mut() {
+            match key.code {
+                KeyCode::Esc => self.history_search = None,
+                KeyCode::Enter => {
+                    if let Some(found) = self
+                        .history
+                        .iter()
+                        .rev()
+                        .find(|value| value.contains(search.as_str()))
+                    {
+                        self.editor.replace_all(found.clone());
+                    }
+                    self.history_search = None;
+                }
+                KeyCode::Backspace => {
+                    search.pop();
+                }
+                KeyCode::Char(value) => search.push(value),
+                _ => {}
+            }
+            return Ok(None);
+        }
+        let palette_open = self.editor.palette_request().is_some() && !self.candidates.is_empty();
+        match key.code {
+            KeyCode::Enter | KeyCode::Tab if palette_open => {
+                self.editor.select(&self.candidates[self.editor.selected]);
+            }
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                self.editor
+                    .edit(self.editor.cursor, self.editor.cursor, "\n");
+            }
+            KeyCode::Enter => return self.submit_action(false),
+            KeyCode::Tab if self.is_active() => return self.submit_action(true),
+            KeyCode::Esc => {
+                if self.editor.palette_request().is_some() {
+                    self.editor.dismiss_palette();
+                } else if self.editor.buffer.is_empty()
+                    && self
+                        .last_escape
+                        .is_some_and(|last| last.elapsed() <= Duration::from_millis(650))
+                {
+                    self.last_escape = None;
+                    return Ok(Some(TuiAction::ForkPrevious));
+                } else {
+                    self.last_escape = Some(Instant::now());
+                }
+            }
+            KeyCode::PageUp => self.transcript_scroll = self.transcript_scroll.saturating_add(8),
+            KeyCode::PageDown => self.transcript_scroll = self.transcript_scroll.saturating_sub(8),
+            KeyCode::Up if palette_open => {
+                self.editor.selected = self.editor.selected.saturating_sub(1)
+            }
+            KeyCode::Down if palette_open => {
+                self.editor.selected = (self.editor.selected + 1).min(self.candidates.len() - 1);
+            }
+            KeyCode::Up if !self.editor.buffer.contains('\n') => {
+                if self.history_index > 0 {
+                    self.history_index -= 1;
+                    self.editor
+                        .replace_all(self.history[self.history_index].clone());
+                }
+            }
+            KeyCode::Down if !self.editor.buffer.contains('\n') => {
+                if self.history_index + 1 < self.history.len() {
+                    self.history_index += 1;
+                    self.editor
+                        .replace_all(self.history[self.history_index].clone());
+                } else if self.history_index < self.history.len() {
+                    self.history_index = self.history.len();
+                    self.editor.replace_all(String::new());
+                }
+            }
+            KeyCode::Left => self.editor.cursor = self.editor.cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.editor.cursor = (self.editor.cursor + 1).min(self.editor.chars().len())
+            }
+            KeyCode::Home => self.editor.cursor = 0,
+            KeyCode::End => self.editor.cursor = self.editor.chars().len(),
+            KeyCode::Backspace if self.editor.cursor > 0 => self.editor.delete_backward(),
+            KeyCode::Delete if self.editor.cursor < self.editor.chars().len() => {
+                self.editor.delete_forward()
+            }
+            KeyCode::Char(value)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.editor
+                    .edit(self.editor.cursor, self.editor.cursor, &value.to_string());
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    fn handle_question_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        let mut completed_answer = None;
+        {
+            let overlay = self.question_overlay.as_mut().expect("question overlay");
+            let question = overlay.question().clone();
+            let options = question.options.as_deref().unwrap_or_default();
+            let choice_count = options.len() + usize::from(question.is_other);
+            let text_mode = options.is_empty() || overlay.other_mode;
+            if text_mode {
+                match key.code {
+                    KeyCode::Backspace => {
+                        overlay.text.pop();
+                    }
+                    KeyCode::Char(value)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        overlay.text.push(value);
+                    }
+                    KeyCode::Esc if overlay.other_mode => {
+                        overlay.other_mode = false;
+                        overlay.text.clear();
+                    }
+                    KeyCode::Enter if !overlay.text.trim().is_empty() => {
+                        completed_answer = Some(overlay.text.trim().to_owned());
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Up => overlay.selected = overlay.selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        overlay.selected =
+                            (overlay.selected + 1).min(choice_count.saturating_sub(1));
+                    }
+                    KeyCode::Char(value) if value.is_ascii_digit() => {
+                        if let Some(selected) = value.to_digit(10).map(|value| value as usize) {
+                            if selected > 0 && selected <= choice_count {
+                                overlay.selected = selected - 1;
+                            }
+                        }
+                    }
+                    KeyCode::Enter if overlay.selected < options.len() => {
+                        completed_answer = Some(options[overlay.selected].label.clone());
+                    }
+                    KeyCode::Enter if question.is_other => {
+                        overlay.other_mode = true;
+                        overlay.text.clear();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(answer) = completed_answer {
+            return self.finish_question(answer);
+        }
+        Ok(None)
+    }
+
+    fn finish_question(
+        &mut self,
+        answer: String,
+    ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        let overlay = self.question_overlay.as_mut().expect("question overlay");
+        let question_id = overlay.question().id.clone();
+        overlay
+            .answers
+            .insert(question_id, serde_json::json!({ "answers": [answer] }));
+        if overlay.question_index + 1 < overlay.questions.len() {
+            overlay.question_index += 1;
+            overlay.selected = 0;
+            overlay.text.clear();
+            overlay.other_mode = false;
+            return Ok(None);
+        }
+        let overlay = self.question_overlay.take().expect("question overlay");
+        Ok(Some(TuiAction::AnswerInput {
+            request_id: overlay.request_id,
+            answers: serde_json::Value::Object(overlay.answers),
+        }))
+    }
+
+    fn submit_action(
+        &mut self,
+        queue: bool,
+    ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        let state = std::mem::take(&mut self.editor);
+        let line = state.submit()?;
+        if line.content.trim().is_empty() {
+            return Ok(None);
+        }
+        if matches!(line.content.trim(), "/exit" | "/quit" | ":exit" | ":quit") {
+            return Ok(Some(TuiAction::Exit));
+        }
+        self.history.push(line.content.clone());
+        self.history_index = self.history.len();
+        self.candidates.clear();
+        if queue {
+            Ok(Some(TuiAction::Queue(line)))
+        } else if self.is_active() {
+            Ok(Some(TuiAction::Steer(line)))
+        } else {
+            Ok(Some(TuiAction::Submit(line)))
+        }
+    }
+
+    fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
+        let area = frame.area();
+        let composer_height =
+            u16::try_from(self.editor.buffer.lines().count().clamp(1, 6)).unwrap_or(1) + 4;
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(1),
+                Constraint::Length(composer_height),
+            ])
+            .split(area);
+        let transcript = Paragraph::new(self.transcript_text())
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .title(format!(" MetaCog · {} ", self.view.conversation.title)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((self.transcript_scroll, 0));
+        frame.render_widget(transcript, layout[0]);
+        frame.render_widget(Paragraph::new(self.status_line()), layout[1]);
+        let composer = Paragraph::new(self.editor.buffer.as_str())
+            .style(Style::default().fg(Color::White))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if self.is_active() {
+                        " Steer now · Tab queues "
+                    } else {
+                        " Message MetaCog "
+                    }),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(composer, layout[2]);
+        let cursor = cursor_position(layout[2], &self.editor.buffer, self.editor.cursor);
+        frame.set_cursor_position(cursor);
+        self.render_palette(frame, layout[2], area);
+        self.render_history_search(frame, area);
+        self.render_question_overlay(frame, area);
+    }
+
+    fn transcript_text(&self) -> Text<'static> {
+        let mut entries = Vec::<(chrono::DateTime<chrono::Utc>, Line<'static>)>::new();
+        for message in &self.view.messages {
+            let (label, color) = match message.role {
+                ConversationRole::User => ("You", Color::Cyan),
+                ConversationRole::Assistant => ("MetaCog", Color::Green),
+                ConversationRole::System => ("System", Color::Yellow),
+            };
+            entries.push((
+                message.created_at,
+                Line::from(vec![
+                    Span::styled(
+                        format!("{label}: "),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(message.content.clone()),
+                ]),
+            ));
+        }
+        for activity in &self.view.activities {
+            if !self.details_expanded
+                && matches!(
+                    activity.kind,
+                    ConversationActivityKind::Working | ConversationActivityKind::Usage
+                )
+            {
+                continue;
+            }
+            let icon = match activity.kind {
+                ConversationActivityKind::ReasoningSummary => "◇",
+                ConversationActivityKind::Command => ">_",
+                ConversationActivityKind::FileChange => "✎",
+                ConversationActivityKind::Approval => "!",
+                ConversationActivityKind::Failure => "×",
+                ConversationActivityKind::Completion => "✓",
+                _ => "·",
+            };
+            let state = match activity.state {
+                ConversationActivityState::Running => "running",
+                ConversationActivityState::Completed => "done",
+                ConversationActivityState::Failed => "failed",
+                ConversationActivityState::Declined => "declined",
+            };
+            let detail = activity
+                .command
+                .as_deref()
+                .or(activity.output.as_deref())
+                .unwrap_or(state);
+            entries.push((
+                activity.updated_at,
+                Line::styled(
+                    format!("  {icon} {} · {detail}", activity_kind_label(activity.kind)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ));
+        }
+        entries.sort_by_key(|entry| entry.0);
+        let mut lines = Vec::new();
+        for (_, line) in entries {
+            lines.push(line);
+            lines.push(Line::raw(""));
+        }
+        if lines.is_empty() {
+            lines.push(Line::styled(
+                "What should we build?",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        Text::from(lines)
+    }
+
+    fn status_line(&self) -> Line<'static> {
+        let prefs = &self.view.conversation.execution_preferences;
+        let goal = self
+            .view
+            .conversation
+            .goal
+            .as_ref()
+            .map_or("no goal".into(), |goal| format!("goal: {:?}", goal.status));
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", self.status),
+                Style::default()
+                    .fg(if self.is_active() {
+                        Color::Yellow
+                    } else {
+                        Color::Green
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  {}  {}  {}  {}  {:?}  {} queued  {}",
+                self.project,
+                self.branch,
+                prefs.model_id.as_deref().unwrap_or("Automatic"),
+                prefs.reasoning_effort.as_deref().unwrap_or("Automatic"),
+                prefs.approval_mode,
+                self.queued.len(),
+                goal
+            )),
+        ])
+    }
+
+    fn render_palette(&mut self, frame: &mut ratatui::Frame<'_>, composer: Rect, area: Rect) {
+        if self.editor.palette_request().is_none() || self.candidates.is_empty() {
+            return;
+        }
+        let height =
+            u16::try_from(self.candidates.len().min(MAX_VISIBLE_CHOICES) + 2).unwrap_or(10);
+        let width = area.width.saturating_sub(4).min(78).max(24);
+        let y = composer.y.saturating_sub(height);
+        let popup = Rect::new(composer.x.saturating_add(1), y, width, height);
+        frame.render_widget(Clear, popup);
+        let items = self
+            .candidates
+            .iter()
+            .take(MAX_VISIBLE_CHOICES)
+            .map(|candidate| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{:<22}", candidate.label()),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        candidate.detail().to_owned(),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(" Select "))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
+        let mut state = ListState::default().with_selected(Some(self.editor.selected));
+        frame.render_stateful_widget(list, popup, &mut state);
+    }
+
+    fn render_history_search(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let Some(search) = &self.history_search else {
+            return;
+        };
+        let popup = centered_rect(70, 5, area);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(search.as_str()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Search prompt history · Enter use · Esc cancel "),
+            ),
+            popup,
+        );
+    }
+
+    fn render_question_overlay(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let Some(overlay) = &self.question_overlay else {
+            return;
+        };
+        let question = overlay.question();
+        let options = question.options.as_deref().unwrap_or_default();
+        let mut lines = vec![Line::styled(
+            question.question.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )];
+        lines.push(Line::raw(""));
+        if options.is_empty() || overlay.other_mode {
+            let value = if question.is_secret {
+                "•".repeat(overlay.text.chars().count())
+            } else {
+                overlay.text.clone()
+            };
+            lines.push(Line::raw(if value.is_empty() {
+                "Type an answer, then press Enter".into()
+            } else {
+                value
+            }));
+            if overlay.other_mode {
+                lines.push(Line::styled(
+                    "Esc returns to choices",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        } else {
+            for (index, option) in options.iter().enumerate() {
+                let prefix = if index == overlay.selected {
+                    "›"
+                } else {
+                    " "
+                };
+                let recommended = if index == 0 { " · Recommended" } else { "" };
+                lines.push(Line::styled(
+                    format!(
+                        "{prefix} {}. {}{recommended} — {}",
+                        index + 1,
+                        option.label,
+                        option.description
+                    ),
+                    if index == overlay.selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    },
+                ));
+            }
+            if question.is_other {
+                let index = options.len();
+                lines.push(Line::styled(
+                    format!(
+                        "{} {}. Other answer",
+                        if index == overlay.selected {
+                            "›"
+                        } else {
+                            " "
+                        },
+                        index + 1
+                    ),
+                    if index == overlay.selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    },
+                ));
+            }
+        }
+        let height = u16::try_from(lines.len() + 2)
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let popup = centered_rect(80, height.max(7), area);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                Block::default().borders(Borders::ALL).title(format!(
+                    " {} · question {} of {} ",
+                    question.header,
+                    overlay.question_index + 1,
+                    overlay.questions.len()
+                )),
+            ),
+            popup,
+        );
+    }
+}
+
+fn activity_kind_label(kind: ConversationActivityKind) -> &'static str {
+    match kind {
+        ConversationActivityKind::Working => "Working",
+        ConversationActivityKind::Waiting => "Waiting",
+        ConversationActivityKind::ReasoningSummary => "Reasoning",
+        ConversationActivityKind::Plan => "Plan",
+        ConversationActivityKind::Command => "Command",
+        ConversationActivityKind::FileChange => "File change",
+        ConversationActivityKind::McpCall => "MCP",
+        ConversationActivityKind::CollaborationCall => "Agent exchange",
+        ConversationActivityKind::WebSearch => "Web search",
+        ConversationActivityKind::ImageView => "Image",
+        ConversationActivityKind::Approval => "Approval",
+        ConversationActivityKind::Elicitation => "Question",
+        ConversationActivityKind::ContextCompaction => "Compaction",
+        ConversationActivityKind::Usage => "Usage",
+        ConversationActivityKind::Recovery => "Recovery",
+        ConversationActivityKind::Interruption => "Interrupted",
+        ConversationActivityKind::Failure => "Failure",
+        ConversationActivityKind::Completion => "Completed",
+    }
+}
+
+fn cursor_position(area: Rect, value: &str, cursor: usize) -> (u16, u16) {
+    let before = value.chars().take(cursor).collect::<String>();
+    let mut lines = before.split('\n');
+    let last = lines.next_back().unwrap_or_default();
+    let row = u16::try_from(before.matches('\n').count()).unwrap_or(u16::MAX);
+    let column = u16::try_from(last.chars().count()).unwrap_or(u16::MAX);
+    (
+        area.x.saturating_add(1).saturating_add(column),
+        area.y
+            .saturating_add(1)
+            .saturating_add(row.min(area.height.saturating_sub(2))),
+    )
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let width = area
+        .width
+        .saturating_mul(percent_x)
+        .saturating_div(100)
+        .max(20);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width.min(area.width),
+        height.min(area.height),
+    )
 }
 
 pub fn prompt_for_question(
@@ -165,111 +956,6 @@ fn prompt_for_text(
         return Err("an answer is required".into());
     }
     Ok(answer)
-}
-
-impl Composer {
-    pub async fn read_line<F, Fut>(
-        &mut self,
-        mut candidates_for: F,
-    ) -> Result<ComposerOutcome, Box<dyn std::error::Error>>
-    where
-        F: FnMut(PaletteRequest) -> Fut,
-        Fut: Future<Output = Vec<PaletteCandidate>>,
-    {
-        let _raw_mode = RawModeGuard::enter()?;
-        let mut state = EditorState::default();
-        let mut history_index = self.history.len();
-        let mut stdout = io::stdout();
-
-        loop {
-            let request = state.palette_request();
-            let candidates = request.clone().map(&mut candidates_for);
-            let candidates = if let Some(candidates) = candidates {
-                candidates.await
-            } else {
-                Vec::new()
-            };
-            state.clamp_selection(candidates.len());
-            render(&mut stdout, &state, &candidates)?;
-
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind == event::KeyEventKind::Release {
-                continue;
-            }
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Char('c') => {
-                        clear_render(&mut stdout)?;
-                        execute!(stdout, Print("^C\r\n"))?;
-                        return Ok(ComposerOutcome::Eof);
-                    }
-                    KeyCode::Char('d') if state.buffer.is_empty() => {
-                        clear_render(&mut stdout)?;
-                        execute!(stdout, Print("\r\n"))?;
-                        return Ok(ComposerOutcome::Eof);
-                    }
-                    _ => {}
-                }
-            }
-
-            match key.code {
-                KeyCode::Enter | KeyCode::Tab if request.is_some() && !candidates.is_empty() => {
-                    state.select(&candidates[state.selected]);
-                }
-                KeyCode::Enter => {
-                    let submitted = state.submit()?;
-                    clear_render(&mut stdout)?;
-                    execute!(stdout, Print(format!("{PROMPT}{}\r\n", submitted.content)))?;
-                    if !submitted.content.trim().is_empty() {
-                        self.history.push(submitted.content.clone());
-                    }
-                    return Ok(ComposerOutcome::Submit(submitted));
-                }
-                KeyCode::Esc => state.dismiss_palette(),
-                KeyCode::Up if request.is_some() && !candidates.is_empty() => {
-                    state.selected = state.selected.saturating_sub(1);
-                }
-                KeyCode::Down if request.is_some() && !candidates.is_empty() => {
-                    state.selected = (state.selected + 1).min(candidates.len() - 1);
-                }
-                KeyCode::Up => {
-                    if history_index > 0 {
-                        history_index -= 1;
-                        state.replace_all(self.history[history_index].clone());
-                    }
-                }
-                KeyCode::Down => {
-                    if history_index + 1 < self.history.len() {
-                        history_index += 1;
-                        state.replace_all(self.history[history_index].clone());
-                    } else if history_index < self.history.len() {
-                        history_index = self.history.len();
-                        state.replace_all(String::new());
-                    }
-                }
-                KeyCode::Left => state.cursor = state.cursor.saturating_sub(1),
-                KeyCode::Right => state.cursor = (state.cursor + 1).min(state.chars().len()),
-                KeyCode::Home => state.cursor = 0,
-                KeyCode::End => state.cursor = state.chars().len(),
-                KeyCode::Backspace if state.cursor > 0 => {
-                    state.delete_backward();
-                }
-                KeyCode::Delete if state.cursor < state.chars().len() => {
-                    state.delete_forward();
-                }
-                KeyCode::Char(value)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    state.edit(state.cursor, state.cursor, &value.to_string());
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
 #[derive(Default)]
@@ -463,72 +1149,14 @@ impl EditorState {
     }
 }
 
-fn clear_render(stdout: &mut io::Stdout) -> io::Result<()> {
-    execute!(
-        stdout,
-        cursor::MoveToColumn(0),
-        terminal::Clear(ClearType::FromCursorDown)
-    )
-}
-
-fn render(
-    stdout: &mut io::Stdout,
-    state: &EditorState,
-    candidates: &[PaletteCandidate],
-) -> io::Result<()> {
-    clear_render(stdout)?;
-    let width = terminal::size().map_or(100, |(width, _)| usize::from(width));
-    let available = width.saturating_sub(PROMPT.len() + 1).max(12);
-    let chars = state.chars();
-    let window_start = state.cursor.saturating_sub(available);
-    let window_end = (window_start + available).min(chars.len());
-    let visible = chars[window_start..window_end].iter().collect::<String>();
-    execute!(stdout, Print(PROMPT), Print(visible))?;
-
-    let visible_candidates = candidates
-        .iter()
-        .take(MAX_VISIBLE_CHOICES)
-        .collect::<Vec<_>>();
-    for (index, candidate) in visible_candidates.iter().enumerate() {
-        execute!(stdout, Print("\r\n"))?;
-        if index == state.selected {
-            execute!(stdout, SetAttribute(Attribute::Reverse))?;
-        }
-        let label = candidate.label();
-        let detail = candidate.detail();
-        let max_detail = width.saturating_sub(label.len() + 8);
-        let detail = detail.chars().take(max_detail).collect::<String>();
-        execute!(stdout, Print(format!("  {label:<24} {detail}")))?;
-        if index == state.selected {
-            execute!(stdout, SetAttribute(Attribute::Reset))?;
-        }
-    }
-    if candidates.len() > MAX_VISIBLE_CHOICES {
-        execute!(
-            stdout,
-            Print(format!(
-                "\r\n  … {} more matches; keep typing to narrow",
-                candidates.len() - MAX_VISIBLE_CHOICES
-            ))
-        )?;
-    }
-    let rows = u16::try_from(
-        visible_candidates.len() + usize::from(candidates.len() > MAX_VISIBLE_CHOICES),
-    )
-    .unwrap_or(u16::MAX);
-    if rows > 0 {
-        execute!(stdout, cursor::MoveUp(rows))?;
-    }
-    let cursor_column =
-        u16::try_from(PROMPT.len() + state.cursor.saturating_sub(window_start)).unwrap_or(u16::MAX);
-    execute!(stdout, cursor::MoveToColumn(cursor_column))?;
-    stdout.flush()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcg_domain::MentionKind;
+    use chrono::Utc;
+    use mcg_domain::{
+        Conversation, ConversationInputOption, ConversationInputRequest, ConversationTeamState,
+        ConversationTurn, ConversationTurnId, ExecutionPreferences, MentionKind,
+    };
 
     fn mention(label: &str, resource: &str) -> PaletteCandidate {
         PaletteCandidate::Mention(MentionCandidate {
@@ -614,5 +1242,140 @@ mod tests {
         forward.delete_forward();
         assert_eq!(forward.buffer, " ");
         assert!(forward.mentions.is_empty());
+    }
+
+    fn view(active: bool) -> ConversationView {
+        let conversation = Conversation::new("CLI", None);
+        let turns = active
+            .then(|| ConversationTurn {
+                schema_version: 1,
+                id: ConversationTurnId::new(),
+                conversation_id: conversation.id,
+                state: ConversationTurnState::Streaming,
+                execution_preferences: ExecutionPreferences::default(),
+                codex_thread_id: Some("thread".into()),
+                codex_turn_id: Some("turn".into()),
+                task_id: None,
+                run_id: None,
+                error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .into_iter()
+            .collect();
+        ConversationView {
+            conversation,
+            turns,
+            messages: Vec::new(),
+            activities: Vec::new(),
+            team: ConversationTeamState::default(),
+        }
+    }
+
+    #[test]
+    fn enter_submits_idle_and_steers_active_while_tab_queues() {
+        let mut idle = TuiModel::new(view(false), "project".into(), "main".into());
+        idle.editor.replace_all("build it".into());
+        assert!(matches!(
+            idle.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("idle"),
+            Some(TuiAction::Submit(_))
+        ));
+
+        let mut active = TuiModel::new(view(true), "project".into(), "main".into());
+        active.editor.replace_all("use blue".into());
+        assert!(matches!(
+            active
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("steer"),
+            Some(TuiAction::Steer(_))
+        ));
+
+        let mut queued = TuiModel::new(view(true), "project".into(), "main".into());
+        queued.editor.replace_all("then test".into());
+        assert!(matches!(
+            queued
+                .handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .expect("queue"),
+            Some(TuiAction::Queue(_))
+        ));
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_multiline_break() {
+        let mut model = TuiModel::new(view(false), "project".into(), "main".into());
+        model.editor.replace_all("first".into());
+        assert!(
+            model
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+                .expect("newline")
+                .is_none()
+        );
+        assert_eq!(model.editor.buffer, "first\n");
+    }
+
+    #[test]
+    fn planning_questions_use_a_non_blocking_recommended_choice_overlay() {
+        let mut question_view = view(true);
+        question_view
+            .conversation
+            .pending_input_requests
+            .push(ConversationInputRequest {
+                request_id: serde_json::json!({ "id": "request-1" }),
+                thread_id: "thread".into(),
+                turn_id: "turn".into(),
+                item_id: "item".into(),
+                questions: vec![ConversationInputQuestion {
+                    id: "scope".into(),
+                    header: "Scope".into(),
+                    question: "How broad should this be?".into(),
+                    is_other: true,
+                    is_secret: false,
+                    options: Some(vec![
+                        ConversationInputOption {
+                            label: "Focused".into(),
+                            description: "Smallest useful change".into(),
+                        },
+                        ConversationInputOption {
+                            label: "Broad".into(),
+                            description: "Wider refactor".into(),
+                        },
+                    ]),
+                }],
+                received_at: Utc::now(),
+            });
+        let mut model = TuiModel::new(question_view.clone(), "project".into(), "main".into());
+        model.set_view(question_view);
+        let action = model
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("question response")
+            .expect("answer action");
+        let TuiAction::AnswerInput {
+            request_id,
+            answers,
+        } = action
+        else {
+            panic!("expected an input answer");
+        };
+        assert_eq!(request_id, serde_json::json!({ "id": "request-1" }));
+        assert_eq!(
+            answers,
+            serde_json::json!({ "scope": { "answers": ["Focused"] } })
+        );
+    }
+
+    #[test]
+    fn terminal_layout_renders_without_clipping_panics_at_compact_and_wide_sizes() {
+        for (width, height) in [(40, 12), (120, 40)] {
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+            let mut model = TuiModel::new(view(false), "project".into(), "main".into());
+            model.editor.replace_all("first line\nsecond line".into());
+            terminal
+                .draw(|frame| model.render(frame))
+                .expect("render should fit terminal");
+            let rendered = terminal.backend().buffer().content();
+            assert_eq!(rendered.len(), usize::from(width) * usize::from(height));
+        }
     }
 }

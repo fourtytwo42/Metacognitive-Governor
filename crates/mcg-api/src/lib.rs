@@ -52,7 +52,7 @@ use mcg_domain::{
     SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
     SshWorkflow, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
-use mcg_events::EventEnvelope;
+use mcg_events::{EventEnvelope, EventKind};
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
 use mcg_plugin_trust::PluginSignatureProof;
 use mcg_projects::{
@@ -238,6 +238,16 @@ pub struct UpdateConversationRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationListResponse {
     pub conversations: Vec<Conversation>,
+}
+
+/// A resumable, conversation-scoped projection for terminal and desktop clients.
+/// The full view keeps reconnect/reducer logic backward compatible as projection
+/// schemas evolve, while `sequence` is the durable replay cursor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationStreamEvent {
+    pub sequence: u64,
+    pub kind: EventKind,
+    pub view: ConversationView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1572,6 +1582,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}",
             get(get_conversation).put(update_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/events/stream",
+            get(stream_conversation_events),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/archive",
@@ -3809,6 +3823,89 @@ async fn get_conversation(
         ))
     } else {
         Ok(Json(view))
+    }
+}
+
+async fn stream_conversation_events(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<EventStreamQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    // Fail before opening the stream when the owner supplied an unknown id.
+    state
+        .runtime
+        .conversation(conversation_id)
+        .map_err(map_runtime_error)?;
+    let receiver = state.runtime.subscribe();
+    let header_sequence = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| ApiError::bad_request("Last-Event-ID must be an event sequence"))?;
+    let after = query.after.or(header_sequence);
+    let backlog = after
+        .map(|sequence| state.runtime.events_after(sequence))
+        .transpose()?
+        .unwrap_or_default();
+    let replay_cutoff = backlog
+        .last()
+        .map_or(after.unwrap_or(0), |event| event.sequence);
+    let durable_runtime = Arc::clone(&state.runtime);
+    let durable = tokio_stream::iter(backlog).filter_map(move |event| {
+        conversation_stream_frame(&durable_runtime, conversation_id, event)
+    });
+    let live_runtime = Arc::clone(&state.runtime);
+    let live = BroadcastStream::new(receiver).filter_map(move |result| {
+        result
+            .ok()
+            .filter(|event| event.sequence > replay_cutoff)
+            .and_then(|event| conversation_stream_frame(&live_runtime, conversation_id, event))
+    });
+    Ok(Sse::new(durable.chain(live)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
+}
+
+fn conversation_stream_frame(
+    runtime: &AppRuntime,
+    conversation_id: ConversationId,
+    event: EventEnvelope,
+) -> Option<Result<Event, Infallible>> {
+    if !json_mentions_conversation(&event.payload, conversation_id) {
+        return None;
+    }
+    let view = runtime.conversation(conversation_id).ok()?;
+    let projected = ConversationStreamEvent {
+        sequence: event.sequence,
+        kind: event.kind,
+        view,
+    };
+    serde_json::to_string(&projected).ok().map(|data| {
+        Ok(Event::default()
+            .id(event.sequence.to_string())
+            .event(event.kind.as_str())
+            .data(data))
+    })
+}
+
+fn json_mentions_conversation(value: &serde_json::Value, conversation_id: ConversationId) -> bool {
+    let expected = conversation_id.to_string();
+    match value {
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            (key == "conversation_id" && value.as_str() == Some(expected.as_str()))
+                || json_mentions_conversation(value, conversation_id)
+        }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_mentions_conversation(value, conversation_id)),
+        _ => false,
     }
 }
 
@@ -15429,6 +15526,55 @@ form.addEventListener('submit', (event) => {
         .expect("SSE should be UTF-8");
         assert!(text.contains(&format!("id: {}", task_event.sequence)));
         assert!(text.contains("event: task_created"));
+    }
+
+    #[tokio::test]
+    async fn conversation_event_stream_replays_only_the_requested_conversation_projection() {
+        let runtime = test_runtime();
+        let first = runtime
+            .create_conversation(None, None, ExecutionPreferences::default())
+            .expect("first conversation");
+        let second = runtime
+            .create_conversation(None, None, ExecutionPreferences::default())
+            .expect("second conversation");
+        let first_event = runtime
+            .events_after(0)
+            .expect("events")
+            .into_iter()
+            .find(|event| {
+                event.kind == EventKind::ConversationCreated
+                    && json_mentions_conversation(&event.payload, first.id)
+            })
+            .expect("first conversation event");
+        let response = router(runtime)
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/conversations/{}/events/stream?after={}",
+                    first.id,
+                    first_event.sequence.saturating_sub(1)
+                )))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("conversation replay should respond")
+            .expect("conversation replay should contain frame")
+            .expect("frame should be valid");
+        let text = String::from_utf8(
+            frame
+                .into_data()
+                .expect("frame should contain data")
+                .to_vec(),
+        )
+        .expect("SSE should be UTF-8");
+        assert!(text.contains(&first.id.to_string()));
+        assert!(!text.contains(&second.id.to_string()));
+        assert!(text.contains("event: conversation_created"));
     }
 
     #[tokio::test]

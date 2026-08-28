@@ -16,6 +16,8 @@ use std::os::windows::process::CommandExt;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
+use eventsource_stream::Eventsource as _;
+use futures_util::StreamExt as _;
 use mcg_agents::{
     AgentRunState, ExperimentBenchmark, ExperimentDecision, ExperimentDefinition, ExperimentState,
     GovernorProposalState, OrganizationGenome, OrganizationSharePackage,
@@ -26,16 +28,16 @@ use mcg_api::{
     AnswerConversationInputRequest, ApplyComputerActionsRequest, ApprovalListResponse,
     ArchiveConversationRequest, ArchiveProjectRequest, AssembleContextRequest,
     AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
-    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
-    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
-    CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
-    DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
-    ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
-    ExperimentListResponse, ImportOrganizationRequest, ImportSharedOrganizationRequest,
-    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    ConversationStreamEvent, CorrectMemoryClaimRequest, CreateConversationRequest,
+    CreateEncryptedBackupRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
+    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DecideSharedOrganizationRequest,
+    DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse,
+    ExperimentDecisionListResponse, ExperimentListResponse, ImportOrganizationRequest,
+    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
+    InstallRegistryPluginRequest, InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse,
+    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     MentionCandidateListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
     OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
     OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
@@ -60,17 +62,17 @@ use mcg_api::{
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
-    ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationMode, ConversationRole,
-    ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatchState,
-    ExecutionPreferences, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
-    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
-    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
-    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId, ConversationMode,
+    ConversationRole, ConversationTurnId, ConversationTurnState, ConversationView,
+    CoordinationBatchState, ExecutionPreferences, MemoryClaimId, MemoryTransferId,
+    MentionCandidate, MentionKind, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
+    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
+    PluginSignatureState, ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
+    SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
     effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
@@ -109,8 +111,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use interactive::{
-    Composer, ComposerOutcome, PaletteCandidate, PaletteKind, PaletteRequest, SlashCandidate,
-    SubmittedLine, prompt_for_question,
+    PaletteCandidate, PaletteKind, PaletteRequest, SlashCandidate, SubmittedLine, TuiAction,
+    TuiModel, TuiTerminal, prompt_for_question,
 };
 
 #[derive(Serialize)]
@@ -2107,74 +2109,382 @@ async fn run_interactive(
         "MetaCog CLI",
     )
     .await?;
-    let mut composer = Composer::default();
     let mut pending_mentions = Vec::<String>::new();
-
-    println!("MetaCog interactive · project {root}");
-    println!("Type / for commands, @ for project references, or /help for shortcuts.");
-    println!("Conversation: {}", conversation.id);
+    let initial_view =
+        fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+    let branch = git_branch(project_root.as_deref()).unwrap_or_else(|| "no branch".into());
+    let mut model = TuiModel::new(initial_view, root.clone(), branch);
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut stream_task = spawn_conversation_stream(
+        client.clone(),
+        host.to_owned(),
+        token.to_owned(),
+        conversation.id,
+        stream_tx.clone(),
+    );
+    let mut terminal = TuiTerminal::enter()?;
     loop {
-        let plugin_candidates = interactive_plugin_candidates(client, host, token).await?;
-        let outcome = composer
-            .read_line(|request| {
-                interactive_palette_candidates(
+        while let Ok(event) = stream_rx.try_recv() {
+            if event.view.conversation.id == conversation.id {
+                conversation = event.view.conversation.clone();
+                model.set_view(event.view);
+            }
+        }
+
+        if !model.is_active() {
+            if let Some(line) = model.pop_queue() {
+                match dispatch_interactive_line(
                     client,
                     host,
                     token,
-                    project_id,
-                    &plugin_candidates,
-                    request,
+                    &mut conversation,
+                    &mut project_id,
+                    &mut project_root,
+                    &mut preferences,
+                    &mut pending_mentions,
+                    line,
                 )
-            })
-            .await?;
-        let ComposerOutcome::Submit(line) = outcome else {
-            break;
-        };
-        if line.content.trim().is_empty() {
-            continue;
-        }
-        if matches!(line.content.trim(), ":quit" | ":exit") {
-            break;
-        }
-        if line.content.trim_start().starts_with('/') {
-            match run_interactive_slash(
-                client,
-                host,
-                token,
-                &mut conversation,
-                &mut project_id,
-                &mut project_root,
-                &mut preferences,
-                &mut pending_mentions,
-                line,
-            )
-            .await
-            {
-                Ok(InteractiveControl::Continue) => {}
-                Ok(InteractiveControl::Exit) => break,
-                Err(error) => eprintln!("Command failed: {error}"),
+                .await
+                {
+                    Ok(Some(view)) => {
+                        conversation = view.conversation.clone();
+                        model.set_view(view);
+                    }
+                    Ok(None) => {}
+                    Err(error) => model.set_status(format!("Queued message failed: {error}")),
+                }
             }
+        }
+
+        if let Some(request) = model.palette_request() {
+            let plugins = interactive_plugin_candidates(client, host, token).await?;
+            let candidates =
+                interactive_palette_candidates(client, host, token, project_id, &plugins, request)
+                    .await;
+            model.set_candidates(candidates);
+        } else {
+            model.set_candidates(Vec::new());
+        }
+        terminal.draw(&mut model)?;
+        if !crossterm::event::poll(std::time::Duration::from_millis(75))? {
             continue;
         }
-        match send_interactive_message(
-            client,
-            host,
-            token,
-            &conversation,
-            &preferences,
-            line,
-            &pending_mentions,
-        )
-        .await
-        {
-            Err(error) => eprintln!("Message failed: {error}"),
-            Ok(view) => {
-                conversation = view.conversation;
-                pending_mentions.clear();
+        let Some(action) = model.handle_event(crossterm::event::read()?)? else {
+            continue;
+        };
+        match action {
+            TuiAction::Exit => break,
+            TuiAction::AnswerInput {
+                request_id,
+                answers,
+            } => {
+                match answer_interactive_input(
+                    client,
+                    host,
+                    token,
+                    conversation.id,
+                    request_id,
+                    answers,
+                )
+                .await
+                {
+                    Ok(view) => {
+                        conversation = view.conversation.clone();
+                        model.set_view(view);
+                    }
+                    Err(error) => model.set_status(format!("Answer failed: {error}")),
+                }
+            }
+            TuiAction::Queue(line) => {
+                model.queue(line);
+                model.set_status(format!("{} queued", model.queued_len()));
+            }
+            TuiAction::CopyLatest => {
+                model.set_status(
+                    if copy_to_clipboard(model.latest_assistant_text().unwrap_or_default()) {
+                        "Copied latest response"
+                    } else {
+                        "Clipboard unavailable"
+                    },
+                );
+            }
+            TuiAction::ForkPrevious => {
+                let line = SubmittedLine {
+                    content: "/fork".into(),
+                    mentions: Vec::new(),
+                };
+                if let Err(error) = run_interactive_slash(
+                    client,
+                    host,
+                    token,
+                    &mut conversation,
+                    &mut project_id,
+                    &mut project_root,
+                    &mut preferences,
+                    &mut pending_mentions,
+                    line,
+                )
+                .await
+                {
+                    model.set_status(format!("Fork failed: {error}"));
+                }
+            }
+            TuiAction::Steer(line) => {
+                let Some(turn) = model.active_turn() else {
+                    continue;
+                };
+                match steer_interactive_message(client, host, token, &conversation, &turn, line)
+                    .await
+                {
+                    Ok(view) => model.set_view(view),
+                    Err(error) => model.set_status(format!("Steer failed: {error}")),
+                }
+            }
+            TuiAction::Submit(line) => {
+                match dispatch_interactive_line(
+                    client,
+                    host,
+                    token,
+                    &mut conversation,
+                    &mut project_id,
+                    &mut project_root,
+                    &mut preferences,
+                    &mut pending_mentions,
+                    line,
+                )
+                .await
+                {
+                    Ok(Some(view)) => {
+                        let changed_conversation = view.conversation.id != conversation.id;
+                        conversation = view.conversation.clone();
+                        model.set_view(view);
+                        if changed_conversation {
+                            stream_task.abort();
+                            stream_task = spawn_conversation_stream(
+                                client.clone(),
+                                host.to_owned(),
+                                token.to_owned(),
+                                conversation.id,
+                                stream_tx.clone(),
+                            );
+                        }
+                        let project_label = project_root
+                            .as_ref()
+                            .map_or_else(|| "No project".into(), |path| path.display().to_string());
+                        model.set_workspace(
+                            project_label,
+                            git_branch(project_root.as_deref())
+                                .unwrap_or_else(|| "no branch".into()),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => model.set_status(format!("Command failed: {error}")),
+                }
             }
         }
     }
+    stream_task.abort();
     Ok(())
+}
+
+async fn answer_interactive_input(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+    request_id: serde_json::Value,
+    answers: serde_json::Value,
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{conversation_id}/input"
+            ))
+            .bearer_auth(token)
+            .json(&AnswerConversationInputRequest {
+                request_id,
+                answers,
+            })
+            .send()
+            .await?,
+        "answer interactive question",
+    )
+    .await
+}
+
+async fn dispatch_interactive_line(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &mut Conversation,
+    project_id: &mut Option<ProjectId>,
+    project_root: &mut Option<PathBuf>,
+    preferences: &mut ExecutionPreferences,
+    pending_mentions: &mut Vec<String>,
+    line: SubmittedLine,
+) -> Result<Option<ConversationView>, Box<dyn std::error::Error>> {
+    if line.content.trim_start().starts_with('/') {
+        let control = run_interactive_slash(
+            client,
+            host,
+            token,
+            conversation,
+            project_id,
+            project_root,
+            preferences,
+            pending_mentions,
+            line,
+        )
+        .await?;
+        if control == InteractiveControl::Exit {
+            return Err("/exit".into());
+        }
+        return Ok(Some(
+            fetch_conversation(client, host, token, &conversation.id.to_string()).await?,
+        ));
+    }
+    let view = start_interactive_message(
+        client,
+        host,
+        token,
+        conversation,
+        preferences,
+        line,
+        pending_mentions,
+    )
+    .await?;
+    pending_mentions.clear();
+    Ok(Some(view))
+}
+
+fn git_branch(project: Option<&std::path::Path>) -> Option<String> {
+    let project = project?;
+    let output = ProcessCommand::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(project)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn spawn_conversation_stream(
+    client: reqwest::Client,
+    host: String,
+    token: String,
+    conversation_id: mcg_domain::ConversationId,
+    sender: tokio::sync::mpsc::UnboundedSender<ConversationStreamEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut after = 0_u64;
+        loop {
+            let response = client
+                .get(format!(
+                    "{host}/api/v1/conversations/{conversation_id}/events/stream"
+                ))
+                .query(&[("after", after)])
+                .bearer_auth(&token)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send()
+                .await;
+            let Ok(response) = response else {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            };
+            if !response.status().is_success() {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                continue;
+            }
+            let mut stream = response.bytes_stream().eventsource();
+            while let Some(frame) = stream.next().await {
+                let Ok(frame) = frame else {
+                    break;
+                };
+                if frame.data.is_empty() {
+                    continue;
+                }
+                let Ok(event) = serde_json::from_str::<ConversationStreamEvent>(&frame.data) else {
+                    continue;
+                };
+                after = after.max(event.sequence);
+                if sender.send(event).is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+}
+
+async fn start_interactive_message(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &Conversation,
+    preferences: &ExecutionPreferences,
+    line: SubmittedLine,
+    pending_mentions: &[String],
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    let (content, appended_mentions) =
+        resolve_cli_mentions(client, host, token, line.content, pending_mentions).await?;
+    let mut mentions = line.mentions;
+    mentions.extend(appended_mentions);
+    mentions.sort_by_key(|mention| mention.byte_start);
+    decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{}/messages",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .json(&SendConversationMessageRequest {
+                content,
+                execution_preferences: Some(preferences.clone()),
+                mentions,
+            })
+            .send()
+            .await?,
+        "send interactive message",
+    )
+    .await
+}
+
+async fn steer_interactive_message(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &Conversation,
+    turn: &mcg_domain::ConversationTurn,
+    line: SubmittedLine,
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{}/turns/{}/steer",
+                conversation.id, turn.id
+            ))
+            .bearer_auth(token)
+            .json(&SteerConversationTurnRequest {
+                content: line.content,
+                mentions: line.mentions,
+            })
+            .send()
+            .await?,
+        "steer active turn",
+    )
+    .await
+}
+
+fn copy_to_clipboard(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(value.to_owned()))
+        .is_ok()
 }
 
 const INTERACTIVE_SLASH_COMMANDS: &[SlashCandidate] = &[
