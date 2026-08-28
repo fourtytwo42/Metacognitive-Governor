@@ -31,6 +31,7 @@ import {
   Laptop,
   ListTree,
   ListChecks,
+  LockKeyhole,
   Maximize2,
   Minus,
   PanelBottom,
@@ -559,6 +560,8 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       speed: parsed.speed ?? "standard",
       service_tier: parsed.service_tier,
       approval_mode: parsed.approval_mode ?? "ask",
+      approval_policy: parsed.approval_policy,
+      sandbox_mode: parsed.sandbox_mode,
       team_preset: parsed.team_preset ?? "automatic"
     };
   } catch {
@@ -644,6 +647,10 @@ const APPROVAL_MODE_DETAILS: Record<ApprovalMode, { label: string; description: 
     label: "Approve for me",
     description: "Codex reviews requests and only asks you when an action may be unsafe."
   },
+  read_only: {
+    label: "Read only",
+    description: "Inspect the project without allowing file changes or unrestricted commands."
+  },
   full_access: {
     label: "Full access",
     description: "Allow internet access and any file on this computer without asking."
@@ -665,6 +672,7 @@ function closeTransientDetails(except?: Element | null) {
 function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
   if (mode === "ask") return <Hand aria-hidden="true" />;
   if (mode === "auto_review") return <ShieldCheck aria-hidden="true" />;
+  if (mode === "read_only") return <LockKeyhole aria-hidden="true" />;
   return <ShieldAlert aria-hidden="true" />;
 }
 
@@ -984,6 +992,8 @@ function ChatRunSelector({
       speed: value.speed,
       service_tier: value.service_tier,
       approval_mode: value.approval_mode,
+      approval_policy: value.approval_policy,
+      sandbox_mode: value.sandbox_mode,
       team_preset: value.team_preset
     });
   };
@@ -2974,6 +2984,8 @@ export function App() {
         service_tier: tier,
         speed: tier && /fast|priority/i.test(tier) ? "fast" : "standard",
         approval_mode: conversation.execution_preferences.approval_mode ?? "ask",
+        approval_policy: conversation.execution_preferences.approval_policy,
+        sandbox_mode: conversation.execution_preferences.sandbox_mode,
         team_preset: conversation.execution_preferences.team_preset ?? "automatic",
         personality: conversation.execution_preferences.personality
       }));
@@ -4486,6 +4498,8 @@ export function App() {
         reasoning_effort: preferences.reasoning_effort,
         service_tier: preferences.service_tier,
         approval_mode: preferences.approval_mode,
+        approval_policy: preferences.approval_policy,
+        sandbox_mode: preferences.sandbox_mode,
         team_preset: preferences.team_preset,
         personality: preferences.personality
       };
@@ -4929,6 +4943,8 @@ export function App() {
           reasoning_effort: uncertainTurn.execution_preferences.reasoning_effort ?? newChatRunPreferences.reasoning_effort,
           service_tier: uncertainTurn.execution_preferences.service_tier,
           approval_mode: uncertainTurn.execution_preferences.approval_mode ?? newChatRunPreferences.approval_mode,
+          approval_policy: uncertainTurn.execution_preferences.approval_policy,
+          sandbox_mode: uncertainTurn.execution_preferences.sandbox_mode,
           team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });
       }
@@ -7273,7 +7289,7 @@ export function App() {
               <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
               <div className="composer-actions">
                 <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
-                <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(selectedProject)} />
+                <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam />
                 <button className="primary new-chat-send" type="button" aria-label="Send" title="Send message" disabled={taskBusy || !taskGoal.trim()} onClick={() => void addTask()}>
@@ -7379,7 +7395,7 @@ export function App() {
                   <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
                   <div className="composer-actions">
                     <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
-                    <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} />
+                    <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />
                     <button className="primary new-chat-send" type="button" aria-label={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue message (Ctrl+Enter steers now)" : "Run command or send message"} onClick={() => conversationIsActive && !parseSlashCommand(taskGoal) ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>

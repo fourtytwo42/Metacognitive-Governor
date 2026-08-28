@@ -272,7 +272,9 @@ export interface ProviderModelCatalog {
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | (string & {});
 export type ExecutionSpeed = "standard" | "fast";
 export type TeamPreset = "automatic" | "fast" | "balanced" | "thorough";
-export type ApprovalMode = "ask" | "auto_review" | "full_access";
+export type ApprovalMode = "ask" | "auto_review" | "read_only" | "full_access";
+export type ExecutionApprovalPolicy = "untrusted" | "on-request" | "never";
+export type ExecutionSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
 export interface GitHubAccount {
   login: string;
@@ -306,6 +308,8 @@ export interface ChatRunPreferences {
   speed: ExecutionSpeed;
   service_tier?: string;
   approval_mode: ApprovalMode;
+  approval_policy?: ExecutionApprovalPolicy;
+  sandbox_mode?: ExecutionSandboxMode;
   team_preset: TeamPreset;
   personality?: string;
 }
@@ -315,6 +319,8 @@ export interface ExecutionPreferences {
   reasoning_effort?: string;
   service_tier?: string;
   approval_mode?: ApprovalMode;
+  approval_policy?: ExecutionApprovalPolicy;
+  sandbox_mode?: ExecutionSandboxMode;
   team_preset?: TeamPreset;
   personality?: string;
 }

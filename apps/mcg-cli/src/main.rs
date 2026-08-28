@@ -68,13 +68,13 @@ use mcg_domain::{
     AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
     ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId, ConversationMode,
     ConversationRole, ConversationState, ConversationTurnId, ConversationTurnState,
-    ConversationView, CoordinationBatchState, ExecutionPreferences, MemoryClaimId,
-    MemoryTransferId, MentionCandidate, MentionKind, NotificationSeverity, OrganizationId,
-    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
-    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
-    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
-    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    ConversationView, CoordinationBatchState, ExecutionApprovalPolicy, ExecutionPreferences,
+    ExecutionSandboxMode, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
+    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
+    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
     SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
@@ -385,6 +385,13 @@ enum CodexSandboxArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CodexApprovalPolicyArg {
+    Untrusted,
+    OnRequest,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CompletionShell {
     Bash,
     Zsh,
@@ -420,6 +427,8 @@ struct ExecArgs {
     model: Option<String>,
     #[arg(short = 's', long, value_enum)]
     sandbox: Option<CodexSandboxArg>,
+    #[arg(short = 'a', long = "ask-for-approval", value_enum)]
+    approval_policy: Option<CodexApprovalPolicyArg>,
     #[arg(long, alias = "yolo")]
     dangerously_bypass_approvals_and_sandbox: bool,
     #[arg(short = 'i', long = "image", value_name = "PATH")]
@@ -2282,6 +2291,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 skip_git_repo_check,
                 model,
                 sandbox,
+                approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 images,
                 output_last_message,
@@ -2298,6 +2308,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 skip_git_repo_check,
                 model,
                 sandbox,
+                approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 images,
                 output_last_message,
@@ -3202,7 +3213,10 @@ async fn dispatch_interactive_line(
             cwd: None,
             timeout_ms: Some(120_000),
             process_id: None,
-            writable: preferences.approval_mode == ApprovalMode::FullAccess,
+            writable: preferences.sandbox_mode.map_or(
+                !matches!(preferences.approval_mode, ApprovalMode::ReadOnly),
+                |mode| !matches!(mode, ExecutionSandboxMode::ReadOnly),
+            ),
         };
         command_output.push(format!("$ {command}"));
         if background {
@@ -4455,16 +4469,24 @@ async fn run_interactive_slash(
         "permissions" => {
             if argument.is_empty() {
                 println!(
-                    "Current permissions: {:?}. Choose ask, auto-review, or full-access.",
+                    "Current permissions: {:?}. Choose ask, auto-review, read-only, or full-access.",
                     preferences.approval_mode
                 );
             } else {
                 preferences.approval_mode = match argument.to_ascii_lowercase().as_str() {
                     "ask" => ApprovalMode::Ask,
                     "auto" | "auto-review" | "approve-for-me" => ApprovalMode::AutoReview,
+                    "read-only" | "readonly" => ApprovalMode::ReadOnly,
                     "full" | "full-access" => ApprovalMode::FullAccess,
-                    _ => return Err("permissions must be ask, auto-review, or full-access".into()),
+                    _ => {
+                        return Err(
+                            "permissions must be ask, auto-review, read-only, or full-access"
+                                .into(),
+                        );
+                    }
                 };
+                preferences.approval_policy = None;
+                preferences.sandbox_mode = None;
                 println!("Permissions set to {:?}.", preferences.approval_mode);
             }
         }
@@ -5208,6 +5230,7 @@ async fn run_codex_compatible_exec(
     skip_git_repo_check: bool,
     model: Option<String>,
     sandbox: Option<CodexSandboxArg>,
+    approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
@@ -5216,18 +5239,30 @@ async fn run_codex_compatible_exec(
     if !skip_git_repo_check {
         require_git_repository(project)?;
     }
-    if matches!(sandbox, Some(CodexSandboxArg::ReadOnly)) {
-        return Err(
-            "--sandbox read-only is not yet a persisted MetaCog run preference; use workspace-write or run a project-free chat"
-                .into(),
-        );
-    }
-    let approval = if dangerously_bypass_approvals_and_sandbox
-        || matches!(sandbox, Some(CodexSandboxArg::DangerFullAccess))
-    {
+    let approval = if dangerously_bypass_approvals_and_sandbox {
         ApprovalMode::FullAccess
+    } else if matches!(sandbox, Some(CodexSandboxArg::ReadOnly)) {
+        ApprovalMode::ReadOnly
     } else {
         ApprovalMode::Ask
+    };
+    let exact_approval = if dangerously_bypass_approvals_and_sandbox {
+        Some(ExecutionApprovalPolicy::Never)
+    } else {
+        approval_policy.map(|policy| match policy {
+            CodexApprovalPolicyArg::Untrusted => ExecutionApprovalPolicy::Untrusted,
+            CodexApprovalPolicyArg::OnRequest => ExecutionApprovalPolicy::OnRequest,
+            CodexApprovalPolicyArg::Never => ExecutionApprovalPolicy::Never,
+        })
+    };
+    let exact_sandbox = if dangerously_bypass_approvals_and_sandbox {
+        Some(ExecutionSandboxMode::DangerFullAccess)
+    } else {
+        sandbox.map(|mode| match mode {
+            CodexSandboxArg::ReadOnly => ExecutionSandboxMode::ReadOnly,
+            CodexSandboxArg::WorkspaceWrite => ExecutionSandboxMode::WorkspaceWrite,
+            CodexSandboxArg::DangerFullAccess => ExecutionSandboxMode::DangerFullAccess,
+        })
     };
     let mentions = codex_exec_mentions(&images)?;
     match command {
@@ -5245,7 +5280,14 @@ async fn run_codex_compatible_exec(
                 } else {
                     ConsumerOutput::Human
                 },
-                conversation_preferences(model, None, None, approval),
+                conversation_preferences_exact(
+                    model,
+                    None,
+                    None,
+                    approval,
+                    exact_approval,
+                    exact_sandbox,
+                ),
                 &mentions,
                 output_last_message.as_deref(),
                 ephemeral,
@@ -5275,7 +5317,14 @@ async fn run_codex_compatible_exec(
             let content = codex_exec_prompt(&follow_up)?;
             let (content, mentions) =
                 resolve_cli_mentions(client, host, token, content, &mentions).await?;
-            let preferences = conversation_preferences(model, None, None, approval);
+            let preferences = conversation_preferences_exact(
+                model,
+                None,
+                None,
+                approval,
+                exact_approval,
+                exact_sandbox,
+            );
             let mut view: ConversationView = decode_api_response(
                 client
                     .post(format!(
@@ -9408,11 +9457,24 @@ fn conversation_preferences(
     speed: Option<String>,
     approval: ApprovalMode,
 ) -> ExecutionPreferences {
+    conversation_preferences_exact(model, effort, speed, approval, None, None)
+}
+
+fn conversation_preferences_exact(
+    model: Option<String>,
+    effort: Option<String>,
+    speed: Option<String>,
+    approval: ApprovalMode,
+    approval_policy: Option<ExecutionApprovalPolicy>,
+    sandbox_mode: Option<ExecutionSandboxMode>,
+) -> ExecutionPreferences {
     ExecutionPreferences {
         model_id: model,
         reasoning_effort: effort,
         service_tier: speed,
         approval_mode: approval,
+        approval_policy,
+        sandbox_mode,
         team_preset: Default::default(),
         personality: None,
     }
@@ -11848,7 +11910,9 @@ mod tests {
             "--model",
             "gpt-5.6-terra",
             "--sandbox",
-            "workspace-write",
+            "read-only",
+            "--ask-for-approval",
+            "untrusted",
             "--image",
             "screen.png",
             "--output-last-message",
@@ -11863,11 +11927,26 @@ mod tests {
                     && args.ephemeral
                     && args.skip_git_repo_check
                     && args.model.as_deref() == Some("gpt-5.6-terra")
-                    && matches!(args.sandbox, Some(CodexSandboxArg::WorkspaceWrite))
+                    && matches!(args.sandbox, Some(CodexSandboxArg::ReadOnly))
+                    && matches!(args.approval_policy, Some(CodexApprovalPolicyArg::Untrusted))
                     && args.images == [PathBuf::from("screen.png")]
                     && args.output_last_message.as_deref() == Some(std::path::Path::new("answer.txt"))
                     && args.prompt == ["fix the tests"]
         ));
+
+        let exact = conversation_preferences_exact(
+            None,
+            None,
+            None,
+            ApprovalMode::ReadOnly,
+            Some(ExecutionApprovalPolicy::Untrusted),
+            Some(ExecutionSandboxMode::ReadOnly),
+        );
+        assert_eq!(
+            exact.approval_policy,
+            Some(ExecutionApprovalPolicy::Untrusted)
+        );
+        assert_eq!(exact.sandbox_mode, Some(ExecutionSandboxMode::ReadOnly));
 
         let resume = CodexCompatCli::try_parse_from([
             "mcg",

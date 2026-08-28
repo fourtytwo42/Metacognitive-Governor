@@ -2055,7 +2055,24 @@ pub enum ApprovalMode {
     #[default]
     Ask,
     AutoReview,
+    ReadOnly,
     FullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionApprovalPolicy {
+    Untrusted,
+    OnRequest,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2091,6 +2108,14 @@ pub struct ExecutionPreferences {
     pub service_tier: Option<String>,
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    /// Optional exact Codex approval-policy override. Legacy callers continue
+    /// to derive this from `approval_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<ExecutionApprovalPolicy>,
+    /// Optional exact Codex sandbox override. Project-free and role-scoped
+    /// execution can still reduce this authority at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<ExecutionSandboxMode>,
     #[serde(default)]
     pub team_preset: TeamPreset,
     /// Optional owner-selected response style. This never expands authority.
@@ -2446,6 +2471,12 @@ mod tests {
             .and_then(serde_json::Value::as_object_mut)
             .expect("execution preferences")
             .remove("personality");
+        let execution_preferences = object
+            .get_mut("execution_preferences")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("execution preferences");
+        execution_preferences.remove("approval_policy");
+        execution_preferences.remove("sandbox_mode");
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
@@ -2453,6 +2484,8 @@ mod tests {
         let decoded: Conversation = serde_json::from_value(document).expect("legacy conversation");
         assert_eq!(decoded.mode, ConversationMode::Default);
         assert!(decoded.execution_preferences.personality.is_none());
+        assert!(decoded.execution_preferences.approval_policy.is_none());
+        assert!(decoded.execution_preferences.sandbox_mode.is_none());
         assert!(decoded.goal.is_none());
         assert!(decoded.pending_input_requests.is_empty());
     }

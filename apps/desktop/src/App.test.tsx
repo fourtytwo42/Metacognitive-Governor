@@ -3523,6 +3523,34 @@ test("permission mode is selected before prompting and sent with the conversatio
   ));
 });
 
+test("read-only permission is available for project chats and persists with the turn", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  render(<App />);
+
+  await selectNewChatProject("sample");
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /Read only/ }));
+  expect(screen.getByLabelText("Change permissions")).toHaveTextContent("Read only");
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Inspect without editing" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ approval_mode: "read_only" }) })
+  ));
+});
+
 test("team presets are selected before prompting and persisted with the conversation turn", async () => {
   render(<App />);
 

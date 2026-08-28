@@ -411,6 +411,22 @@ test("new chat run menus stay compact, aligned, and use the shared icon set", as
   expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
 });
 
+test("new chat exposes a compact read-only authority preset", async ({ page }) => {
+  await page.goto("/");
+  const trigger = page.getByLabel("Change permissions");
+  await trigger.click();
+
+  const menu = page.getByRole("menu", { name: "How should MetaCog actions be approved?" });
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(4);
+  const readOnly = menu.getByRole("menuitemradio", { name: /Read only/ });
+  await expect(readOnly).toContainText("Inspect the project without allowing file changes");
+  await readOnly.click();
+
+  await expect(trigger).toContainText("Read only");
+  await expect(trigger.locator("svg").first()).toBeVisible();
+  await expect(menu).toBeHidden();
+});
+
 test("new chat resolves project mentions with keyboard selection and exclusive palettes", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");

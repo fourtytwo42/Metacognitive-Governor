@@ -22,7 +22,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, and skills work; app completion and images are missing. |
 | Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
-| Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Named permission profiles, exact nested selectors, and remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
+| Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 3 adds a durable read-only preset shared with desktop. Named permission profiles, exact nested selectors, and remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
 | Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | Apps are missing; several commands print discovery data; agent selection does not replace the transcript viewport. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycle 2 adds the compatible top-level alias, JSONL lifecycle output, stdin prompts, model/sandbox selection, image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, hook/rules flags, and persisted read-only selection remain. |
+| `exec` / `e` | Partial | Cycles 2-3 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, model selection, independent `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -51,14 +51,14 @@ Environment variables alone are not capability discovery.
 
 ## Global flag compatibility
 
-MetaCog supports daemon host/token path and project path globally. Cycle 2 adds
-`exec` model, workspace-write/danger-full-access sandbox mapping, image
-references, ephemeral cleanup, JSONL, output-last-message, and Git-check flags.
-Codex-compatible support remains for `--add-dir`, the complete approval policy,
-persisted read-only sandboxing, search, local providers/OSS, profiles, permission
-profiles, remote endpoints/authentication, strict config, output schemas, and
-repeatable `-c key=value` overrides. These flags must map into governed requests;
-they may not bypass organization or approval policy.
+MetaCog supports daemon host/token path and project path globally. Cycles 2-3 add
+`exec` model, independent approval-policy and sandbox selection (including
+read-only), image references, ephemeral cleanup, JSONL, output-last-message, and
+Git-check flags. Codex-compatible support remains for applying those execution
+flags to the interactive root command, `--add-dir`, search, local providers/OSS,
+profiles, permission profiles, remote endpoints/authentication, strict config,
+output schemas, and repeatable `-c key=value` overrides. These flags must map
+into governed requests; they may not bypass organization or approval policy.
 
 ## Desktop alignment rule
 
@@ -68,6 +68,10 @@ such as shell completion and keymaps do not need GUI duplicates. Authentication,
 permissions, models, profiles, apps, MCP, plugins, memory, sandbox roots,
 cloud/remote sessions, reviews, session management, and updates do. New desktop
 interactions require automated accessibility coverage and native UAT.
+
+Cycle 3 adds the shared Read only permission choice to New Chat and established
+Chat. It is enforced through Coordinator/Coder delegation, report acceptance,
+and integration, rather than treated as a presentation-only preference.
 
 ## Safety invariants
 

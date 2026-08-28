@@ -287,6 +287,10 @@ pub struct CodexExecutionPreferences {
     pub service_tier: Option<String>,
     #[serde(default)]
     pub approval_mode: CodexApprovalMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<CodexApprovalPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<CodexSandboxMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -517,43 +521,84 @@ pub enum CodexApprovalMode {
     #[default]
     Ask,
     AutoReview,
+    ReadOnly,
     FullAccess,
 }
 
-impl CodexApprovalMode {
-    fn approval_policy(self, writable: bool) -> &'static str {
-        if !writable || matches!(self, Self::FullAccess) {
-            "never"
-        } else {
-            "on-request"
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexApprovalPolicy {
+    Untrusted,
+    OnRequest,
+    Never,
+}
+
+impl CodexApprovalPolicy {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::OnRequest => "on-request",
+            Self::Never => "never",
         }
     }
+}
 
-    fn approvals_reviewer(self) -> &'static str {
-        if matches!(self, Self::AutoReview) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexExecutionPreferences {
+    fn approval_policy(&self, writable: bool) -> &'static str {
+        if !writable {
+            return "never";
+        }
+        self.approval_policy.map_or_else(
+            || match self.approval_mode {
+                CodexApprovalMode::Ask | CodexApprovalMode::AutoReview => "on-request",
+                CodexApprovalMode::ReadOnly | CodexApprovalMode::FullAccess => "never",
+            },
+            CodexApprovalPolicy::as_str,
+        )
+    }
+
+    fn approvals_reviewer(&self) -> &'static str {
+        if matches!(self.approval_mode, CodexApprovalMode::AutoReview) {
             "auto_review"
         } else {
             "user"
         }
     }
 
-    fn thread_sandbox(self, writable: bool) -> &'static str {
-        if writable && matches!(self, Self::FullAccess) {
-            "danger-full-access"
-        } else if writable {
-            "workspace-write"
-        } else {
-            "read-only"
+    fn effective_sandbox(&self, writable: bool) -> CodexSandboxMode {
+        if !writable {
+            return CodexSandboxMode::ReadOnly;
+        }
+        self.sandbox_mode.unwrap_or(match self.approval_mode {
+            CodexApprovalMode::ReadOnly => CodexSandboxMode::ReadOnly,
+            CodexApprovalMode::FullAccess => CodexSandboxMode::DangerFullAccess,
+            CodexApprovalMode::Ask | CodexApprovalMode::AutoReview => {
+                CodexSandboxMode::WorkspaceWrite
+            }
+        })
+    }
+
+    fn thread_sandbox(&self, writable: bool) -> &'static str {
+        match self.effective_sandbox(writable) {
+            CodexSandboxMode::ReadOnly => "read-only",
+            CodexSandboxMode::WorkspaceWrite => "workspace-write",
+            CodexSandboxMode::DangerFullAccess => "danger-full-access",
         }
     }
 
-    fn turn_sandbox(self, writable: bool) -> Value {
-        if writable && matches!(self, Self::FullAccess) {
-            json!({"type": "dangerFullAccess"})
-        } else if writable {
-            json!({"type": "workspaceWrite"})
-        } else {
-            json!({"type": "readOnly"})
+    fn turn_sandbox(&self, writable: bool) -> Value {
+        match self.effective_sandbox(writable) {
+            CodexSandboxMode::ReadOnly => json!({"type": "readOnly"}),
+            CodexSandboxMode::WorkspaceWrite => json!({"type": "workspaceWrite"}),
+            CodexSandboxMode::DangerFullAccess => json!({"type": "dangerFullAccess"}),
         }
     }
 }
@@ -1038,9 +1083,9 @@ impl CodexAppServerHarness {
                     "cwd": cwd,
                     "model": preferences.model,
                     "serviceTier": preferences.service_tier,
-                    "approvalPolicy": preferences.approval_mode.approval_policy(writable),
-                    "approvalsReviewer": preferences.approval_mode.approvals_reviewer(),
-                    "sandbox": preferences.approval_mode.thread_sandbox(writable),
+                    "approvalPolicy": preferences.approval_policy(writable),
+                    "approvalsReviewer": preferences.approvals_reviewer(),
+                    "sandbox": preferences.thread_sandbox(writable),
                     "baseInstructions": instructions.and_then(|value| value.base.as_deref()),
                     "developerInstructions": instructions.and_then(|value| value.developer.as_deref()),
                     "config": instructions.and_then(|value| value.config.as_ref()),
@@ -1101,9 +1146,9 @@ impl CodexAppServerHarness {
                 "cwd": cwd,
                 "model": preferences.model,
                 "serviceTier": preferences.service_tier,
-                "approvalPolicy": preferences.approval_mode.approval_policy(writable),
-                "approvalsReviewer": preferences.approval_mode.approvals_reviewer(),
-                "sandbox": preferences.approval_mode.thread_sandbox(writable)
+                "approvalPolicy": preferences.approval_policy(writable),
+                "approvalsReviewer": preferences.approvals_reviewer(),
+                "sandbox": preferences.thread_sandbox(writable)
                 ,"baseInstructions": instructions.and_then(|value| value.base.as_deref())
                 ,"developerInstructions": instructions.and_then(|value| value.developer.as_deref())
                 ,"config": instructions.and_then(|value| value.config.as_ref())
@@ -1305,9 +1350,9 @@ impl CodexAppServerHarness {
                     "model": preferences.model,
                     "effort": preferences.effort,
                     "serviceTier": preferences.service_tier,
-                    "approvalPolicy": preferences.approval_mode.approval_policy(writable),
-                    "approvalsReviewer": preferences.approval_mode.approvals_reviewer(),
-                    "sandboxPolicy": preferences.approval_mode.turn_sandbox(writable),
+                    "approvalPolicy": preferences.approval_policy(writable),
+                    "approvalsReviewer": preferences.approvals_reviewer(),
+                    "sandboxPolicy": preferences.turn_sandbox(writable),
                     "outputSchema": output_schema
                     ,"collaborationMode": collaboration_mode
                 }),
@@ -2113,41 +2158,41 @@ mod tests {
 
     #[test]
     fn approval_modes_map_to_native_codex_controls() {
-        assert_eq!(CodexApprovalMode::Ask.approval_policy(true), "on-request");
-        assert_eq!(CodexApprovalMode::Ask.approvals_reviewer(), "user");
-        assert_eq!(
-            CodexApprovalMode::Ask.turn_sandbox(true),
-            json!({"type": "workspaceWrite"})
-        );
+        let ask = CodexExecutionPreferences {
+            approval_mode: CodexApprovalMode::Ask,
+            ..Default::default()
+        };
+        assert_eq!(ask.approval_policy(true), "on-request");
+        assert_eq!(ask.approvals_reviewer(), "user");
+        assert_eq!(ask.turn_sandbox(true), json!({"type": "workspaceWrite"}));
 
-        assert_eq!(
-            CodexApprovalMode::AutoReview.approval_policy(true),
-            "on-request"
-        );
-        assert_eq!(
-            CodexApprovalMode::AutoReview.approvals_reviewer(),
-            "auto_review"
-        );
-        assert_eq!(
-            CodexApprovalMode::AutoReview.turn_sandbox(true),
-            json!({"type": "workspaceWrite"})
-        );
+        let auto = CodexExecutionPreferences {
+            approval_mode: CodexApprovalMode::AutoReview,
+            ..Default::default()
+        };
+        assert_eq!(auto.approval_policy(true), "on-request");
+        assert_eq!(auto.approvals_reviewer(), "auto_review");
+        assert_eq!(auto.turn_sandbox(true), json!({"type": "workspaceWrite"}));
 
-        assert_eq!(CodexApprovalMode::FullAccess.approval_policy(true), "never");
-        assert_eq!(CodexApprovalMode::FullAccess.approvals_reviewer(), "user");
-        assert_eq!(
-            CodexApprovalMode::FullAccess.turn_sandbox(true),
-            json!({"type": "dangerFullAccess"})
-        );
+        let full = CodexExecutionPreferences {
+            approval_mode: CodexApprovalMode::FullAccess,
+            ..Default::default()
+        };
+        assert_eq!(full.approval_policy(true), "never");
+        assert_eq!(full.approvals_reviewer(), "user");
+        assert_eq!(full.turn_sandbox(true), json!({"type": "dangerFullAccess"}));
 
-        assert_eq!(
-            CodexApprovalMode::FullAccess.approval_policy(false),
-            "never"
-        );
-        assert_eq!(
-            CodexApprovalMode::FullAccess.turn_sandbox(false),
-            json!({"type": "readOnly"})
-        );
+        assert_eq!(full.approval_policy(false), "never");
+        assert_eq!(full.turn_sandbox(false), json!({"type": "readOnly"}));
+
+        let exact = CodexExecutionPreferences {
+            approval_mode: CodexApprovalMode::Ask,
+            approval_policy: Some(CodexApprovalPolicy::Untrusted),
+            sandbox_mode: Some(CodexSandboxMode::ReadOnly),
+            ..Default::default()
+        };
+        assert_eq!(exact.approval_policy(true), "untrusted");
+        assert_eq!(exact.turn_sandbox(true), json!({"type": "readOnly"}));
     }
 
     #[test]

@@ -1819,6 +1819,7 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .permission-selector > summary > svg:last-child { width: 13px; height: 13px; color: var(--mcg-muted); }
 .permission-selector[open] > summary { border-color: var(--mcg-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--mcg-accent) 20%, transparent); }
 .permission-selector.permission-full_access > summary { border-color: color-mix(in srgb, #ff7a35 55%, var(--mcg-border)); color: #ff8a4c; }
+.permission-selector.permission-read_only > summary { border-color: color-mix(in srgb, #73a9d8 55%, var(--mcg-border)); color: color-mix(in srgb, #8bc4f4 78%, var(--mcg-text)); }
 .permission-popover { position: absolute; z-index: 46; left: 0; bottom: calc(100% + 8px); display: grid; width: min(450px, calc(100vw - 48px)); overflow: hidden; border: 1px solid var(--mcg-border); border-radius: 14px; background: var(--mcg-surface-raised); box-shadow: 0 18px 45px #0008; text-align: left; }
 .permission-popover-heading { display: grid; gap: 4px; padding: 14px 15px 10px; }
 .permission-popover-heading strong { font-size: .78rem; }
