@@ -3183,9 +3183,10 @@ async fn interactive_command_context(
     CommandContext {
         has_project: project_id.is_some(),
         fast_model,
-        ide: std::env::var_os("TERM_PROGRAM")
-            .or_else(|| std::env::var_os("VSCODE_PID"))
-            .is_some(),
+        // An IDE-flavoured terminal does not prove that the app-server exposed
+        // an IDE context attachment contract. Keep /ide hidden until capability
+        // discovery returns a handler-compatible endpoint.
+        ide: false,
         apps: false,
         experimental: false,
     }
@@ -3401,13 +3402,18 @@ async fn run_interactive_slash(
             }
         }
         "clear" => {
+            let title = if argument.trim().is_empty() {
+                "MetaCog CLI"
+            } else {
+                argument.trim()
+            };
             *conversation = create_interactive_conversation(
                 client,
                 host,
                 token,
                 *project_id,
                 preferences,
-                "MetaCog CLI",
+                title,
             )
             .await?;
             pending_mentions.clear();
@@ -3459,6 +3465,13 @@ async fn run_interactive_slash(
             pending_mentions.clear();
         }
         "archive" => {
+            if !argument.eq_ignore_ascii_case("confirm") {
+                println!(
+                    "Archive '{}' ({}) and close this CLI session? Re-run `/archive confirm` to continue.",
+                    conversation.title, conversation.id
+                );
+                return Ok(InteractiveControl::Continue);
+            }
             let archived: Conversation = decode_api_response(
                 client
                     .post(format!(
@@ -3473,6 +3486,8 @@ async fn run_interactive_slash(
             )
             .await?;
             *conversation = archived;
+            println!("Archived conversation {}.", conversation.id);
+            return Ok(InteractiveControl::Exit);
         }
         "new" => {
             *conversation = create_interactive_conversation(
@@ -3881,22 +3896,44 @@ async fn run_interactive_slash(
             }
         }
         "stop" => {
-            if argument.is_empty() {
-                return Err("choose a running command from the /stop picker".into());
-            }
-            let execution: mcg_runtime::ConversationCommandExecution = decode_api_response(
+            let commands: Vec<mcg_runtime::ConversationCommandExecution> = decode_api_response(
                 client
-                    .post(format!(
-                        "{host}/api/v1/conversations/{}/codex/commands/{}/stop",
-                        conversation.id, argument
+                    .get(format!(
+                        "{host}/api/v1/conversations/{}/codex/commands",
+                        conversation.id
                     ))
                     .bearer_auth(token)
                     .send()
                     .await?,
-                "stop conversation command",
+                "list conversation commands",
             )
             .await?;
-            println!("{} · {:?}", execution.id, execution.state);
+            let running = commands
+                .into_iter()
+                .filter(|execution| {
+                    execution.state == mcg_runtime::ConversationCommandState::Running
+                })
+                .collect::<Vec<_>>();
+            if running.is_empty() {
+                println!("No running commands belong to this conversation.");
+            } else {
+                for command in &running {
+                    let execution: mcg_runtime::ConversationCommandExecution = decode_api_response(
+                        client
+                            .post(format!(
+                                "{host}/api/v1/conversations/{}/codex/commands/{}/stop",
+                                conversation.id, command.id
+                            ))
+                            .bearer_auth(token)
+                            .send()
+                            .await?,
+                        "stop conversation command",
+                    )
+                    .await?;
+                    println!("{} · {:?}", execution.id, execution.state);
+                }
+                println!("Stopped {} conversation command(s).", running.len());
+            }
         }
         "copy" => {
             let view =

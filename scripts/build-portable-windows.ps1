@@ -58,8 +58,23 @@ try {
     if ($files.Count -ne 1 -or $files[0].Name -ne $desktopFileName) {
         throw "The one-file portable output contains unexpected supporting files."
     }
+    # Repeated release cycles otherwise retain many obsolete, very large binaries.
+    # Prune only versioned portable directories directly beneath the verified root.
+    $portableParent = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot "target\portable"))
+    $currentPortable = [System.IO.Path]::GetFullPath($portableRoot)
+    $obsoletePortableDirectories = @(Get-ChildItem -LiteralPath $portableParent -Directory | Where-Object {
+        $candidate = [System.IO.Path]::GetFullPath($_.FullName)
+        [System.IO.Path]::GetDirectoryName($candidate) -eq $portableParent -and
+            $candidate -ne $currentPortable -and
+            $_.Name -match '^(?:MCG|MetaCog)-Portable-Windows-x64-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$'
+    })
+    foreach ($obsolete in $obsoletePortableDirectories) {
+        Remove-Item -LiteralPath $obsolete.FullName -Recurse -Force
+    }
+
     Write-Output "Portable directory: $portableRoot"
     Write-Output "Portable payload: one self-contained executable"
+    Write-Output "Removed obsolete portable directories: $($obsoletePortableDirectories.Count)"
     Write-Output "$desktopFileName bytes: $size"
     Write-Output "$desktopFileName SHA-256: $hash"
 } finally {

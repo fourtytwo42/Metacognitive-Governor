@@ -1,49 +1,81 @@
-# Codex CLI parity matrix
+# Codex CLI and desktop parity matrix
 
-Last verified 2026-08-27 against the pinned Codex app-server `0.144.6` schema
-(`e710974af2ef773a512e039f7b38b6040f533035465ad899929f4cc52ce7a2a4`).
+Last verified 2026-08-28 against:
 
-MetaCog follows Codex interaction semantics where the pinned stable protocol can
-support them without weakening MetaCog governance. Unsupported or experimental
-commands are omitted from completion instead of being displayed as inert menu
-items. MetaCog-only operations remain under `/mcg` or `mcg <subcommand>`.
+- pinned Codex app-server `0.144.6` schema
+  `e710974af2ef773a512e039f7b38b6040f533035465ad899929f4cc52ce7a2a4`;
+- current official [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli);
+- current official [slash-command reference](https://learn.chatgpt.com/docs/reference/slash-commands).
 
-| Area | Commands and mechanics | MetaCog state |
+This is a gap ledger, not a completion claim. `Native` means the interaction
+and effect match current Codex. `MetaCog` means the same objective is supported
+through a governed MetaCog equivalent but its invocation differs. `Partial`
+means a real implementation still has missing behavior. `Missing` means there
+is no usable equivalent. MetaCog-only operations remain under `/mcg` or
+`mcg <subcommand>`.
+
+## Interactive terminal
+
+| Area | Codex surface | State | Remaining gap |
+| --- | --- | --- | --- |
+| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, steering, queueing, reconnect/replay | Native | Add native images and `Ctrl+L` display clearing. |
+| References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, and skills work; app completion and images are missing. |
+| Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
+| Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
+| Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Named permission profiles, exact nested selectors, and remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
+| Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
+| Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | Apps are missing; several commands print discovery data; agent selection does not replace the transcript viewport. |
+| Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
+| Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout work; IDE, import, app handoff are missing; hooks/feedback are informational. |
+| Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Missing | Implement a governed sandbox mutation contract and mirror it in Settings. |
+| Experimental | `/experimental` | Missing | Requires discovered capabilities and durable feature configuration. |
+
+Commands without implemented handlers must remain absent from completion.
+Environment variables alone are not capability discovery.
+
+## Top-level command compatibility
+
+| Codex family | State | Notes |
 | --- | --- | --- |
-| Terminal | Persistent transcript, multiline composer, resize-safe palettes, history, search, copy, steering, queueing, interrupt, reconnect/replay | Native |
-| Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Native; delete is exact-confirmed and recursive |
-| Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Native |
-| Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Native and capability-filtered |
-| Context | `@`, `/mention`, `$`, `/skills`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Native; `$` exposes stable enabled skills and apps only when stable discovery exists |
-| Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Native and persisted outside organization policy |
-| Integration | `/init`, `/hooks`, `/logout`, `/feedback` | Native |
-| Governed shell | `!command`, `!command &` | Native foreground/background execution through the daemon's pinned Codex sandbox contract |
-| Background process control | `/ps`, `/stop` | Native; client-owned process IDs are scoped to the active conversation |
-| Desktop handoff | `/app` | Hidden until a stable authenticated desktop-navigation contract exists |
-| Apps | `/apps`, `$app` | Hidden while `app/list` remains experimental in the pinned schema |
-| IDE/import/experiments | `/ide`, `/import`, `/experimental` | Hidden unless capability discovery explicitly enables them |
-| Windows sandbox setup | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Hidden until the stable protocol exposes the required mutation contract |
+| `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
+| `exec` / `e` | MetaCog | `mcg run --json` and `--stream-json` are governed equivalents but their flags and schemas differ. |
+| `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
+| `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
+| `app`, `apply`, `archive`, `completion`, `delete`, `features`, `fork`, `login`, `logout`, `resume`, `review`, `sandbox`, `unarchive`, `update` | Missing | Add compatible top-level aliases without removing MetaCog commands. |
+| `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
+
+## Global flag compatibility
+
+MetaCog currently supports daemon host/token path, project path, and
+command-specific execution preferences. Codex-compatible support remains for
+`--add-dir`, approval policy, sandbox, search, images, model/provider, profiles,
+permission profiles, remote endpoints/authentication, strict config, and
+repeatable `-c key=value` overrides. These flags must map into governed requests;
+they may not bypass organization or approval policy.
+
+## Desktop alignment rule
+
+Every capability affecting ordinary conversation work must be reachable in the
+desktop through the shared API and current visual system. Terminal-only mechanics
+such as shell completion and keymaps do not need GUI duplicates. Authentication,
+permissions, models, profiles, apps, MCP, plugins, memory, sandbox roots,
+cloud/remote sessions, reviews, session management, and updates do. New desktop
+interactions require automated accessibility coverage and native UAT.
 
 ## Safety invariants
 
-- A mention supplies bounded context or a pinned plugin capability; it never
-  expands filesystem, network, agent, plugin, or approval authority.
-- Agent-session replies use the target session's existing Codex thread and
-  pinned delegation. They cannot add roles, tools, grants, or organization
-  capacity.
-- Conversation deletion refuses active turns and active goals, requires the
-  exact conversation ID, deletes descendants transactionally, retains only
-  content-free policy tombstones, and garbage-collects unreferenced captured
-  mention artifacts.
-- `!command` is never executed by the unrestricted CLI process. It uses the
-  daemon-side Codex command executor with the selected project, permissions,
-  sandbox, timeout, and bounded output.
-- Reasoning display contains only model-provided summaries. Hidden reasoning is
-  never requested or reconstructed.
+- Mentions provide bounded context or a pinned plugin capability; they never
+  expand filesystem, network, agent, plugin, or approval authority.
+- Agent-session replies retain the target session's pinned delegation.
+- Conversation deletion refuses active work, requires exact confirmation,
+  deletes descendants transactionally, and retains only required tombstones.
+- `!command` uses the daemon-side governed executor, never the unrestricted CLI.
+- Only model-provided reasoning summaries are shown.
 
-## Drift gate
+## Cycle gate
 
-When the pinned Codex binary or generated schema digest changes, regenerate the
-protocol bindings, review newly stable request methods, update this matrix, and
-rerun CLI registry, PTY, runtime, API, desktop, and packaging gates before
-exposing additional commands.
+Each cycle updates this ledger, adds automated coverage for every behavior,
+runs affected Rust and desktop suites, performs native GUI UAT for desktop
+changes, removes obsolete portable outputs, builds one current Windows portable,
+and pushes the verified commit. Re-audit when the pinned binary, generated schema,
+or official reference changes.

@@ -58,7 +58,8 @@ for (const invariant of [
   'MetaCog-Portable-Windows-x64-v$version',
   'MetaCog-Desktop-v$version.exe',
   '--features single-file-portable',
-  'one self-contained executable'
+  'one self-contained executable',
+  'Removed obsolete portable directories'
 ]) requireText(portableWindowsBuilder, invariant, "Windows portable builder");
 const config = JSON.parse(await read("apps/desktop/src-tauri/tauri.release.conf.json"));
 const updaterConfig = JSON.parse(await read("apps/desktop/src-tauri/tauri.updater.conf.json"));

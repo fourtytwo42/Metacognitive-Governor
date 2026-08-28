@@ -95,7 +95,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     command!(
         "clear",
         "Clear the display and start a new conversation",
-        None,
+        OptionalText,
         Immediate,
         Always
     ),
@@ -131,7 +131,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     command!(
         "archive",
         "Archive the current conversation",
-        None,
+        OptionalText,
         RejectWhileActive,
         Always
     ),
@@ -202,8 +202,9 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     ),
     command!(
         "stop",
-        "Stop a command owned by this conversation",
-        Picker,
+        ["clean"],
+        "Stop all commands owned by this conversation",
+        None,
         Immediate,
         Always
     ),
@@ -246,7 +247,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         "plan",
         "Enter Plan mode",
         OptionalText,
-        QueueWhenActive,
+        RejectWhileActive,
         Always
     ),
     command!(
@@ -428,6 +429,10 @@ mod tests {
             command_named("btw", context).map(|value| value.name),
             Some("side")
         );
+        assert_eq!(
+            command_named("clean", context).map(|value| value.name),
+            Some("stop")
+        );
     }
 
     #[test]
@@ -449,5 +454,23 @@ mod tests {
         for command in SLASH_COMMANDS {
             assert!(names.insert(command.name), "duplicate /{}", command.name);
         }
+    }
+
+    #[test]
+    fn codex_session_command_contracts_match_current_semantics() {
+        let context = CommandContext::default();
+        let clear = command_named("clear", context).expect("clear command");
+        assert_eq!(clear.arguments, ArgumentSchema::OptionalText);
+
+        let archive = command_named("archive", context).expect("archive command");
+        assert_eq!(archive.arguments, ArgumentSchema::OptionalText);
+        assert_eq!(archive.queue_policy, QueuePolicy::RejectWhileActive);
+
+        let plan = command_named("plan", context).expect("plan command");
+        assert_eq!(plan.queue_policy, QueuePolicy::RejectWhileActive);
+
+        let stop = command_named("stop", context).expect("stop command");
+        assert_eq!(stop.arguments, ArgumentSchema::None);
+        assert!(stop.aliases.contains(&"clean"));
     }
 }
