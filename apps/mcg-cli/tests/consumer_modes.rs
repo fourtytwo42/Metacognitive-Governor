@@ -254,6 +254,10 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
     let root_help = String::from_utf8_lossy(&root_help.stdout);
     assert!(root_help.contains("--search"));
     assert!(root_help.contains("--no-alt-screen"));
+    assert!(root_help.contains("--approve-for-me"));
+    assert!(root_help.contains("agents"));
+    assert!(root_help.contains("queue"));
+    assert!(root_help.contains("migrate-rollouts"));
 }
 
 #[cfg(windows)]
@@ -533,6 +537,32 @@ async fn codex_compatible_session_commands_use_durable_metacog_conversations() {
         .as_str()
         .expect("conversation id")
         .to_owned();
+
+    let agents = run_cli(&host, project.path(), &["agents"]);
+    assert!(
+        agents.status.success(),
+        "agents stderr: {}",
+        String::from_utf8_lossy(&agents.stderr)
+    );
+    let agents = String::from_utf8_lossy(&agents.stdout);
+    assert!(
+        agents.contains("Codex compatibility session")
+            || agents.contains("No governed agent sessions found.")
+    );
+
+    let missing_queue = run_cli(
+        &host,
+        project.path(),
+        &[
+            "queue",
+            "--thread",
+            "missing conversation",
+            "--message",
+            "queued fixture",
+        ],
+    );
+    assert!(!missing_queue.status.success());
+    assert!(String::from_utf8_lossy(&missing_queue.stderr).contains("not found"));
 
     let archived = run_cli(
         &host,

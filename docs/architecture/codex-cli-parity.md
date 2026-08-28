@@ -48,8 +48,10 @@ Environment variables alone are not capability discovery.
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
-| `agents`, `queue`, `migrate-rollouts` | Missing | Added by stable Codex 0.150.1 and scheduled for the next bounded parity cycle. They remain visible in this ledger rather than being simulated by similarly named MetaCog operations. |
-| global `--approve-for-me` | Missing | Added by stable Codex 0.150.1; map it to the existing governed auto-review approval mode without weakening organization policy. |
+| `agents` | Partial | Lists every active MetaCog Chat, Coordinator, Coder, Tester, and future governed agent session across conversations. The Codex-style searchable live browser and direct thread switching remain pending. |
+| `queue` | Native | Resolves a conversation UUID or exact name, validates global execution and image-reference options, durably persists the queued owner turn, and returns after daemon acceptance while governed work continues FIFO. |
+| `migrate-rollouts` | Native | Daemon-free pass-through to the pinned Codex 0.150.1 migration engine with dry-run default, `--apply`, repeated `--thread`, throughput, JSON, and verbose controls. MetaCog does not reinterpret Codex rollout storage. |
+| global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
 | `apply`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
@@ -168,6 +170,15 @@ Add menu, `/apps`, and direct `$` typing open the same searchable, independently
 scrollable picker; selection inserts the stable `$app-id` syntax used by Codex.
 Apps stay visually and semantically distinct from MetaCog's pinned-revision
 plugin mentions. Outside interaction and Escape dismiss the picker consistently.
+
+Cycle 13 adds Codex 0.150.1's global `--approve-for-me` shortcut to interactive,
+bare/piped, consumer-run, exec, resume, fork, and queue paths. It selects the
+same Auto Review option already available in both desktop composers, so no new
+GUI control is needed. The new top-level `queue` endpoint accepts and persists a
+turn before returning while the daemon retains responsibility for execution.
+`migrate-rollouts` delegates unchanged to the pinned Codex migration engine.
+The first `agents` surface exposes the complete governed session catalog, but
+remains Partial until its searchable live terminal browser is implemented.
 
 ## Safety invariants
 

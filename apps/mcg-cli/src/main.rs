@@ -179,6 +179,9 @@ struct Cli {
     /// Configure when model-generated commands require approval.
     #[arg(short = 'a', long = "ask-for-approval", value_enum, global = true)]
     approval_policy: Option<CodexApprovalPolicyArg>,
+    /// Route approval requests through automatic review using workspace-write sandboxing.
+    #[arg(long, global = true, conflicts_with_all = ["approval_policy", "dangerously_bypass_approvals_and_sandbox"])]
+    approve_for_me: bool,
     /// Disable both approval prompts and sandboxing for this new session.
     #[arg(long, alias = "yolo", global = true)]
     dangerously_bypass_approvals_and_sandbox: bool,
@@ -369,6 +372,8 @@ struct CodexCompatCli {
     sandbox: Option<CodexSandboxArg>,
     #[arg(short = 'a', long = "ask-for-approval", value_enum, global = true)]
     approval_policy: Option<CodexApprovalPolicyArg>,
+    #[arg(long, global = true, conflicts_with_all = ["approval_policy", "dangerously_bypass_approvals_and_sandbox"])]
+    approve_for_me: bool,
     #[arg(long, alias = "yolo", global = true)]
     dangerously_bypass_approvals_and_sandbox: bool,
     #[arg(short = 'i', long = "image", value_name = "FILE", global = true)]
@@ -385,6 +390,8 @@ struct CodexCompatCli {
 
 #[derive(Debug, Subcommand)]
 enum CodexCompatCommand {
+    /// Browse all governed agent sessions on the shared MetaCog daemon.
+    Agents,
     /// Hand a workspace path to the MetaCog desktop app.
     App(Box<AppArgs>),
     /// Run MetaCog non-interactively through the governed agent workflow.
@@ -392,6 +399,10 @@ enum CodexCompatCommand {
     Exec(Box<ExecArgs>),
     /// Continue a previous interactive conversation.
     Resume(Box<ResumeArgs>),
+    /// Queue a message for an existing conversation.
+    Queue(Box<QueueArgs>),
+    /// Inspect or migrate legacy Codex sessions to paginated thread history.
+    MigrateRollouts(Box<MigrateRolloutsArgs>),
     /// Fork a previous conversation and open the fork in the terminal UI.
     Fork(Box<ForkArgs>),
     /// Archive a saved conversation by ID or exact name.
@@ -502,6 +513,35 @@ struct ForkArgs {
     #[arg(long)]
     last: bool,
     session: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct QueueArgs {
+    /// Conversation UUID or exact conversation name.
+    #[arg(long)]
+    thread: String,
+    /// Message text to queue.
+    #[arg(long)]
+    message: String,
+}
+
+#[derive(Debug, Args)]
+struct MigrateRolloutsArgs {
+    /// Publish the migration; otherwise report eligible sessions only.
+    #[arg(long)]
+    apply: bool,
+    /// Restrict inspection or migration to one or more thread IDs.
+    #[arg(long = "thread")]
+    threads: Vec<String>,
+    /// Limit aggregate rollout I/O throughput in MiB per second.
+    #[arg(long)]
+    max_mib_per_second: Option<u64>,
+    /// Emit the complete per-thread report as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Print one line for every inspected rollout.
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2112,6 +2152,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let model = cli.model;
     let sandbox = cli.sandbox;
     let approval_policy = cli.approval_policy;
+    let approve_for_me = cli.approve_for_me;
     let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
     let images = cli.images;
     let host = host.as_str();
@@ -2183,6 +2224,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 || !config_overrides.is_empty()
                 || sandbox.is_some()
                 || approval_policy.is_some()
+                || approve_for_me
                 || dangerously_bypass_approvals_and_sandbox
                 || !goal.is_empty()
             {
@@ -2212,6 +2254,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 run_model.or(model.clone()),
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2241,6 +2284,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 model.clone(),
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2269,6 +2313,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 model.clone(),
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2295,6 +2340,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 model,
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2350,6 +2396,9 @@ fn codex_compat_command_requested() -> bool {
     const COMMANDS: &[&str] = &[
         "exec",
         "e",
+        "agents",
+        "queue",
+        "migrate-rollouts",
         "app",
         "resume",
         "fork",
@@ -2698,6 +2747,36 @@ fn run_codex_app(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+fn run_codex_rollout_migration(
+    args: &MigrateRolloutsArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex"));
+    let mut command = ProcessCommand::new(executable);
+    command.arg("migrate-rollouts");
+    if args.apply {
+        command.arg("--apply");
+    }
+    for thread in &args.threads {
+        command.args(["--thread", thread]);
+    }
+    if let Some(limit) = args.max_mib_per_second {
+        command.args(["--max-mib-per-second", &limit.to_string()]);
+    }
+    if args.json {
+        command.arg("--json");
+    }
+    if args.verbose {
+        command.arg("--verbose");
+    }
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("Codex rollout migration failed with {status}").into());
+    }
+    Ok(())
+}
+
 async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let (arguments, native_overrides) = extract_native_overrides(std::env::args_os())?;
     let cli = CodexCompatCli::parse_from(arguments);
@@ -2707,9 +2786,13 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     if let CodexCompatCommand::App(args) = &cli.command {
         return run_codex_app(&args.path);
     }
+    if let CodexCompatCommand::MigrateRollouts(args) = &cli.command {
+        return run_codex_rollout_migration(args);
+    }
     let model = cli.model;
     let sandbox = cli.sandbox;
     let approval_policy = cli.approval_policy;
+    let approve_for_me = cli.approve_for_me;
     let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
     let images = cli.images;
     let mut add_dirs = cli.add_dirs;
@@ -2743,6 +2826,12 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let token = token.trim();
     match cli.command {
         CodexCompatCommand::App(_) => unreachable!("app handled before daemon authentication"),
+        CodexCompatCommand::MigrateRollouts(_) => {
+            unreachable!("rollout migration handled before daemon authentication")
+        }
+        CodexCompatCommand::Agents => {
+            run_codex_agents(&client, host, token).await?;
+        }
         CodexCompatCommand::Exec(args) => {
             let ExecArgs {
                 command,
@@ -2764,6 +2853,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 model,
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2796,6 +2886,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 model.clone(),
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2814,6 +2905,55 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 no_alt_screen,
             ))
             .await?;
+        }
+        CodexCompatCommand::Queue(args) => {
+            let QueueArgs { thread, message } = *args;
+            let conversation = resolve_cli_session(
+                &client,
+                host,
+                token,
+                &project,
+                Some(&thread),
+                false,
+                true,
+                Some(false),
+            )
+            .await?;
+            let preferences = codex_execution_preferences_override(
+                model,
+                sandbox,
+                approval_policy,
+                approve_for_me,
+                dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
+                &feature_overrides,
+                &config_overrides,
+                &conversation.execution_preferences,
+            );
+            let pending_mentions = codex_exec_mentions(&images)?;
+            let (content, mentions) =
+                resolve_cli_mentions(&client, host, token, message, &pending_mentions).await?;
+            let _: ConversationView = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/queue",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&SendConversationMessageRequest {
+                        content,
+                        execution_preferences: preferences,
+                        mentions,
+                    })
+                    .send()
+                    .await?,
+                "queue conversation message",
+            )
+            .await?;
+            println!(
+                "Queued message for {} ({}).",
+                conversation.title, conversation.id
+            );
         }
         CodexCompatCommand::Fork(args) => {
             let ForkArgs { all, last, session } = *args;
@@ -2844,6 +2984,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 model.clone(),
                 sandbox,
                 approval_policy,
+                approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
@@ -2977,6 +3118,31 @@ async fn run_codex_features(
         .unwrap_or(0);
     for (name, stage, enabled) in rows {
         println!("{name:<name_width$}  {stage:<stage_width$}  {enabled}");
+    }
+    Ok(())
+}
+
+async fn run_codex_agents(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conversations = list_cli_sessions(client, host, token).await?;
+    conversations.retain(|conversation| conversation.state == ConversationState::Active);
+    conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.updated_at));
+    let mut count = 0_usize;
+    for conversation in conversations {
+        let view = fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+        for session in &view.team.sessions {
+            count = count.saturating_add(1);
+            println!(
+                "{} · {} · {:?} · {:?} · {}",
+                conversation.title, session.display_name, session.kind, session.state, session.id
+            );
+        }
+    }
+    if count == 0 {
+        println!("No governed agent sessions found.");
     }
     Ok(())
 }
@@ -5961,6 +6127,7 @@ async fn run_codex_compatible_exec(
     model: Option<String>,
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
+    approve_for_me: bool,
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
@@ -5976,6 +6143,7 @@ async fn run_codex_compatible_exec(
         model,
         sandbox,
         approval_policy,
+        approve_for_me,
         dangerously_bypass_approvals_and_sandbox,
         additional_writable_roots,
         feature_overrides,
@@ -10190,13 +10358,15 @@ fn codex_execution_preferences(
     model: Option<String>,
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
+    approve_for_me: bool,
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
     mut fallback: ExecutionPreferences,
 ) -> ExecutionPreferences {
-    let execution_controls_overridden = sandbox.is_some() || approval_policy.is_some();
+    let execution_controls_overridden =
+        sandbox.is_some() || approval_policy.is_some() || approve_for_me;
     if let Some(model) = model {
         fallback.model_id = Some(model);
     }
@@ -10207,6 +10377,12 @@ fn codex_execution_preferences(
         fallback.approval_mode = ApprovalMode::FullAccess;
         fallback.approval_policy = Some(ExecutionApprovalPolicy::Never);
         fallback.sandbox_mode = Some(ExecutionSandboxMode::DangerFullAccess);
+        return fallback;
+    }
+    if approve_for_me {
+        fallback.approval_mode = ApprovalMode::AutoReview;
+        fallback.approval_policy = Some(ExecutionApprovalPolicy::OnRequest);
+        fallback.sandbox_mode = Some(ExecutionSandboxMode::WorkspaceWrite);
         return fallback;
     }
     if let Some(policy) = approval_policy {
@@ -10246,6 +10422,7 @@ fn codex_execution_preferences_override(
     model: Option<String>,
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
+    approve_for_me: bool,
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
@@ -10255,6 +10432,7 @@ fn codex_execution_preferences_override(
     if model.is_none()
         && sandbox.is_none()
         && approval_policy.is_none()
+        && !approve_for_me
         && additional_writable_roots.is_empty()
         && feature_overrides.is_empty()
         && config_overrides.is_empty()
@@ -10266,6 +10444,7 @@ fn codex_execution_preferences_override(
         model,
         sandbox,
         approval_policy,
+        approve_for_me,
         dangerously_bypass_approvals_and_sandbox,
         additional_writable_roots,
         feature_overrides,
@@ -12743,12 +12922,11 @@ mod tests {
 
         let before_command = CodexCompatCli::try_parse_from([
             "mcg",
+            "--approve-for-me",
             "--model",
             "gpt-5.6-terra",
             "--sandbox",
             "workspace-write",
-            "--ask-for-approval",
-            "on-request",
             "--image",
             "screen.png",
             "--add-dir",
@@ -12763,12 +12941,10 @@ mod tests {
             before_command.sandbox,
             Some(CodexSandboxArg::WorkspaceWrite)
         ));
-        assert!(matches!(
-            before_command.approval_policy,
-            Some(CodexApprovalPolicyArg::OnRequest)
-        ));
+        assert!(before_command.approval_policy.is_none());
         assert_eq!(before_command.images, [PathBuf::from("screen.png")]);
         assert_eq!(before_command.add_dirs, [PathBuf::from(".")]);
+        assert!(before_command.approve_for_me);
         assert!(matches!(
             &before_command.command,
             CodexCompatCommand::Exec(args) if args.json && args.prompt == ["fix the tests"]
@@ -12887,6 +13063,7 @@ mod tests {
             Some(CodexSandboxArg::DangerFullAccess),
             Some(CodexApprovalPolicyArg::OnRequest),
             false,
+            false,
             &["C:/shared".into()],
             &BTreeMap::from([("memories".into(), true)]),
             &interactive_overrides.config_overrides,
@@ -12916,6 +13093,7 @@ mod tests {
             None,
             Some(CodexSandboxArg::ReadOnly),
             Some(CodexApprovalPolicyArg::Untrusted),
+            false,
             true,
             &[],
             &BTreeMap::new(),
@@ -12928,6 +13106,71 @@ mod tests {
             yolo.sandbox_mode,
             Some(ExecutionSandboxMode::DangerFullAccess)
         );
+
+        let approve_for_me = codex_execution_preferences(
+            None,
+            None,
+            None,
+            true,
+            false,
+            &[],
+            &BTreeMap::new(),
+            &[],
+            conversation_preferences(None, None, None, ApprovalMode::Ask),
+        );
+        assert_eq!(approve_for_me.approval_mode, ApprovalMode::AutoReview);
+        assert_eq!(
+            approve_for_me.approval_policy,
+            Some(ExecutionApprovalPolicy::OnRequest)
+        );
+        assert_eq!(
+            approve_for_me.sandbox_mode,
+            Some(ExecutionSandboxMode::WorkspaceWrite)
+        );
+
+        let queue = CodexCompatCli::try_parse_from([
+            "mcg",
+            "queue",
+            "--thread",
+            "release work",
+            "--message",
+            "run the remaining verification",
+        ])
+        .expect("Codex-compatible queue command");
+        assert!(matches!(
+            queue.command,
+            CodexCompatCommand::Queue(args)
+                if args.thread == "release work"
+                    && args.message == "run the remaining verification"
+        ));
+
+        let agents = CodexCompatCli::try_parse_from(["mcg", "agents"])
+            .expect("Codex-compatible agents command");
+        assert!(matches!(agents.command, CodexCompatCommand::Agents));
+
+        let migrate = CodexCompatCli::try_parse_from([
+            "mcg",
+            "migrate-rollouts",
+            "--thread",
+            "thread-a",
+            "--thread",
+            "thread-b",
+            "--max-mib-per-second",
+            "8",
+            "--json",
+            "--verbose",
+            "--apply",
+        ])
+        .expect("Codex-compatible rollout migration command");
+        assert!(matches!(
+            migrate.command,
+            CodexCompatCommand::MigrateRollouts(args)
+                if args.apply
+                    && args.json
+                    && args.verbose
+                    && args.threads == ["thread-a", "thread-b"]
+                    && args.max_mib_per_second == Some(8)
+        ));
 
         let resume = CodexCompatCli::try_parse_from([
             "mcg",

@@ -2775,6 +2775,11 @@ struct ProjectMentionCache {
     candidates: Vec<MentionCandidate>,
 }
 
+struct QueuedConversationAcceptance {
+    sender: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    turn_id: Option<ConversationTurnId>,
+}
+
 impl Drop for ActiveCoordinationBatchGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut batches) = self.batches.lock() {
@@ -10979,6 +10984,115 @@ impl AppRuntime {
         turn_preferences: Option<ExecutionPreferences>,
         mention_inputs: Vec<ComposerMentionInput>,
     ) -> Result<ConversationView, RuntimeError> {
+        self.send_conversation_message_inner(
+            conversation_id,
+            content,
+            turn_preferences,
+            mention_inputs,
+            None,
+        )
+        .await
+    }
+
+    /// Durably accepts a governed chat turn and returns without waiting for the
+    /// active turn ahead of it to finish. The daemon owns the queued continuation.
+    pub async fn queue_conversation_message(
+        self: &Arc<Self>,
+        conversation_id: ConversationId,
+        content: String,
+        turn_preferences: Option<ExecutionPreferences>,
+        mention_inputs: Vec<ComposerMentionInput>,
+    ) -> Result<ConversationView, RuntimeError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let acceptance = Arc::new(Mutex::new(QueuedConversationAcceptance {
+            sender: Some(sender),
+            turn_id: None,
+        }));
+        let task_acceptance = Arc::clone(&acceptance);
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = runtime
+                .send_conversation_message_inner(
+                    conversation_id,
+                    content,
+                    turn_preferences,
+                    mention_inputs,
+                    Some(Arc::clone(&task_acceptance)),
+                )
+                .await;
+            let error = result.err();
+            let (sender, turn_id) = task_acceptance
+                .lock()
+                .map(|mut acceptance| (acceptance.sender.take(), acceptance.turn_id))
+                .unwrap_or((None, None));
+            if let Some(sender) = sender {
+                let message = error.as_ref().map_or_else(
+                    || "queued turn ended before acceptance".into(),
+                    ToString::to_string,
+                );
+                let _ = sender.send(Err(message));
+            } else if let (Some(turn_id), Some(error)) = (turn_id, error) {
+                let _ =
+                    runtime.settle_queued_conversation_failure(conversation_id, turn_id, &error);
+            }
+        });
+        receiver
+            .await
+            .map_err(|_| {
+                StorageError::InvalidData("queued turn acceptance was interrupted".into())
+            })?
+            .map_err(StorageError::InvalidData)?;
+        self.conversation(conversation_id)
+    }
+
+    fn settle_queued_conversation_failure(
+        &self,
+        conversation_id: ConversationId,
+        turn_id: ConversationTurnId,
+        error: &RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        let mut turn = self
+            .conversation(conversation_id)?
+            .turns
+            .into_iter()
+            .find(|turn| turn.id == turn_id)
+            .ok_or_else(|| {
+                StorageError::InvalidData("queued conversation turn is missing".into())
+            })?;
+        if matches!(
+            turn.state,
+            ConversationTurnState::Completed
+                | ConversationTurnState::Failed
+                | ConversationTurnState::Interrupted
+                | ConversationTurnState::Indeterminate
+        ) {
+            return Ok(());
+        }
+        if turn.codex_turn_id.is_some() {
+            turn.state = ConversationTurnState::Indeterminate;
+            turn.error = Some(format!(
+                "Codex accepted this queued turn, but completion could not be proven: {error}. MetaCog will not resend it automatically."
+            ));
+        } else {
+            turn.state = ConversationTurnState::Failed;
+            turn.error = Some(format!(
+                "The queued turn was persisted, but Codex did not accept it: {error}. It is safe to retry."
+            ));
+        }
+        turn.updated_at = Utc::now();
+        let event = self.store()?.save_conversation_turn(&turn)?;
+        let _ = self.event_sender.send(event);
+        Ok(())
+    }
+
+    async fn send_conversation_message_inner(
+        self: &Arc<Self>,
+        conversation_id: ConversationId,
+        content: String,
+        turn_preferences: Option<ExecutionPreferences>,
+        mention_inputs: Vec<ComposerMentionInput>,
+        acceptance: Option<Arc<Mutex<QueuedConversationAcceptance>>>,
+    ) -> Result<ConversationView, RuntimeError> {
         let raw_prompt = content.trim();
         let (requested_mode, requested_goal, prompt) = if let Some(rest) =
             raw_prompt.strip_prefix("/plan")
@@ -11064,6 +11178,14 @@ impl AppRuntime {
         };
         let event = self.store()?.append_conversation_message(&user_message)?;
         let _ = self.event_sender.send(event);
+        if let Some(acceptance) = &acceptance
+            && let Ok(mut acceptance) = acceptance.lock()
+        {
+            acceptance.turn_id = Some(turn.id);
+            if let Some(sender) = acceptance.sender.take() {
+                let _ = sender.send(Ok(()));
+            }
+        }
 
         let chat_lock = self.conversation_chat_lock(conversation_id).await;
         let _chat_guard = chat_lock.lock().await;
@@ -26502,6 +26624,90 @@ mod tests {
             "https://springfield-it.hendo420.chatgpt.site/"
         );
         assert_eq!(first[0].hosting_provider, "OpenAI Sites");
+    }
+
+    #[test]
+    fn accepted_queue_failures_never_leave_nonterminal_turns() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        let conversation = runtime
+            .create_conversation(
+                Some("Queued failure settlement".into()),
+                None,
+                ExecutionPreferences::default(),
+            )
+            .expect("conversation");
+        let now = Utc::now();
+        let mut retryable = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: conversation.id,
+            state: ConversationTurnState::Pending,
+            execution_preferences: ExecutionPreferences::default(),
+            codex_thread_id: None,
+            codex_turn_id: None,
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .store()
+            .expect("store")
+            .save_conversation_turn(&retryable)
+            .expect("retryable turn");
+        runtime
+            .settle_queued_conversation_failure(
+                conversation.id,
+                retryable.id,
+                &RuntimeError::Storage(StorageError::InvalidData("fixture startup failure".into())),
+            )
+            .expect("retryable settlement");
+        let failed = runtime
+            .conversation(conversation.id)
+            .expect("failed view")
+            .turns
+            .into_iter()
+            .find(|turn| turn.id == retryable.id)
+            .expect("failed turn");
+        assert_eq!(failed.state, ConversationTurnState::Failed);
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("safe to retry"))
+        );
+
+        retryable.codex_turn_id = Some("accepted-codex-turn".into());
+        retryable.state = ConversationTurnState::Streaming;
+        retryable.error = None;
+        runtime
+            .store()
+            .expect("store")
+            .save_conversation_turn(&retryable)
+            .expect("accepted turn");
+        runtime
+            .settle_queued_conversation_failure(
+                conversation.id,
+                retryable.id,
+                &RuntimeError::Storage(StorageError::InvalidData("fixture transport loss".into())),
+            )
+            .expect("indeterminate settlement");
+
+        let view = runtime.conversation(conversation.id).expect("view");
+        let settled = view
+            .turns
+            .iter()
+            .find(|turn| turn.id == retryable.id)
+            .expect("settled turn");
+        assert_eq!(settled.state, ConversationTurnState::Indeterminate);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("will not resend"))
+        );
     }
 
     #[test]

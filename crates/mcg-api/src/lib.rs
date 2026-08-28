@@ -1648,6 +1648,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             post(send_conversation_message),
         )
         .route(
+            "/api/v1/conversations/{conversation_id}/queue",
+            post(queue_conversation_message),
+        )
+        .route(
             "/api/v1/conversations/{conversation_id}/mode",
             post(update_conversation_mode),
         )
@@ -4124,6 +4128,28 @@ async fn send_conversation_message(
         state
             .runtime
             .send_conversation_message(
+                conversation_id,
+                request.content,
+                request.execution_preferences,
+                request.mentions,
+            )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn queue_conversation_message(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<SendConversationMessageRequest>,
+) -> Result<Json<ConversationView>, ApiError> {
+    let conversation_id = conversation_id
+        .parse::<ConversationId>()
+        .map_err(|_| ApiError::bad_request("conversation id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .queue_conversation_message(
                 conversation_id,
                 request.content,
                 request.execution_preferences,
