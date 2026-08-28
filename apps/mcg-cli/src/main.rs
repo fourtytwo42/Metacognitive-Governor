@@ -8,6 +8,7 @@ use std::{
     str::FromStr,
 };
 
+mod commands;
 mod interactive;
 
 #[cfg(windows)]
@@ -28,18 +29,19 @@ use mcg_api::{
     AnswerConversationInputRequest, ApplyComputerActionsRequest, ApprovalListResponse,
     ArchiveConversationRequest, ArchiveProjectRequest, AssembleContextRequest,
     AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    ConversationStreamEvent, CorrectMemoryClaimRequest, CreateConversationRequest,
-    CreateEncryptedBackupRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
-    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DecideSharedOrganizationRequest,
-    DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse,
-    ExperimentDecisionListResponse, ExperimentListResponse, ImportOrganizationRequest,
-    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
-    InstallRegistryPluginRequest, InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse,
-    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    MentionCandidateListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
-    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
+    ConversationListResponse, ConversationStreamEvent, CorrectMemoryClaimRequest,
+    CreateConversationRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
+    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
+    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
+    DecideSharedOrganizationRequest, DelegationMutationRequest, DelegationRetryRequest,
+    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, MentionCandidateListResponse,
+    NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
+    OrganizationMutationResponse, OrganizationPublisherListResponse,
     OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
@@ -55,9 +57,9 @@ use mcg_api::{
     TaskEventsResponse, TaskListResponse, TaskMutationResponse, ToolAuditResponse,
     TransferProjectMemoryRequest, TransitionAgentRunRequest, TransitionExperimentRequest,
     TransitionMemoryClaimRequest, TransitionTaskRequest, TrustOrganizationPublisherRequest,
-    UpdateConversationGoalRequest, UpdateConversationModeRequest, UpdateSiteRequest,
-    UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
-    WakeScheduleRequest, WorktreeMutationRequest,
+    UpdateConversationGoalRequest, UpdateConversationModeRequest, UpdateConversationRequest,
+    UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
+    UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
@@ -110,6 +112,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
 use interactive::{
     PaletteCandidate, PaletteKind, PaletteRequest, SlashCandidate, SubmittedLine, TuiAction,
     TuiModel, TuiTerminal, prompt_for_question,
@@ -2133,6 +2136,7 @@ async fn run_interactive(
 
         if !model.is_active() {
             if let Some(line) = model.pop_queue() {
+                let mut command_output = Vec::new();
                 match dispatch_interactive_line(
                     client,
                     host,
@@ -2143,24 +2147,44 @@ async fn run_interactive(
                     &mut preferences,
                     &mut pending_mentions,
                     line,
+                    &mut command_output,
                 )
                 .await
                 {
                     Ok(Some(view)) => {
+                        let changed_conversation = view.conversation.id != conversation.id;
                         conversation = view.conversation.clone();
                         model.set_view(view);
+                        if changed_conversation {
+                            stream_task.abort();
+                            stream_task = spawn_conversation_stream(
+                                client.clone(),
+                                host.to_owned(),
+                                token.to_owned(),
+                                conversation.id,
+                                stream_tx.clone(),
+                            );
+                        }
                     }
                     Ok(None) => {}
                     Err(error) => model.set_status(format!("Queued message failed: {error}")),
                 }
+                model.push_notices(command_output);
             }
         }
 
         if let Some(request) = model.palette_request() {
             let plugins = interactive_plugin_candidates(client, host, token).await?;
-            let candidates =
-                interactive_palette_candidates(client, host, token, project_id, &plugins, request)
-                    .await;
+            let candidates = interactive_palette_candidates(
+                client,
+                host,
+                token,
+                project_id,
+                &preferences,
+                &plugins,
+                request,
+            )
+            .await;
             model.set_candidates(candidates);
         } else {
             model.set_candidates(Vec::new());
@@ -2213,6 +2237,7 @@ async fn run_interactive(
                     content: "/fork".into(),
                     mentions: Vec::new(),
                 };
+                let mut command_output = Vec::new();
                 if let Err(error) = run_interactive_slash(
                     client,
                     host,
@@ -2223,13 +2248,74 @@ async fn run_interactive(
                     &mut preferences,
                     &mut pending_mentions,
                     line,
+                    &mut command_output,
                 )
                 .await
                 {
                     model.set_status(format!("Fork failed: {error}"));
                 }
+                model.push_notices(command_output);
             }
             TuiAction::Steer(line) => {
+                if let Some((requested, _, _)) = parse_interactive_slash(&line) {
+                    let context =
+                        interactive_command_context(client, host, token, project_id, &preferences)
+                            .await;
+                    if let Some(command) = command_named(&requested.to_ascii_lowercase(), context) {
+                        match command.queue_policy {
+                            QueuePolicy::QueueWhenActive => {
+                                model.queue(line);
+                                model.set_status(format!("{} queued", model.queued_len()));
+                            }
+                            QueuePolicy::RejectWhileActive => {
+                                model.set_status(format!(
+                                    "/{} is unavailable while the conversation is active",
+                                    command.name
+                                ));
+                            }
+                            QueuePolicy::Immediate => {
+                                let mut command_output = Vec::new();
+                                match dispatch_interactive_line(
+                                    client,
+                                    host,
+                                    token,
+                                    &mut conversation,
+                                    &mut project_id,
+                                    &mut project_root,
+                                    &mut preferences,
+                                    &mut pending_mentions,
+                                    line,
+                                    &mut command_output,
+                                )
+                                .await
+                                {
+                                    Ok(Some(view)) => {
+                                        let changed_conversation =
+                                            view.conversation.id != conversation.id;
+                                        conversation = view.conversation.clone();
+                                        model.set_view(view);
+                                        if changed_conversation {
+                                            stream_task.abort();
+                                            stream_task = spawn_conversation_stream(
+                                                client.clone(),
+                                                host.to_owned(),
+                                                token.to_owned(),
+                                                conversation.id,
+                                                stream_tx.clone(),
+                                            );
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        model.set_status(format!("Command failed: {error}"));
+                                    }
+                                }
+                                model.push_notices(command_output);
+                            }
+                        }
+                        continue;
+                    }
+                }
                 let Some(turn) = model.active_turn() else {
                     continue;
                 };
@@ -2241,6 +2327,7 @@ async fn run_interactive(
                 }
             }
             TuiAction::Submit(line) => {
+                let mut command_output = Vec::new();
                 match dispatch_interactive_line(
                     client,
                     host,
@@ -2251,6 +2338,7 @@ async fn run_interactive(
                     &mut preferences,
                     &mut pending_mentions,
                     line,
+                    &mut command_output,
                 )
                 .await
                 {
@@ -2280,6 +2368,7 @@ async fn run_interactive(
                     Ok(None) => {}
                     Err(error) => model.set_status(format!("Command failed: {error}")),
                 }
+                model.push_notices(command_output);
             }
         }
     }
@@ -2322,6 +2411,7 @@ async fn dispatch_interactive_line(
     preferences: &mut ExecutionPreferences,
     pending_mentions: &mut Vec<String>,
     line: SubmittedLine,
+    command_output: &mut Vec<String>,
 ) -> Result<Option<ConversationView>, Box<dyn std::error::Error>> {
     if line.content.trim_start().starts_with('/') {
         let control = run_interactive_slash(
@@ -2334,6 +2424,7 @@ async fn dispatch_interactive_line(
             preferences,
             pending_mentions,
             line,
+            command_output,
         )
         .await?;
         if control == InteractiveControl::Exit {
@@ -2487,133 +2578,6 @@ fn copy_to_clipboard(value: &str) -> bool {
         .is_ok()
 }
 
-const INTERACTIVE_SLASH_COMMANDS: &[SlashCandidate] = &[
-    SlashCandidate {
-        name: "approve",
-        description: "Approve the latest pending request once",
-    },
-    SlashCandidate {
-        name: "clear",
-        description: "Clear the terminal without deleting the chat",
-    },
-    SlashCandidate {
-        name: "cloud",
-        description: "Show the local-execution boundary",
-    },
-    SlashCandidate {
-        name: "cloud-environment",
-        description: "Show the cloud-environment boundary",
-    },
-    SlashCandidate {
-        name: "compact",
-        description: "Compact the current Codex context",
-    },
-    SlashCandidate {
-        name: "exit",
-        description: "Exit MetaCog",
-    },
-    SlashCandidate {
-        name: "fast",
-        description: "Toggle fast response service",
-    },
-    SlashCandidate {
-        name: "feedback",
-        description: "Show feedback instructions",
-    },
-    SlashCandidate {
-        name: "fork",
-        description: "Fork the current local Codex context",
-    },
-    SlashCandidate {
-        name: "goal",
-        description: "Set, view, edit, pause, resume, or clear the goal",
-    },
-    SlashCandidate {
-        name: "help",
-        description: "Show interactive commands and keyboard controls",
-    },
-    SlashCandidate {
-        name: "ide-context",
-        description: "Show the IDE-context boundary",
-    },
-    SlashCandidate {
-        name: "init",
-        description: "Create or improve this project's AGENTS.md",
-    },
-    SlashCandidate {
-        name: "local",
-        description: "Show the selected local workspace",
-    },
-    SlashCandidate {
-        name: "mcp",
-        description: "List connected MCP servers",
-    },
-    SlashCandidate {
-        name: "memories",
-        description: "Show memory configuration guidance",
-    },
-    SlashCandidate {
-        name: "mention",
-        description: "Attach a file or folder path to the next message",
-    },
-    SlashCandidate {
-        name: "model",
-        description: "Choose the model for later turns",
-    },
-    SlashCandidate {
-        name: "new",
-        description: "Start a new chat in this CLI session",
-    },
-    SlashCandidate {
-        name: "permissions",
-        description: "Choose ask, auto-review, or full-access",
-    },
-    SlashCandidate {
-        name: "pet",
-        description: "Show the desktop-pet compatibility boundary",
-    },
-    SlashCandidate {
-        name: "personality",
-        description: "Choose a response personality",
-    },
-    SlashCandidate {
-        name: "plan",
-        description: "Enter Plan mode with an optional planning request",
-    },
-    SlashCandidate {
-        name: "project",
-        description: "Switch to another local project",
-    },
-    SlashCandidate {
-        name: "quit",
-        description: "Exit MetaCog",
-    },
-    SlashCandidate {
-        name: "reasoning",
-        description: "Choose the reasoning effort",
-    },
-    SlashCandidate {
-        name: "review",
-        description: "Review current project changes",
-    },
-    SlashCandidate {
-        name: "side",
-        description: "Start a separate chat in the same project",
-    },
-    SlashCandidate {
-        name: "status",
-        description: "Show chat, project, model, mode, and goal state",
-    },
-    SlashCandidate {
-        name: "task",
-        description: "Start a project-free chat",
-    },
-    SlashCandidate {
-        name: "worktree",
-        description: "Run coding work through a managed worktree",
-    },
-];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InteractiveControl {
     Continue,
@@ -2678,16 +2642,34 @@ async fn interactive_palette_candidates(
     host: &str,
     token: &str,
     project_id: Option<ProjectId>,
+    preferences: &ExecutionPreferences,
     plugins: &[MentionCandidate],
     request: PaletteRequest,
 ) -> Vec<PaletteCandidate> {
     let needle = request.query.to_ascii_lowercase();
     if request.kind == PaletteKind::Slash {
-        return INTERACTIVE_SLASH_COMMANDS
+        let context =
+            interactive_command_context(client, host, token, project_id, preferences).await;
+        return SLASH_COMMANDS
             .iter()
-            .filter(|command| command.name.starts_with(&needle))
-            .cloned()
-            .map(PaletteCandidate::Slash)
+            .filter(|command| command.is_available(context) && command.name.starts_with(&needle))
+            .map(|command| {
+                PaletteCandidate::Slash(SlashCandidate {
+                    name: command.name,
+                    description: command.description,
+                })
+            })
+            .collect();
+    }
+    if request.kind == PaletteKind::CommandOption {
+        return interactive_command_options(client, host, token, &request)
+            .await
+            .into_iter()
+            .map(|(value, label, detail)| PaletteCandidate::Choice {
+                value,
+                label,
+                detail,
+            })
             .collect();
     }
     let mut candidates = if let Some(project_id) = project_id {
@@ -2722,6 +2704,247 @@ async fn interactive_palette_candidates(
         .take(100)
         .map(PaletteCandidate::Mention)
         .collect()
+}
+
+async fn interactive_command_options(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    request: &PaletteRequest,
+) -> Vec<(String, String, String)> {
+    let command = request.command.as_deref().unwrap_or_default();
+    let mut values = match command {
+        "permissions" => vec![
+            (
+                "ask".into(),
+                "Ask for approval".into(),
+                "Ask before external edits and network use".into(),
+            ),
+            (
+                "auto-review".into(),
+                "Approve for me".into(),
+                "Ask only for actions detected as unsafe".into(),
+            ),
+            (
+                "full-access".into(),
+                "Full access".into(),
+                "Unrestricted project and internet authority".into(),
+            ),
+        ],
+        "personality" => vec![
+            (
+                "friendly".into(),
+                "Friendly".into(),
+                "Warm and collaborative".into(),
+            ),
+            (
+                "pragmatic".into(),
+                "Pragmatic".into(),
+                "Direct and implementation-focused".into(),
+            ),
+            (
+                "none".into(),
+                "None".into(),
+                "No personality override".into(),
+            ),
+        ],
+        "theme" => vec![
+            (
+                "system".into(),
+                "System".into(),
+                "Follow terminal colors".into(),
+            ),
+            (
+                "dark".into(),
+                "Dark".into(),
+                "High-contrast dark palette".into(),
+            ),
+            (
+                "light".into(),
+                "Light".into(),
+                "High-contrast light palette".into(),
+            ),
+        ],
+        "keymap" => vec![
+            (
+                "default".into(),
+                "Default".into(),
+                "Codex-style terminal keys".into(),
+            ),
+            ("vim".into(), "Vim".into(), "Modal composer editing".into()),
+        ],
+        "agent" | "subagents" => ["chat", "coordinator", "coder", "tester"]
+            .into_iter()
+            .map(|role| {
+                (
+                    role.into(),
+                    role.to_ascii_uppercase(),
+                    "Audited agent session".into(),
+                )
+            })
+            .collect(),
+        "model" => {
+            let mut models = vec![(
+                "model=automatic".into(),
+                "Model · Automatic".into(),
+                "Use the catalog default".into(),
+            )];
+            if let Ok(response) = client
+                .get(format!("{host}/api/v1/codex/models"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(catalog) = response.json::<serde_json::Value>().await {
+                    if let Some(catalog) = catalog.as_array() {
+                        models.extend(catalog.iter().filter_map(|model| {
+                            if model.get("hidden").and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                            {
+                                return None;
+                            }
+                            let id = model.get("id")?.as_str()?.to_owned();
+                            let label = model
+                                .get("displayName")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or(&id)
+                                .to_owned();
+                            let detail = model
+                                .get("description")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("Codex model")
+                                .to_owned();
+                            Some((format!("model={id}"), format!("Model · {label}"), detail))
+                        }));
+                    }
+                }
+            }
+            models.extend([
+                (
+                    "effort=low".into(),
+                    "Effort · Low".into(),
+                    "Use less reasoning".into(),
+                ),
+                (
+                    "effort=medium".into(),
+                    "Effort · Medium".into(),
+                    "Balanced reasoning".into(),
+                ),
+                (
+                    "effort=high".into(),
+                    "Effort · High".into(),
+                    "Use more reasoning".into(),
+                ),
+                (
+                    "effort=xhigh".into(),
+                    "Effort · Extra high".into(),
+                    "Use substantially more reasoning".into(),
+                ),
+                (
+                    "speed=standard".into(),
+                    "Speed · Standard".into(),
+                    "Default service tier".into(),
+                ),
+                (
+                    "speed=fast".into(),
+                    "Speed · Fast".into(),
+                    "Faster responses, more usage".into(),
+                ),
+            ]);
+            models
+        }
+        "resume" => {
+            let mut conversations = Vec::new();
+            if let Ok(response) = client
+                .get(format!("{host}/api/v1/conversations?include_archived=true"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(list) = response.json::<ConversationListResponse>().await {
+                    conversations.extend(list.conversations.into_iter().map(|conversation| {
+                        (
+                            conversation.id.to_string(),
+                            conversation.title,
+                            format!("{:?} · {}", conversation.state, conversation.updated_at),
+                        )
+                    }));
+                }
+            }
+            conversations
+        }
+        _ => Vec::new(),
+    };
+    let needle = request.query.to_ascii_lowercase();
+    values.retain(|(value, label, _)| {
+        needle.is_empty()
+            || value.to_ascii_lowercase().contains(&needle)
+            || label.to_ascii_lowercase().contains(&needle)
+    });
+    values
+}
+
+async fn interactive_command_context(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_id: Option<ProjectId>,
+    preferences: &ExecutionPreferences,
+) -> CommandContext {
+    let models = client
+        .get(format!("{host}/api/v1/codex/models"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()
+        .and_then(|response| response.error_for_status().ok());
+    let fast_model = if let Some(response) = models {
+        response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .is_some_and(|models| {
+                models.iter().any(|model| {
+                    let selected = preferences.model_id.as_deref().map_or_else(
+                        || {
+                            model.get("isDefault").and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                        },
+                        |selected| {
+                            model.get("id").and_then(serde_json::Value::as_str) == Some(selected)
+                                || model.get("model").and_then(serde_json::Value::as_str)
+                                    == Some(selected)
+                        },
+                    );
+                    selected
+                        && model
+                            .get("serviceTiers")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|tiers| {
+                                tiers.iter().any(|tier| {
+                                    tier.get("name")
+                                        .or_else(|| tier.get("serviceTier"))
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|value| value.eq_ignore_ascii_case("fast"))
+                                })
+                            })
+                })
+            })
+    } else {
+        false
+    };
+    CommandContext {
+        has_project: project_id.is_some(),
+        fast_model,
+        ide: std::env::var_os("TERM_PROGRAM")
+            .or_else(|| std::env::var_os("VSCODE_PID"))
+            .is_some(),
+        apps: false,
+        experimental: false,
+    }
 }
 
 async fn send_interactive_message(
@@ -2879,16 +3102,44 @@ async fn run_interactive_slash(
     preferences: &mut ExecutionPreferences,
     pending_mentions: &mut Vec<String>,
     line: SubmittedLine,
+    command_output: &mut Vec<String>,
 ) -> Result<InteractiveControl, Box<dyn std::error::Error>> {
+    macro_rules! println {
+        ($($argument:tt)*) => {
+            command_output.push(format!($($argument)*))
+        };
+    }
     let (name, argument_start, argument) =
         parse_interactive_slash(&line).ok_or("invalid slash command")?;
-    let name = name.to_ascii_lowercase();
-    if !INTERACTIVE_SLASH_COMMANDS
-        .iter()
-        .any(|command| command.name == name)
-    {
-        return Err(format!("unknown command /{name}; type /help to list commands").into());
-    }
+    let requested_name = name.to_ascii_lowercase();
+    let command_context =
+        interactive_command_context(client, host, token, *project_id, preferences).await;
+    let command = command_named(&requested_name, command_context).ok_or_else(|| {
+        format!("unknown or unavailable command /{requested_name}; type /help to list commands")
+    })?;
+    let (name, argument_owned) = if command.name == "mcg" {
+        let (subcommand, remainder) = argument
+            .split_once(char::is_whitespace)
+            .map_or((argument, ""), |(name, value)| (name, value.trim_start()));
+        if ![
+            "project",
+            "task",
+            "worktree",
+            "local",
+            "reasoning",
+            "cloud",
+            "cloud-environment",
+            "ide-context",
+        ]
+        .contains(&subcommand)
+        {
+            return Err("use /mcg project|task|worktree|local|reasoning|cloud|cloud-environment|ide-context".into());
+        }
+        (subcommand.to_owned(), remainder.to_owned())
+    } else {
+        (command.name.to_owned(), argument.to_owned())
+    };
+    let argument = argument_owned.as_str();
     match name.as_str() {
         "exit" | "quit" => return Ok(InteractiveControl::Exit),
         "help" => {
@@ -2898,16 +3149,86 @@ async fn run_interactive_slash(
             println!(
                 "Left/Right/Home/End edit, Up/Down recall history when no picker is open, Ctrl+C exits.\n"
             );
-            for command in INTERACTIVE_SLASH_COMMANDS {
+            for command in SLASH_COMMANDS
+                .iter()
+                .filter(|command| command.is_available(command_context))
+            {
                 println!("/{:<18} {}", command.name, command.description);
             }
         }
         "clear" => {
-            crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                crossterm::cursor::MoveTo(0, 0)
-            )?;
+            *conversation = create_interactive_conversation(
+                client,
+                host,
+                token,
+                *project_id,
+                preferences,
+                "MetaCog CLI",
+            )
+            .await?;
+            pending_mentions.clear();
+        }
+        "rename" => {
+            if argument.trim().is_empty() {
+                return Err("add the new conversation title after /rename".into());
+            }
+            *conversation = decode_api_response(
+                client
+                    .patch(format!("{host}/api/v1/conversations/{}", conversation.id))
+                    .bearer_auth(token)
+                    .json(&UpdateConversationRequest {
+                        title: argument.trim().to_owned(),
+                        project_id: *project_id,
+                    })
+                    .send()
+                    .await?,
+                "rename conversation",
+            )
+            .await?;
+        }
+        "resume" => {
+            let requested = argument
+                .trim()
+                .parse::<ConversationId>()
+                .map_err(|_| "choose a conversation from the /resume picker")?;
+            let resumed = fetch_conversation(client, host, token, &requested.to_string()).await?;
+            *conversation = resumed.conversation;
+            *project_id = conversation.project_id;
+            *project_root = if let Some(resumed_project_id) = *project_id {
+                let projects: ProjectListResponse = decode_api_response(
+                    client
+                        .get(format!("{host}/api/v1/projects"))
+                        .bearer_auth(token)
+                        .send()
+                        .await?,
+                    "resolve resumed project",
+                )
+                .await?;
+                projects
+                    .projects
+                    .into_iter()
+                    .find(|project| project.project_id == resumed_project_id)
+                    .map(|project| PathBuf::from(project.root))
+            } else {
+                None
+            };
+            pending_mentions.clear();
+        }
+        "archive" => {
+            let archived: Conversation = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/archive",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&ArchiveConversationRequest { archived: true })
+                    .send()
+                    .await?,
+                "archive conversation",
+            )
+            .await?;
+            *conversation = archived;
         }
         "new" | "side" => {
             *conversation = create_interactive_conversation(
@@ -3066,8 +3387,19 @@ async fn run_interactive_slash(
                     preferences.model_id.as_deref().unwrap_or("Automatic")
                 );
             } else {
-                preferences.model_id = Some(argument.to_owned());
-                println!("Model set to {argument} for later turns.");
+                if let Some(model) = argument.strip_prefix("model=") {
+                    preferences.model_id = (model != "automatic").then(|| model.to_owned());
+                    println!("Model set to {model} for later turns.");
+                } else if let Some(effort) = argument.strip_prefix("effort=") {
+                    preferences.reasoning_effort = Some(effort.to_owned());
+                    println!("Reasoning effort set to {effort}.");
+                } else if let Some(speed) = argument.strip_prefix("speed=") {
+                    preferences.service_tier = (speed != "standard").then(|| speed.to_owned());
+                    println!("Speed set to {speed}.");
+                } else {
+                    preferences.model_id = Some(argument.to_owned());
+                    println!("Model set to {argument} for later turns.");
+                }
             }
         }
         "reasoning" => {
@@ -3120,16 +3452,14 @@ async fn run_interactive_slash(
             if argument.is_empty() {
                 println!(
                     "Current personality: {}",
-                    preferences.personality.as_deref().unwrap_or("default")
+                    preferences.personality.as_deref().unwrap_or("none")
                 );
             } else {
                 let value = argument.to_ascii_lowercase();
-                if !["default", "concise", "friendly", "professional"].contains(&value.as_str()) {
-                    return Err(
-                        "personality must be default, concise, friendly, or professional".into(),
-                    );
+                if !["friendly", "pragmatic", "none"].contains(&value.as_str()) {
+                    return Err("personality must be friendly, pragmatic, or none".into());
                 }
-                preferences.personality = (value != "default").then_some(value.clone());
+                preferences.personality = (value != "none").then_some(value.clone());
                 println!("Personality set to {value}.");
             }
         }
@@ -3157,6 +3487,44 @@ async fn run_interactive_slash(
             );
             println!("Permissions: {:?}", preferences.approval_mode);
             println!(
+                "Writable roots: {}",
+                project_root.as_ref().map_or_else(
+                    || "None (read-only)".into(),
+                    |root| root.display().to_string()
+                )
+            );
+            if let Ok(models) = client
+                .get(format!("{host}/api/v1/codex/models"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(models) = models.json::<serde_json::Value>().await {
+                    if let Some(selected) = models.as_array().and_then(|models| {
+                        models.iter().find(|model| {
+                            preferences.model_id.as_deref().map_or_else(
+                                || {
+                                    model.get("isDefault").and_then(serde_json::Value::as_bool)
+                                        == Some(true)
+                                },
+                                |id| {
+                                    model.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                                },
+                            )
+                        })
+                    }) {
+                        println!(
+                            "Context capacity: {}",
+                            selected
+                                .get("contextWindow")
+                                .or_else(|| selected.get("context_window"))
+                                .map_or_else(|| "Unknown".into(), serde_json::Value::to_string)
+                        );
+                    }
+                }
+            }
+            println!(
                 "Goal: {}",
                 view.conversation
                     .goal
@@ -3164,6 +3532,62 @@ async fn run_interactive_slash(
                     .map_or("None", |goal| goal.objective.as_str())
             );
             *conversation = view.conversation;
+        }
+        "usage" => {
+            let limits: serde_json::Value = decode_api_response(
+                client
+                    .get(format!("{host}/api/v1/codex/rate-limits"))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "read Codex usage limits",
+            )
+            .await?;
+            let usage: serde_json::Value = decode_api_response(
+                client
+                    .get(format!("{host}/api/v1/codex/account/usage"))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "read Codex account usage",
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "usage": usage,
+                    "limits": limits,
+                }))?
+            );
+        }
+        "copy" => {
+            let view =
+                fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+            let text = view
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == ConversationRole::Assistant)
+                .map(|message| message.content.as_str())
+                .ok_or("there is no completed assistant output to copy")?;
+            if !copy_to_clipboard(text) {
+                return Err("clipboard is unavailable".into());
+            }
+            *conversation = view.conversation;
+        }
+        "diff" => {
+            let root = project_root.as_ref().ok_or("/diff requires a project")?;
+            let output = ProcessCommand::new("git")
+                .args(["diff", "--no-ext-diff", "--"])
+                .current_dir(root)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .to_owned()
+                    .into());
+            }
+            println!("{}", String::from_utf8_lossy(&output.stdout));
         }
         "compact" | "fork" => {
             let operation = name.as_str();
@@ -3182,6 +3606,16 @@ async fn run_interactive_slash(
             println!("Context {operation} completed.");
         }
         "approve" => {
+            if !argument.eq_ignore_ascii_case("confirm") {
+                return Err("review the exact pending action, then run /approve confirm".into());
+            }
+            let view =
+                fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+            let task_ids = view
+                .turns
+                .iter()
+                .filter_map(|turn| turn.task_id)
+                .collect::<BTreeSet<_>>();
             let approvals: ApprovalListResponse = decode_api_response(
                 client
                     .get(format!("{host}/api/v1/approvals?state=pending"))
@@ -3191,7 +3625,12 @@ async fn run_interactive_slash(
                 "list pending approvals",
             )
             .await?;
-            if let Some(approval) = approvals.approvals.last() {
+            let matching = approvals
+                .approvals
+                .iter()
+                .rev()
+                .find(|approval| task_ids.contains(&approval.task_id));
+            if let Some(approval) = matching {
                 resolve_approval(
                     client,
                     host,
@@ -3202,8 +3641,9 @@ async fn run_interactive_slash(
                 )
                 .await?;
             } else {
-                println!("No pending approvals.");
+                println!("No pending approval belongs to this conversation.");
             }
+            *conversation = view.conversation;
         }
         "project" => {
             if argument.is_empty() {
@@ -3250,12 +3690,38 @@ async fn run_interactive_slash(
             pending_mentions.clear();
             println!("Started project-free conversation {}.", conversation.id);
         }
-        "review" | "init" | "worktree" => {
+        "review" => {
+            if project_id.is_none() {
+                return Err("/review requires a project".into());
+            }
+            let target = if argument.is_empty() {
+                serde_json::json!({ "type": "uncommittedChanges" })
+            } else {
+                serde_json::json!({ "type": "custom", "instructions": argument })
+            };
+            let result: serde_json::Value = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/codex/owned-threads/{}/review",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({
+                        "target": target,
+                        "delivery": "inline",
+                    }))
+                    .send()
+                    .await?,
+                "start native read-only review",
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "init" | "worktree" => {
             if project_id.is_none() {
                 return Err(format!("/{name} requires a project").into());
             }
             let message = match name.as_str() {
-                "review" => format!("Review {}. Prioritize correctness, regressions, security, missing tests, and repository instructions. Report actionable findings with file and line references. Do not modify the working tree.", if argument.is_empty() { "all staged, unstaged, and untracked changes" } else { argument }),
                 "init" => "Create or update AGENTS.md for this project. Inspect the repository first, preserve existing instructions, and add concise project-specific guidance.".into(),
                 "worktree" if !argument.is_empty() => format!("Complete this coding task through a managed Git worktree: {argument}"),
                 "worktree" => return Err("add the coding objective after /worktree".into()),
@@ -3284,7 +3750,64 @@ async fn run_interactive_slash(
                 |root| root.display().to_string()
             )
         ),
-        "mcp" => run_mcp(client, host, token, McpCommand::List { json: false }).await?,
+        "skills" | "hooks" => {
+            let discovery: serde_json::Value = decode_api_response(
+                client
+                    .post(format!("{host}/api/v1/codex/discovery"))
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({
+                        "cwds": project_root.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                        "force_reload": false,
+                    }))
+                    .send()
+                    .await?,
+                "discover Codex context",
+            )
+            .await?;
+            let key = if name == "skills" { "skills" } else { "hooks" };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    discovery
+                        .get(key)
+                        .unwrap_or(&serde_json::Value::Array(Vec::new()))
+                )?
+            );
+        }
+        "plugins" => {
+            let response: PluginListResponse =
+                get_authenticated(client, host, token, "/api/v1/plugins").await?;
+            if response.plugins.is_empty() {
+                println!("No plugins installed.");
+            }
+            for plugin in response.plugins {
+                println!(
+                    "{} {} · {}",
+                    plugin.active_revision.manifest.display_name,
+                    plugin.active_revision.manifest.version,
+                    if plugin.installation.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
+        }
+        "mcp" => {
+            let response: McpListResponse =
+                get_authenticated(client, host, token, "/api/v1/mcp/connections").await?;
+            if response.connections.is_empty() {
+                println!("No MCP servers configured.");
+            }
+            for item in response.connections {
+                println!(
+                    "{} · {} · {} tool(s)",
+                    item.connection.display_name,
+                    item.connection.id,
+                    item.catalog.map_or(0, |catalog| catalog.tools.len())
+                );
+            }
+        }
         "feedback" => println!(
             "Use `mcg doctor` for a support report and include it with your GitHub feedback."
         ),

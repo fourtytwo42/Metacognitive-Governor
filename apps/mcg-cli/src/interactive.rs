@@ -30,6 +30,7 @@ const MAX_VISIBLE_CHOICES: usize = 8;
 pub enum PaletteKind {
     Slash,
     Mention,
+    CommandOption,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,11 @@ pub struct SlashCandidate {
 pub enum PaletteCandidate {
     Slash(SlashCandidate),
     Mention(MentionCandidate),
+    Choice {
+        value: String,
+        label: String,
+        detail: String,
+    },
 }
 
 impl PaletteCandidate {
@@ -49,6 +55,7 @@ impl PaletteCandidate {
         match self {
             Self::Slash(candidate) => format!("/{}", candidate.name),
             Self::Mention(candidate) => format!("@{}", candidate.label),
+            Self::Choice { label, .. } => label.clone(),
         }
     }
 
@@ -56,6 +63,7 @@ impl PaletteCandidate {
         match self {
             Self::Slash(candidate) => candidate.description,
             Self::Mention(candidate) => candidate.detail.as_deref().unwrap_or(&candidate.resource),
+            Self::Choice { detail, .. } => detail,
         }
     }
 }
@@ -64,6 +72,7 @@ impl PaletteCandidate {
 pub struct PaletteRequest {
     pub kind: PaletteKind,
     pub query: String,
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +183,7 @@ pub struct TuiModel {
     details_expanded: bool,
     last_escape: Option<Instant>,
     question_overlay: Option<QuestionOverlay>,
+    notices: VecDeque<(chrono::DateTime<chrono::Utc>, String)>,
 }
 
 impl TuiModel {
@@ -194,6 +204,7 @@ impl TuiModel {
             details_expanded: false,
             last_escape: None,
             question_overlay: None,
+            notices: VecDeque::new(),
         }
     }
 
@@ -216,6 +227,17 @@ impl TuiModel {
 
     pub fn set_status(&mut self, value: impl Into<String>) {
         self.status = value.into();
+    }
+
+    pub fn push_notices(&mut self, notices: Vec<String>) {
+        self.notices.extend(
+            notices
+                .into_iter()
+                .map(|notice| (chrono::Utc::now(), notice)),
+        );
+        while self.notices.len() > 20 {
+            self.notices.pop_front();
+        }
     }
 
     pub fn set_workspace(&mut self, project: String, branch: String) {
@@ -642,6 +664,15 @@ impl TuiModel {
                 ),
             ));
         }
+        for (created_at, notice) in &self.notices {
+            entries.push((
+                *created_at,
+                Line::from(vec![
+                    Span::styled("MetaCog CLI: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(notice.clone()),
+                ]),
+            ));
+        }
         entries.sort_by_key(|entry| entry.0);
         let mut lines = Vec::new();
         for (_, line) in entries {
@@ -1048,7 +1079,33 @@ impl EditorState {
                 return Some(PaletteRequest {
                     kind: PaletteKind::Slash,
                     query: prefix,
+                    command: None,
                 });
+            }
+            let input = chars[1..self.cursor].iter().collect::<String>();
+            if let Some((command, query)) = input.split_once(char::is_whitespace) {
+                let query = query.trim_start();
+                if [
+                    "model",
+                    "permissions",
+                    "personality",
+                    "resume",
+                    "agent",
+                    "subagents",
+                    "stop",
+                    "theme",
+                    "keymap",
+                    "statusline",
+                    "title",
+                ]
+                .contains(&command)
+                {
+                    return Some(PaletteRequest {
+                        kind: PaletteKind::CommandOption,
+                        query: query.to_owned(),
+                        command: Some(command.to_owned()),
+                    });
+                }
             }
         }
         let mut start = self.cursor;
@@ -1064,6 +1121,7 @@ impl EditorState {
             return Some(PaletteRequest {
                 kind: PaletteKind::Mention,
                 query: chars[start + 1..self.cursor].iter().collect(),
+                command: None,
             });
         }
         None
@@ -1074,6 +1132,14 @@ impl EditorState {
         match request.kind {
             PaletteKind::Slash => Some((0, self.cursor)),
             PaletteKind::Mention => {
+                let chars = self.chars();
+                let mut start = self.cursor;
+                while start > 0 && !chars[start - 1].is_whitespace() {
+                    start -= 1;
+                }
+                Some((start, self.cursor))
+            }
+            PaletteKind::CommandOption => {
                 let chars = self.chars();
                 let mut start = self.cursor;
                 while start > 0 && !chars[start - 1].is_whitespace() {
@@ -1104,6 +1170,9 @@ impl EditorState {
                 if self.cursor == self.chars().len() {
                     self.edit(self.cursor, self.cursor, " ");
                 }
+            }
+            PaletteCandidate::Choice { value, .. } => {
+                self.edit(start, end, value);
             }
         }
         self.palette_dismissed = true;
@@ -1177,7 +1246,17 @@ mod tests {
             state.palette_request(),
             Some(PaletteRequest {
                 kind: PaletteKind::Slash,
-                query: "pla".into()
+                query: "pla".into(),
+                command: None,
+            })
+        );
+        state.replace_all("/model ter".into());
+        assert_eq!(
+            state.palette_request(),
+            Some(PaletteRequest {
+                kind: PaletteKind::CommandOption,
+                query: "ter".into(),
+                command: Some("model".into()),
             })
         );
         state.replace_all("email@example.com".into());
@@ -1187,7 +1266,8 @@ mod tests {
             state.palette_request(),
             Some(PaletteRequest {
                 kind: PaletteKind::Mention,
-                query: "src".into()
+                query: "src".into(),
+                command: None,
             })
         );
     }

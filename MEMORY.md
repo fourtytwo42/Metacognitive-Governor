@@ -2810,6 +2810,15 @@ Durable project context lives here. Update this file whenever information should
 - Result: Phase 1 is ready for its independent commit. The TUI renders display-safe summaries only and never exposes hidden chain-of-thought.
 - Follow-up: Implement the capability-aware shared slash-command registry and exact shared Codex semantics.
 
+### 2026-08-27 - Codex CLI alignment Phase 2
+
+- Context: The old interactive dispatcher exposed a partial hard-coded inventory and several shared names behaved differently from Codex.
+- Decision: Drive discovery and dispatch from one `SlashCommandSpec` registry with aliases, argument schemas, queue policies, and capability predicates. Hide unavailable platform/experimental commands until their implementation is active; keep MetaCog-only project/task/worktree/reasoning/cloud operations under `/mcg`.
+- Files: `apps/mcg-cli/src/commands.rs`, `apps/mcg-cli/src/interactive.rs`, `apps/mcg-cli/src/main.rs`.
+- Commands/tests: CLI 38/38; `cargo check -p mcg-cli`; `cargo fmt --all`; `git diff --check`.
+- Result: Shared `/clear`, `/resume`, `/rename`, `/archive`, `/review`, `/diff`, `/copy`, `/usage`, `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/skills`, `/plugins`, and `/hooks` now use corrected semantics or native APIs. Nested model/effort/speed, permission, personality, and resume choices share the resize-safe palette. Slash commands use explicit active-turn queue policies and their output renders inside the TUI instead of corrupting the alternate screen.
+- Follow-up: Add native fork/side/delete, agent-session, governed shell/process, `$` completion, and preference APIs, then activate their registry entries.
+
 ## Active Handoff
 
 - Active long-term goal: Deliver the complete PRD as a production-ready general-consumer app on Windows, Linux, and macOS; completion requires comprehensive local automated qualification and agent-performed UAT through computer-use or equivalent real user-facing interaction on all three platforms.
