@@ -1170,6 +1170,37 @@ async fn codex_models() -> Result<Vec<mcg_codex_app_server::CodexModel>, String>
 }
 
 #[tauri::command]
+async fn codex_features() -> Result<Vec<mcg_codex_app_server::CodexFeature>, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/features")),
+        None::<&()>,
+        "Codex feature discovery",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_codex_feature(
+    name: String,
+    enabled: bool,
+) -> Result<Vec<mcg_codex_app_server::CodexFeature>, String> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err("Codex feature name must be a lowercase key".into());
+    }
+    daemon_json(
+        reqwest::Client::new().put(format!("{LOCAL_DAEMON}/api/v1/codex/features/{name}")),
+        Some(&serde_json::json!({"enabled": enabled})),
+        "Codex feature update",
+    )
+    .await
+}
+
+#[tauri::command]
 async fn codex_account() -> Result<mcg_codex_app_server::CodexAccount, String> {
     daemon_json(
         reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/account")),
@@ -3894,6 +3925,8 @@ pub fn run() {
             interrupt_conversation_turn,
             steer_conversation_turn,
             codex_models,
+            codex_features,
+            set_codex_feature,
             codex_account,
             codex_rate_limits,
             codex_harness_status,

@@ -47,7 +47,8 @@ Environment variables alone are not capability discovery.
 | `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API. Human-formatted findings and remaining global overrides need exact alignment. |
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
-| `apply`, `features`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
+| `features` | Partial | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Global `-c` and session-local `--enable`/`--disable` overlays remain. |
+| `apply`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
 ## Global flag compatibility
@@ -70,9 +71,16 @@ Codex `workspaceWrite.writableRoots`. Read-only execution rejects the setting;
 normal approval and organization policy remain authoritative. The desktop offers
 the same control in the existing Advanced run-settings disclosure.
 
+Cycle 7 adds native `features list|enable|disable` behavior through the pinned
+Codex app-server's typed feature discovery and mutation methods. This is a
+process-wide Codex configuration surface, not a MetaCog authority override. The
+same searchable flag list is available in Advanced Settings while Simple stays
+uncluttered. Global repeatable `--enable`/`--disable` overlays remain separate
+work because they are session-local overrides rather than persisted mutations.
+
 Codex-compatible support remains incomplete for live search, local providers/OSS,
 profiles, permission profiles, remote endpoints/authentication, strict config,
-output schemas, `--no-alt-screen`, feature toggles, hook trust, and repeatable
+output schemas, `--no-alt-screen`, session-local feature overlays, hook trust, and repeatable
 `-c key=value` overrides. These flags must map into governed requests; they may
 not bypass organization or approval policy.
 
@@ -93,6 +101,12 @@ Cycle 6 adds Additional writable folders to the same Advanced run-settings
 disclosure in New Chat, established Chat, and task execution. Project-free and
 read-only runs cannot add them; selected folders remain removable and are sent
 through the shared execution-preference contract.
+
+Cycle 7 adds a searchable, independently scrollable Codex feature-flag disclosure
+under Advanced Settings → Configuration. It shows the pinned runtime's stage,
+effective state, and description, and writes through the same typed app-server
+contract as `mcg features`; no flag can expand MetaCog organization, approval,
+or delegated-agent authority.
 
 ## Safety invariants
 

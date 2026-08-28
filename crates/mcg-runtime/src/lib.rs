@@ -44,11 +44,11 @@ use mcg_agents::{
 use mcg_codex_app_server::{
     CODEX_BINARY_VERSION, CODEX_PROTOCOL_VERSION, CodexAccount, CodexAppServerHarness,
     CodexApprovalMode, CodexApprovalPolicy, CodexApprovalRequest, CodexCommandExecRequest,
-    CodexCommandExecResult, CodexConfigurationStatus, CodexExecutionPreferences, CodexFsWatch,
-    CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
-    CodexRateLimits, CodexReviewDelivery, CodexReviewResult, CodexReviewTarget, CodexSandboxMode,
-    CodexStableDiscovery, CodexThreadInstructions, CodexTurnProgress,
-    verify_pinned_two_agent_conformance,
+    CodexCommandExecResult, CodexConfigurationStatus, CodexExecutionPreferences, CodexFeature,
+    CodexFsWatch, CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel,
+    CodexPendingRequest, CodexRateLimits, CodexReviewDelivery, CodexReviewResult,
+    CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery, CodexThreadInstructions,
+    CodexTurnProgress, verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
@@ -806,6 +806,7 @@ impl RuntimeError {
                 | Self::Tool(ToolError::Invalid(_))
                 | Self::PluginTrust(_)
                 | Self::GitHub(_)
+                | Self::CodexHarness(CodexHarnessError::InvalidRequest(_))
         )
     }
 
@@ -9790,6 +9791,18 @@ impl AppRuntime {
 
     pub async fn codex_models(&self) -> Result<Vec<CodexModel>, RuntimeError> {
         Ok(self.codex_harness.models().await?)
+    }
+
+    pub async fn codex_features(&self) -> Result<Vec<CodexFeature>, RuntimeError> {
+        Ok(self.codex_harness.features().await?)
+    }
+
+    pub async fn set_codex_feature(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<Vec<CodexFeature>, RuntimeError> {
+        Ok(self.codex_harness.set_feature(name, enabled).await?)
     }
 
     pub async fn codex_account(&self) -> Result<CodexAccount, RuntimeError> {

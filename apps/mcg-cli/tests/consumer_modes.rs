@@ -2,15 +2,15 @@ use std::{
     io::Write,
     process::{Command, Output, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
 use axum::{
     Json, Router,
-    extract::State,
-    routing::{get, post},
+    extract::{Path, State},
+    routing::{get, post, put},
 };
 use mcg_config::AppConfig;
 use mcg_domain::ProjectId;
@@ -80,6 +80,75 @@ async fn start_provider(calls: Arc<AtomicUsize>) -> (String, JoinHandle<()>) {
             .expect("provider fixture server");
     });
     (format!("http://{address}/v1"), server)
+}
+
+async fn start_feature_server() -> (String, JoinHandle<()>) {
+    type FeatureState = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    async fn list(State(features): State<FeatureState>) -> Json<Vec<serde_json::Value>> {
+        Json(features.lock().expect("feature state").clone())
+    }
+
+    async fn set(
+        State(features): State<FeatureState>,
+        Path(name): Path<String>,
+        Json(request): Json<serde_json::Value>,
+    ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        let enabled = request.get("enabled").and_then(serde_json::Value::as_bool);
+        let mut features = features.lock().expect("feature state");
+        let Some(feature) = features.iter_mut().find(|feature| feature["name"] == name) else {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "unknown feature"})),
+            );
+        };
+        let Some(enabled) = enabled else {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "enabled is required"})),
+            );
+        };
+        feature["enabled"] = serde_json::json!(enabled);
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::Value::Array(features.clone())),
+        )
+    }
+
+    let features = Arc::new(Mutex::new(vec![
+        serde_json::json!({
+            "name": "memories",
+            "stage": "beta",
+            "displayName": "Memories",
+            "description": "Use durable memories.",
+            "announcement": null,
+            "enabled": false,
+            "defaultEnabled": false
+        }),
+        serde_json::json!({
+            "name": "shell_tool",
+            "stage": "stable",
+            "displayName": null,
+            "description": null,
+            "announcement": null,
+            "enabled": true,
+            "defaultEnabled": true
+        }),
+    ]));
+    let app = Router::new()
+        .route("/api/v1/codex/features", get(list))
+        .route("/api/v1/codex/features/{name}", put(set))
+        .with_state(features);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("feature listener");
+    let address = listener.local_addr().expect("feature listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("feature fixture server");
+    });
+    (format!("http://{address}"), server)
 }
 
 fn run_cli(host: &str, project: &std::path::Path, arguments: &[&str]) -> Output {
@@ -482,5 +551,57 @@ async fn codex_compatible_session_commands_use_durable_metacog_conversations() {
         &["conversation", "show", &conversation_id, "--json"],
     );
     assert!(!missing.status.success());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_compatible_feature_commands_list_and_mutate_pinned_flags() {
+    let project = tempfile::tempdir().expect("feature project directory");
+    let (host, server) = start_feature_server().await;
+
+    let listed = run_cli(&host, project.path(), &["features", "list"]);
+    assert!(
+        listed.status.success(),
+        "list stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.contains("memories"));
+    assert!(listed.contains("beta"));
+    assert!(listed.contains("false"));
+    assert!(listed.contains("shell_tool"));
+
+    let enabled = run_cli(&host, project.path(), &["features", "enable", "memories"]);
+    assert!(
+        enabled.status.success(),
+        "enable stderr: {}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    assert!(enabled.stdout.is_empty());
+    let enabled_list = run_cli(&host, project.path(), &["features", "list"]);
+    assert!(
+        String::from_utf8_lossy(&enabled_list.stdout)
+            .lines()
+            .any(|line| line.starts_with("memories") && line.ends_with("true"))
+    );
+
+    let disabled = run_cli(&host, project.path(), &["features", "disable", "memories"]);
+    assert!(disabled.status.success());
+    assert!(disabled.stdout.is_empty());
+    let disabled_list = run_cli(&host, project.path(), &["features", "list"]);
+    assert!(
+        String::from_utf8_lossy(&disabled_list.stdout)
+            .lines()
+            .any(|line| line.starts_with("memories") && line.ends_with("false"))
+    );
+
+    let invalid = run_cli(
+        &host,
+        project.path(),
+        &["features", "enable", "Bad-Feature"],
+    );
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("lowercase ASCII key"));
+
     server.abort();
 }

@@ -82,6 +82,35 @@ pub struct CodexStableDiscovery {
     pub refreshed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexFeatureStage {
+    Beta,
+    UnderDevelopment,
+    Stable,
+    Deprecated,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexFeature {
+    pub name: String,
+    pub stage: CodexFeatureStage,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub announcement: Option<String>,
+    pub enabled: bool,
+    pub default_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexFeatureList {
+    pub data: Vec<CodexFeature>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexReviewResult {
@@ -143,6 +172,8 @@ pub enum CodexHarnessError {
     Json(#[from] serde_json::Error),
     #[error("Codex app-server request failed: {0}")]
     Protocol(String),
+    #[error("invalid Codex request: {0}")]
+    InvalidRequest(String),
     #[error("Codex app-server did not respond before the timeout")]
     Timeout,
     #[error("Codex app-server stopped while a request was active")]
@@ -958,6 +989,56 @@ impl CodexAppServerHarness {
         let response = self.request("model/list", json!({"limit": 100})).await?;
         serde_json::from_value(response.get("data").cloned().unwrap_or_else(|| json!([])))
             .map_err(Into::into)
+    }
+
+    pub async fn features(&self) -> Result<Vec<CodexFeature>, CodexHarnessError> {
+        let mut cursor: Option<String> = None;
+        let mut features = Vec::new();
+        loop {
+            let response = self
+                .request(
+                    "experimentalFeature/list",
+                    json!({"cursor": cursor, "limit": 100}),
+                )
+                .await?;
+            let page: CodexFeatureList = serde_json::from_value(response)?;
+            features.extend(page.data);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(features)
+    }
+
+    pub async fn set_feature(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<Vec<CodexFeature>, CodexHarnessError> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(CodexHarnessError::InvalidRequest(
+                "feature name must be a non-empty lowercase ASCII key".into(),
+            ));
+        }
+        let known = self.features().await?;
+        if !known.iter().any(|feature| feature.name == name) {
+            return Err(CodexHarnessError::InvalidRequest(format!(
+                "pinned Codex does not expose feature `{name}`"
+            )));
+        }
+        self.request(
+            "experimentalFeature/enablement/set",
+            json!({"enablement": {(name): enabled}}),
+        )
+        .await?;
+        self.features().await
     }
 
     pub async fn account(&self) -> Result<CodexAccount, CodexHarnessError> {
@@ -2380,5 +2461,32 @@ mod tests {
                 json!({"type":"mention","name":"src","path":"C:/workspace/src"}),
             ]
         );
+    }
+
+    #[test]
+    fn experimental_feature_payloads_match_the_pinned_schema() {
+        let page: CodexFeatureList = serde_json::from_value(json!({
+            "data": [{
+                "name": "memories",
+                "stage": "beta",
+                "displayName": "Memories",
+                "description": "Use durable memories.",
+                "announcement": null,
+                "enabled": true,
+                "defaultEnabled": false
+            }],
+            "nextCursor": "next"
+        }))
+        .unwrap();
+        assert_eq!(page.data[0].stage, CodexFeatureStage::Beta);
+        assert_eq!(page.data[0].display_name.as_deref(), Some("Memories"));
+        assert!(page.data[0].enabled);
+        assert_eq!(page.next_cursor.as_deref(), Some("next"));
+
+        let schema = include_str!(
+            "../../../protocol/codex-app-server/0.144.6/codex_app_server_protocol.v2.schemas.json"
+        );
+        assert!(schema.contains("\"experimentalFeature/list\""));
+        assert!(schema.contains("\"experimentalFeature/enablement/set\""));
     }
 }

@@ -63,6 +63,8 @@ const client = vi.hoisted(() => ({
   pickMentionFolder: vi.fn(),
   pickWritableFolder: vi.fn(),
   getCodexModels: vi.fn(),
+  getCodexFeatures: vi.fn(),
+  setCodexFeature: vi.fn(),
   getCodexAccount: vi.fn(),
   getCodexRateLimits: vi.fn(),
   getCodexHarnessStatus: vi.fn(),
@@ -254,6 +256,8 @@ vi.mock("./desktop-client", () => ({
   pickMentionFolder: client.pickMentionFolder,
   pickWritableFolder: client.pickWritableFolder,
   getCodexModels: client.getCodexModels,
+  getCodexFeatures: client.getCodexFeatures,
+  setCodexFeature: client.setCodexFeature,
   getCodexAccount: client.getCodexAccount,
   getCodexRateLimits: client.getCodexRateLimits,
   getCodexHarnessStatus: client.getCodexHarnessStatus,
@@ -459,6 +463,8 @@ beforeEach(() => {
   client.pickMentionFolder.mockReset();
   client.pickWritableFolder.mockReset();
   client.getCodexModels.mockReset();
+  client.getCodexFeatures.mockReset();
+  client.setCodexFeature.mockReset();
   client.getCodexAccount.mockReset();
   client.getCodexRateLimits.mockReset();
   client.getCodexHarnessStatus.mockReset();
@@ -683,6 +689,8 @@ beforeEach(() => {
   client.pickMentionFolder.mockResolvedValue(null);
   client.pickWritableFolder.mockResolvedValue(null);
   client.getCodexModels.mockResolvedValue([]);
+  client.getCodexFeatures.mockResolvedValue([]);
+  client.setCodexFeature.mockResolvedValue([]);
   client.getCodexAccount.mockResolvedValue({ authenticated: false, requires_openai_auth: true });
   client.getCodexRateLimits.mockResolvedValue({ refreshed_at: "2026-08-22T00:00:00Z" });
   client.getCodexHarnessStatus.mockResolvedValue({
@@ -2881,6 +2889,30 @@ test("integration and coding settings expose sectioned Codex-style controls", as
   expect(screen.getByText("Branch prefix")).toBeInTheDocument();
   expect(screen.getByText("codex/")).toBeInTheDocument();
   expect(await screen.findByText("Local Git by default")).toBeInTheDocument();
+});
+
+test("advanced configuration exposes searchable Codex feature flags and persists toggles", async () => {
+  const features = [
+    { name: "memories", stage: "beta", displayName: "Memories", description: "Use durable memories.", enabled: false, defaultEnabled: false },
+    { name: "shell_tool", stage: "stable", enabled: true, defaultEnabled: true }
+  ];
+  client.getCodexFeatures.mockResolvedValue(features);
+  client.setCodexFeature.mockResolvedValue([{ ...features[0], enabled: true }, features[1]]);
+  render(<App />);
+
+  expect(screen.queryByText("Codex feature flags")).not.toBeInTheDocument();
+  await enableAdvancedMode();
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Configuration" }));
+  fireEvent.click(await screen.findByText("Codex feature flags"));
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Search Codex feature flags" }), { target: { value: "memor" } });
+  expect(screen.getByText("Memories")).toBeInTheDocument();
+  expect(screen.queryByText("shell_tool")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Enable memories" }));
+  await waitFor(() => expect(client.setCodexFeature).toHaveBeenCalledWith("memories", true));
+  expect(screen.getByRole("checkbox", { name: "Disable memories" })).toBeChecked();
 });
 
 test("Git settings complete browser sign-in and show accessible repositories", async () => {

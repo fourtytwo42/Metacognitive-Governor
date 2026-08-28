@@ -404,6 +404,21 @@ enum CodexCompatCommand {
     Login(Box<LoginArgs>),
     /// Remove shared Codex authentication.
     Logout,
+    /// Inspect feature flags exposed by the pinned Codex runtime.
+    Features {
+        #[command(subcommand)]
+        command: FeaturesCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FeaturesCommand {
+    /// List known features with their stage and effective state.
+    List,
+    /// Enable a feature in the shared Codex configuration.
+    Enable { feature: String },
+    /// Disable a feature in the shared Codex configuration.
+    Disable { feature: String },
 }
 
 #[derive(Debug, Args)]
@@ -2309,6 +2324,7 @@ fn codex_compat_command_requested() -> bool {
         "completion",
         "login",
         "logout",
+        "features",
     ];
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -2655,8 +2671,100 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         CodexCompatCommand::Logout => {
             run_codex(&client, host, token, CodexCommand::Logout).await?;
         }
+        CodexCompatCommand::Features { command } => {
+            run_codex_features(&client, host, token, command).await?;
+        }
     }
     Ok(())
+}
+
+async fn run_codex_features(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    command: FeaturesCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut features: Vec<mcg_codex_app_server::CodexFeature> = match command {
+        FeaturesCommand::List => {
+            decode_api_response(
+                client
+                    .get(format!("{host}/api/v1/codex/features"))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "list Codex features",
+            )
+            .await?
+        }
+        FeaturesCommand::Enable { feature } => {
+            set_codex_feature_cli(client, host, token, &feature, true).await?;
+            return Ok(());
+        }
+        FeaturesCommand::Disable { feature } => {
+            set_codex_feature_cli(client, host, token, &feature, false).await?;
+            return Ok(());
+        }
+    };
+    features.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    let rows = features
+        .iter()
+        .map(|feature| {
+            let stage = match feature.stage {
+                mcg_codex_app_server::CodexFeatureStage::Beta => "beta",
+                mcg_codex_app_server::CodexFeatureStage::UnderDevelopment => "under development",
+                mcg_codex_app_server::CodexFeatureStage::Stable => "stable",
+                mcg_codex_app_server::CodexFeatureStage::Deprecated => "deprecated",
+                mcg_codex_app_server::CodexFeatureStage::Removed => "removed",
+            };
+            (feature.name.as_str(), stage, feature.enabled)
+        })
+        .collect::<Vec<_>>();
+    let name_width = rows
+        .iter()
+        .map(|(name, _, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let stage_width = rows
+        .iter()
+        .map(|(_, stage, _)| stage.len())
+        .max()
+        .unwrap_or(0);
+    for (name, stage, enabled) in rows {
+        println!("{name:<name_width$}  {stage:<stage_width$}  {enabled}");
+    }
+    Ok(())
+}
+
+async fn set_codex_feature_cli(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    feature: &str,
+    enabled: bool,
+) -> Result<Vec<mcg_codex_app_server::CodexFeature>, Box<dyn std::error::Error>> {
+    let feature = feature.trim();
+    if feature.is_empty()
+        || feature.len() > 128
+        || !feature
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err("feature name must be a non-empty lowercase ASCII key".into());
+    }
+    decode_api_response(
+        client
+            .put(format!("{host}/api/v1/codex/features/{feature}"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"enabled": enabled}))
+            .send()
+            .await?,
+        if enabled {
+            "enable Codex feature"
+        } else {
+            "disable Codex feature"
+        },
+    )
+    .await
 }
 
 const MAX_CONSUMER_INPUT_BYTES: u64 = 1_048_576;
@@ -12451,6 +12559,15 @@ mod tests {
                 shell: CompletionShell::PowerShell
             }
         ));
+
+        let features = CodexCompatCli::try_parse_from(["mcg", "features", "enable", "memories"])
+            .expect("Codex-compatible feature command");
+        assert!(matches!(
+            features.command,
+            CodexCompatCommand::Features {
+                command: FeaturesCommand::Enable { feature }
+            } if feature == "memories"
+        ));
     }
 
     #[test]
@@ -12465,6 +12582,7 @@ mod tests {
             "delete",
             "review",
             "completion",
+            "features",
             "login",
             "project",
             "organization",

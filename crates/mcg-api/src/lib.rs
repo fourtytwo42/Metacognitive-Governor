@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -365,6 +365,11 @@ pub struct CodexDiscoveryRequest {
     pub cwds: Vec<String>,
     #[serde(default)]
     pub force_reload: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetCodexFeatureRequest {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1708,6 +1713,8 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         )
         .route("/api/v1/codex/harness", get(codex_harness_status))
         .route("/api/v1/codex/models", get(codex_models))
+        .route("/api/v1/codex/features", get(codex_features))
+        .route("/api/v1/codex/features/{name}", put(set_codex_feature))
         .route("/api/v1/codex/account", get(codex_account))
         .route("/api/v1/codex/rate-limits", get(codex_rate_limits))
         .route("/api/v1/codex/account/usage", get(codex_account_usage))
@@ -4451,6 +4458,42 @@ async fn codex_models(
         state
             .runtime
             .codex_models()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_features(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<mcg_codex_app_server::CodexFeature>>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_features()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn set_codex_feature(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    Json(request): Json<SetCodexFeatureRequest>,
+) -> Result<Json<Vec<mcg_codex_app_server::CodexFeature>>, ApiError> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(ApiError::bad_request(
+            "Codex feature name must be a non-empty lowercase ASCII key",
+        ));
+    }
+    Ok(Json(
+        state
+            .runtime
+            .set_codex_feature(&name, request.enabled)
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -7467,6 +7510,27 @@ mod tests {
         assert_eq!(consumer.context_token_budget, 16_384);
         assert_eq!(consumer.estimated_output_tokens, 8_192);
         assert_eq!(consumer.max_model_calls, 16);
+    }
+
+    #[tokio::test]
+    async fn codex_feature_mutation_rejects_invalid_keys_before_runtime_dispatch() {
+        let response = router(test_runtime())
+            .oneshot(
+                authorized(Request::put("/api/v1/codex/features/Bad-Feature"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .expect("feature request"),
+            )
+            .await
+            .expect("feature response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], "bad_request");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("lowercase ASCII key"))
+        );
     }
 
     #[tokio::test]

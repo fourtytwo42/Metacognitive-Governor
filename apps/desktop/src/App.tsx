@@ -204,6 +204,8 @@ import {
   answerConversationInput,
   updateConversation,
   getCodexModels,
+  getCodexFeatures,
+  setCodexFeature,
   getCodexAccount,
   getCodexRateLimits,
   getCodexHarnessStatus,
@@ -281,6 +283,7 @@ import {
   type ConversationInputRequest,
   type ManagedWorktree,
   type CodexModel,
+  type CodexFeature,
   type CodexAccount,
   type CodexRateLimits,
   type CodexHarnessStatus,
@@ -408,6 +411,11 @@ import { parseSlashCommand, slashCommandMatches, type SlashCommandName } from ".
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function codexFeatureStageLabel(stage: CodexFeature["stage"]): string {
+  if (stage === "underDevelopment") return "Under development";
+  return stage.charAt(0).toUpperCase() + stage.slice(1);
 }
 
 function chatIdForTask(task: TaskEnvelope): string {
@@ -2267,6 +2275,10 @@ export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationViews, setConversationViews] = useState<Record<string, ConversationView | undefined>>({});
   const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
+  const [codexFeatures, setCodexFeatures] = useState<CodexFeature[]>([]);
+  const [codexFeatureSearch, setCodexFeatureSearch] = useState("");
+  const [codexFeatureBusy, setCodexFeatureBusy] = useState<string | null>(null);
+  const [codexFeatureError, setCodexFeatureError] = useState<string | null>(null);
   const [codexAccount, setCodexAccount] = useState<CodexAccount | null>(null);
   const [codexRateLimits, setCodexRateLimits] = useState<CodexRateLimits | null>(null);
   const [codexHarnessStatus, setCodexHarnessStatus] = useState<CodexHarnessStatus | null>(null);
@@ -3512,16 +3524,18 @@ export function App() {
       .catch((error) => {
         if (active) setTaskError(errorMessage(error));
       });
-    Promise.allSettled([getCodexModels(), getCodexAccount(), getCodexRateLimits(), getCodexHarnessStatus(), getCodexConfigurationStatus(), getCodexPendingRequests()])
-      .then(([models, account, rateLimits, harness, configuration, pendingRequests]) => {
+    Promise.allSettled([getCodexModels(), getCodexFeatures(), getCodexAccount(), getCodexRateLimits(), getCodexHarnessStatus(), getCodexConfigurationStatus(), getCodexPendingRequests()])
+      .then(([models, features, account, rateLimits, harness, configuration, pendingRequests]) => {
         if (!active) return;
         if (models.status === "fulfilled") setCodexModels(models.value);
+        if (features.status === "fulfilled") setCodexFeatures(features.value);
         if (account.status === "fulfilled") setCodexAccount(account.value);
         if (rateLimits.status === "fulfilled") setCodexRateLimits(rateLimits.value);
         if (harness.status === "fulfilled") setCodexHarnessStatus(harness.value);
         if (configuration.status === "fulfilled") setCodexConfigurationStatus(configuration.value);
         if (pendingRequests.status === "fulfilled") setCodexPendingRequests(pendingRequests.value);
         if (models.status === "rejected") setModelDiscoveryError(`Codex model discovery unavailable: ${errorMessage(models.reason)}`);
+        if (features.status === "rejected") setCodexFeatureError(`Codex feature discovery unavailable: ${errorMessage(features.reason)}`);
       });
     getCodexStableDiscovery()
       .then((discovery) => { if (active) setCodexStableDiscovery(discovery); })
@@ -4050,10 +4064,11 @@ export function App() {
     setModelDiscoveryBusy(true);
     setModelDiscoveryError(null);
     try {
-      const [models, account, limits, harness, configuration, pendingRequests] = await Promise.all([
-        getCodexModels(), getCodexAccount(), getCodexRateLimits(), getCodexHarnessStatus(), getCodexConfigurationStatus(), getCodexPendingRequests()
+      const [models, features, account, limits, harness, configuration, pendingRequests] = await Promise.all([
+        getCodexModels(), getCodexFeatures(), getCodexAccount(), getCodexRateLimits(), getCodexHarnessStatus(), getCodexConfigurationStatus(), getCodexPendingRequests()
       ]);
       setCodexModels(models);
+      setCodexFeatures(features);
       setCodexAccount(account);
       setCodexRateLimits(limits);
       setCodexHarnessStatus(harness);
@@ -4064,6 +4079,18 @@ export function App() {
       setModelDiscoveryError(`Could not load the Codex account catalog. ${errorMessage(error)}`);
     } finally {
       setModelDiscoveryBusy(false);
+    }
+  }
+
+  async function changeCodexFeature(feature: CodexFeature, enabled: boolean) {
+    setCodexFeatureBusy(feature.name);
+    setCodexFeatureError(null);
+    try {
+      setCodexFeatures(await setCodexFeature(feature.name, enabled));
+    } catch (error) {
+      setCodexFeatureError(errorMessage(error));
+    } finally {
+      setCodexFeatureBusy(null);
     }
   }
 
@@ -9240,6 +9267,29 @@ export function App() {
             <div className="settings-control"><span><strong>Web access</strong><small>Provider and tool access stays within reviewed capabilities.</small></span><span className="count-badge">Capability based</span></div>
             <div className="settings-control"><span><strong>Reasoning and output detail</strong><small>Available model features are discovered from each provider endpoint.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Models</button></div>
           </div>
+          {advanced && <TechnicalDetails title="Codex feature flags" summary={`${codexFeatures.length} flags from pinned Codex 0.144.6`}>
+            <p className="form-note">These are the same process-wide flags exposed by <code>mcg features</code>. Changes affect new Codex sessions and cannot expand MetaCog organization, approval, or agent authority.</p>
+            <label className="codex-feature-search"><span className="sr-only">Search Codex feature flags</span><input value={codexFeatureSearch} onChange={(event) => setCodexFeatureSearch(event.target.value)} placeholder="Search feature flags" /></label>
+            <div className="codex-feature-list" data-scroll-chain aria-label="Codex feature flags">
+              {codexFeatures
+                .filter((feature) => {
+                  const query = codexFeatureSearch.trim().toLocaleLowerCase();
+                  return !query || feature.name.toLocaleLowerCase().includes(query) || feature.displayName?.toLocaleLowerCase().includes(query) || feature.description?.toLocaleLowerCase().includes(query);
+                })
+                .sort((left, right) => left.name.localeCompare(right.name))
+                .map((feature) => <label className="codex-feature-row" key={feature.name}>
+                  <span><strong>{feature.displayName ?? feature.name}</strong><small><code>{feature.name}</code> · {codexFeatureStageLabel(feature.stage)}{feature.description ? ` · ${feature.description}` : ""}</small></span>
+                  <span className="settings-switch"><input aria-label={`${feature.enabled ? "Disable" : "Enable"} ${feature.name}`} type="checkbox" checked={feature.enabled} disabled={codexFeatureBusy !== null} onChange={(event) => void changeCodexFeature(feature, event.target.checked)} /><i aria-hidden="true" /></span>
+                </label>)}
+              {codexFeatures.length > 0 && codexFeatures.every((feature) => {
+                const query = codexFeatureSearch.trim().toLocaleLowerCase();
+                return query && !feature.name.toLocaleLowerCase().includes(query) && !feature.displayName?.toLocaleLowerCase().includes(query) && !feature.description?.toLocaleLowerCase().includes(query);
+              }) && <p className="empty-state">No feature flags match that search.</p>}
+              {codexFeatures.length === 0 && !codexFeatureError && <p className="empty-state">Loading feature flags…</p>}
+            </div>
+            {codexFeatureBusy && <p role="status">Updating <code>{codexFeatureBusy}</code>…</p>}
+            {codexFeatureError && <p className="error-message" role="alert">{codexFeatureError}</p>}
+          </TechnicalDetails>}
           <h3>Application</h3>
           <div className="provider-connections" aria-label="Application updates">
             <div className="section-heading compact-heading">

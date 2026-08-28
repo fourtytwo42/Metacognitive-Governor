@@ -34,6 +34,10 @@ test.beforeEach(async ({ page }) => {
       }
     };
     const now = "2026-08-18T00:00:00Z";
+    let codexFeatures = [
+      { name: "memories", stage: "beta", displayName: "Memories", description: "Use durable memories.", enabled: false, defaultEnabled: false },
+      { name: "shell_tool", stage: "stable", displayName: null, description: null, enabled: true, defaultEnabled: true }
+    ];
     const sshHosts = [
       { id: "00000000-0000-4000-8000-000000000221", revision: 4, definition_hash: "d".repeat(64), display_name: "Linux builder", hostname: "builder.test", port: 22, username: "mcg", known_hosts_entry: "builder.test ssh-ed25519 AAAA", host_key_sha256: "SHA256:builder", capabilities: ["os:linux", "tool:cargo"], state: "active", created_at: now, updated_at: now },
       { id: "00000000-0000-4000-8000-000000000222", revision: 2, definition_hash: "e".repeat(64), display_name: "Linux tester", hostname: "tester.test", port: 22, username: "mcg", known_hosts_entry: "tester.test ssh-ed25519 BBBB", host_key_sha256: "SHA256:tester", capabilities: ["os:linux", "tool:playwright"], state: "active", created_at: now, updated_at: now }
@@ -116,6 +120,11 @@ test.beforeEach(async ({ page }) => {
             ].filter((candidate) => !args.query || candidate.label.toLowerCase().includes(String(args.query).toLowerCase()))
           };
           if (command === "list_conversations") return { conversations: [] };
+          if (command === "codex_features") return codexFeatures;
+          if (command === "set_codex_feature") {
+            codexFeatures = codexFeatures.map((feature) => feature.name === args.name ? { ...feature, enabled: args.enabled } : feature);
+            return codexFeatures;
+          }
           if (command === "list_open_in_applications") return { applications: [] };
           if (command === "list_tasks") return { tasks: [] };
           if (command === "list_organizations") return { organizations };
@@ -341,6 +350,16 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(settings.getByLabel("Autonomy")).toHaveValue("autonomous");
   await expect(settings.getByLabel("Run opt-in shadow model experiments")).toBeChecked();
   await expect(settings.getByLabel("Settings revision history")).toContainText("Enabled advanced interface");
+  await page.getByRole("button", { name: "Configuration", exact: true }).click();
+  await page.getByText("Codex feature flags", { exact: true }).click();
+  const featureFlags = page.getByLabel("Codex feature flags", { exact: true });
+  await expect(featureFlags).toBeVisible();
+  await page.getByRole("textbox", { name: "Search Codex feature flags" }).fill("memor");
+  await expect(featureFlags.getByText("Memories", { exact: true })).toBeVisible();
+  await expect(featureFlags.getByText("shell_tool", { exact: true })).toHaveCount(0);
+  await featureFlags.getByRole("checkbox", { name: "Enable memories" }).check();
+  await expect(featureFlags.getByRole("checkbox", { name: "Disable memories" })).toBeChecked();
+  expect(await featureFlags.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Sites", exact: true }).click();
   const sites = page.getByRole("region", { name: "Sites" });

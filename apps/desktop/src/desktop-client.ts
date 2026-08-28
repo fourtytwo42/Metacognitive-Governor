@@ -602,6 +602,16 @@ export interface CodexModel {
   serviceTiers: CodexServiceTier[];
   defaultServiceTier?: string;
 }
+export type CodexFeatureStage = "beta" | "underDevelopment" | "stable" | "deprecated" | "removed";
+export interface CodexFeature {
+  name: string;
+  stage: CodexFeatureStage;
+  displayName?: string;
+  description?: string;
+  announcement?: string;
+  enabled: boolean;
+  defaultEnabled: boolean;
+}
 export interface CodexAccount { authenticated: boolean; account_type?: string; email?: string; plan_type?: string; requires_openai_auth: boolean; }
 export interface CodexLoginStart { loginId: string; authUrl: string; }
 export interface CodexRateLimitWindow { used_percent: number; remaining_percent: number; resets_at?: number; }
@@ -1981,6 +1991,8 @@ export function steerConversationTurn(conversationId: string, turnId: string, co
 }
 
 export function getCodexModels(): Promise<CodexModel[]> { return invoke("codex_models"); }
+export function getCodexFeatures(): Promise<CodexFeature[]> { return invoke("codex_features"); }
+export function setCodexFeature(name: string, enabled: boolean): Promise<CodexFeature[]> { return invoke("set_codex_feature", { name, enabled }); }
 export function getCodexAccount(): Promise<CodexAccount> { return invoke("codex_account"); }
 export function getCodexRateLimits(): Promise<CodexRateLimits> { return invoke("codex_rate_limits"); }
 export function getCodexHarnessStatus(): Promise<CodexHarnessStatus> { return invoke("codex_harness_status"); }
