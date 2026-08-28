@@ -368,7 +368,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         "Open this conversation in the MetaCog desktop app",
         None,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "feedback",
@@ -472,5 +472,9 @@ mod tests {
         let stop = command_named("stop", context).expect("stop command");
         assert_eq!(stop.arguments, ArgumentSchema::None);
         assert!(stop.aliases.contains(&"clean"));
+
+        let app = command_named("app", context).expect("desktop handoff command");
+        assert_eq!(app.arguments, ArgumentSchema::None);
+        assert_eq!(app.queue_policy, QueuePolicy::Immediate);
     }
 }

@@ -379,6 +379,8 @@ struct CodexCompatCli {
 
 #[derive(Debug, Subcommand)]
 enum CodexCompatCommand {
+    /// Hand a workspace path to the MetaCog desktop app.
+    App(Box<AppArgs>),
     /// Run MetaCog non-interactively through the governed agent workflow.
     #[command(alias = "e")]
     Exec(Box<ExecArgs>),
@@ -400,6 +402,13 @@ enum CodexCompatCommand {
     Login(Box<LoginArgs>),
     /// Remove shared Codex authentication.
     Logout,
+}
+
+#[derive(Debug, Args)]
+struct AppArgs {
+    /// Workspace path to open in MetaCog Desktop.
+    #[arg(default_value = ".")]
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -2278,6 +2287,7 @@ fn codex_compat_command_requested() -> bool {
     const COMMANDS: &[&str] = &[
         "exec",
         "e",
+        "app",
         "resume",
         "fork",
         "archive",
@@ -2348,10 +2358,49 @@ fn combined_cli_command() -> clap::Command {
     command
 }
 
+fn run_codex_app(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::fs::canonicalize(path)
+        .map_err(|error| format!("workspace path {} is unavailable: {error}", path.display()))?;
+    if !path.is_dir() {
+        return Err(format!("workspace path is not a directory: {}", path.display()).into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = ProcessCommand::new("open")
+            .args(["-a", "MetaCog"])
+            .arg(&path)
+            .status()?;
+        if !status.success() {
+            return Err(format!("MetaCog Desktop could not be opened: {status}").into());
+        }
+        println!("Opened MetaCog Desktop at {}.", path.display());
+    }
+    #[cfg(windows)]
+    {
+        println!(
+            "Open this workspace in MetaCog Desktop:\n{}",
+            path.display()
+        );
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        return Err(format!(
+            "MetaCog Desktop handoff is available on Windows and macOS; workspace: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = CodexCompatCli::parse();
     if let CodexCompatCommand::Completion { shell } = &cli.command {
         return generate_cli_completion(*shell);
+    }
+    if let CodexCompatCommand::App(args) = &cli.command {
+        return run_codex_app(&args.path);
     }
     let model = cli.model;
     let sandbox = cli.sandbox;
@@ -2376,6 +2425,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let host = host.as_str();
     let token = token.trim();
     match cli.command {
+        CodexCompatCommand::App(_) => unreachable!("app handled before daemon authentication"),
         CodexCompatCommand::Exec(args) => {
             let ExecArgs {
                 command,
@@ -5252,6 +5302,17 @@ async fn run_interactive_slash(
             "{}",
             serde_json::to_string_pretty(&interactive_tui_preferences(client, host, token).await?)?
         ),
+        "app" => {
+            if let Some(root) = project_root.as_deref() {
+                run_codex_app(root)?;
+                println!("Conversation: {}", conversation.id);
+            } else {
+                println!(
+                    "Open MetaCog Desktop and select conversation {} (project-free).",
+                    conversation.id
+                );
+            }
+        }
         "feedback" => println!(
             "Use `mcg doctor` for a support report and include it with your GitHub feedback."
         ),
@@ -12060,6 +12121,13 @@ mod tests {
 
     #[test]
     fn codex_compatible_top_level_commands_parse_with_documented_shapes() {
+        let app = CodexCompatCli::try_parse_from(["mcg", "app", "."])
+            .expect("Codex-compatible desktop handoff");
+        assert!(matches!(
+            app.command,
+            CodexCompatCommand::App(args) if args.path == PathBuf::from(".")
+        ));
+
         let exec = CodexCompatCli::try_parse_from([
             "mcg",
             "e",
@@ -12244,6 +12312,7 @@ mod tests {
     fn combined_help_and_completion_registry_retain_metacog_commands() {
         let command = combined_cli_command();
         for name in [
+            "app",
             "exec",
             "resume",
             "fork",

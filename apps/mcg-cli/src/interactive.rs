@@ -191,6 +191,7 @@ pub struct TuiModel {
     project: String,
     branch: String,
     transcript_scroll: u16,
+    transcript_cleared_before: Option<chrono::DateTime<chrono::Utc>>,
     queued: VecDeque<SubmittedLine>,
     status: String,
     details_expanded: bool,
@@ -214,6 +215,7 @@ impl TuiModel {
             project,
             branch,
             transcript_scroll: 0,
+            transcript_cleared_before: None,
             queued: VecDeque::new(),
             status: "Ready".into(),
             details_expanded: false,
@@ -387,6 +389,12 @@ impl TuiModel {
                     return Ok(Some(TuiAction::Exit));
                 }
                 KeyCode::Char('o') => return Ok(Some(TuiAction::CopyLatest)),
+                KeyCode::Char('l') => {
+                    self.transcript_cleared_before = Some(chrono::Utc::now());
+                    self.transcript_scroll = 0;
+                    self.status = "Display cleared; conversation history is retained".into();
+                    return Ok(None);
+                }
                 KeyCode::Char('r') => {
                     self.history_search = Some(String::new());
                     return Ok(None);
@@ -761,6 +769,9 @@ impl TuiModel {
                     Span::raw(notice.clone()),
                 ]),
             ));
+        }
+        if let Some(cleared_before) = self.transcript_cleared_before {
+            entries.retain(|(created_at, _)| *created_at > cleared_before);
         }
         entries.sort_by_key(|entry| entry.0);
         let mut lines = Vec::new();
@@ -1528,6 +1539,40 @@ mod tests {
                 .is_none()
         );
         assert_eq!(model.editor.buffer, "first\n");
+    }
+
+    #[test]
+    fn control_l_clears_only_the_rendered_transcript() {
+        let mut model = TuiModel::new(view(false), "project".into(), "main".into());
+        model.notices.push_back((
+            Utc::now() - chrono::Duration::seconds(1),
+            "old notice".into(),
+        ));
+        assert!(
+            model
+                .transcript_text()
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("old notice"))
+        );
+
+        assert!(
+            model
+                .handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL))
+                .expect("clear display")
+                .is_none()
+        );
+        assert!(
+            !model
+                .transcript_text()
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("old notice"))
+        );
+        assert!(model.view.messages.is_empty());
+        assert!(model.status.contains("history is retained"));
     }
 
     #[test]

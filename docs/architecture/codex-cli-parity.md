@@ -18,7 +18,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 
 | Area | Codex surface | State | Remaining gap |
 | --- | --- | --- | --- |
-| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, steering, queueing, reconnect/replay | Native | Add `Ctrl+L` display clearing. Initial image attachments now enter the same durable mention queue as interactive picker selections. |
+| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, `Ctrl+L`, steering, queueing, reconnect/replay | Native | `Ctrl+L` clears only the rendered transcript; durable conversation history and replay remain intact. Initial image attachments enter the same durable mention queue as interactive picker selections. |
 | References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, skills, and initial image attachments work; app completion is missing. |
 | Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
@@ -26,7 +26,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
 | Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | Apps are missing; several commands print discovery data; agent selection does not replace the transcript viewport. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
-| Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout work; IDE, import, app handoff are missing; hooks/feedback are informational. |
+| Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout and `/app` workspace/conversation handoff work. Direct desktop deep-linking to the active conversation, IDE context, and import remain; hooks/feedback are informational. |
 | Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Missing | Implement a governed sandbox mutation contract and mirror it in Settings. |
 | Experimental | `/experimental` | Missing | Requires discovered capabilities and durable feature configuration. |
 
@@ -46,7 +46,8 @@ Environment variables alone are not capability discovery.
 | `resume`, `fork` | Partial | IDs, exact names, project-scoped `--last`, `--all`, durable forks, and terminal reopening work. The temporary numbered picker must be replaced by the same searchable TUI overlay, and non-interactive session classification/current-vs-saved-directory choice remain. |
 | `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API. Human-formatted findings and remaining global overrides need exact alignment. |
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
-| `app`, `apply`, `features`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
+| `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
+| `apply`, `features`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
 ## Global flag compatibility
