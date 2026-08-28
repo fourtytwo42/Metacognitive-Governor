@@ -350,9 +350,41 @@ export interface ConversationMessage {
   turn_id: string;
   role: ConversationRole;
   content: string;
+  mentions?: ConversationMention[];
   codex_item_id?: string;
   created_at: string;
 }
+
+export type MentionKind = "file" | "folder" | "plugin";
+export type MentionTarget =
+  | { kind: "project_path"; project_id: string; relative_path: string }
+  | { kind: "external_path"; canonical_path: string; artifact_sha256?: string; artifact_relative_path?: string }
+  | { kind: "plugin"; plugin_id: string; plugin_revision_id: string; installation_revision: number; grants_sha256: string };
+export interface ComposerMentionInput {
+  kind: MentionKind;
+  label: string;
+  resource: string;
+  byte_start: number;
+  byte_end: number;
+  plugin_revision_id?: string;
+  installation_revision?: number;
+}
+export interface ConversationMention extends Omit<ComposerMentionInput, "resource" | "plugin_revision_id" | "installation_revision"> {
+  id: string;
+  target: MentionTarget;
+  observed_size_bytes?: number;
+  observed_modified_unix_milliseconds?: number;
+  observed_sha256?: string;
+}
+export interface MentionCandidate {
+  kind: MentionKind;
+  label: string;
+  resource: string;
+  detail?: string;
+  plugin_revision_id?: string;
+  installation_revision?: number;
+}
+export interface MentionCandidateListResponse { candidates: MentionCandidate[]; }
 
 export interface ConversationTurn {
   schema_version: number;
@@ -545,7 +577,7 @@ export interface ConversationView {
 export interface ConversationListResponse { conversations: Conversation[]; }
 export interface CreateConversationRequest { title?: string; project_id?: string; execution_preferences: ExecutionPreferences; }
 export interface UpdateConversationRequest { title: string; project_id?: string; }
-export interface SendConversationMessageRequest { content: string; execution_preferences?: ExecutionPreferences; }
+export interface SendConversationMessageRequest { content: string; execution_preferences?: ExecutionPreferences; mentions?: ComposerMentionInput[]; }
 
 export interface CodexReasoningEffort { reasoningEffort: string; description: string; }
 export interface CodexServiceTier { id: string; name: string; description: string; }
@@ -1875,6 +1907,13 @@ export function sendConversationMessage(conversationId: string, request: SendCon
   return invoke("send_conversation_message", { conversationId, request });
 }
 
+export function searchProjectMentions(projectId: string, query = "", limit = 50): Promise<MentionCandidateListResponse> {
+  return invoke("search_project_mentions", { projectId, query, limit });
+}
+
+export function pickMentionFiles(): Promise<string[]> { return invoke("pick_mention_files"); }
+export function pickMentionFolder(): Promise<string | null> { return invoke("pick_mention_folder"); }
+
 export function updateConversationMode(conversationId: string, mode: ConversationMode): Promise<ConversationView> {
   return invoke("update_conversation_mode", { conversationId, request: { mode } });
 }
@@ -1928,8 +1967,8 @@ export function interruptConversationTurn(conversationId: string, turnId: string
   return invoke("interrupt_conversation_turn", { conversationId, turnId });
 }
 
-export function steerConversationTurn(conversationId: string, turnId: string, content: string): Promise<ConversationView> {
-  return invoke("steer_conversation_turn", { conversationId, turnId, content });
+export function steerConversationTurn(conversationId: string, turnId: string, content: string, mentions: ComposerMentionInput[] = []): Promise<ConversationView> {
+  return invoke("steer_conversation_turn", { conversationId, turnId, content, mentions });
 }
 
 export function getCodexModels(): Promise<CodexModel[]> { return invoke("codex_models"); }

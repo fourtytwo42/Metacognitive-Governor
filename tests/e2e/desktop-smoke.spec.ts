@@ -108,6 +108,12 @@ test.beforeEach(async ({ page }) => {
           if (command === "list_ssh_hosts") return { hosts: sshHosts };
           if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
           if (command === "list_projects") return { projects: [project] };
+          if (command === "search_project_mentions") return {
+            candidates: [
+              { kind: "file", label: "main.ts", resource: "src/main.ts", detail: "src/main.ts" },
+              { kind: "folder", label: "src", resource: "src", detail: "src" }
+            ].filter((candidate) => !args.query || candidate.label.toLowerCase().includes(String(args.query).toLowerCase()))
+          };
           if (command === "list_conversations") return { conversations: [] };
           if (command === "list_open_in_applications") return { applications: [] };
           if (command === "list_tasks") return { tasks: [] };
@@ -403,6 +409,28 @@ test("new chat run menus stay compact, aligned, and use the shared icon set", as
   expect(dialogBox?.width ?? 999).toBeLessThanOrEqual(350);
   expect(Math.abs((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0) - ((selectorBox?.x ?? 0) + (selectorBox?.width ?? 0)))).toBeLessThanOrEqual(2);
   expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
+});
+
+test("new chat resolves project mentions with keyboard selection and exclusive palettes", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await composer.fill("/");
+  await expect(page.getByRole("listbox", { name: "Slash commands" })).toBeVisible();
+  await composer.fill("Review @ma");
+  const mentions = page.getByRole("listbox", { name: "Mention files, folders, or plugins" });
+  await expect(mentions).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "Slash commands" })).toBeHidden();
+  await expect(mentions.getByRole("option", { name: /main\.ts/ })).toBeVisible();
+
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("Review @main.ts ");
+  await expect(mentions).toBeHidden();
+
+  await composer.fill("email person@example.com");
+  await expect(mentions).toBeHidden();
 });
 
 test("transient menus dismiss outside, on Escape, and when the app loses focus", async ({ page }) => {

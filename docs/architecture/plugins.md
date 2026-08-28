@@ -9,7 +9,10 @@ one class never falls back to the other.
 Simple mode follows the Codex plugin-directory model. Plugins are grouped by
 OpenAI, workspace, personal, and installed sources; users search or browse,
 review requested access separately, turn an installed plugin on or off, and use
-an enabled plugin from a new chat with an explicit `@Plugin` prompt. Raw manifest
+an enabled plugin from a new chat with a structured `@Plugin` reference. The
+reference pins the exact installed revision and grant digest, and only the Chat
+Agent can request its bounded invocation through the normal approval and audit
+path. A mention alone never invokes a plugin or expands authority. Raw manifest
 and module import, signed-package verification, exact broker scopes, structured
 JSON invocation, immutable identities, digests, and invocation history remain in
 Advanced mode.
@@ -24,8 +27,9 @@ imports under personal; Installed shows both.
 Remaining directory parity requires a typed, signed marketplace index with
 OpenAI/workspace/personal provenance; install and uninstall mutations; connector
 and MCP authentication lifecycle; bundled skill, hook, browser-extension, UI,
-and scheduled-template metadata; new-chat/session activation; and runtime
-resolution of natural-language or explicit `@` plugin selection. Connector
+and scheduled-template metadata; new-chat/session activation; and
+natural-language plugin resolution that was not explicitly selected by the
+owner. Connector
 disconnection remains a separate account action from plugin uninstall. These
 extensions must preserve the existing host sandbox, approval, and exact-scope
 contracts. They must not use GitHub Actions or other GitHub-hosted compute.

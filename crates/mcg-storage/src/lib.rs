@@ -3168,6 +3168,7 @@ impl SqliteEventStore {
                                 format!("Failure: {failure_summary}")
                             }
                         ),
+                        mentions: Vec::new(),
                         codex_item_id: None,
                         created_at: now,
                     })?;
@@ -3211,6 +3212,7 @@ impl SqliteEventStore {
                         turn_id: batch.origin_turn_id,
                         role: mcg_domain::ConversationRole::Assistant,
                         content: "The agent team finished, but MCG restarted before the Chat Agent could safely synthesize the result. The durable inline Coordinator and Coding Agent cards contain the completed report and evidence.".into(),
+                        mentions: Vec::new(),
                         codex_item_id: None,
                         created_at: now,
                     };
@@ -3556,6 +3558,7 @@ impl SqliteEventStore {
                 turn_id: turn.id,
                 role: mcg_domain::ConversationRole::User,
                 content: task.goal,
+                mentions: Vec::new(),
                 codex_item_id: None,
                 created_at: task.created_at,
             })?;
@@ -5263,7 +5266,7 @@ mod tests {
             run_id: None,
             agent_instance_id: None,
             agent_session_id: Some(mcg_domain::ConversationAgentSessionId::new()),
-            delegation_id: Some(mcg_domain::AgentDelegationId::new()),
+            delegation_id: None,
             role_id: None,
             organization_revision_id: None,
             workspace_id: None,

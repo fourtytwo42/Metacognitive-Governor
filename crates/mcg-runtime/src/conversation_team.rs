@@ -19,13 +19,16 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const CHAT_AGENT_TOOLS: [&str; 4] = [
+pub const CHAT_AGENT_TOOLS: [&str; 7] = [
     "message_coordinator",
     "search_shared_context",
     "read_blackboard",
     "write_blackboard",
+    "read_mentioned_resource",
+    "list_mentioned_folder",
+    "invoke_mentioned_plugin",
 ];
-pub const COORDINATOR_AGENT_TOOLS: [&str; 9] = [
+pub const COORDINATOR_AGENT_TOOLS: [&str; 11] = [
     "delegate_code",
     "delegate_test",
     "message_chat",
@@ -35,20 +38,26 @@ pub const COORDINATOR_AGENT_TOOLS: [&str; 9] = [
     "read_blackboard",
     "write_blackboard",
     "cancel_delegation",
+    "read_mentioned_resource",
+    "list_mentioned_folder",
 ];
-pub const CODER_AGENT_TOOLS: [&str; 5] = [
+pub const CODER_AGENT_TOOLS: [&str; 7] = [
     "message_coordinator",
     "search_shared_context",
     "read_blackboard",
     "write_blackboard",
     "report_result",
+    "read_mentioned_resource",
+    "list_mentioned_folder",
 ];
-pub const TESTER_AGENT_TOOLS: [&str; 5] = [
+pub const TESTER_AGENT_TOOLS: [&str; 7] = [
     "message_coordinator",
     "search_shared_context",
     "read_blackboard",
     "write_blackboard",
     "report_result",
+    "read_mentioned_resource",
+    "list_mentioned_folder",
 ];
 
 /// The deterministic coordinator owns concurrency and authority state; it is deliberately not a

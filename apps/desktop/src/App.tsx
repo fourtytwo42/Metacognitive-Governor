@@ -43,6 +43,9 @@ import {
   Plus,
   RotateCw,
   Search,
+  File,
+  Folder,
+  Plug,
   Share2,
   ShieldAlert,
   ShieldCheck,
@@ -298,7 +301,13 @@ import {
   type ComputerUseFrame,
   type PersistentBrowserObservation,
   pickProjectDirectory,
+  pickMentionFiles,
+  pickMentionFolder,
+  searchProjectMentions,
   type ProjectModel,
+  type MentionCandidate,
+  type ComposerMentionInput,
+  type ConversationMention,
   type ProjectTopologyPlan,
   type ReviewedTopologyPlan,
   type MemoryClaim,
@@ -564,7 +573,55 @@ interface QueuedChatMessage {
   conversation_id: string;
   content: string;
   preferences: ChatRunPreferences;
+  mentions: ComposerMentionInput[];
   created_at: string;
+}
+
+interface PendingComposerMention {
+  id: string;
+  candidate: MentionCandidate;
+  token: string;
+}
+
+interface MentionTrigger {
+  start: number;
+  end: number;
+  query: string;
+}
+
+function mentionTrigger(value: string, caret = value.length): MentionTrigger | null {
+  const before = value.slice(0, caret);
+  const match = before.match(/(?:^|\s)@([^\s@]*)$/u);
+  if (!match || match.index === undefined) return null;
+  const prefix = match[0].startsWith("@") ? 0 : 1;
+  return { start: match.index + prefix, end: caret, query: match[1] ?? "" };
+}
+
+function utf8Length(value: string): number { return new TextEncoder().encode(value).length; }
+
+function materializeComposerMentions(content: string, pending: PendingComposerMention[]): ComposerMentionInput[] {
+  const mentions: ComposerMentionInput[] = [];
+  let characterOffset = 0;
+  const seen = new Set<string>();
+  for (const item of pending) {
+    const characterStart = content.indexOf(item.token, characterOffset);
+    if (characterStart < 0) continue;
+    const identity = `${item.candidate.kind}:${item.candidate.resource}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const characterEnd = characterStart + item.token.length;
+    mentions.push({
+      kind: item.candidate.kind,
+      label: item.candidate.label,
+      resource: item.candidate.resource,
+      byte_start: utf8Length(content.slice(0, characterStart)),
+      byte_end: utf8Length(content.slice(0, characterEnd)),
+      plugin_revision_id: item.candidate.plugin_revision_id,
+      installation_revision: item.candidate.installation_revision
+    });
+    characterOffset = characterEnd;
+  }
+  return mentions;
 }
 
 function storedChatQueue(): QueuedChatMessage[] {
@@ -572,7 +629,7 @@ function storedChatQueue(): QueuedChatMessage[] {
     const parsed = JSON.parse(window.localStorage.getItem(CHAT_QUEUE_STORAGE_KEY) || "[]") as Partial<QueuedChatMessage>[];
     return parsed.filter((item): item is QueuedChatMessage => Boolean(
       item.id && item.conversation_id && item.content?.trim() && item.preferences && item.created_at
-    ));
+    )).map((item) => ({ ...item, mentions: Array.isArray(item.mentions) ? item.mentions : [] }));
   } catch {
     return [];
   }
@@ -775,11 +832,14 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   </details>;
 }
 
-function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, onCommands, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; onCommands: () => void; existingChat?: boolean }) {
+function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, onCommands, onAttachFiles, onAttachFolder, onPlugins, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; onCommands: () => void; onAttachFiles: () => void; onAttachFolder: () => void; onPlugins: () => void; existingChat?: boolean }) {
   return <details className="new-chat-add-menu" data-transient-popover>
     <summary aria-label="Add files and more" title="Add files and more"><Plus aria-hidden="true" /></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
       <div className="context-popover-heading">Add</div>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onAttachFiles(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><File aria-hidden="true" /><span><strong>Files</strong><small>Attach durable file snapshots to this message</small></span></button>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onAttachFolder(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Folder aria-hidden="true" /><span><strong>Folder</strong><small>Attach a bounded read-only folder reference</small></span></button>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onPlugins(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Plug aria-hidden="true" /><span><strong>Plugins</strong><small>Mention an enabled plugin without invoking it</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onGoal(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target aria-hidden="true" /><span><strong>Goal</strong><small>Set a durable objective to keep pursuing</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onPlan(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks aria-hidden="true" /><span><strong>Plan mode</strong><small>Research, ask choices, and create a decision-complete plan</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onCommands(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Command aria-hidden="true" /><span><strong>Slash commands</strong><small>Browse every Codex-aligned chat command</small></span></button>
@@ -793,6 +853,33 @@ function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPla
       }}><X aria-hidden="true" /><span><strong>{existingChat ? "Start a project-free chat" : "Remove project"}</strong><small>{existingChat ? "Open a new read-only conversation" : "Continue without a linked workspace"}</small></span></button>
     </div>
   </details>;
+}
+
+function MentionPalette({ open, candidates, onSelect }: { open: boolean; candidates: MentionCandidate[]; onSelect: (candidate: MentionCandidate) => void }) {
+  if (!open) return null;
+  const groups = [
+    { kind: "file", label: "Files" },
+    { kind: "folder", label: "Folders" },
+    { kind: "plugin", label: "Plugins" }
+  ] as const;
+  return <div className="mention-palette" role="listbox" aria-label="Mention files, folders, or plugins" data-transient-popover data-scroll-chain>
+    {groups.map((group) => {
+      const matches = candidates.filter((candidate) => candidate.kind === group.kind);
+      if (matches.length === 0) return null;
+      return <section key={group.kind}><div className="mention-palette-heading">{group.label}</div>{matches.map((candidate) => <button type="button" role="option" aria-selected="false" key={`${candidate.kind}:${candidate.resource}`} onClick={() => onSelect(candidate)}>
+        {candidate.kind === "file" ? <File aria-hidden="true" /> : candidate.kind === "folder" ? <Folder aria-hidden="true" /> : <Plug aria-hidden="true" />}
+        <span><strong>{candidate.label}</strong><small>{candidate.detail ?? candidate.resource}</small></span>
+      </button>)}</section>;
+    })}
+    {candidates.length === 0 && <p>No matching references.</p>}
+  </div>;
+}
+
+function MentionChips({ mentions }: { mentions: ConversationMention[] }) {
+  if (mentions.length === 0) return null;
+  return <div className="message-mention-chips" aria-label="Referenced resources">{mentions.map((mention) => <span className={`message-mention-chip mention-${mention.kind}`} key={mention.id} title={mention.label}>
+    {mention.kind === "file" ? <File aria-hidden="true" /> : mention.kind === "folder" ? <Folder aria-hidden="true" /> : <Plug aria-hidden="true" />}@{mention.label}
+  </span>)}</div>;
 }
 
 function SlashCommandPalette({ value, open, onSelect, hasProject, hasConversation }: { value: string; open: boolean; onSelect: (command: SlashCommandName) => void; hasProject: boolean; hasConversation: boolean }) {
@@ -1658,7 +1745,7 @@ function ConversationTurnTranscript({
   const hasResponseText = messages.some((message) => message.role === "assistant" && message.content.length > 0);
   return <section className="chat-turn" aria-label="Conversation turn">
     {visibleMessages.filter((message) => message.role === "user").map((message) => <article className="chat-message user-message" key={message.id}>
-      <span>You</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} />
+      <span>You</span><MarkdownContent content={message.content} onOpenLink={openSiteExternalUrl} /><MentionChips mentions={message.mentions ?? []} />
     </article>)}
     {(activities.length > 0 || assistantMessages.length > 0 || batches.length > 0) && <ConversationActivityTimeline messages={assistantMessages} activities={activities} batches={batches} team={team} conversationId={conversationId} onView={onView} onOpenPreview={onOpenPreview} />}
     {active && <ConversationTurnStatus turn={turn} hasResponseText={hasResponseText} />}
@@ -2157,6 +2244,10 @@ export function App() {
   const [codexReviewBusy, setCodexReviewBusy] = useState(false);
   const [draftThreadId, setDraftThreadId] = useState(() => crypto.randomUUID());
   const [taskGoal, setTaskGoal] = useState("");
+  const [composerMentions, setComposerMentions] = useState<PendingComposerMention[]>([]);
+  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
+  const [mentionPaletteOpen, setMentionPaletteOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
   const [slashPaletteOpen, setSlashPaletteOpen] = useState(false);
   const [commandDialog, setCommandDialog] = useState<"status" | "feedback" | "personality" | "model" | "reasoning" | "notice" | null>(null);
   const [commandNotice, setCommandNotice] = useState({ title: "", detail: "" });
@@ -2408,12 +2499,14 @@ export function App() {
       setChatContextMenu(null);
       setSiteContextMenu(null);
       setSlashPaletteOpen(false);
+      setMentionPaletteOpen(false);
     };
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       closeTransientDetails(target);
       closeStateMenusOutside(target);
       if (!target?.closest(".slash-command-palette, #chat-message, #goal")) setSlashPaletteOpen(false);
+      if (!target?.closest(".mention-palette, #chat-message, #goal")) setMentionPaletteOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -4319,7 +4412,16 @@ export function App() {
       return;
     }
     setSelectedChatId(null);
-    setTaskGoal(`Use @${plugin.active_revision.manifest.display_name} to `);
+    const label = plugin.active_revision.manifest.display_name;
+    setTaskGoal(`Use @${label} to `);
+    setComposerMentions([{ id: crypto.randomUUID(), candidate: {
+      kind: "plugin",
+      label,
+      resource: plugin.installation.plugin_id,
+      detail: `Plugin ${plugin.active_revision.manifest.version}`,
+      plugin_revision_id: plugin.active_revision.id,
+      installation_revision: plugin.installation.revision
+    }, token: `@${label}` }]);
     setTaskError(null);
     setPluginError(null);
     navigateSurface("tasks");
@@ -4368,7 +4470,8 @@ export function App() {
   async function sendMessageContent(
     content: string,
     targetConversation?: Conversation,
-    preferences: ChatRunPreferences = newChatRunPreferences
+    preferences: ChatRunPreferences = newChatRunPreferences,
+    mentions: ComposerMentionInput[] = []
   ): Promise<boolean> {
     if (!content.trim()) {
       setTaskError("Write a message to continue.");
@@ -4419,6 +4522,7 @@ export function App() {
             turn_id: optimisticTurnId,
             role: "user",
             content: content.trim(),
+            mentions: [],
             created_at: new Date().toISOString()
           }]
         }
@@ -4431,7 +4535,7 @@ export function App() {
           })
           .catch(() => undefined);
       }, 350);
-      const view = await sendConversationMessage(conversation.id, { content, execution_preferences: executionPreferences });
+      const view = await sendConversationMessage(conversation.id, { content, execution_preferences: executionPreferences, mentions });
       setConversationViews((current) => ({ ...current, [conversation.id]: view }));
       setConversations((current) => [view.conversation, ...current.filter((candidate) => candidate.id !== view.conversation.id)]);
       return true;
@@ -4442,6 +4546,100 @@ export function App() {
       if (pollHandle !== undefined) window.clearInterval(pollHandle);
       setTaskBusy(false);
     }
+  }
+
+  async function loadMentionCandidates(query: string) {
+    const project = activeSurface === "threads" ? workspaceProject : selectedProject;
+    const pluginCandidates: MentionCandidate[] = plugins
+      .filter((plugin) => plugin.installation.enabled)
+      .map((plugin) => ({
+        kind: "plugin" as const,
+        label: plugin.active_revision.manifest.display_name,
+        resource: plugin.installation.plugin_id,
+        detail: `Plugin ${plugin.active_revision.manifest.version}`,
+        plugin_revision_id: plugin.active_revision.id,
+        installation_revision: plugin.installation.revision
+      }))
+      .filter((candidate) => `${candidate.label} ${candidate.resource}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    try {
+      const projectCandidates = project
+        ? (await searchProjectMentions(project.project_id, query, 50)).candidates
+        : [];
+      setMentionCandidates([...projectCandidates, ...pluginCandidates].slice(0, 60));
+    } catch (error) {
+      setMentionCandidates(pluginCandidates);
+      setTaskError(errorMessage(error));
+    }
+  }
+
+  function updateComposerValue(value: string, caret = value.length) {
+    setTaskGoal(value);
+    setComposerMentions((current) => current.filter((mention) => value.includes(mention.token)));
+    const trigger = mentionTrigger(value, caret);
+    if (trigger) {
+      setMentionQuery(trigger.query);
+      setMentionPaletteOpen(true);
+      setSlashPaletteOpen(false);
+      void loadMentionCandidates(trigger.query);
+    } else {
+      setMentionPaletteOpen(false);
+      const slashOpen = slashCommandMatches(value).length > 0;
+      setSlashPaletteOpen(slashOpen);
+    }
+  }
+
+  function chooseMention(candidate: MentionCandidate) {
+    const textarea = document.querySelector<HTMLTextAreaElement>(activeSurface === "threads" ? "#chat-message" : "#goal");
+    const caret = textarea?.selectionStart ?? taskGoal.length;
+    const trigger = mentionTrigger(taskGoal, caret);
+    if (!trigger) return;
+    const token = `@${candidate.label}`;
+    const next = `${taskGoal.slice(0, trigger.start)}${token} ${taskGoal.slice(trigger.end)}`;
+    setTaskGoal(next);
+    setComposerMentions((current) => [
+      ...current.filter((mention) => `${mention.candidate.kind}:${mention.candidate.resource}` !== `${candidate.kind}:${candidate.resource}`),
+      { id: crypto.randomUUID(), candidate, token }
+    ]);
+    setMentionPaletteOpen(false);
+    setMentionQuery("");
+    window.requestAnimationFrame(() => {
+      const nextCaret = trigger.start + token.length + 1;
+      textarea?.focus();
+      textarea?.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
+  async function attachMentionFiles() {
+    try {
+      const paths = await pickMentionFiles();
+      for (const path of paths.slice(0, 20)) {
+        const label = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+        const prefix = taskGoal && !/\s$/u.test(taskGoal) ? " " : "";
+        setTaskGoal((current) => `${current}${prefix}@${label} `);
+        setComposerMentions((current) => [...current, { id: crypto.randomUUID(), candidate: { kind: "file", label, resource: path, detail: path }, token: `@${label}` }]);
+      }
+    } catch (error) { setTaskError(errorMessage(error)); }
+  }
+
+  async function attachMentionFolder() {
+    try {
+      const path = await pickMentionFolder();
+      if (!path) return;
+      const label = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+      const prefix = taskGoal && !/\s$/u.test(taskGoal) ? " " : "";
+      setTaskGoal((current) => `${current}${prefix}@${label} `);
+      setComposerMentions((current) => [...current, { id: crypto.randomUUID(), candidate: { kind: "folder", label, resource: path, detail: path }, token: `@${label}` }]);
+    } catch (error) { setTaskError(errorMessage(error)); }
+  }
+
+  function openPluginMentions() {
+    const prefix = taskGoal && !/\s$/u.test(taskGoal) ? " " : "";
+    const next = `${taskGoal}${prefix}@`;
+    setTaskGoal(next);
+    setMentionQuery("");
+    setMentionPaletteOpen(true);
+    setSlashPaletteOpen(false);
+    void loadMentionCandidates("");
   }
 
   function showCommandNotice(title: string, detail: string) {
@@ -4627,11 +4825,14 @@ export function App() {
 
   async function addTask() {
     const content = taskGoal.trim();
+    const mentions = materializeComposerMentions(content, composerMentions);
     if (!content) {
       setTaskError("Write a message to continue.");
       return;
     }
     setTaskGoal("");
+    setComposerMentions([]);
+    setMentionPaletteOpen(false);
     if (content.startsWith("/") && !parseSlashCommand(content)) {
       setTaskError("Unknown slash command. Type / to browse available commands.");
       setTaskGoal(content);
@@ -4644,8 +4845,11 @@ export function App() {
       setTaskGoal(content);
       return;
     }
-    const sent = await sendMessageContent(content);
-    if (!sent) setTaskGoal((current) => current || content);
+    const sent = await sendMessageContent(content, undefined, newChatRunPreferences, mentions);
+    if (!sent) {
+      setTaskGoal((current) => current || content);
+      setComposerMentions(composerMentions);
+    }
   }
 
   async function changeConversationMode(mode: "default" | "plan") {
@@ -4763,6 +4967,7 @@ export function App() {
       conversation_id: selectedChatId,
       content,
       preferences: { ...newChatRunPreferences },
+      mentions: materializeComposerMentions(content, composerMentions),
       created_at: new Date().toISOString()
     }]);
   }
@@ -4772,10 +4977,11 @@ export function App() {
     if (!content || !selectedChatId) return;
     queueMessageContent(content);
     setTaskGoal("");
+    setComposerMentions([]);
     setTaskError(null);
   }
 
-  async function steerMessage(content: string, queuedMessageId?: string) {
+  async function steerMessage(content: string, queuedMessageId?: string, queuedMentions?: ComposerMentionInput[]) {
     if (!selectedChatId || !activeConversationTurn || !content.trim()) return;
     const operationId = queuedMessageId ?? "draft";
     setSteeringMessageId(operationId);
@@ -4789,12 +4995,14 @@ export function App() {
         turn = refreshed.turns.find((candidate) => candidate.id === activeConversationTurn.id) ?? turn;
       }
       if (!turn.codex_turn_id) throw new Error("The active Codex turn is still starting. Try steering again in a moment.");
-      const view = await steerConversationTurn(selectedChatId, turn.id, content.trim());
+      const mentions = queuedMentions ?? materializeComposerMentions(content.trim(), composerMentions);
+      const view = await steerConversationTurn(selectedChatId, turn.id, content.trim(), mentions);
       setConversationViews((current) => ({ ...current, [selectedChatId]: view }));
       if (queuedMessageId) {
         setQueuedChatMessages((current) => current.filter((item) => item.id !== queuedMessageId));
       } else {
         setTaskGoal("");
+        setComposerMentions([]);
       }
     } catch (error) {
       setTaskError(errorMessage(error));
@@ -4804,6 +5012,18 @@ export function App() {
   }
 
   function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionPaletteOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionPaletteOpen(false);
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && mentionCandidates.length > 0 && !event.shiftKey && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        chooseMention(mentionCandidates[0]);
+        return;
+      }
+    }
     const commandMatches = slashCommandMatches(taskGoal);
     if ((event.key === "Enter" || event.key === "Tab") && commandMatches.length > 0 && !parseSlashCommand(taskGoal) && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -6548,7 +6768,7 @@ export function App() {
     const conversation = conversations.find((candidate) => candidate.id === selectedChatId);
     if (!conversation) return;
     queueDispatchingRef.current = next.id;
-    void sendMessageContent(next.content, conversation, next.preferences).then((sent) => {
+    void sendMessageContent(next.content, conversation, next.preferences, next.mentions).then((sent) => {
       if (sent) {
         setQueuedChatMessages((current) => current.filter((item) => item.id !== next.id));
         setQueueDispatchErrorId(null);
@@ -7045,13 +7265,14 @@ export function App() {
                 ref={goalInputRef}
                 id="goal"
                 value={taskGoal}
-                onChange={(event) => { setTaskGoal(event.target.value); setSlashPaletteOpen(slashCommandMatches(event.target.value).length > 0); }}
+                onChange={(event) => updateComposerValue(event.target.value, event.target.selectionStart)}
                 onKeyDown={handleComposerKeyDown}
                 placeholder="Do anything"
               />
               <SlashCommandPalette value={taskGoal} open={slashPaletteOpen} onSelect={chooseSlashCommand} hasProject={Boolean(selectedProject)} hasConversation={false} />
+              <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
               <div className="composer-actions">
-                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
+                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
                 <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam />
@@ -7140,7 +7361,7 @@ export function App() {
                   <span className="chat-queue-icon" aria-hidden="true">↳</span>
                   <span className="chat-queue-content" title={message.content}>{message.content}</span>
                   {conversationIsActive
-                    ? <button className="chat-queue-steer" type="button" disabled={steeringMessageId !== null} onClick={() => void steerMessage(message.content, message.id)}>{steeringMessageId === message.id ? "Steering…" : "↪ Steer"}</button>
+                    ? <button className="chat-queue-steer" type="button" disabled={steeringMessageId !== null} onClick={() => void steerMessage(message.content, message.id, message.mentions)}>{steeringMessageId === message.id ? "Steering…" : "↪ Steer"}</button>
                     : queueDispatchErrorId === message.id && <button className="chat-queue-steer" type="button" onClick={() => setQueueDispatchErrorId(null)}>Retry</button>}
                   <button className="chat-queue-remove" type="button" aria-label="Remove queued message" title="Remove" onClick={() => setQueuedChatMessages((current) => current.filter((item) => item.id !== message.id))}>⌫</button>
                 </div>)}
@@ -7153,10 +7374,11 @@ export function App() {
                 </div>
                 <div className="composer chat-input-composer chat-followup-composer">
                   <label className="visually-hidden" htmlFor="chat-message">Message</label>
-                  <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => { setTaskGoal(event.target.value); setSlashPaletteOpen(slashCommandMatches(event.target.value).length > 0); }} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
+                  <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => updateComposerValue(event.target.value, event.target.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
                   <SlashCommandPalette value={taskGoal} open={slashPaletteOpen} onSelect={chooseSlashCommand} hasProject={Boolean(workspaceProject)} hasConversation={Boolean(selectedChatId)} />
+                  <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
                   <div className="composer-actions">
-                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
+                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
                     <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />
@@ -8703,7 +8925,7 @@ export function App() {
                 {PLUGIN_DIRECTORY_TABS.map(([tab, label]) => <button type="button" className="secondary" aria-pressed={pluginDirectoryTab === tab} onClick={() => setPluginDirectoryTab(tab)} key={tab}>{label}</button>)}
               </div>
             </div>
-            <p className="plugin-directory-note">Enabled plugins can seed a new chat with an explicit @ mention. Direct chat-to-plugin resolution, the universal public marketplace, and connector sign-in are not connected in this build yet; exact invocation remains available in Advanced mode.</p>
+            <p className="plugin-directory-note">Enabled plugins can be pinned to a chat with an explicit @ mention. Mentioning a plugin does not invoke it or expand its grants; the Chat Agent can use only that exact revision through the normal approval and audit boundary. The universal public marketplace and connector sign-in are not connected in this build yet.</p>
             {pluginError && <p className="error-message" role="alert">{pluginError}</p>}
             <div className="plugin-directory-grid" aria-label="Plugin directory results">
               {directoryPlugins.length === 0 ? <div className="site-empty-state">

@@ -297,6 +297,38 @@ pub struct CodexThreadInstructions {
     pub config: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexMentionInput {
+    pub name: String,
+    pub path: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub placeholder: String,
+}
+
+fn codex_user_input(prompt: &str, mentions: &[CodexMentionInput]) -> Vec<Value> {
+    let text_elements = mentions
+        .iter()
+        .map(|mention| {
+            json!({
+                "byteRange": {"start": mention.byte_start, "end": mention.byte_end},
+                "placeholder": mention.placeholder,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut input = vec![json!({
+        "type": "text",
+        "text": prompt,
+        "text_elements": text_elements,
+    })];
+    input.extend(
+        mentions
+            .iter()
+            .map(|mention| json!({"type": "mention", "name": mention.name, "path": mention.path})),
+    );
+    input
+}
+
 /// Verifies the exact pinned binary and the feature/config surface required by the two-agent
 /// security boundary. Callers must fail rollout closed on any error.
 pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), CodexHarnessError> {
@@ -1090,6 +1122,27 @@ impl CodexAppServerHarness {
             .await
     }
 
+    pub async fn start_turn_with_mentions(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        mentions: &[CodexMentionInput],
+        preferences: &CodexExecutionPreferences,
+        writable: bool,
+    ) -> Result<CodexTurnResult, CodexHarnessError> {
+        self.start_turn_with_progress_and_schema_and_mode(
+            thread_id,
+            prompt,
+            mentions,
+            preferences,
+            writable,
+            None,
+            None,
+            false,
+        )
+        .await
+    }
+
     pub async fn start_turn_with_progress(
         &self,
         thread_id: &str,
@@ -1101,6 +1154,7 @@ impl CodexAppServerHarness {
         self.start_turn_with_progress_and_schema(
             thread_id,
             prompt,
+            &[],
             preferences,
             writable,
             progress,
@@ -1119,6 +1173,50 @@ impl CodexAppServerHarness {
         self.start_turn_with_progress_and_schema_and_mode(
             thread_id,
             prompt,
+            &[],
+            preferences,
+            false,
+            progress,
+            None,
+            true,
+        )
+        .await
+    }
+
+    pub async fn start_turn_with_mentions_and_progress(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        mentions: &[CodexMentionInput],
+        preferences: &CodexExecutionPreferences,
+        writable: bool,
+        progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
+    ) -> Result<CodexTurnResult, CodexHarnessError> {
+        self.start_turn_with_progress_and_schema_and_mode(
+            thread_id,
+            prompt,
+            mentions,
+            preferences,
+            writable,
+            progress,
+            None,
+            false,
+        )
+        .await
+    }
+
+    pub async fn start_plan_turn_with_mentions_and_progress(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        mentions: &[CodexMentionInput],
+        preferences: &CodexExecutionPreferences,
+        progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
+    ) -> Result<CodexTurnResult, CodexHarnessError> {
+        self.start_turn_with_progress_and_schema_and_mode(
+            thread_id,
+            prompt,
+            mentions,
             preferences,
             false,
             progress,
@@ -1139,6 +1237,7 @@ impl CodexAppServerHarness {
         self.start_turn_with_progress_and_schema(
             thread_id,
             prompt,
+            &[],
             preferences,
             writable,
             None,
@@ -1151,6 +1250,7 @@ impl CodexAppServerHarness {
         &self,
         thread_id: &str,
         prompt: &str,
+        mentions: &[CodexMentionInput],
         preferences: &CodexExecutionPreferences,
         writable: bool,
         progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
@@ -1159,6 +1259,7 @@ impl CodexAppServerHarness {
         self.start_turn_with_progress_and_schema_and_mode(
             thread_id,
             prompt,
+            mentions,
             preferences,
             writable,
             progress,
@@ -1172,6 +1273,7 @@ impl CodexAppServerHarness {
         &self,
         thread_id: &str,
         prompt: &str,
+        mentions: &[CodexMentionInput],
         preferences: &CodexExecutionPreferences,
         writable: bool,
         progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
@@ -1197,7 +1299,7 @@ impl CodexAppServerHarness {
                 "turn/start",
                 json!({
                     "threadId": thread_id,
-                    "input": [{"type": "text", "text": prompt, "text_elements": []}],
+                    "input": codex_user_input(prompt, mentions),
                     "model": preferences.model,
                     "effort": preferences.effort,
                     "serviceTier": preferences.service_tier,
@@ -1391,12 +1493,23 @@ impl CodexAppServerHarness {
         turn_id: &str,
         content: &str,
     ) -> Result<String, CodexHarnessError> {
+        self.steer_turn_with_mentions(thread_id, turn_id, content, &[])
+            .await
+    }
+
+    pub async fn steer_turn_with_mentions(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        content: &str,
+        mentions: &[CodexMentionInput],
+    ) -> Result<String, CodexHarnessError> {
         let result = self
             .request(
                 "turn/steer",
                 json!({
                     "threadId": thread_id,
-                    "input": [{"type": "text", "text": content}],
+                    "input": codex_user_input(content, mentions),
                     "expectedTurnId": turn_id,
                 }),
             )
@@ -2157,5 +2270,26 @@ mod tests {
         }
         assert!(protocol_generated::SERVER_NOTIFICATION_METHODS.contains(&"fs/changed"));
         assert!(protocol_generated::SERVER_NOTIFICATION_METHODS.contains(&"skills/changed"));
+    }
+
+    #[test]
+    fn structured_mentions_preserve_text_elements_and_native_inputs() {
+        let input = codex_user_input(
+            "open @src",
+            &[CodexMentionInput {
+                name: "src".into(),
+                path: "C:/workspace/src".into(),
+                byte_start: 5,
+                byte_end: 9,
+                placeholder: "@src".into(),
+            }],
+        );
+        assert_eq!(
+            input,
+            vec![
+                json!({"type":"text","text":"open @src","text_elements":[{"byteRange":{"start":5,"end":9},"placeholder":"@src"}]}),
+                json!({"type":"mention","name":"src","path":"C:/workspace/src"}),
+            ]
+        );
     }
 }

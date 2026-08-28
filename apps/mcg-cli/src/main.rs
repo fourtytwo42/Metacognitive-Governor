@@ -55,17 +55,17 @@ use mcg_api::{
 };
 use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
 use mcg_domain::{
-    AgentWakeState, ApprovalMode, ComputerUseCapability, ComputerUseRegion, ComputerUseTarget,
-    Conversation, ConversationRole, ConversationTurnId, ConversationTurnState, ConversationView,
-    CoordinationBatchState, ExecutionPreferences, MemoryClaimId, MemoryTransferId,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
-    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
-    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
-    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
+    ComputerUseTarget, Conversation, ConversationRole, ConversationTurnId, ConversationTurnState,
+    ConversationView, CoordinationBatchState, ExecutionPreferences, MemoryClaimId,
+    MemoryTransferId, MentionKind, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
+    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
+    PluginSignatureState, ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
+    SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
     effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
@@ -269,6 +269,9 @@ enum Command {
         /// Integration permission for generated changes.
         #[arg(long, value_enum, default_value_t = ConversationApprovalArg::FullAccess)]
         approval: ConversationApprovalArg,
+        /// Attach a typed reference (`file:path`, `folder:path`, or `plugin:id`). Repeatable.
+        #[arg(long = "mention", value_name = "KIND:RESOURCE")]
+        mentions: Vec<String>,
         /// Consumer goal when no administrative run subcommand is supplied.
         #[arg(value_name = "GOAL", num_args = 0..)]
         goal: Vec<String>,
@@ -1486,6 +1489,9 @@ enum ConversationCommand {
         id: String,
         #[arg(value_name = "MESSAGE", num_args = 1..)]
         message: Vec<String>,
+        /// Attach a typed reference (`file:path`, `folder:path`, or `plugin:id`). Repeatable.
+        #[arg(long = "mention", value_name = "KIND:RESOURCE")]
+        mentions: Vec<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -1562,6 +1568,8 @@ enum ConversationCommand {
         turn_id: String,
         #[arg(value_name = "MESSAGE", num_args = 1..)]
         message: Vec<String>,
+        #[arg(long = "mention", value_name = "KIND:RESOURCE")]
+        mentions: Vec<String>,
     },
     Archive {
         id: String,
@@ -1889,6 +1897,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             effort,
             speed,
             approval: _,
+            mentions,
             goal,
         }) => {
             if json
@@ -1896,6 +1905,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 || model.is_some()
                 || effort.is_some()
                 || speed.is_some()
+                || !mentions.is_empty()
                 || !goal.is_empty()
             {
                 return Err(
@@ -1913,6 +1923,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             effort,
             speed,
             approval,
+            mentions,
             goal,
         }) => {
             let goal = validated_goal(&goal.join(" "))?;
@@ -1926,6 +1937,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 supplemental,
                 consumer_output(json, stream_json),
                 conversation_preferences(model, effort, speed, approval.into()),
+                &mentions,
             )
             .await?;
         }
@@ -1941,6 +1953,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 supplemental,
                 ConsumerOutput::Human,
                 conversation_preferences(None, None, None, ApprovalMode::FullAccess),
+                &[],
             )
             .await?;
         }
@@ -1958,6 +1971,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 ConsumerOutput::Human,
                 conversation_preferences(None, None, None, ApprovalMode::FullAccess),
+                &[],
             )
             .await?;
         }
@@ -2093,6 +2107,7 @@ async fn run_interactive(
             None,
             ConsumerOutput::Human,
             conversation_preferences(None, None, None, ApprovalMode::FullAccess),
+            &[],
         )
         .await
         {
@@ -2111,6 +2126,7 @@ async fn run_consumer_submission(
     supplemental_input: Option<String>,
     output: ConsumerOutput,
     preferences: ExecutionPreferences,
+    mention_specs: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_root = std::fs::canonicalize(project_root)?;
     let root = canonical_root
@@ -2138,6 +2154,8 @@ async fn run_consumer_submission(
     } else {
         goal.to_owned()
     };
+    let (content, mentions) =
+        resolve_cli_mentions(client, host, token, content, mention_specs).await?;
     let mut view: ConversationView = decode_api_response(
         client
             .post(format!(
@@ -2148,6 +2166,7 @@ async fn run_consumer_submission(
             .json(&SendConversationMessageRequest {
                 content,
                 execution_preferences: Some(preferences),
+                mentions,
             })
             .send()
             .await?,
@@ -2213,6 +2232,103 @@ async fn run_consumer_submission(
         }
     }
     ensure_governed_consumer_success(&view, origin_turn_id)
+}
+
+async fn resolve_cli_mentions(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    mut content: String,
+    specs: &[String],
+) -> Result<(String, Vec<ComposerMentionInput>), Box<dyn std::error::Error>> {
+    if specs.len() > 20 {
+        return Err("a turn can contain at most 20 --mention values".into());
+    }
+    let plugin_catalog = if specs.iter().any(|spec| spec.starts_with("plugin:")) {
+        Some(
+            decode_api_response::<PluginListResponse>(
+                client
+                    .get(format!("{host}/api/v1/plugins"))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "list plugins for mentions",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut mentions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let (kind, resource) = spec
+            .split_once(':')
+            .ok_or("--mention must use file:path, folder:path, or plugin:id")?;
+        if resource.trim().is_empty() {
+            return Err("--mention resource cannot be empty".into());
+        }
+        let (kind, label, plugin_revision_id, installation_revision) = match kind {
+            "file" | "folder" => {
+                let label = std::path::Path::new(resource)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(resource)
+                    .to_owned();
+                (
+                    if kind == "file" {
+                        MentionKind::File
+                    } else {
+                        MentionKind::Folder
+                    },
+                    label,
+                    None,
+                    None,
+                )
+            }
+            "plugin" => {
+                let plugin = plugin_catalog
+                    .as_ref()
+                    .and_then(|catalog| {
+                        catalog.plugins.iter().find(|plugin| {
+                            plugin.installation.plugin_id == resource
+                                || plugin
+                                    .active_revision
+                                    .manifest
+                                    .display_name
+                                    .eq_ignore_ascii_case(resource)
+                        })
+                    })
+                    .ok_or("mentioned plugin is not installed")?;
+                if !plugin.installation.enabled {
+                    return Err("mentioned plugin is disabled".into());
+                }
+                (
+                    MentionKind::Plugin,
+                    plugin.active_revision.manifest.display_name.clone(),
+                    Some(plugin.active_revision.id),
+                    Some(plugin.installation.revision),
+                )
+            }
+            _ => return Err("--mention kind must be file, folder, or plugin".into()),
+        };
+        let separator = if content.is_empty() { "" } else { "\n" };
+        content.push_str(separator);
+        let byte_start = u32::try_from(content.len())?;
+        content.push('@');
+        content.push_str(&label);
+        let byte_end = u32::try_from(content.len())?;
+        mentions.push(ComposerMentionInput {
+            kind,
+            label,
+            resource: resource.to_owned(),
+            byte_start,
+            byte_end,
+            plugin_revision_id,
+            installation_revision,
+        });
+    }
+    Ok((content, mentions))
 }
 
 fn ensure_governed_consumer_success(
@@ -6196,6 +6312,7 @@ async fn run_conversation(
         ConversationCommand::Send {
             id,
             message,
+            mentions,
             model,
             effort,
             speed,
@@ -6206,6 +6323,8 @@ async fn run_conversation(
             json,
         } => {
             let content = validated_goal(&message.join(" "))?;
+            let (content, mentions) =
+                resolve_cli_mentions(client, host, token, content, &mentions).await?;
             let execution_preferences =
                 if model.is_some() || effort.is_some() || speed.is_some() || approval.is_some() {
                     Some(conversation_preferences(
@@ -6224,6 +6343,7 @@ async fn run_conversation(
                     .json(&SendConversationMessageRequest {
                         content,
                         execution_preferences,
+                        mentions,
                     })
                     .send()
                     .await?,
@@ -6408,16 +6528,18 @@ async fn run_conversation(
             id,
             turn_id,
             message,
+            mentions,
         } => {
+            let content = validated_goal(&message.join(" "))?;
+            let (content, mentions) =
+                resolve_cli_mentions(client, host, token, content, &mentions).await?;
             print_json_response(
                 client
                     .post(format!(
                         "{host}/api/v1/conversations/{id}/turns/{turn_id}/steer"
                     ))
                     .bearer_auth(token)
-                    .json(&SteerConversationTurnRequest {
-                        content: validated_goal(&message.join(" "))?,
-                    })
+                    .json(&SteerConversationTurnRequest { content, mentions })
                     .send()
                     .await?,
             )
@@ -8288,6 +8410,10 @@ mod tests {
             "send",
             conversation_id,
             "build the fixture",
+            "--mention",
+            "file:src/main.rs",
+            "--mention",
+            "plugin:fixture-plugin",
             "--wait",
             "--timeout-seconds",
             "900",
@@ -8299,9 +8425,10 @@ mod tests {
                 command: ConversationCommand::Send {
                     wait: true,
                     timeout_seconds: 900,
+                    mentions,
                     ..
                 }
-            }
+            } if mentions == vec!["file:src/main.rs", "plugin:fixture-plugin"]
         ));
 
         let receipt = Cli::try_parse_from(["mcg", "conversation", "receipt", conversation_id])

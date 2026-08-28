@@ -1584,6 +1584,22 @@ kbd { padding: 2px 6px; border: 1px solid #555; border-radius: 4px; color: #ddd;
 .slash-command-palette button > span:last-child { display: grid; min-width: 0; gap: 2px; }
 .slash-command-palette strong { overflow: hidden; font-size: .75rem; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .slash-command-palette small { color: var(--mcg-accent); font-size: .67rem; }
+.mention-palette { position: absolute; z-index: 59; right: 12px; bottom: calc(100% - 2px); left: 12px; display: grid; max-height: min(420px, 52vh); overflow: auto; padding: 7px; border: 1px solid var(--mcg-border); border-radius: 14px; color: var(--mcg-text); background: var(--mcg-surface-raised); box-shadow: 0 22px 56px #000a; scrollbar-width: thin; }
+.mention-palette section { display: grid; gap: 2px; }
+.mention-palette-heading { padding: 8px 11px 4px; color: var(--mcg-muted); font-size: .66rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.mention-palette button { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 9px; width: 100%; padding: 9px 11px; border: 0; border-radius: 9px; color: inherit; background: transparent; text-align: left; }
+.mention-palette button:hover,
+.mention-palette button:focus-visible { background: color-mix(in srgb, var(--mcg-surface-raised) 72%, white 9%); }
+.mention-palette button > svg { width: 16px; height: 16px; color: var(--mcg-accent); stroke-width: 1.8; }
+.mention-palette button > span { display: grid; min-width: 0; gap: 2px; }
+.mention-palette strong,
+.mention-palette small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-palette strong { font-size: .76rem; font-weight: 600; }
+.mention-palette small { color: var(--mcg-muted); font-size: .67rem; }
+.mention-palette > p { margin: 8px 10px; color: var(--mcg-muted); font-size: .74rem; }
+.message-mention-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.message-mention-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 260px; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--mcg-accent) 42%, var(--mcg-border)); border-radius: 999px; color: var(--mcg-text); background: color-mix(in srgb, var(--mcg-accent) 9%, var(--mcg-surface)); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-mention-chip svg { width: 13px; height: 13px; flex: 0 0 auto; color: var(--mcg-accent); }
 .slash-command-dialog-backdrop { position: fixed; z-index: 120; inset: var(--desktop-chrome-height) 0 0; display: grid; place-items: center; padding: 24px; background: #0008; backdrop-filter: blur(3px); }
 .slash-command-dialog { display: grid; width: min(560px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - var(--desktop-chrome-height) - 48px)); overflow: auto; border: 1px solid var(--mcg-border); border-radius: 16px; color: var(--mcg-text); background: var(--mcg-surface-raised); box-shadow: 0 28px 80px #000c; scrollbar-width: thin; }
 .slash-command-dialog > header { position: sticky; z-index: 1; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 54px; padding: 0 15px; border-bottom: 1px solid var(--mcg-border); background: inherit; }

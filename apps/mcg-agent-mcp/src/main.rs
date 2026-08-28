@@ -123,6 +123,15 @@ fn tool_schema(name: &str) -> Value {
         "read_blackboard" => "Read this conversation's append-only shared blackboard.",
         "write_blackboard" => "Append a typed entry to this conversation's shared blackboard.",
         "cancel_delegation" => "Cancel one active delegation belonging to this conversation.",
+        "read_mentioned_resource" => {
+            "Read a bounded UTF-8 file explicitly mentioned on this governed request."
+        }
+        "list_mentioned_folder" => {
+            "List one bounded directory explicitly mentioned on this governed request."
+        }
+        "invoke_mentioned_plugin" => {
+            "Invoke the exact immutable revision of a plugin explicitly mentioned on this owner turn."
+        }
         "report_result" => {
             "Required final step for a Coding Agent or Tester. Call exactly once after verification to report structured results to the Coordinator Agent."
         }
@@ -244,6 +253,35 @@ fn tool_schema(name: &str) -> Value {
                 "unresolved_issues",
                 "integration_ready"
             ],
+            "additionalProperties":false
+        }),
+        "read_mentioned_resource" => json!({
+            "type":"object",
+            "properties":{
+                "mention_id":{"type":"string","minLength":1},
+                "relative_path":{"type":"string"},
+                "max_bytes":{"type":"integer","minimum":1,"maximum":1048576}
+            },
+            "required":["mention_id"],
+            "additionalProperties":false
+        }),
+        "list_mentioned_folder" => json!({
+            "type":"object",
+            "properties":{
+                "mention_id":{"type":"string","minLength":1},
+                "relative_path":{"type":"string"},
+                "limit":{"type":"integer","minimum":1,"maximum":200}
+            },
+            "required":["mention_id"],
+            "additionalProperties":false
+        }),
+        "invoke_mentioned_plugin" => json!({
+            "type":"object",
+            "properties":{
+                "mention_id":{"type":"string","minLength":1},
+                "input":{}
+            },
+            "required":["mention_id","input"],
             "additionalProperties":false
         }),
         _ => json!({"type":"object","properties":{},"additionalProperties":false}),

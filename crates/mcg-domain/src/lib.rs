@@ -247,7 +247,7 @@ impl ExperimentDecisionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,
@@ -2098,6 +2098,78 @@ pub struct ExecutionPreferences {
     pub personality: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionKind {
+    File,
+    Folder,
+    Plugin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MentionTarget {
+    ProjectPath {
+        project_id: ProjectId,
+        relative_path: String,
+    },
+    ExternalPath {
+        canonical_path: String,
+        artifact_sha256: Option<String>,
+        artifact_relative_path: Option<String>,
+    },
+    Plugin {
+        plugin_id: String,
+        plugin_revision_id: PluginRevisionId,
+        installation_revision: u64,
+        grants_sha256: String,
+    },
+}
+
+/// One untrusted composer reference submitted by a first-party client. Byte
+/// offsets address the UTF-8 message buffer and are revalidated by the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposerMentionInput {
+    pub kind: MentionKind,
+    pub label: String,
+    pub resource: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_revision_id: Option<PluginRevisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationMention {
+    pub id: String,
+    pub kind: MentionKind,
+    pub label: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub target: MentionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_modified_unix_milliseconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionCandidate {
+    pub kind: MentionKind,
+    pub label: String,
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_revision_id: Option<PluginRevisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_revision: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversation {
     pub schema_version: u16,
@@ -2144,6 +2216,8 @@ pub struct ConversationMessage {
     pub turn_id: ConversationTurnId,
     pub role: ConversationRole,
     pub content: String,
+    #[serde(default)]
+    pub mentions: Vec<ConversationMention>,
     pub codex_item_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }

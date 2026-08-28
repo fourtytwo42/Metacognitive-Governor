@@ -928,6 +928,24 @@ async fn send_conversation_message(
 }
 
 #[tauri::command]
+async fn search_project_mentions(
+    project_id: String,
+    query: String,
+    limit: usize,
+) -> Result<mcg_api::MentionCandidateListResponse, String> {
+    daemon_json(
+        reqwest::Client::new()
+            .get(format!(
+                "{LOCAL_DAEMON}/api/v1/projects/{project_id}/mentions"
+            ))
+            .query(&[("q", query), ("limit", limit.clamp(1, 100).to_string())]),
+        None::<&()>,
+        "Project mention search",
+    )
+    .await
+}
+
+#[tauri::command]
 async fn update_conversation_mode(
     conversation_id: String,
     request: UpdateConversationModeRequest,
@@ -1129,12 +1147,13 @@ async fn steer_conversation_turn(
     conversation_id: String,
     turn_id: String,
     content: String,
+    mentions: Vec<mcg_domain::ComposerMentionInput>,
 ) -> Result<ConversationView, String> {
     daemon_json(
         reqwest::Client::new().post(format!(
             "{LOCAL_DAEMON}/api/v1/conversations/{conversation_id}/turns/{turn_id}/steer"
         )),
-        Some(&SteerConversationTurnRequest { content }),
+        Some(&SteerConversationTurnRequest { content, mentions }),
         "Conversation steer",
     )
     .await
@@ -2886,6 +2905,36 @@ async fn pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>,
 }
 
 #[tauri::command]
+async fn pick_mention_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    app.dialog()
+        .file()
+        .set_title("Attach files to this message")
+        .blocking_pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|_| "A selected file is not a local filesystem path".to_owned())
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn pick_mention_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    app.dialog()
+        .file()
+        .set_title("Attach a read-only folder to this message")
+        .blocking_pick_folder()
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|_| "The selected folder is not a local filesystem path".to_owned())
+        })
+        .transpose()
+}
+
+#[tauri::command]
 async fn discover_project(request: DiscoverProjectRequest) -> Result<ProjectMutation, String> {
     let response = reqwest::Client::new()
         .post(format!("{LOCAL_DAEMON}/api/v1/projects"))
@@ -3815,6 +3864,7 @@ pub fn run() {
             update_conversation,
             archive_conversation,
             send_conversation_message,
+            search_project_mentions,
             update_conversation_mode,
             update_conversation_goal,
             clear_conversation_goal,
@@ -3890,6 +3940,8 @@ pub fn run() {
             task_tool_audit,
             replay_agent_run,
             pick_project_directory,
+            pick_mention_files,
+            pick_mention_folder,
             discover_project,
             initialize_project_git,
             list_projects,

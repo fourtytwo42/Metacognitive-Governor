@@ -34,17 +34,18 @@ use mcg_agents::{
 };
 use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
 use mcg_domain::{
-    AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComputerActionBatchId,
-    ComputerUseCapability, ComputerUseTarget, Conversation, ConversationAgentSessionId,
-    ConversationGoalStatus, ConversationId, ConversationMode, ConversationPreview,
-    ConversationPreviewId, ConversationTeamState, ConversationTurnId, ConversationTurnState,
-    ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId, ManagedWorktree,
-    MemoryClaimId, MemoryTransferId, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
-    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComposerMentionInput,
+    ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, Conversation,
+    ConversationAgentSessionId, ConversationGoalStatus, ConversationId, ConversationMode,
+    ConversationPreview, ConversationPreviewId, ConversationTeamState, ConversationTurnId,
+    ConversationTurnState, ConversationView, ExecutionPreferences, ExperimentId,
+    GovernorProposalId, ManagedWorktree, MemoryClaimId, MemoryTransferId, MentionCandidate,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent,
+    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallation,
+    PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId,
+    RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
+    ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
     SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
     SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
@@ -186,6 +187,8 @@ pub struct SendConversationMessageRequest {
     pub content: String,
     #[serde(default)]
     pub execution_preferences: Option<ExecutionPreferences>,
+    #[serde(default)]
+    pub mentions: Vec<ComposerMentionInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +213,13 @@ pub struct AnswerConversationInputRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteerConversationTurnRequest {
     pub content: String,
+    #[serde(default)]
+    pub mentions: Vec<ComposerMentionInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionCandidateListResponse {
+    pub candidates: Vec<MentionCandidate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +251,18 @@ pub struct SharedContextSearchQuery {
     pub q: String,
     #[serde(default = "default_context_search_limit")]
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionSearchQuery {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default = "default_mention_search_limit")]
+    pub limit: usize,
+}
+
+const fn default_mention_search_limit() -> usize {
+    50
 }
 
 const fn default_context_search_limit() -> usize {
@@ -1834,6 +1856,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/projects/{project_id}",
             get(get_project).delete(remove_project),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/mentions",
+            get(search_project_mentions),
         )
         .route(
             "/api/v1/projects/{project_id}/archive",
@@ -3846,6 +3872,7 @@ async fn send_conversation_message(
                 conversation_id,
                 request.content,
                 request.execution_preferences,
+                request.mentions,
             )
             .await
             .map_err(map_runtime_error)?,
@@ -4139,7 +4166,7 @@ async fn steer_conversation_turn(
     Ok(Json(
         state
             .runtime
-            .steer_conversation_turn(conversation_id, turn_id, request.content)
+            .steer_conversation_turn(conversation_id, turn_id, request.content, request.mentions)
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -6431,6 +6458,24 @@ async fn list_projects(
         projects: state.runtime.projects()?,
         archived_projects: state.runtime.archived_projects()?,
     }))
+}
+
+async fn search_project_mentions(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<MentionSearchQuery>,
+) -> Result<Json<MentionCandidateListResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    if query.limit == 0 || query.limit > 100 {
+        return Err(ApiError::bad_request(
+            "mention search limit must be between 1 and 100",
+        ));
+    }
+    state
+        .runtime
+        .project_mention_candidates(project_id, &query.q, query.limit)
+        .map(|candidates| Json(MentionCandidateListResponse { candidates }))
+        .map_err(map_runtime_error)
 }
 
 async fn archive_project(

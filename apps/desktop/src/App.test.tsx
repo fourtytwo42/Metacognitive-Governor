@@ -58,6 +58,9 @@ const client = vi.hoisted(() => ({
   answerConversationInput: vi.fn(),
   sendConversationMessage: vi.fn(),
   steerConversationTurn: vi.fn(),
+  searchProjectMentions: vi.fn(),
+  pickMentionFiles: vi.fn(),
+  pickMentionFolder: vi.fn(),
   getCodexModels: vi.fn(),
   getCodexAccount: vi.fn(),
   getCodexRateLimits: vi.fn(),
@@ -245,6 +248,9 @@ vi.mock("./desktop-client", () => ({
   answerConversationInput: client.answerConversationInput,
   sendConversationMessage: client.sendConversationMessage,
   steerConversationTurn: client.steerConversationTurn,
+  searchProjectMentions: client.searchProjectMentions,
+  pickMentionFiles: client.pickMentionFiles,
+  pickMentionFolder: client.pickMentionFolder,
   getCodexModels: client.getCodexModels,
   getCodexAccount: client.getCodexAccount,
   getCodexRateLimits: client.getCodexRateLimits,
@@ -446,6 +452,9 @@ beforeEach(() => {
   client.getConversation.mockReset();
   client.sendConversationMessage.mockReset();
   client.steerConversationTurn.mockReset();
+  client.searchProjectMentions.mockReset();
+  client.pickMentionFiles.mockReset();
+  client.pickMentionFolder.mockReset();
   client.getCodexModels.mockReset();
   client.getCodexAccount.mockReset();
   client.getCodexRateLimits.mockReset();
@@ -666,6 +675,9 @@ beforeEach(() => {
     };
   });
   client.steerConversationTurn.mockImplementation(async () => client.getConversation());
+  client.searchProjectMentions.mockResolvedValue({ candidates: [] });
+  client.pickMentionFiles.mockResolvedValue([]);
+  client.pickMentionFolder.mockResolvedValue(null);
   client.getCodexModels.mockResolvedValue([]);
   client.getCodexAccount.mockResolvedValue({ authenticated: false, requires_openai_auth: true });
   client.getCodexRateLimits.mockResolvedValue({ refreshed_at: "2026-08-22T00:00:00Z" });
@@ -3084,15 +3096,49 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(client.createConversation).toHaveBeenCalledWith({
     title: "Explain this repository",
     project_id: project.project_id,
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic" }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic", personality: undefined }
   });
   expect(client.sendConversationMessage).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000c01", {
     content: "Explain this repository",
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic" }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic", personality: undefined },
+    mentions: []
   });
   expect(client.createTask).not.toHaveBeenCalled();
   expect(client.launchTask).not.toHaveBeenCalled();
   expect(screen.getByText("Fixture response")).toBeInTheDocument();
+});
+
+test("new chat resolves an at mention into a structured project reference", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] },
+    world: { nodes: [], relationships: [] },
+    watched_inputs: {},
+    warnings: []
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.searchProjectMentions.mockResolvedValue({ candidates: [{ kind: "file", label: "main.ts", resource: "src/main.ts", detail: "src/main.ts" }] });
+  render(<App />);
+  await selectNewChatProject("sample");
+  const composer = screen.getByLabelText("Message");
+  fireEvent.change(composer, { target: { value: "Review @ma", selectionStart: 10 } });
+  fireEvent.click(await screen.findByRole("option", { name: /main\.ts/ }));
+  expect(composer).toHaveValue("Review @main.ts ");
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({
+      content: "Review @main.ts",
+      mentions: [{ kind: "file", label: "main.ts", resource: "src/main.ts", byte_start: 7, byte_end: 15, plugin_revision_id: undefined, installation_revision: undefined }]
+    })
+  ));
 });
 
 test("established chat keeps the New Chat composer and routes uncommitted review through the visible conversation", async () => {
@@ -3433,7 +3479,8 @@ test("active chats queue Enter messages in a drawer and allow immediate steering
   await waitFor(() => expect(client.steerConversationTurn).toHaveBeenCalledWith(
     conversation.id,
     turn.id,
-    "Use the blue design"
+    "Use the blue design",
+    []
   ));
   expect(screen.queryByLabelText("Queued messages")).not.toBeInTheDocument();
 
@@ -3442,7 +3489,8 @@ test("active chats queue Enter messages in a drawer and allow immediate steering
   await waitFor(() => expect(client.steerConversationTurn).toHaveBeenLastCalledWith(
     conversation.id,
     turn.id,
-    "Keep the current structure"
+    "Keep the current structure",
+    []
   ));
   expect(screen.getByLabelText("Message")).toHaveValue("");
 });
