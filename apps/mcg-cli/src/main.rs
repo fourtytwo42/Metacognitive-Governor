@@ -16,7 +16,8 @@ use std::os::windows::process::CommandExt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
 use mcg_agents::{
@@ -66,16 +67,17 @@ use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
     ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId, ConversationMode,
-    ConversationRole, ConversationTurnId, ConversationTurnState, ConversationView,
-    CoordinationBatchState, ExecutionPreferences, MemoryClaimId, MemoryTransferId,
-    MentionCandidate, MentionKind, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
-    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
-    PluginSignatureState, ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
-    SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ConversationRole, ConversationState, ConversationTurnId, ConversationTurnState,
+    ConversationView, CoordinationBatchState, ExecutionPreferences, MemoryClaimId,
+    MemoryTransferId, MentionCandidate, MentionKind, NotificationSeverity, OrganizationId,
+    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
+    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
+    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
+    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
+    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
     effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
@@ -335,6 +337,166 @@ enum Command {
     /// Treat an otherwise unknown command line as a consumer goal.
     #[command(external_subcommand)]
     Prompt(Vec<OsString>),
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "mcg", version, about = "MetaCog Codex-compatible CLI commands")]
+struct CodexCompatCli {
+    #[arg(long, default_value = "http://127.0.0.1:7777")]
+    host: String,
+    #[arg(long)]
+    token_file: Option<PathBuf>,
+    #[arg(short = 'C', long = "project", global = true)]
+    project: Option<PathBuf>,
+    #[command(subcommand)]
+    command: CodexCompatCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexCompatCommand {
+    /// Run MetaCog non-interactively through the governed agent workflow.
+    #[command(alias = "e")]
+    Exec(Box<ExecArgs>),
+    /// Continue a previous interactive conversation.
+    Resume(Box<ResumeArgs>),
+    /// Fork a previous conversation and open the fork in the terminal UI.
+    Fork(Box<ForkArgs>),
+    /// Archive a saved conversation by ID or exact name.
+    Archive { session: String },
+    /// Restore an archived conversation by ID or exact name.
+    Unarchive { session: String },
+    /// Permanently delete a saved conversation.
+    Delete(Box<DeleteArgs>),
+    /// Run a native, read-only code review.
+    Review(Box<ReviewArgs>),
+    /// Generate a shell-completion script on standard output.
+    Completion { shell: CompletionShell },
+    /// Authenticate the shared Codex app-server account.
+    Login(Box<LoginArgs>),
+    /// Remove shared Codex authentication.
+    Logout,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CodexSandboxArg {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(name = "power-shell", alias = "powershell")]
+    PowerShell,
+    Elvish,
+}
+
+impl From<CompletionShell> for Shell {
+    fn from(value: CompletionShell) -> Self {
+        match value {
+            CompletionShell::Bash => Self::Bash,
+            CompletionShell::Zsh => Self::Zsh,
+            CompletionShell::Fish => Self::Fish,
+            CompletionShell::PowerShell => Self::PowerShell,
+            CompletionShell::Elvish => Self::Elvish,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct ExecArgs {
+    #[command(subcommand)]
+    command: Option<ExecCommand>,
+    #[arg(long, alias = "experimental-json")]
+    json: bool,
+    #[arg(long)]
+    ephemeral: bool,
+    #[arg(long)]
+    skip_git_repo_check: bool,
+    #[arg(short = 'm', long)]
+    model: Option<String>,
+    #[arg(short = 's', long, value_enum)]
+    sandbox: Option<CodexSandboxArg>,
+    #[arg(long, alias = "yolo")]
+    dangerously_bypass_approvals_and_sandbox: bool,
+    #[arg(short = 'i', long = "image", value_name = "PATH")]
+    images: Vec<PathBuf>,
+    #[arg(short = 'o', long)]
+    output_last_message: Option<PathBuf>,
+    #[arg(value_name = "PROMPT", num_args = 0..)]
+    prompt: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ResumeArgs {
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    include_non_interactive: bool,
+    #[arg(long)]
+    last: bool,
+    session: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ForkArgs {
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    last: bool,
+    session: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct DeleteArgs {
+    session: String,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReviewArgs {
+    #[arg(long, conflicts_with_all = ["base", "commit", "prompt"])]
+    uncommitted: bool,
+    #[arg(long, conflicts_with_all = ["uncommitted", "commit", "prompt"])]
+    base: Option<String>,
+    #[arg(long, conflicts_with_all = ["uncommitted", "base", "prompt"])]
+    commit: Option<String>,
+    #[arg(long, requires = "commit")]
+    title: Option<String>,
+    #[arg(value_name = "PROMPT", num_args = 0.., conflicts_with_all = ["uncommitted", "base", "commit"])]
+    prompt: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct LoginArgs {
+    #[command(subcommand)]
+    command: Option<LoginCommand>,
+    #[arg(long)]
+    device_auth: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ExecCommand {
+    /// Resume a previous non-interactive conversation.
+    Resume {
+        #[arg(long)]
+        last: bool,
+        #[arg(long)]
+        all: bool,
+        session: Option<String>,
+        #[arg(value_name = "PROMPT", num_args = 0..)]
+        prompt: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LoginCommand {
+    /// Print the active authentication state.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1791,6 +1953,14 @@ async fn main() {
 
 #[allow(clippy::too_many_lines)] // Keeps offline recovery, authentication, and all CLI modes visible together.
 async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
+    if root_help_requested() {
+        combined_cli_command().print_long_help()?;
+        println!();
+        return Ok(());
+    }
+    if codex_compat_command_requested() {
+        return Box::pin(run_codex_compat_cli()).await;
+    }
     let cli = Cli::parse();
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
@@ -1957,6 +2127,8 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 consumer_output(json, stream_json),
                 conversation_preferences(model, effort, speed, approval.into()),
                 &mentions,
+                None,
+                false,
             )
             .await?;
         }
@@ -1973,11 +2145,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 ConsumerOutput::Human,
                 conversation_preferences(None, None, None, ApprovalMode::FullAccess),
                 &[],
+                None,
+                false,
             )
             .await?;
         }
         None if std::io::stdin().is_terminal() => {
-            run_interactive(&client, host, token.trim(), &project).await?;
+            run_interactive(&client, host, token.trim(), &project, None).await?;
         }
         None => {
             let goal = validated_goal(&read_bounded_stdin()?)?;
@@ -1991,6 +2165,8 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 ConsumerOutput::Human,
                 conversation_preferences(None, None, None, ApprovalMode::FullAccess),
                 &[],
+                None,
+                false,
             )
             .await?;
         }
@@ -2020,6 +2196,224 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+fn codex_compat_command_requested() -> bool {
+    const COMMANDS: &[&str] = &[
+        "exec",
+        "e",
+        "resume",
+        "fork",
+        "archive",
+        "unarchive",
+        "delete",
+        "review",
+        "completion",
+        "login",
+        "logout",
+    ];
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        if matches!(argument, "--host" | "--token-file" | "--project" | "-C") {
+            let _ = arguments.next();
+            continue;
+        }
+        if argument.starts_with("--host=")
+            || argument.starts_with("--token-file=")
+            || argument.starts_with("--project=")
+            || (argument.starts_with("-C") && argument.len() > 2)
+        {
+            continue;
+        }
+        if argument.starts_with('-') {
+            continue;
+        }
+        return COMMANDS.contains(&argument);
+    }
+    false
+}
+
+fn root_help_requested() -> bool {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    matches!(arguments.as_slice(), [argument] if argument == "--help" || argument == "-h")
+}
+
+fn combined_cli_command() -> clap::Command {
+    let mut command = Cli::command();
+    let compatibility = CodexCompatCli::command();
+    for subcommand in compatibility.get_subcommands() {
+        command = command.subcommand(subcommand.clone());
+    }
+    command
+}
+
+async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = CodexCompatCli::parse();
+    if let CodexCompatCommand::Completion { shell } = &cli.command {
+        return generate_cli_completion(*shell);
+    }
+    let config = AppConfig::default();
+    let host = cli.host.trim_end_matches('/').to_owned();
+    let token_path = cli.token_file.unwrap_or_else(|| config.auth_token_path());
+    let token = if let Ok(token) = std::env::var("MCG_AUTH_TOKEN") {
+        token
+    } else {
+        std::fs::read_to_string(&token_path).map_err(|error| {
+            format!(
+                "cannot read local daemon token at {}: {error}; start mcg-daemon first",
+                token_path.display()
+            )
+        })?
+    };
+    let project = cli.project.unwrap_or(std::env::current_dir()?);
+    let client = reqwest::Client::new();
+    let host = host.as_str();
+    let token = token.trim();
+    match cli.command {
+        CodexCompatCommand::Exec(args) => {
+            let ExecArgs {
+                command,
+                json,
+                ephemeral,
+                skip_git_repo_check,
+                model,
+                sandbox,
+                dangerously_bypass_approvals_and_sandbox,
+                images,
+                output_last_message,
+                prompt,
+            } = *args;
+            Box::pin(run_codex_compatible_exec(
+                &client,
+                host,
+                token,
+                &project,
+                command,
+                json,
+                ephemeral,
+                skip_git_repo_check,
+                model,
+                sandbox,
+                dangerously_bypass_approvals_and_sandbox,
+                images,
+                output_last_message,
+                prompt,
+            ))
+            .await?;
+        }
+        CodexCompatCommand::Resume(args) => {
+            let ResumeArgs {
+                all,
+                include_non_interactive: _,
+                last,
+                session,
+            } = *args;
+            let conversation = resolve_cli_session(
+                &client,
+                host,
+                token,
+                &project,
+                session.as_deref(),
+                last,
+                all,
+                Some(false),
+            )
+            .await?;
+            Box::pin(run_interactive(
+                &client,
+                host,
+                token,
+                &project,
+                Some(conversation),
+            ))
+            .await?;
+        }
+        CodexCompatCommand::Fork(args) => {
+            let ForkArgs { all, last, session } = *args;
+            let source = resolve_cli_session(
+                &client,
+                host,
+                token,
+                &project,
+                session.as_deref(),
+                last,
+                all,
+                Some(false),
+            )
+            .await?;
+            let fork: Conversation = decode_api_response(
+                client
+                    .post(format!("{host}/api/v1/conversations/{}/fork", source.id))
+                    .bearer_auth(token)
+                    .json(&ForkConversationRequest {
+                        origin_turn_id: None,
+                    })
+                    .send()
+                    .await?,
+                "fork conversation",
+            )
+            .await?;
+            Box::pin(run_interactive(&client, host, token, &project, Some(fork))).await?;
+        }
+        CodexCompatCommand::Archive { session } => {
+            run_cli_archive(&client, host, token, &project, &session, true).await?;
+        }
+        CodexCompatCommand::Unarchive { session } => {
+            run_cli_archive(&client, host, token, &project, &session, false).await?;
+        }
+        CodexCompatCommand::Delete(args) => {
+            let DeleteArgs { session, force } = *args;
+            run_cli_delete(&client, host, token, &project, &session, force).await?;
+        }
+        CodexCompatCommand::Review(args) => {
+            let ReviewArgs {
+                uncommitted,
+                base,
+                commit,
+                title,
+                prompt,
+            } = *args;
+            Box::pin(run_codex_compatible_review(
+                &client,
+                host,
+                token,
+                &project,
+                uncommitted,
+                base,
+                commit,
+                title,
+                prompt,
+            ))
+            .await?;
+        }
+        CodexCompatCommand::Completion { .. } => unreachable!("completion handled offline"),
+        CodexCompatCommand::Login(args) if matches!(args.command, Some(LoginCommand::Status)) => {
+            run_codex(&client, host, token, CodexCommand::Account).await?;
+        }
+        CodexCompatCommand::Login(args) => {
+            let LoginArgs {
+                command: None,
+                device_auth,
+            } = *args
+            else {
+                unreachable!("login subcommand handled above")
+            };
+            if device_auth {
+                return Err(
+                    "device-code login is not yet exposed by the pinned Codex app-server; use `mcg login` for browser OAuth"
+                        .into(),
+                );
+            }
+            run_codex(&client, host, token, CodexCommand::Login).await?;
+        }
+        CodexCompatCommand::Logout => {
+            run_codex(&client, host, token, CodexCommand::Logout).await?;
+        }
+    }
     Ok(())
 }
 
@@ -2092,30 +2486,355 @@ fn read_bounded_stdin() -> Result<String, Box<dyn std::error::Error>> {
     Ok(String::from_utf8(bytes).map_err(|_| "standard input must be valid UTF-8")?)
 }
 
+fn generate_cli_completion(shell: CompletionShell) -> Result<(), Box<dyn std::error::Error>> {
+    // clap_complete recursively walks MetaCog's unusually broad compatibility + native command
+    // tree. Generate on a bounded worker stack so Windows' small main-thread stack cannot fail.
+    let output = std::thread::Builder::new()
+        .name("mcg-completion".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let mut output = Vec::new();
+            generate(
+                Shell::from(shell),
+                &mut combined_cli_command(),
+                "mcg",
+                &mut output,
+            );
+            output
+        })?
+        .join()
+        .map_err(|_| "shell completion generator panicked")?;
+    std::io::stdout().write_all(&output)?;
+    Ok(())
+}
+
+async fn list_cli_sessions(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> Result<Vec<Conversation>, Box<dyn std::error::Error>> {
+    let response: ConversationListResponse = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/conversations"))
+            .query(&[("include_archived", true)])
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "list saved conversations",
+    )
+    .await?;
+    Ok(response.conversations)
+}
+
+async fn current_cli_project_id(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+) -> Result<ProjectId, Box<dyn std::error::Error>> {
+    let canonical = std::fs::canonicalize(project)?;
+    let root = canonical
+        .to_str()
+        .ok_or("project directory must be valid Unicode")?;
+    Ok(resolve_consumer_project(client, host, token, root)
+        .await?
+        .project
+        .project_id)
+}
+
+fn choose_cli_session(
+    sessions: &[Conversation],
+) -> Result<Conversation, Box<dyn std::error::Error>> {
+    if !std::io::stdin().is_terminal() {
+        return Err("SESSION or --last is required when standard input is not a terminal".into());
+    }
+    if sessions.is_empty() {
+        return Err("no matching saved conversations were found".into());
+    }
+    eprintln!("Select a conversation:");
+    for (index, conversation) in sessions.iter().enumerate() {
+        eprintln!(
+            "  {}. {}  {}  ({})",
+            index + 1,
+            conversation.title,
+            conversation.id,
+            conversation.updated_at
+        );
+    }
+    eprint!("> ");
+    std::io::stderr().flush()?;
+    let mut selection = String::new();
+    std::io::stdin().read_line(&mut selection)?;
+    let index = selection
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "conversation selection must be a number")?;
+    sessions
+        .get(index.saturating_sub(1))
+        .cloned()
+        .ok_or_else(|| "conversation selection is out of range".into())
+}
+
+async fn resolve_cli_session(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+    selector: Option<&str>,
+    last: bool,
+    all: bool,
+    archived_state: Option<bool>,
+) -> Result<Conversation, Box<dyn std::error::Error>> {
+    if selector.is_some() && last {
+        return Err("SESSION and --last cannot be used together".into());
+    }
+    let mut sessions = list_cli_sessions(client, host, token).await?;
+    if let Some(archived) = archived_state {
+        sessions.retain(|conversation| {
+            conversation.state
+                == if archived {
+                    ConversationState::Archived
+                } else {
+                    ConversationState::Active
+                }
+        });
+    }
+    if let Some(selector) = selector {
+        if let Ok(id) = ConversationId::from_str(selector)
+            && let Some(conversation) = sessions.iter().find(|item| item.id == id)
+        {
+            return Ok(conversation.clone());
+        }
+        let matches = sessions
+            .iter()
+            .filter(|conversation| conversation.title == selector)
+            .cloned()
+            .collect::<Vec<_>>();
+        return match matches.as_slice() {
+            [conversation] => Ok(conversation.clone()),
+            [] => Err(format!("saved conversation `{selector}` was not found").into()),
+            _ => Err(format!(
+                "multiple conversations are named `{selector}`; use a conversation UUID"
+            )
+            .into()),
+        };
+    }
+    if !all {
+        let project_id = current_cli_project_id(client, host, token, project).await?;
+        sessions.retain(|conversation| conversation.project_id == Some(project_id));
+    }
+    sessions.sort_by_key(|conversation| std::cmp::Reverse(conversation.updated_at));
+    if last {
+        sessions
+            .into_iter()
+            .next()
+            .ok_or_else(|| "no matching saved conversations were found".into())
+    } else {
+        choose_cli_session(&sessions)
+    }
+}
+
+async fn run_cli_archive(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+    selector: &str,
+    archived: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conversation = resolve_cli_session(
+        client,
+        host,
+        token,
+        project,
+        Some(selector),
+        false,
+        true,
+        Some(!archived),
+    )
+    .await?;
+    let updated: Conversation = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{}/archive",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .json(&ArchiveConversationRequest { archived })
+            .send()
+            .await?,
+        if archived {
+            "archive conversation"
+        } else {
+            "restore conversation"
+        },
+    )
+    .await?;
+    println!(
+        "{} {} ({})",
+        if archived { "Archived" } else { "Restored" },
+        updated.title,
+        updated.id
+    );
+    Ok(())
+}
+
+async fn delete_cli_conversation_by_id(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    id: ConversationId,
+) -> Result<ConversationDeletionResult, Box<dyn std::error::Error>> {
+    let preview: ConversationDeletionPreview = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/conversations/{id}/delete-preview"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "preview conversation deletion",
+    )
+    .await?;
+    decode_api_response(
+        client
+            .delete(format!("{host}/api/v1/conversations/{id}"))
+            .bearer_auth(token)
+            .json(&mcg_api::DeleteConversationRequest {
+                confirmation: preview.confirmation,
+            })
+            .send()
+            .await?,
+        "delete conversation",
+    )
+    .await
+}
+
+async fn run_cli_delete(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+    selector: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if force && ConversationId::from_str(selector).is_err() {
+        return Err("--force requires a conversation UUID; names require confirmation".into());
+    }
+    let conversation = resolve_cli_session(
+        client,
+        host,
+        token,
+        project,
+        Some(selector),
+        false,
+        true,
+        None,
+    )
+    .await?;
+    let preview: ConversationDeletionPreview = decode_api_response(
+        client
+            .get(format!(
+                "{host}/api/v1/conversations/{}/delete-preview",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "preview conversation deletion",
+    )
+    .await?;
+    if !force {
+        if !std::io::stdin().is_terminal() {
+            return Err(
+                "deletion requires an interactive confirmation or UUID plus --force".into(),
+            );
+        }
+        eprintln!(
+            "Permanently delete '{}' ({}) and {} child conversation(s)? Type DELETE to continue:",
+            preview.conversation.title,
+            preview.conversation.id,
+            preview.children.len()
+        );
+        let mut confirmation = String::new();
+        std::io::stdin().read_line(&mut confirmation)?;
+        if confirmation.trim() != "DELETE" {
+            return Err("conversation deletion cancelled".into());
+        }
+    }
+    let result: ConversationDeletionResult = decode_api_response(
+        client
+            .delete(format!("{host}/api/v1/conversations/{}", conversation.id))
+            .bearer_auth(token)
+            .json(&mcg_api::DeleteConversationRequest {
+                confirmation: preview.confirmation,
+            })
+            .send()
+            .await?,
+        "delete conversation",
+    )
+    .await?;
+    println!(
+        "Deleted {} conversation(s).",
+        result.deleted_conversation_ids.len()
+    );
+    Ok(())
+}
+
 async fn run_interactive(
     client: &reqwest::Client,
     host: &str,
     token: &str,
     project: &std::path::Path,
+    initial_conversation: Option<Conversation>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let canonical_root = std::fs::canonicalize(project)?;
-    let root = canonical_root
-        .to_str()
-        .ok_or("project directory must be valid Unicode")?
-        .to_owned();
-    let resolved = resolve_consumer_project(client, host, token, &root).await?;
-    let mut project_id = Some(resolved.project.project_id);
-    let mut project_root = Some(canonical_root);
-    let mut preferences = conversation_preferences(None, None, None, ApprovalMode::FullAccess);
-    let mut conversation = create_interactive_conversation(
-        client,
-        host,
-        token,
-        project_id,
-        &preferences,
-        "MetaCog CLI",
-    )
-    .await?;
+    let (mut conversation, mut project_id, mut project_root, root, mut preferences) =
+        if let Some(conversation) = initial_conversation {
+            let project_id = conversation.project_id;
+            let project_root = match project_id {
+                Some(project_id) => {
+                    let value: serde_json::Value = decode_api_response(
+                        client
+                            .get(format!("{host}/api/v1/projects/{project_id}"))
+                            .bearer_auth(token)
+                            .send()
+                            .await?,
+                        "load the resumed conversation project",
+                    )
+                    .await?;
+                    let root = value
+                        .get("root")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("resumed project did not contain a root")?;
+                    Some(std::fs::canonicalize(root)?)
+                }
+                None => None,
+            };
+            let root = project_root.as_ref().map_or_else(
+                || "project-free".to_owned(),
+                |root| root.display().to_string(),
+            );
+            let preferences = conversation.execution_preferences.clone();
+            (conversation, project_id, project_root, root, preferences)
+        } else {
+            let canonical_root = std::fs::canonicalize(project)?;
+            let root = canonical_root
+                .to_str()
+                .ok_or("project directory must be valid Unicode")?
+                .to_owned();
+            let resolved = resolve_consumer_project(client, host, token, &root).await?;
+            let project_id = Some(resolved.project.project_id);
+            let project_root = Some(canonical_root);
+            let preferences = conversation_preferences(None, None, None, ApprovalMode::FullAccess);
+            let conversation = create_interactive_conversation(
+                client,
+                host,
+                token,
+                project_id,
+                &preferences,
+                "MetaCog CLI",
+            )
+            .await?;
+            (conversation, project_id, project_root, root, preferences)
+        };
     let mut pending_mentions = Vec::<String>::new();
     let initial_view =
         fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
@@ -4444,6 +5163,267 @@ async fn save_interactive_tui_preferences(
     Ok(())
 }
 
+fn codex_exec_prompt(words: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    if words == ["-"] || (words.is_empty() && !std::io::stdin().is_terminal()) {
+        return validated_goal(&read_bounded_stdin()?);
+    }
+    validated_goal(&words.join(" "))
+}
+
+fn codex_exec_mentions(images: &[PathBuf]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut mentions = Vec::new();
+    for image in images {
+        let value = image.to_str().ok_or("image paths must be valid Unicode")?;
+        for path in value.split(',').filter(|path| !path.trim().is_empty()) {
+            mentions.push(format!("file:{}", path.trim()));
+        }
+    }
+    Ok(mentions)
+}
+
+fn require_git_repository(project: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let output = ProcessCommand::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(project)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !output.success() {
+        return Err(
+            "not inside a Git repository; pass --skip-git-repo-check to allow MetaCog to initialize and govern this directory"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+async fn run_codex_compatible_exec(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+    command: Option<ExecCommand>,
+    json: bool,
+    ephemeral: bool,
+    skip_git_repo_check: bool,
+    model: Option<String>,
+    sandbox: Option<CodexSandboxArg>,
+    dangerously_bypass_approvals_and_sandbox: bool,
+    images: Vec<PathBuf>,
+    output_last_message: Option<PathBuf>,
+    prompt: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !skip_git_repo_check {
+        require_git_repository(project)?;
+    }
+    if matches!(sandbox, Some(CodexSandboxArg::ReadOnly)) {
+        return Err(
+            "--sandbox read-only is not yet a persisted MetaCog run preference; use workspace-write or run a project-free chat"
+                .into(),
+        );
+    }
+    let approval = if dangerously_bypass_approvals_and_sandbox
+        || matches!(sandbox, Some(CodexSandboxArg::DangerFullAccess))
+    {
+        ApprovalMode::FullAccess
+    } else {
+        ApprovalMode::Ask
+    };
+    let mentions = codex_exec_mentions(&images)?;
+    match command {
+        None => {
+            let goal = codex_exec_prompt(&prompt)?;
+            run_consumer_submission(
+                client,
+                host,
+                token,
+                project,
+                &goal,
+                None,
+                if json {
+                    ConsumerOutput::StreamJson
+                } else {
+                    ConsumerOutput::Human
+                },
+                conversation_preferences(model, None, None, approval),
+                &mentions,
+                output_last_message.as_deref(),
+                ephemeral,
+            )
+            .await
+        }
+        Some(ExecCommand::Resume {
+            last,
+            all,
+            session,
+            prompt: follow_up,
+        }) => {
+            if !prompt.is_empty() {
+                return Err("place the follow-up prompt after `exec resume`".into());
+            }
+            let conversation = resolve_cli_session(
+                client,
+                host,
+                token,
+                project,
+                session.as_deref(),
+                last,
+                all,
+                Some(false),
+            )
+            .await?;
+            let content = codex_exec_prompt(&follow_up)?;
+            let (content, mentions) =
+                resolve_cli_mentions(client, host, token, content, &mentions).await?;
+            let preferences = conversation_preferences(model, None, None, approval);
+            let mut view: ConversationView = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/messages",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&SendConversationMessageRequest {
+                        content,
+                        execution_preferences: Some(preferences),
+                        mentions,
+                    })
+                    .send()
+                    .await?,
+                "resume non-interactive conversation",
+            )
+            .await?;
+            let turn_id = view
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == ConversationRole::User)
+                .map(|message| message.turn_id)
+                .ok_or("resumed conversation did not contain the submitted turn")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "conversation_started",
+                        "conversation_id": conversation.id,
+                        "origin_turn_id": turn_id,
+                    })
+                );
+                std::io::stdout().flush()?;
+            }
+            view = wait_for_conversation(
+                client,
+                host,
+                token,
+                &conversation.id.to_string(),
+                turn_id,
+                3_600,
+                2,
+            )
+            .await?;
+            let final_message = view
+                .messages
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.turn_id == turn_id && message.role == ConversationRole::Assistant
+                })
+                .map(|message| message.content.as_str())
+                .unwrap_or_default();
+            if let Some(path) = output_last_message.as_deref() {
+                std::fs::write(path, final_message)?;
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "conversation_completed",
+                        "receipt": conversation_receipt(&view, Some(turn_id))?,
+                    })
+                );
+            } else {
+                println!("{final_message}");
+            }
+            ensure_governed_consumer_success(&view, turn_id)?;
+            if ephemeral {
+                let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn run_codex_compatible_review(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+    uncommitted: bool,
+    base: Option<String>,
+    commit: Option<String>,
+    title: Option<String>,
+    prompt: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    require_git_repository(project)?;
+    let canonical_root = std::fs::canonicalize(project)?;
+    let root = canonical_root
+        .to_str()
+        .ok_or("project directory must be valid Unicode")?;
+    let project = resolve_consumer_project(client, host, token, root).await?;
+    let target = if let Some(branch) = base {
+        mcg_codex_app_server::CodexReviewTarget::BaseBranch { branch }
+    } else if let Some(sha) = commit {
+        mcg_codex_app_server::CodexReviewTarget::Commit { sha, title }
+    } else if !prompt.is_empty() {
+        mcg_codex_app_server::CodexReviewTarget::Custom {
+            instructions: codex_exec_prompt(&prompt)?,
+        }
+    } else {
+        let _ = uncommitted;
+        mcg_codex_app_server::CodexReviewTarget::UncommittedChanges
+    };
+    let conversation = create_interactive_conversation(
+        client,
+        host,
+        token,
+        Some(project.project.project_id),
+        &conversation_preferences(None, None, None, ApprovalMode::Ask),
+        "MetaCog CLI review",
+    )
+    .await?;
+    let result: mcg_codex_app_server::CodexReviewResult = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/codex/owned-threads/{}/review",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .json(&mcg_api::CodexReviewRequest {
+                target,
+                delivery: mcg_codex_app_server::CodexReviewDelivery::Inline,
+            })
+            .send()
+            .await?,
+        "run native read-only review",
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&result.turn)?);
+    let _: Conversation = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/conversations/{}/archive",
+                conversation.id
+            ))
+            .bearer_auth(token)
+            .json(&ArchiveConversationRequest { archived: true })
+            .send()
+            .await?,
+        "archive review control conversation",
+    )
+    .await?;
+    Ok(())
+}
+
 async fn run_consumer_submission(
     client: &reqwest::Client,
     host: &str,
@@ -4454,6 +5434,8 @@ async fn run_consumer_submission(
     output: ConsumerOutput,
     preferences: ExecutionPreferences,
     mention_specs: &[String],
+    output_last_message: Option<&std::path::Path>,
+    ephemeral: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_root = std::fs::canonicalize(project_root)?;
     let root = canonical_root
@@ -4530,6 +5512,17 @@ async fn run_consumer_submission(
         2,
     )
     .await?;
+    let final_message = view
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.turn_id == origin_turn_id && message.role == ConversationRole::Assistant
+        })
+        .map(|message| message.content.clone());
+    if let Some(path) = output_last_message {
+        std::fs::write(path, final_message.as_deref().unwrap_or_default())?;
+    }
     if output == ConsumerOutput::Json {
         println!(
             "{}",
@@ -4546,19 +5539,15 @@ async fn run_consumer_submission(
     } else {
         println!("Project: {}", project.project.root);
         println!("Conversation: {}", conversation.id);
-        if let Some(text) = view
-            .messages
-            .iter()
-            .rev()
-            .find(|message| {
-                message.turn_id == origin_turn_id && message.role == ConversationRole::Assistant
-            })
-            .map(|message| message.content.as_str())
-        {
+        if let Some(text) = final_message.as_deref() {
             println!("\n{text}");
         }
     }
-    ensure_governed_consumer_success(&view, origin_turn_id)
+    ensure_governed_consumer_success(&view, origin_turn_id)?;
+    if ephemeral {
+        let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await?;
+    }
+    Ok(())
 }
 
 async fn resolve_cli_mentions(
@@ -10846,5 +11835,107 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn codex_compatible_top_level_commands_parse_with_documented_shapes() {
+        let exec = CodexCompatCli::try_parse_from([
+            "mcg",
+            "e",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--model",
+            "gpt-5.6-terra",
+            "--sandbox",
+            "workspace-write",
+            "--image",
+            "screen.png",
+            "--output-last-message",
+            "answer.txt",
+            "fix the tests",
+        ])
+        .expect("Codex-compatible exec command");
+        assert!(matches!(
+            exec.command,
+            CodexCompatCommand::Exec(args)
+                if args.json
+                    && args.ephemeral
+                    && args.skip_git_repo_check
+                    && args.model.as_deref() == Some("gpt-5.6-terra")
+                    && matches!(args.sandbox, Some(CodexSandboxArg::WorkspaceWrite))
+                    && args.images == [PathBuf::from("screen.png")]
+                    && args.output_last_message.as_deref() == Some(std::path::Path::new("answer.txt"))
+                    && args.prompt == ["fix the tests"]
+        ));
+
+        let resume = CodexCompatCli::try_parse_from([
+            "mcg",
+            "resume",
+            "--last",
+            "--all",
+            "--include-non-interactive",
+        ])
+        .expect("Codex-compatible resume command");
+        assert!(matches!(
+            resume.command,
+            CodexCompatCommand::Resume(args)
+                if args.last && args.all && args.include_non_interactive
+        ));
+
+        let review = CodexCompatCli::try_parse_from([
+            "mcg",
+            "review",
+            "--commit",
+            "abc123",
+            "--title",
+            "Fix regression",
+        ])
+        .expect("Codex-compatible review command");
+        assert!(matches!(
+            review.command,
+            CodexCompatCommand::Review(args)
+                if args.commit.as_deref() == Some("abc123")
+                    && args.title.as_deref() == Some("Fix regression")
+        ));
+        assert!(
+            CodexCompatCli::try_parse_from(["mcg", "review", "--uncommitted", "--base", "main",])
+                .is_err()
+        );
+
+        let completion = CodexCompatCli::try_parse_from(["mcg", "completion", "power-shell"])
+            .expect("official PowerShell completion spelling");
+        assert!(matches!(
+            completion.command,
+            CodexCompatCommand::Completion {
+                shell: CompletionShell::PowerShell
+            }
+        ));
+    }
+
+    #[test]
+    fn combined_help_and_completion_registry_retain_metacog_commands() {
+        let command = combined_cli_command();
+        for name in [
+            "exec",
+            "resume",
+            "fork",
+            "archive",
+            "delete",
+            "review",
+            "completion",
+            "login",
+            "project",
+            "organization",
+            "governor",
+            "plugin",
+        ] {
+            assert!(
+                command
+                    .get_subcommands()
+                    .any(|subcommand| subcommand.get_name() == name),
+                "missing {name} from combined CLI registry"
+            );
+        }
     }
 }

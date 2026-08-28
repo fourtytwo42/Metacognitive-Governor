@@ -38,18 +38,25 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | MetaCog | `mcg run --json` and `--stream-json` are governed equivalents but their flags and schemas differ. |
+| `exec` / `e` | Partial | Cycle 2 adds the compatible top-level alias, JSONL lifecycle output, stdin prompts, model/sandbox selection, image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, hook/rules flags, and persisted read-only selection remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
-| `app`, `apply`, `archive`, `completion`, `delete`, `features`, `fork`, `login`, `logout`, `resume`, `review`, `sandbox`, `unarchive`, `update` | Missing | Add compatible top-level aliases without removing MetaCog commands. |
+| `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
+| `completion` | Native | Bash, Zsh, Fish, PowerShell (`power-shell`), and Elvish completions include both Codex-compatible and MetaCog-native commands and work without the daemon. |
+| `resume`, `fork` | Partial | IDs, exact names, project-scoped `--last`, `--all`, durable forks, and terminal reopening work. The temporary numbered picker must be replaced by the same searchable TUI overlay, and non-interactive session classification/current-vs-saved-directory choice remain. |
+| `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API. Human-formatted findings and remaining global overrides need exact alignment. |
+| `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
+| `app`, `apply`, `features`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
 ## Global flag compatibility
 
-MetaCog currently supports daemon host/token path, project path, and
-command-specific execution preferences. Codex-compatible support remains for
-`--add-dir`, approval policy, sandbox, search, images, model/provider, profiles,
-permission profiles, remote endpoints/authentication, strict config, and
+MetaCog supports daemon host/token path and project path globally. Cycle 2 adds
+`exec` model, workspace-write/danger-full-access sandbox mapping, image
+references, ephemeral cleanup, JSONL, output-last-message, and Git-check flags.
+Codex-compatible support remains for `--add-dir`, the complete approval policy,
+persisted read-only sandboxing, search, local providers/OSS, profiles, permission
+profiles, remote endpoints/authentication, strict config, output schemas, and
 repeatable `-c key=value` overrides. These flags must map into governed requests;
 they may not bypass organization or approval policy.
 

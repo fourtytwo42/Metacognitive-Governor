@@ -328,3 +328,83 @@ async fn cli_completes_explicit_provider_backed_task_workflows() {
     daemon_server.abort();
     provider_server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_compatible_session_commands_use_durable_metacog_conversations() {
+    let project = tempfile::tempdir().expect("session project directory");
+    std::fs::write(project.path().join("README.md"), "session fixture")
+        .expect("session fixture file");
+    let runtime = Arc::new(
+        AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned()).expect("runtime"),
+    );
+    let project_id = ProjectId::new();
+    runtime
+        .discover_project(project.path(), project_id)
+        .expect("discover session project");
+    let (host, server) = start_server(runtime).await;
+
+    let created = run_cli(
+        &host,
+        project.path(),
+        &[
+            "conversation",
+            "create",
+            "--title",
+            "Codex compatibility session",
+            "--project-id",
+            &project_id.to_string(),
+            "--json",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "create stderr: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: serde_json::Value =
+        serde_json::from_slice(&created.stdout).expect("created conversation JSON");
+    let conversation_id = created["conversation"]["id"]
+        .as_str()
+        .expect("conversation id")
+        .to_owned();
+
+    let archived = run_cli(
+        &host,
+        project.path(),
+        &["archive", "Codex compatibility session"],
+    );
+    assert!(
+        archived.status.success(),
+        "archive stderr: {}",
+        String::from_utf8_lossy(&archived.stderr)
+    );
+    assert!(String::from_utf8_lossy(&archived.stdout).contains("Archived"));
+
+    let restored = run_cli(&host, project.path(), &["unarchive", &conversation_id]);
+    assert!(
+        restored.status.success(),
+        "unarchive stderr: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert!(String::from_utf8_lossy(&restored.stdout).contains("Restored"));
+
+    let deleted = run_cli(
+        &host,
+        project.path(),
+        &["delete", &conversation_id, "--force"],
+    );
+    assert!(
+        deleted.status.success(),
+        "delete stderr: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&deleted.stdout).contains("Deleted 1 conversation"));
+
+    let missing = run_cli(
+        &host,
+        project.path(),
+        &["conversation", "show", &conversation_id, "--json"],
+    );
+    assert!(!missing.status.success());
+    server.abort();
+}
