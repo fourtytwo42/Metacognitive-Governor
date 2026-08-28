@@ -265,7 +265,13 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         Always
     ),
     command!("skills", "List available skills", None, Immediate, Always),
-    command!("apps", "List enabled apps", None, Immediate, Apps),
+    command!(
+        "apps",
+        "Choose an enabled app and insert its $ reference",
+        Picker,
+        Immediate,
+        Apps
+    ),
     command!(
         "plugins",
         "List enabled MetaCog plugins",
@@ -446,6 +452,13 @@ mod tests {
                 .iter()
                 .any(|command| command.name == "review")
         );
+
+        let apps = CommandContext {
+            apps: true,
+            ..CommandContext::default()
+        };
+        let command = command_named("apps", apps).expect("apps command");
+        assert_eq!(command.arguments, ArgumentSchema::Picker);
     }
 
     #[test]

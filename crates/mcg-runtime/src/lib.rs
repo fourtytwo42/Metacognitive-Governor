@@ -1861,7 +1861,7 @@ fn parse_chat_agent_decision(value: &str) -> Option<ChatAgentDecision> {
             serde_json::from_str(fenced).ok()
         })
         .or_else(|| {
-            // Codex 0.144.6 can satisfy an output-schema turn with the selected enum tag as
+            // Codex 0.150.1 can satisfy an output-schema turn with the selected enum tag as
             // the first line and the selected string payload as the remaining text instead of
             // publishing the JSON object. Accept only that exact compatibility envelope. A
             // narrow marker prevents ordinary prose that merely mentions delegation from

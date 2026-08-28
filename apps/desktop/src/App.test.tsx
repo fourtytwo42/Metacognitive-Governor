@@ -694,9 +694,9 @@ beforeEach(() => {
   client.getCodexAccount.mockResolvedValue({ authenticated: false, requires_openai_auth: true });
   client.getCodexRateLimits.mockResolvedValue({ refreshed_at: "2026-08-22T00:00:00Z" });
   client.getCodexHarnessStatus.mockResolvedValue({
-    bundled_version: "0.144.6",
-    protocol_version: "0.144.6",
-    schema_sha256: "e710974af2ef773a512e039f7b38b6040f533035465ad899929f4cc52ce7a2a4",
+    bundled_version: "0.150.1",
+    protocol_version: "0.150.1",
+    schema_sha256: "844b52d4a5a8cda58794e28b3b119c3a3d20a588b7db83209c298bec62704092",
     process_state: "ready",
     initialized: true,
     account_state: "signed_out",
@@ -715,8 +715,8 @@ beforeEach(() => {
   client.getCodexStableDiscovery.mockResolvedValue({
     skills: [],
     hooks: [],
-    appsAvailable: false,
-    appsUnavailableReason: "Installed-app discovery is experimental in bundled Codex 0.144.6",
+    apps: [{ id: "calendar", name: "Calendar", description: "Work with calendar events", isAccessible: true, isEnabled: true }],
+    appsAvailable: true,
     refreshedAt: "2026-08-22T00:00:00Z"
   });
   client.reconcileOwnedCodexThread.mockResolvedValue({});
@@ -2525,6 +2525,7 @@ test("new chat presents project, workspace, branch, add, permission, and run set
   const addMenu = screen.getByRole("menu", { name: "Add" });
   expect(within(addMenu).getByRole("menuitem", { name: /Goal/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Plan mode/ })).toBeEnabled();
+  expect(within(addMenu).getByRole("menuitem", { name: /Apps/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Slash commands/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Open project folder/ })).toBeEnabled();
   expect(within(addMenu).getByRole("menuitem", { name: /Remove project/ })).toBeEnabled();
@@ -2663,13 +2664,38 @@ test("goal and plan commands are available from Add and prepare the composer", (
   expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("/plan ");
 });
 
+test("Codex apps use the shared dollar picker from Add, slash commands, and direct typing", async () => {
+  render(<App />);
+  const composer = screen.getByRole("textbox", { name: "Message" });
+
+  fireEvent.click(screen.getByLabelText("Add files and more"));
+  fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Apps/ }));
+  expect(composer).toHaveValue("$");
+  fireEvent.click(await within(screen.getByRole("listbox", { name: "Enabled apps" })).findByRole("option", { name: /Calendar/ }));
+  expect(composer).toHaveValue("$calendar ");
+
+  fireEvent.change(composer, { target: { value: "/apps ", selectionStart: 6 } });
+  fireEvent.click(within(screen.getByRole("listbox", { name: "Enabled apps" })).getByRole("option", { name: /Calendar/ }));
+  expect(composer).toHaveValue("$calendar ");
+
+  fireEvent.change(composer, { target: { value: "Use $cal", selectionStart: 8 } });
+  expect(screen.getByRole("listbox", { name: "Enabled apps" })).toBeVisible();
+  fireEvent.keyDown(composer, { key: "Tab" });
+  expect(composer).toHaveValue("Use $calendar ");
+
+  fireEvent.change(composer, { target: { value: "$", selectionStart: 1 } });
+  expect(screen.getByRole("listbox", { name: "Enabled apps" })).toBeVisible();
+  fireEvent.pointerDown(screen.getByRole("heading", { name: "What should we build?" }));
+  expect(screen.queryByRole("listbox", { name: "Enabled apps" })).not.toBeInTheDocument();
+});
+
 test("slash command palette exposes the complete inventory and runs local command dialogs", () => {
   render(<App />);
 
   fireEvent.click(screen.getByLabelText("Add files and more"));
   fireEvent.click(within(screen.getByRole("menu", { name: "Add" })).getByRole("menuitem", { name: /Slash commands/ }));
   const palette = screen.getByRole("listbox", { name: "Slash commands" });
-  expect(within(palette).getAllByRole("option")).toHaveLength(24);
+  expect(within(palette).getAllByRole("option")).toHaveLength(25);
 
   fireEvent.pointerDown(screen.getByRole("heading", { name: "What should we build?" }));
   expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();

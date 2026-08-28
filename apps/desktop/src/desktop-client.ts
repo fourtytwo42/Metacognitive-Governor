@@ -674,9 +674,22 @@ export interface CodexOwnedThread {
   last_reconciled_item_id?: string;
 }
 
+export interface CodexAppInfo {
+  id: string;
+  name: string;
+  description?: string | null;
+  logoUrl?: string | null;
+  logoUrlDark?: string | null;
+  isAccessible?: boolean;
+  isEnabled?: boolean;
+  distributionChannel?: string | null;
+  pluginDisplayNames?: string[];
+}
+
 export interface CodexStableDiscovery {
   skills: unknown[];
   hooks: unknown[];
+  apps: CodexAppInfo[];
   appsAvailable: boolean;
   appsUnavailableReason?: string;
   refreshedAt: string;

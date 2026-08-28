@@ -121,6 +121,13 @@ test.beforeEach(async ({ page }) => {
           };
           if (command === "list_conversations") return { conversations: [] };
           if (command === "codex_features") return codexFeatures;
+          if (command === "codex_stable_discovery") return {
+            skills: [],
+            hooks: [],
+            apps: [{ id: "calendar", name: "Calendar", description: "Work with calendar events", isAccessible: true, isEnabled: true }],
+            appsAvailable: true,
+            refreshedAt: now
+          };
           if (command === "set_codex_feature") {
             codexFeatures = codexFeatures.map((feature) => feature.name === args.name ? { ...feature, enabled: args.enabled } : feature);
             return codexFeatures;
@@ -559,6 +566,18 @@ test("new chat resolves project mentions with keyboard selection and exclusive p
 
   await composer.fill("email person@example.com");
   await expect(mentions).toBeHidden();
+
+  await composer.fill("Use $cal");
+  const apps = page.getByRole("listbox", { name: "Enabled apps" });
+  await expect(apps.getByRole("option", { name: /Calendar/ })).toBeVisible();
+  await composer.press("Tab");
+  await expect(composer).toHaveValue("Use $calendar ");
+  await expect(apps).toBeHidden();
+
+  await composer.fill("/apps ");
+  await expect(apps).toBeVisible();
+  await page.locator(".desktop-titlebar-brand").click();
+  await expect(apps).toBeHidden();
 });
 
 test("transient menus dismiss outside, on Escape, and when the app loses focus", async ({ page }) => {

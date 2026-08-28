@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const version = "0.144.6";
+const version = "0.150.1";
 const protocolRoot = resolve(root, "protocol", "codex-app-server", version);
 const notificationPath = resolve(protocolRoot, "typescript", "ServerNotification.ts");
 const requestPath = resolve(protocolRoot, "typescript", "ServerRequest.ts");

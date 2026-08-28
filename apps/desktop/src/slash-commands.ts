@@ -1,5 +1,6 @@
 export const SLASH_COMMANDS = [
   { name: "approve", description: "Approve one recent automatic-review denial", availability: "conditional" },
+  { name: "apps", description: "Choose an enabled app and insert its $ reference", availability: "always" },
   { name: "cloud", description: "Run the chat in the cloud", availability: "conditional" },
   { name: "cloud-environment", description: "Choose the cloud environment for the chat", availability: "conditional" },
   { name: "compact", description: "Compact the current chat context", availability: "chat" },

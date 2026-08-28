@@ -291,6 +291,7 @@ import {
   type CodexConfigurationStatus,
   type CodexPendingRequest,
   type CodexStableDiscovery,
+  type CodexAppInfo,
   type CodexLoginStart,
   type ReasoningEffort,
   type ExecutionSpeed,
@@ -616,6 +617,16 @@ function mentionTrigger(value: string, caret = value.length): MentionTrigger | n
   return { start: match.index + prefix, end: caret, query: match[1] ?? "" };
 }
 
+function appReferenceTrigger(value: string, caret = value.length): MentionTrigger | null {
+  const before = value.slice(0, caret);
+  const command = before.match(/^\/apps(?:\s+([^\s$]*))?$/u);
+  if (command) return { start: 0, end: caret, query: command[1] ?? "" };
+  const match = before.match(/(?:^|\s)\$([^\s$]*)$/u);
+  if (!match || match.index === undefined) return null;
+  const prefix = match[0].startsWith("$") ? 0 : 1;
+  return { start: match.index + prefix, end: caret, query: match[1] ?? "" };
+}
+
 function utf8Length(value: string): number { return new TextEncoder().encode(value).length; }
 
 function materializeComposerMentions(content: string, pending: PendingComposerMention[]): ComposerMentionInput[] {
@@ -856,13 +867,14 @@ function NewChatBranchSelector({ project }: { project: ProjectModel }) {
   </details>;
 }
 
-function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, onCommands, onAttachFiles, onAttachFolder, onPlugins, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; onCommands: () => void; onAttachFiles: () => void; onAttachFolder: () => void; onPlugins: () => void; existingChat?: boolean }) {
+function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPlan, onGoal, onCommands, onAttachFiles, onAttachFolder, onApps, onPlugins, existingChat = false }: { project: ProjectModel | null; disabled: boolean; onOpenFolder: () => void; onClearProject: () => void; onPlan: () => void; onGoal: () => void; onCommands: () => void; onAttachFiles: () => void; onAttachFolder: () => void; onApps: () => void; onPlugins: () => void; existingChat?: boolean }) {
   return <details className="new-chat-add-menu" data-transient-popover>
     <summary aria-label="Add files and more" title="Add files and more"><Plus aria-hidden="true" /></summary>
     <div className="new-chat-add-popover" role="menu" aria-label="Add">
       <div className="context-popover-heading">Add</div>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onAttachFiles(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><File aria-hidden="true" /><span><strong>Files</strong><small>Attach durable file snapshots to this message</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onAttachFolder(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Folder aria-hidden="true" /><span><strong>Folder</strong><small>Attach a bounded read-only folder reference</small></span></button>
+      <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onApps(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Blocks aria-hidden="true" /><span><strong>Apps</strong><small>Insert an enabled Codex app reference</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onPlugins(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Plug aria-hidden="true" /><span><strong>Plugins</strong><small>Mention an enabled plugin without invoking it</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onGoal(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target aria-hidden="true" /><span><strong>Goal</strong><small>Set a durable objective to keep pursuing</small></span></button>
       <button type="button" role="menuitem" disabled={disabled} onClick={(event) => { onPlan(); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks aria-hidden="true" /><span><strong>Plan mode</strong><small>Research, ask choices, and create a decision-complete plan</small></span></button>
@@ -877,6 +889,22 @@ function NewChatAddMenu({ project, disabled, onOpenFolder, onClearProject, onPla
       }}><X aria-hidden="true" /><span><strong>{existingChat ? "Start a project-free chat" : "Remove project"}</strong><small>{existingChat ? "Open a new read-only conversation" : "Continue without a linked workspace"}</small></span></button>
     </div>
   </details>;
+}
+
+function AppReferencePalette({ open, apps, query, onSelect }: { open: boolean; apps: CodexAppInfo[]; query: string; onSelect: (app: CodexAppInfo) => void }) {
+  if (!open) return null;
+  const needle = query.toLocaleLowerCase();
+  const candidates = apps
+    .filter((app) => app.isEnabled !== false && app.isAccessible !== false)
+    .filter((app) => !needle || `${app.name} ${app.id} ${app.description ?? ""}`.toLocaleLowerCase().includes(needle))
+    .slice(0, 100);
+  return <div className="mention-palette app-reference-palette" role="listbox" aria-label="Enabled apps" data-transient-popover data-scroll-chain>
+    <section><div className="mention-palette-heading">Apps</div>{candidates.map((app) => <button type="button" role="option" aria-selected="false" key={app.id} onClick={() => onSelect(app)}>
+      <Blocks aria-hidden="true" />
+      <span><strong>{app.name}</strong><small>{app.description || `$${app.id}`}</small></span>
+    </button>)}</section>
+    {candidates.length === 0 && <p>{apps.length === 0 ? "No enabled apps are available." : "No matching apps."}</p>}
+  </div>;
 }
 
 function MentionPalette({ open, candidates, onSelect }: { open: boolean; candidates: MentionCandidate[]; onSelect: (candidate: MentionCandidate) => void }) {
@@ -2420,6 +2448,8 @@ export function App() {
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
   const [mentionPaletteOpen, setMentionPaletteOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
+  const [appPaletteOpen, setAppPaletteOpen] = useState(false);
+  const [appQuery, setAppQuery] = useState("");
   const [slashPaletteOpen, setSlashPaletteOpen] = useState(false);
   const [commandDialog, setCommandDialog] = useState<"status" | "feedback" | "personality" | "model" | "reasoning" | "notice" | null>(null);
   const [commandNotice, setCommandNotice] = useState({ title: "", detail: "" });
@@ -2672,6 +2702,7 @@ export function App() {
       setSiteContextMenu(null);
       setSlashPaletteOpen(false);
       setMentionPaletteOpen(false);
+      setAppPaletteOpen(false);
     };
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -2679,6 +2710,7 @@ export function App() {
       closeStateMenusOutside(target);
       if (!target?.closest(".slash-command-palette, #chat-message, #goal")) setSlashPaletteOpen(false);
       if (!target?.closest(".mention-palette, #chat-message, #goal")) setMentionPaletteOpen(false);
+      if (!target?.closest(".app-reference-palette, #chat-message, #goal")) setAppPaletteOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -4776,12 +4808,21 @@ export function App() {
     if (trigger) {
       setMentionQuery(trigger.query);
       setMentionPaletteOpen(true);
+      setAppPaletteOpen(false);
       setSlashPaletteOpen(false);
       void loadMentionCandidates(trigger.query);
     } else {
       setMentionPaletteOpen(false);
-      const slashOpen = slashCommandMatches(value).length > 0;
-      setSlashPaletteOpen(slashOpen);
+      const appTrigger = appReferenceTrigger(value, caret);
+      if (appTrigger) {
+        setAppQuery(appTrigger.query);
+        setAppPaletteOpen(true);
+        setSlashPaletteOpen(false);
+      } else {
+        setAppPaletteOpen(false);
+        const slashOpen = slashCommandMatches(value).length > 0;
+        setSlashPaletteOpen(slashOpen);
+      }
     }
   }
 
@@ -4835,8 +4876,41 @@ export function App() {
     setTaskGoal(next);
     setMentionQuery("");
     setMentionPaletteOpen(true);
+    setAppPaletteOpen(false);
     setSlashPaletteOpen(false);
     void loadMentionCandidates("");
+  }
+
+  function openAppReferences() {
+    const prefix = taskGoal && !/\s$/u.test(taskGoal) ? " " : "";
+    const next = `${taskGoal}${prefix}$`;
+    setTaskGoal(next);
+    setAppQuery("");
+    setAppPaletteOpen(true);
+    setMentionPaletteOpen(false);
+    setSlashPaletteOpen(false);
+    window.requestAnimationFrame(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>(activeSurface === "threads" ? "#chat-message" : "#goal");
+      textarea?.focus();
+      textarea?.setSelectionRange(next.length, next.length);
+    });
+  }
+
+  function chooseAppReference(app: CodexAppInfo) {
+    const textarea = document.querySelector<HTMLTextAreaElement>(activeSurface === "threads" ? "#chat-message" : "#goal");
+    const caret = textarea?.selectionStart ?? taskGoal.length;
+    const trigger = appReferenceTrigger(taskGoal, caret);
+    if (!trigger) return;
+    const token = `$${app.id}`;
+    const next = `${taskGoal.slice(0, trigger.start)}${token} ${taskGoal.slice(trigger.end)}`;
+    setTaskGoal(next);
+    setAppPaletteOpen(false);
+    setAppQuery("");
+    window.requestAnimationFrame(() => {
+      const nextCaret = trigger.start + token.length + 1;
+      textarea?.focus();
+      textarea?.setSelectionRange(nextCaret, nextCaret);
+    });
   }
 
   function showCommandNotice(title: string, detail: string) {
@@ -4847,6 +4921,12 @@ export function App() {
   function chooseSlashCommand(name: SlashCommandName) {
     setTaskGoal(`/${name} `);
     setSlashPaletteOpen(false);
+    if (name === "apps") {
+      setAppQuery("");
+      setAppPaletteOpen(true);
+    } else {
+      setAppPaletteOpen(false);
+    }
     setTaskError(null);
     window.requestAnimationFrame(() => {
       const textarea = document.querySelector<HTMLTextAreaElement>(activeSurface === "threads" ? "#chat-message" : "#goal");
@@ -4862,6 +4942,15 @@ export function App() {
     const conversation = selectedChatId ? conversationViews[selectedChatId]?.conversation : undefined;
     const argument = command.argument;
     switch (command.name) {
+      case "apps":
+        if ((codexStableDiscovery?.apps ?? []).filter((app) => app.isEnabled !== false && app.isAccessible !== false).length === 0) {
+          showCommandNotice("No enabled apps", "Connect or enable a Codex app before inserting an app reference.");
+        } else {
+          setTaskGoal(`/apps${argument ? ` ${argument}` : " "}`);
+          setAppQuery(argument);
+          setAppPaletteOpen(true);
+        }
+        return true;
       case "plan":
         if (selectedChatId && conversationIsActive) {
           await changeConversationMode("plan");
@@ -5030,6 +5119,7 @@ export function App() {
     setTaskGoal("");
     setComposerMentions([]);
     setMentionPaletteOpen(false);
+    setAppPaletteOpen(false);
     if (content.startsWith("/") && !parseSlashCommand(content)) {
       setTaskError("Unknown slash command. Type / to browse available commands.");
       setTaskGoal(content);
@@ -5223,6 +5313,22 @@ export function App() {
       if ((event.key === "Enter" || event.key === "Tab") && mentionCandidates.length > 0 && !event.shiftKey && !event.nativeEvent.isComposing) {
         event.preventDefault();
         chooseMention(mentionCandidates[0]);
+        return;
+      }
+    }
+    const appCandidates = (codexStableDiscovery?.apps ?? [])
+      .filter((app) => app.isEnabled !== false && app.isAccessible !== false)
+      .filter((app) => !appQuery || `${app.name} ${app.id} ${app.description ?? ""}`.toLocaleLowerCase().includes(appQuery.toLocaleLowerCase()));
+    if (appPaletteOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAppPaletteOpen(false);
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        if (appCandidates.length > 0) chooseAppReference(appCandidates[0]);
+        else setTaskError("No matching enabled apps are available.");
         return;
       }
     }
@@ -7473,8 +7579,9 @@ export function App() {
               />
               <SlashCommandPalette value={taskGoal} open={slashPaletteOpen} onSelect={chooseSlashCommand} hasProject={Boolean(selectedProject)} hasConversation={false} />
               <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
+              <AppReferencePalette open={appPaletteOpen} apps={codexStableDiscovery?.apps ?? []} query={appQuery} onSelect={chooseAppReference} />
               <div className="composer-actions">
-                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
+                <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onApps={openAppReferences} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setAppPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
                 <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
@@ -7579,8 +7686,9 @@ export function App() {
                   <textarea id="chat-message" aria-label="Message" value={taskGoal} onChange={(event) => updateComposerValue(event.target.value, event.target.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder="Do anything" />
                   <SlashCommandPalette value={taskGoal} open={slashPaletteOpen} onSelect={chooseSlashCommand} hasProject={Boolean(workspaceProject)} hasConversation={Boolean(selectedChatId)} />
                   <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
+                  <AppReferencePalette open={appPaletteOpen} apps={codexStableDiscovery?.apps ?? []} query={appQuery} onSelect={chooseAppReference} />
                   <div className="composer-actions">
-                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
+                    <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onApps={openAppReferences} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setAppPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
                     <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
@@ -7994,7 +8102,7 @@ export function App() {
                     <div className="subsystem-row"><span className={`health-dot health-${codexHarnessStatus.unsupported_requests === 0 ? "healthy" : "unhealthy"}`} aria-hidden="true" /><span><strong>Protocol requests</strong><small>{codexPendingRequests.length} pending · {codexHarnessStatus.unsupported_requests} unsupported{codexHarnessStatus.last_unsupported_request ? ` · ${codexHarnessStatus.last_unsupported_request}` : ""}</small></span><em>{codexHarnessStatus.unsupported_requests === 0 ? "compatible" : "attention"}</em></div>
                     <div className="subsystem-row"><span className={`health-dot health-${codexConfigurationStatus ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>Configuration and sandbox</strong><small>{codexHarnessStatus.configuration_state} · Windows sandbox {codexHarnessStatus.windows_sandbox_state}</small></span><em>{codexConfigurationStatus ? "loaded" : "checking"}</em></div>
                     <div className="subsystem-row"><span className={`health-dot health-${codexHarnessStatus.recovery_state === "healthy" ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>MCP bridge and recovery</strong><small>MCP {codexHarnessStatus.mcp_bridge_state} · {codexHarnessStatus.last_notification ?? codexHarnessStatus.last_event ?? "No events yet"}</small></span><em>{codexHarnessStatus.recovery_state}</em></div>
-                    <div className="subsystem-row"><span className={`health-dot health-${codexStableDiscovery ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>Stable Codex capabilities</strong><small>{codexStableDiscovery ? `${codexStableDiscovery.skills.length} skills · ${codexStableDiscovery.hooks.length} hooks` : "Discovery unavailable"}{codexStableDiscovery?.appsUnavailableReason ? ` · Apps excluded: experimental in 0.144.6` : ""}</small></span><em>{codexStableDiscovery ? "loaded" : "checking"}</em></div>
+                    <div className="subsystem-row"><span className={`health-dot health-${codexStableDiscovery ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>Stable Codex capabilities</strong><small>{codexStableDiscovery ? `${codexStableDiscovery.skills.length} skills · ${codexStableDiscovery.hooks.length} hooks · ${codexStableDiscovery.apps.length} apps` : "Discovery unavailable"}{codexStableDiscovery?.appsUnavailableReason ? ` · ${codexStableDiscovery.appsUnavailableReason}` : ""}</small></span><em>{codexStableDiscovery ? "loaded" : "checking"}</em></div>
                     <div className="subsystem-row"><span className="health-dot health-healthy" aria-hidden="true" /><span><strong>Harness lifecycle</strong><small>{codexHarnessStatus.last_unknown_notification ? `Unknown notification retained: ${codexHarnessStatus.last_unknown_notification}` : "Unknown notifications are retained for diagnostics"}</small></span><em>{codexHarnessStatus.restart_count} starts</em></div>
                   </>}
                 </div>
@@ -9403,7 +9511,7 @@ export function App() {
             <div className="settings-control"><span><strong>Web access</strong><small>Provider and tool access stays within reviewed capabilities.</small></span><span className="count-badge">Capability based</span></div>
             <div className="settings-control"><span><strong>Reasoning and output detail</strong><small>Available model features are discovered from each provider endpoint.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Models</button></div>
           </div>
-          {advanced && <TechnicalDetails title="Codex feature flags" summary={`${codexFeatures.length} flags from pinned Codex 0.144.6`}>
+          {advanced && <TechnicalDetails title="Codex feature flags" summary={`${codexFeatures.length} flags from pinned Codex 0.150.1`}>
             <p className="form-note">These are the same process-wide flags exposed by <code>mcg features</code>. Changes affect new Codex sessions and cannot expand MetaCog organization, approval, or agent authority.</p>
             <label className="codex-feature-search"><span className="sr-only">Search Codex feature flags</span><input value={codexFeatureSearch} onChange={(event) => setCodexFeatureSearch(event.target.value)} placeholder="Search feature flags" /></label>
             <div className="codex-feature-list" data-scroll-chain aria-label="Codex feature flags">

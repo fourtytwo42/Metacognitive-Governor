@@ -3,7 +3,7 @@
 //! This is deliberately a conversation/thread harness, not a `ModelProvider`.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead as _, Read as _},
     path::{Path, PathBuf},
     process::Stdio,
@@ -77,6 +77,8 @@ pub struct CodexConfigurationStatus {
 pub struct CodexStableDiscovery {
     pub skills: Vec<Value>,
     pub hooks: Vec<Value>,
+    #[serde(default)]
+    pub apps: Vec<Value>,
     pub apps_available: bool,
     pub apps_unavailable_reason: Option<String>,
     pub refreshed_at: DateTime<Utc>,
@@ -404,15 +406,20 @@ pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), Code
         }
     }
     let schema = include_str!(
-        "../../../protocol/codex-app-server/0.144.6/codex_app_server_protocol.v2.schemas.json"
+        "../../../protocol/codex-app-server/0.150.1/codex_app_server_protocol.v2.schemas.json"
     );
-    let thread_start = schema
-        .find("ThreadStartParams")
-        .and_then(|offset| schema.get(offset..offset.saturating_add(20_000)))
+    let schema: Value = serde_json::from_str(schema).map_err(|error| {
+        CodexHarnessError::Protocol(format!("pinned schema is not valid JSON: {error}"))
+    })?;
+    let thread_start_properties = schema
+        .pointer("/definitions/ThreadStartParams/properties")
+        .and_then(Value::as_object)
         .ok_or_else(|| {
-            CodexHarnessError::Protocol("pinned schema has no ThreadStartParams".into())
+            CodexHarnessError::Protocol("pinned schema has no ThreadStartParams properties".into())
         })?;
-    if !thread_start.contains("\"config\"") || !thread_start.contains("\"cwd\"") {
+    if !thread_start_properties.contains_key("config")
+        || !thread_start_properties.contains_key("cwd")
+    {
         return Err(CodexHarnessError::Protocol(
             "pinned thread/start cannot carry per-thread configuration".into(),
         ));
@@ -1924,13 +1931,61 @@ impl CodexAppServerHarness {
         cwds: &[String],
         force_reload: bool,
     ) -> Result<CodexStableDiscovery, CodexHarnessError> {
-        let (skills, hooks) = tokio::try_join!(
+        let (skills, hooks, first_apps) = tokio::try_join!(
             self.request(
                 "skills/list",
                 json!({"cwds": cwds, "forceReload": force_reload}),
             ),
             self.request("hooks/list", json!({"cwds": cwds})),
+            self.request(
+                "app/list",
+                json!({"cursor": null, "limit": 100, "forceRefetch": force_reload}),
+            ),
         )?;
+        let mut apps = first_apps
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut cursor = first_apps
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut observed_cursors = BTreeSet::new();
+        for _ in 0..99 {
+            let Some(next_cursor) = cursor.take() else {
+                break;
+            };
+            if !observed_cursors.insert(next_cursor.clone()) {
+                return Err(CodexHarnessError::Protocol(format!(
+                    "app/list repeated pagination cursor {next_cursor:?}"
+                )));
+            }
+            let page = self
+                .request(
+                    "app/list",
+                    json!({"cursor": next_cursor, "limit": 100, "forceRefetch": false}),
+                )
+                .await?;
+            apps.extend(
+                page.get("data")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if cursor.is_some() {
+            return Err(CodexHarnessError::Protocol(format!(
+                "app/list exceeded the bounded 10,000-app discovery limit ({} entries; next cursor {:?})",
+                apps.len(),
+                cursor
+            )));
+        }
         Ok(CodexStableDiscovery {
             skills: skills
                 .get("data")
@@ -1942,11 +1997,9 @@ impl CodexAppServerHarness {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
-            apps_available: false,
-            apps_unavailable_reason: Some(
-                "The bundled Codex 0.144.6 schema marks app/list as experimental; MCG stable-only mode does not call it."
-                    .into(),
-            ),
+            apps,
+            apps_available: true,
+            apps_unavailable_reason: None,
             refreshed_at: Utc::now(),
         })
     }
@@ -2185,7 +2238,7 @@ fn thread_has_source(thread: &Value, thread_source: &str) -> bool {
     if thread.get("threadSource").and_then(Value::as_str) == Some(thread_source) {
         return true;
     }
-    // Codex 0.144.6 persists the analytics tag in rollout metadata but can omit it from
+    // Codex 0.150.1 persists the analytics tag in rollout metadata but can omit it from
     // `thread/list`. Read only the bounded session-metadata line from the server-supplied local
     // rollout path; never infer ownership from titles, prompts, or working directories.
     let Some(path) = thread.get("path").and_then(Value::as_str) else {
@@ -2221,7 +2274,7 @@ mod tests {
 
     #[test]
     fn pinned_contract_and_unknown_fields_are_tolerated() {
-        assert_eq!(CODEX_BINARY_VERSION, "0.144.6");
+        assert_eq!(CODEX_BINARY_VERSION, "0.150.1");
         let model: CodexModel = serde_json::from_value(json!({
             "id":"gpt-test","model":"gpt-test","displayName":"Test","description":"fixture",
             "hidden":false,"isDefault":true,"defaultReasoningEffort":"medium",
@@ -2234,7 +2287,7 @@ mod tests {
     #[test]
     fn checked_in_schema_matches_the_generated_protocol_contract() {
         let schema = include_bytes!(
-            "../../../protocol/codex-app-server/0.144.6/codex_app_server_protocol.v2.schemas.json"
+            "../../../protocol/codex-app-server/0.150.1/codex_app_server_protocol.v2.schemas.json"
         );
         assert_eq!(format!("{:x}", Sha256::digest(schema)), CODEX_SCHEMA_SHA256);
         assert_eq!(
@@ -2531,6 +2584,22 @@ mod tests {
             .expect("pinned Codex two-agent conformance");
     }
 
+    #[tokio::test]
+    #[ignore = "qualification gate: requires the packaged pinned Codex binary and account context"]
+    async fn installed_pinned_binary_exposes_stable_app_discovery() {
+        let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("codex"));
+        let harness = CodexAppServerHarness::new(executable);
+        let discovery = harness
+            .stable_discovery(&[], true)
+            .await
+            .expect("stable Codex discovery");
+        assert!(discovery.apps_available);
+        assert!(discovery.apps_unavailable_reason.is_none());
+        assert!(!discovery.apps.is_empty());
+    }
+
     #[test]
     fn stable_review_and_command_payloads_match_the_pinned_schema() {
         assert_eq!(
@@ -2563,12 +2632,14 @@ mod tests {
     #[test]
     fn v031_uses_only_stable_pinned_methods() {
         let schema = include_str!(
-            "../../../protocol/codex-app-server/0.144.6/codex_app_server_protocol.v2.schemas.json"
+            "../../../protocol/codex-app-server/0.150.1/codex_app_server_protocol.v2.schemas.json"
         );
         for method in [
             "review/start",
             "skills/list",
             "hooks/list",
+            "app/list",
+            "app/read",
             "fs/watch",
             "fs/unwatch",
             "command/exec",
@@ -2624,7 +2695,7 @@ mod tests {
         assert_eq!(page.next_cursor.as_deref(), Some("next"));
 
         let schema = include_str!(
-            "../../../protocol/codex-app-server/0.144.6/codex_app_server_protocol.v2.schemas.json"
+            "../../../protocol/codex-app-server/0.150.1/codex_app_server_protocol.v2.schemas.json"
         );
         assert!(schema.contains("\"experimentalFeature/list\""));
         assert!(schema.contains("\"experimentalFeature/enablement/set\""));

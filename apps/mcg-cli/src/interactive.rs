@@ -1253,6 +1253,7 @@ impl EditorState {
                     "keymap",
                     "statusline",
                     "title",
+                    "apps",
                 ]
                 .contains(&command)
                 {
@@ -1319,6 +1320,7 @@ impl EditorState {
     }
 
     fn select(&mut self, candidate: &PaletteCandidate) {
+        let request = self.palette_request();
         let Some((start, end)) = self.active_range() else {
             return;
         };
@@ -1346,7 +1348,15 @@ impl EditorState {
                 }
             }
             PaletteCandidate::Choice { value, .. } => {
-                self.edit(start, end, value);
+                if request
+                    .as_ref()
+                    .and_then(|request| request.command.as_deref())
+                    == Some("apps")
+                {
+                    self.edit(0, end, &format!("${value} "));
+                } else {
+                    self.edit(start, end, value);
+                }
             }
         }
         self.palette_dismissed = true;
@@ -1477,6 +1487,26 @@ mod tests {
         }));
         assert_eq!(state.buffer, "/goal ");
         assert!(state.mentions.is_empty());
+    }
+
+    #[test]
+    fn app_picker_selection_replaces_the_command_with_a_dollar_reference() {
+        let mut state = EditorState::default();
+        state.replace_all("/apps cal".into());
+        assert_eq!(
+            state.palette_request(),
+            Some(PaletteRequest {
+                kind: PaletteKind::CommandOption,
+                query: "cal".into(),
+                command: Some("apps".into()),
+            })
+        );
+        state.select(&PaletteCandidate::Choice {
+            value: "calendar".into(),
+            label: "Calendar".into(),
+            detail: "Enabled app".into(),
+        });
+        assert_eq!(state.buffer, "$calendar ");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const PINNED_CODEX_VERSION: &str = "0.144.6";
+const PINNED_CODEX_VERSION: &str = "0.150.1";
 
 fn main() {
     if env::var_os("CARGO_FEATURE_SINGLE_FILE_PORTABLE").is_some() {

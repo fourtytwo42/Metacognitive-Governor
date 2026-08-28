@@ -3,10 +3,10 @@ import { parseSlashCommand, slashCommandMatches, SLASH_COMMANDS } from "./slash-
 
 describe("Codex-aligned slash command registry", () => {
   it("contains the complete official command inventory without duplicates", () => {
-    expect(SLASH_COMMANDS).toHaveLength(24);
-    expect(new Set(SLASH_COMMANDS.map((command) => command.name)).size).toBe(24);
+    expect(SLASH_COMMANDS).toHaveLength(25);
+    expect(new Set(SLASH_COMMANDS.map((command) => command.name)).size).toBe(25);
     expect(SLASH_COMMANDS.map((command) => command.name)).toEqual([
-      "approve", "cloud", "cloud-environment", "compact", "fast", "feedback", "fork",
+      "approve", "apps", "cloud", "cloud-environment", "compact", "fast", "feedback", "fork",
       "goal", "ide-context", "init", "local", "mcp", "memories", "model", "pet",
       "personality", "plan", "project", "reasoning", "review", "side", "status", "task",
       "worktree"
@@ -14,7 +14,7 @@ describe("Codex-aligned slash command registry", () => {
   });
 
   it("filters only while the first composer token is being entered", () => {
-    expect(slashCommandMatches("/")).toHaveLength(24);
+    expect(slashCommandMatches("/")).toHaveLength(25);
     expect(slashCommandMatches("/cl").map((command) => command.name)).toEqual(["cloud", "cloud-environment"]);
     expect(slashCommandMatches("please /cl")).toEqual([]);
     expect(slashCommandMatches("/cloud now")).toEqual([]);

@@ -2,8 +2,8 @@
 
 Last verified 2026-08-28 against:
 
-- pinned Codex app-server `0.144.6` schema
-  `e710974af2ef773a512e039f7b38b6040f533035465ad899929f4cc52ce7a2a4`;
+- pinned Codex app-server `0.150.1` schema
+  `844b52d4a5a8cda58794e28b3b119c3a3d20a588b7db83209c298bec62704092`;
 - current official [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli);
 - current official [slash-command reference](https://learn.chatgpt.com/docs/reference/slash-commands).
 
@@ -19,12 +19,12 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | Area | Codex surface | State | Remaining gap |
 | --- | --- | --- | --- |
 | Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, `Ctrl+L`, steering, queueing, reconnect/replay, `--no-alt-screen` | Native | `Ctrl+L` clears only the rendered transcript; durable conversation history and replay remain intact. Initial image attachments enter the same durable mention queue as interactive picker selections. Inline mode preserves terminal scrollback without entering the alternate screen. |
-| References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, skills, and initial image attachments work; app completion is missing. |
+| References | `@`, `/mention`, `$skill`, `$app` | Native | Files/folders, explicitly attached resources, MetaCog plugins, Codex skills, Apps, and initial image attachments use bounded searchable completion. `$` lists accessible enabled Apps and skills; `/apps` inserts the selected `$app-id` instead of sending a command. |
 | Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
 | Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 3 adds a durable read-only preset shared with desktop. Named permission profiles, exact nested selectors, and remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
-| Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | Apps are missing; several commands print discovery data; agent selection does not replace the transcript viewport. |
+| Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. Several other commands still print discovery data; agent selection does not replace the transcript viewport. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
 | Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout and `/app` workspace/conversation handoff work. Direct desktop deep-linking to the active conversation, IDE context, and import remain; hooks/feedback are informational. |
 | Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Missing | Implement a governed sandbox mutation contract and mirror it in Settings. |
@@ -48,6 +48,8 @@ Environment variables alone are not capability discovery.
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
+| `agents`, `queue`, `migrate-rollouts` | Missing | Added by stable Codex 0.150.1 and scheduled for the next bounded parity cycle. They remain visible in this ledger rather than being simulated by similarly named MetaCog operations. |
+| global `--approve-for-me` | Missing | Added by stable Codex 0.150.1; map it to the existing governed auto-review approval mode without weakening organization policy. |
 | `apply`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
@@ -108,6 +110,13 @@ terminal sessions. It selects Ratatui's inline viewport, never enters the
 terminal alternate screen, and restores raw mode, mouse capture, and cursor
 state on exit while leaving prior terminal scrollback available.
 
+Cycle 12 upgrades the pinned binary and complete generated app-server snapshot
+from 0.144.6 to 0.150.1. Native qualification validates the real binary,
+per-thread configuration boundary, and stable paginated `app/list` contract.
+The CLI now exposes `/apps` only when discovery confirms support, inserts the
+selected `$app-id`, and merges enabled accessible Apps into `$` completion with
+skills. Pagination is bounded at 10,000 entries and rejects repeated cursors.
+
 Codex-compatible support remains incomplete for local providers/OSS,
 profiles, permission profiles, remote endpoints/authentication, strict config,
 output schemas, and hook trust. These flags must map into governed requests; they may
@@ -153,6 +162,12 @@ Cycle 10 adds a dedicated Web search panel to the same Advanced run-settings
 hierarchy. Default uses cached search, Live maps to Codex's global `--search`
 semantics, and Off remains available as the validated explicit configuration.
 The setting persists with the originating run and remains absent from Simple.
+
+Cycle 12 adds Apps to the shared New Chat and established Chat composer. The
+Add menu, `/apps`, and direct `$` typing open the same searchable, independently
+scrollable picker; selection inserts the stable `$app-id` syntax used by Codex.
+Apps stay visually and semantically distinct from MetaCog's pinned-revision
+plugin mentions. Outside interaction and Escape dismiss the picker consistently.
 
 ## Safety invariants
 

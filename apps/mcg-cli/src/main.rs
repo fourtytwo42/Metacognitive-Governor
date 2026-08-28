@@ -4110,7 +4110,7 @@ async fn interactive_palette_candidates(
         let Ok(discovery) = response.json::<serde_json::Value>().await else {
             return Vec::new();
         };
-        return discovery
+        let skills = discovery
             .get("skills")
             .and_then(serde_json::Value::as_array)
             .into_iter()
@@ -4131,9 +4131,36 @@ async fn interactive_palette_candidates(
                             .to_owned(),
                     }
                 })
+            });
+        let apps = discovery
+            .get("apps")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|app| {
+                app.get("isEnabled").and_then(serde_json::Value::as_bool) != Some(false)
+                    && app.get("isAccessible").and_then(serde_json::Value::as_bool) != Some(false)
             })
-            .take(100)
-            .collect();
+            .filter_map(|app| {
+                let id = app.get("id").and_then(serde_json::Value::as_str)?;
+                let name = app
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(id);
+                (needle.is_empty()
+                    || id.to_ascii_lowercase().contains(&needle)
+                    || name.to_ascii_lowercase().contains(&needle))
+                .then(|| PaletteCandidate::Reference {
+                    value: id.to_owned(),
+                    label: name.to_owned(),
+                    detail: app
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Enabled app")
+                        .to_owned(),
+                })
+            });
+        return apps.chain(skills).take(100).collect();
     }
     let mut candidates = if let Some(project_id) = project_id {
         match client
@@ -4442,6 +4469,48 @@ async fn interactive_command_options(
             }
             commands
         }
+        "apps" => {
+            let mut apps = Vec::new();
+            if let Ok(response) = client
+                .post(format!("{host}/api/v1/codex/discovery"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "cwds": [], "force_reload": false }))
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(discovery) = response.json::<serde_json::Value>().await {
+                    apps.extend(
+                        discovery
+                            .get("apps")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter(|app| {
+                                app.get("isEnabled").and_then(serde_json::Value::as_bool)
+                                    != Some(false)
+                                    && app.get("isAccessible").and_then(serde_json::Value::as_bool)
+                                        != Some(false)
+                            })
+                            .filter_map(|app| {
+                                let id = app.get("id")?.as_str()?.to_owned();
+                                let name = app
+                                    .get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(&id)
+                                    .to_owned();
+                                let detail = app
+                                    .get("description")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("Enabled app")
+                                    .to_owned();
+                                Some((id, name, detail))
+                            }),
+                    );
+                }
+            }
+            apps
+        }
         _ => Vec::new(),
     };
     let needle = request.query.to_ascii_lowercase();
@@ -4503,6 +4572,26 @@ async fn interactive_command_context(
     } else {
         false
     };
+    let apps = match client
+        .post(format!("{host}/api/v1/codex/discovery"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "cwds": [], "force_reload": false }))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+    {
+        Ok(response) => response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|discovery| {
+                discovery
+                    .get("appsAvailable")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false),
+        Err(_) => false,
+    };
     CommandContext {
         has_project: project_id.is_some(),
         fast_model,
@@ -4510,7 +4599,7 @@ async fn interactive_command_context(
         // an IDE context attachment contract. Keep /ide hidden until capability
         // discovery returns a handler-compatible endpoint.
         ide: false,
-        apps: false,
+        apps,
         experimental: false,
     }
 }
@@ -5550,7 +5639,7 @@ async fn run_interactive_slash(
                 |root| root.display().to_string()
             )
         ),
-        "skills" | "hooks" => {
+        "skills" | "hooks" | "apps" => {
             let discovery: serde_json::Value = decode_api_response(
                 client
                     .post(format!("{host}/api/v1/codex/discovery"))
@@ -5564,7 +5653,7 @@ async fn run_interactive_slash(
                 "discover Codex context",
             )
             .await?;
-            let key = if name == "skills" { "skills" } else { "hooks" };
+            let key = name.as_str();
             println!(
                 "{}",
                 serde_json::to_string_pretty(
