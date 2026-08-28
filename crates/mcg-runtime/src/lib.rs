@@ -44,11 +44,12 @@ use mcg_agents::{
 use mcg_codex_app_server::{
     CODEX_BINARY_VERSION, CODEX_PROTOCOL_VERSION, CodexAccount, CodexAppServerHarness,
     CodexApprovalMode, CodexApprovalPolicy, CodexApprovalRequest, CodexCommandExecRequest,
-    CodexCommandExecResult, CodexConfigurationStatus, CodexExecutionPreferences, CodexFeature,
-    CodexFsWatch, CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel,
-    CodexPendingRequest, CodexRateLimits, CodexReviewDelivery, CodexReviewResult,
-    CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery, CodexThreadInstructions,
-    CodexTurnProgress, verify_pinned_two_agent_conformance,
+    CodexCommandExecResult, CodexConfigOverride as CodexAppConfigOverride,
+    CodexConfigurationStatus, CodexExecutionPreferences, CodexFeature, CodexFsWatch,
+    CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
+    CodexRateLimits, CodexReviewDelivery, CodexReviewResult, CodexReviewTarget, CodexSandboxMode,
+    CodexStableDiscovery, CodexThreadInstructions, CodexTurnProgress,
+    verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
@@ -2485,7 +2486,54 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
         }),
         writable_roots: preferences.additional_writable_roots.clone(),
         feature_overrides: preferences.codex_feature_overrides.clone(),
+        config_overrides: codex_config_overrides(preferences),
     }
+}
+
+fn codex_config_path(key: &str) -> Result<Vec<String>, StorageError> {
+    let mut table = toml::from_str::<toml::Table>(&format!("{key} = 0")).map_err(|error| {
+        StorageError::InvalidData(format!("invalid Codex configuration key `{key}`: {error}"))
+    })?;
+    let mut path = Vec::new();
+    loop {
+        if table.len() != 1 {
+            return Err(StorageError::InvalidData(format!(
+                "Codex configuration key `{key}` must identify one dotted path"
+            )));
+        }
+        let (segment, value) = table.into_iter().next().expect("single TOML path segment");
+        if segment.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "Codex configuration key segments cannot be empty".into(),
+            ));
+        }
+        path.push(segment);
+        match value {
+            toml::Value::Table(next) => table = next,
+            toml::Value::Integer(0) => break,
+            _ => {
+                return Err(StorageError::InvalidData(format!(
+                    "Codex configuration key `{key}` is not a supported dotted path"
+                )));
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn codex_config_overrides(preferences: &ExecutionPreferences) -> Vec<CodexAppConfigOverride> {
+    preferences
+        .codex_config_overrides
+        .iter()
+        .filter_map(|value| {
+            codex_config_path(&value.key)
+                .ok()
+                .map(|path| CodexAppConfigOverride {
+                    path,
+                    value: value.value.clone(),
+                })
+        })
+        .collect()
 }
 
 fn validate_execution_preferences(
@@ -2530,6 +2578,85 @@ fn validate_execution_preferences(
                 "Codex feature `{feature}` is governed by MetaCog and cannot be overridden per run"
             ))
             .into());
+        }
+    }
+    const MAX_CODEX_CONFIG_OVERRIDES: usize = 32;
+    const MAX_CODEX_CONFIG_BYTES: usize = 16 * 1024;
+    const GOVERNED_CONFIG_SEGMENTS: &[&str] = &[
+        "agent",
+        "agents",
+        "app",
+        "apps",
+        "approval",
+        "approval_policy",
+        "browser",
+        "computer_use",
+        "credential",
+        "credentials",
+        "developer_instructions",
+        "dynamic_tools",
+        "experimental_user_input",
+        "features",
+        "hooks",
+        "instructions",
+        "mcp_servers",
+        "model_provider",
+        "model_providers",
+        "network_access",
+        "oss_provider",
+        "permissions",
+        "plugin",
+        "plugins",
+        "process",
+        "remote",
+        "rules",
+        "sandbox",
+        "sandbox_mode",
+        "shell_environment_policy",
+        "skills",
+        "show_raw_agent_reasoning",
+        "tools",
+        "user_instructions",
+        "web_search",
+        "workspace_write",
+    ];
+    if preferences.codex_config_overrides.len() > MAX_CODEX_CONFIG_OVERRIDES {
+        return Err(StorageError::InvalidData(format!(
+            "at most {MAX_CODEX_CONFIG_OVERRIDES} Codex configuration overrides are allowed per run"
+        ))
+        .into());
+    }
+    let serialized_config_bytes = serde_json::to_vec(&preferences.codex_config_overrides)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?
+        .len();
+    if serialized_config_bytes > MAX_CODEX_CONFIG_BYTES {
+        return Err(StorageError::InvalidData(format!(
+            "Codex configuration overrides exceed the {MAX_CODEX_CONFIG_BYTES}-byte per-run limit"
+        ))
+        .into());
+    }
+    for config_override in &preferences.codex_config_overrides {
+        let path = codex_config_path(config_override.key.trim())?;
+        for segment in &path {
+            let normalized = segment.to_ascii_lowercase().replace('-', "_");
+            let contains_secret = [
+                "api_key",
+                "auth",
+                "bearer",
+                "credential",
+                "password",
+                "secret",
+                "token",
+            ]
+            .iter()
+            .any(|needle| normalized.contains(needle));
+            if contains_secret || GOVERNED_CONFIG_SEGMENTS.contains(&normalized.as_str()) {
+                return Err(StorageError::InvalidData(format!(
+                    "Codex configuration `{}` is governed by MetaCog and cannot be overridden per run",
+                    config_override.key
+                ))
+                .into());
+            }
         }
     }
     const MAX_ADDITIONAL_WRITABLE_ROOTS: usize = 16;
@@ -3918,6 +4045,7 @@ impl AppRuntime {
                 .execution_preferences
                 .codex_feature_overrides
                 .clone(),
+            config_overrides: codex_config_overrides(&view.conversation.execution_preferences),
         };
         let scope = delegation.map_or_else(
             || "the current coordination batch".to_owned(),
@@ -10002,6 +10130,7 @@ impl AppRuntime {
                 .execution_preferences
                 .codex_feature_overrides
                 .clone(),
+            config_overrides: codex_config_overrides(&conversation.execution_preferences),
         };
         let host_thread_id = self
             .codex_harness
@@ -10980,6 +11109,7 @@ impl AppRuntime {
             }),
             writable_roots: preferences.additional_writable_roots.clone(),
             feature_overrides: preferences.codex_feature_overrides.clone(),
+            config_overrides: codex_config_overrides(&preferences),
         };
         let previous_thread = chat_session.codex_thread_id.clone();
         let thread_id = if let Some(thread_id) = previous_thread {
@@ -25656,6 +25786,52 @@ mod tests {
         assert!(validate_execution_preferences(&mut preferences, true).is_err());
         preferences.codex_feature_overrides = (0..33)
             .map(|index| (format!("safe_feature_{index}"), true))
+            .collect();
+        assert!(validate_execution_preferences(&mut preferences, true).is_err());
+    }
+
+    #[test]
+    fn session_config_overrides_are_typed_ordered_and_cannot_expand_authority() {
+        let mut preferences = ExecutionPreferences {
+            codex_config_overrides: vec![
+                mcg_domain::CodexConfigOverride {
+                    key: "model_verbosity".into(),
+                    value: serde_json::json!("low"),
+                },
+                mcg_domain::CodexConfigOverride {
+                    key: "history.persistence".into(),
+                    value: serde_json::json!("save-all"),
+                },
+                mcg_domain::CodexConfigOverride {
+                    key: "model_verbosity".into(),
+                    value: serde_json::json!("high"),
+                },
+            ],
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut preferences, true).expect("safe config overrides");
+        let mapped = codex_preferences(&preferences).config_overrides;
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[1].path, ["history", "persistence"]);
+        assert_eq!(mapped[2].value, serde_json::json!("high"));
+
+        for governed in [
+            "sandbox_mode",
+            "mcp_servers.private.command",
+            "provider.api_token",
+            "show_raw_agent_reasoning",
+        ] {
+            preferences.codex_config_overrides = vec![mcg_domain::CodexConfigOverride {
+                key: governed.into(),
+                value: serde_json::json!(true),
+            }];
+            assert!(validate_execution_preferences(&mut preferences, true).is_err());
+        }
+        preferences.codex_config_overrides = (0..33)
+            .map(|index| mcg_domain::CodexConfigOverride {
+                key: format!("notice_{index}"),
+                value: serde_json::json!(true),
+            })
             .collect();
         assert!(validate_execution_preferences(&mut preferences, true).is_err());
     }

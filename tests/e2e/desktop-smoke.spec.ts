@@ -493,6 +493,32 @@ test("advanced run settings expose bounded per-session Codex feature overrides",
   expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
 });
 
+test("advanced run settings expose typed bounded Codex config overrides", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+  await page.getByRole("button", { name: "Use advanced mode" }).click();
+
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByText("Codex config", { exact: true }).click();
+  await dialog.getByRole("textbox", { name: "Codex configuration key" }).fill("sandbox_mode");
+  await dialog.getByRole("textbox", { name: "Codex configuration value" }).fill('"danger-full-access"');
+  await dialog.getByRole("button", { name: "Add override" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("governed by MetaCog");
+  await dialog.getByRole("textbox", { name: "Codex configuration key" }).fill("model_verbosity");
+  await dialog.getByRole("textbox", { name: "Codex configuration value" }).fill('"low"');
+  await dialog.getByRole("button", { name: "Add override" }).click();
+  await expect(dialog.getByText("model_verbosity", { exact: true })).toBeVisible();
+  await expect(dialog.getByText('"low"', { exact: true })).toBeVisible();
+
+  const box = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+});
+
 test("new chat resolves project mentions with keyboard selection and exclusive palettes", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");

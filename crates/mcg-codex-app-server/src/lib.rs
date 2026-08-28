@@ -312,6 +312,12 @@ pub struct CodexRateLimitBucket {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodexConfigOverride {
+    pub path: Vec<String>,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CodexExecutionPreferences {
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -326,6 +332,8 @@ pub struct CodexExecutionPreferences {
     pub writable_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_overrides: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_overrides: Vec<CodexConfigOverride>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -588,11 +596,17 @@ pub enum CodexSandboxMode {
 
 impl CodexExecutionPreferences {
     fn thread_config(&self, instructions: Option<&CodexThreadInstructions>) -> Option<Value> {
-        let mut config = if self.feature_overrides.is_empty() {
-            Value::Object(Default::default())
-        } else {
-            json!({"features": self.feature_overrides})
-        };
+        let mut config = Value::Object(Default::default());
+        for override_value in &self.config_overrides {
+            apply_json_path(
+                &mut config,
+                &override_value.path,
+                override_value.value.clone(),
+            );
+        }
+        if !self.feature_overrides.is_empty() {
+            merge_json_objects(&mut config, &json!({"features": self.feature_overrides}));
+        }
         if let Some(role_config) = instructions.and_then(|value| value.config.as_ref()) {
             merge_json_objects(&mut config, role_config);
         }
@@ -658,6 +672,30 @@ impl CodexExecutionPreferences {
             CodexSandboxMode::DangerFullAccess => json!({"type": "dangerFullAccess"}),
         }
     }
+}
+
+fn apply_json_path(root: &mut Value, path: &[String], value: Value) {
+    if path.is_empty() {
+        return;
+    }
+    let mut current = root;
+    for segment in &path[..path.len() - 1] {
+        if !current.is_object() {
+            *current = Value::Object(Default::default());
+        }
+        current = current
+            .as_object_mut()
+            .expect("configuration path was normalized to an object")
+            .entry(segment.clone())
+            .or_insert_with(|| Value::Object(Default::default()));
+    }
+    if !current.is_object() {
+        *current = Value::Object(Default::default());
+    }
+    current
+        .as_object_mut()
+        .expect("configuration parent was normalized to an object")
+        .insert(path[path.len() - 1].clone(), value);
 }
 
 fn merge_json_objects(base: &mut Value, overlay: &Value) {
@@ -2357,6 +2395,41 @@ mod tests {
         assert_eq!(config["features"]["browser_use"], false);
         assert_eq!(config["features"]["shell_tool"], false);
         assert_eq!(config["custom"]["value"], 1);
+    }
+
+    #[test]
+    fn ordered_session_config_merges_beneath_features_and_role_authority() {
+        let preferences = CodexExecutionPreferences {
+            config_overrides: vec![
+                CodexConfigOverride {
+                    path: vec!["model_verbosity".into()],
+                    value: json!("low"),
+                },
+                CodexConfigOverride {
+                    path: vec!["history".into(), "persistence".into()],
+                    value: json!("save-none"),
+                },
+                CodexConfigOverride {
+                    path: vec!["model_verbosity".into()],
+                    value: json!("high"),
+                },
+            ],
+            feature_overrides: BTreeMap::from([("memories".into(), true)]),
+            ..Default::default()
+        };
+        let role = CodexThreadInstructions {
+            config: Some(json!({
+                "history": {"persistence": "save-all"},
+                "features": {"memories": false}
+            })),
+            ..Default::default()
+        };
+        let config = preferences
+            .thread_config(Some(&role))
+            .expect("merged config");
+        assert_eq!(config["model_verbosity"], "high");
+        assert_eq!(config["history"]["persistence"], "save-all");
+        assert_eq!(config["features"]["memories"], false);
     }
 
     #[test]

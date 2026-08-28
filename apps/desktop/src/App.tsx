@@ -9,6 +9,7 @@ import {
   ArrowRight,
   Blocks,
   BrainCircuit,
+  Braces,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -546,6 +547,7 @@ const DEFAULT_CHAT_RUN_PREFERENCES: ChatRunPreferences = {
   speed: "standard",
   approval_mode: "ask",
   codex_feature_overrides: {},
+  codex_config_overrides: [],
   team_preset: "automatic"
 };
 
@@ -574,6 +576,7 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       sandbox_mode: parsed.sandbox_mode,
       additional_writable_roots: parsed.additional_writable_roots ?? [],
       codex_feature_overrides: parsed.codex_feature_overrides ?? {},
+      codex_config_overrides: parsed.codex_config_overrides ?? [],
       team_preset: parsed.team_preset ?? "automatic",
       personality: parsed.personality
     };
@@ -928,13 +931,14 @@ function TechnicalDetails({ title, summary, children }: { title: string; summary
   </details>;
 }
 
-type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "features";
+type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "features" | "config";
 
 function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
   if (panel === "model") return <Cpu aria-hidden="true" />;
   if (panel === "effort") return <BrainCircuit aria-hidden="true" />;
   if (panel === "speed") return <Gauge aria-hidden="true" />;
   if (panel === "features") return <SlidersHorizontal aria-hidden="true" />;
+  if (panel === "config") return <Braces aria-hidden="true" />;
   return <Users aria-hidden="true" />;
 }
 
@@ -943,6 +947,24 @@ const GOVERNED_CODEX_FEATURES = new Set([
   "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
   "computer_use", "apps", "plugins", "image_generation", "workspace_dependencies"
 ]);
+
+const GOVERNED_CODEX_CONFIG_SEGMENTS = new Set([
+  "agent", "agents", "app", "apps", "approval", "approval_policy", "browser",
+  "computer_use", "credential", "credentials", "developer_instructions", "dynamic_tools",
+  "experimental_user_input", "features", "hooks", "instructions", "mcp_servers",
+  "model_provider", "model_providers", "network_access", "oss_provider", "permissions",
+  "plugin", "plugins", "process", "remote", "rules", "sandbox", "sandbox_mode",
+  "shell_environment_policy", "skills", "show_raw_agent_reasoning", "tools",
+  "user_instructions", "web_search", "workspace_write"
+]);
+
+function codexConfigKeyError(key: string): string | null {
+  if (!/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u.test(key)) return "Use a dotted key such as model_verbosity or history.persistence.";
+  const segments = key.toLocaleLowerCase().replaceAll("-", "_").split(".");
+  const secret = segments.some((segment) => ["api_key", "auth", "bearer", "credential", "password", "secret", "token"].some((needle) => segment.includes(needle)));
+  if (secret || segments.some((segment) => GOVERNED_CODEX_CONFIG_SEGMENTS.has(segment))) return "That setting is governed by MetaCog and cannot be overridden per run.";
+  return null;
+}
 
 function ChatRunChoice({
   selected,
@@ -990,6 +1012,9 @@ function ChatRunSelector({
 }) {
   const [panel, setPanel] = useState<ChatRunPanel>("root");
   const [featureSearch, setFeatureSearch] = useState("");
+  const [configKey, setConfigKey] = useState("");
+  const [configValue, setConfigValue] = useState("");
+  const [configError, setConfigError] = useState<string | null>(null);
   const providerModels = providers.flatMap((provider) => (provider.catalog?.models ?? []).map((model) => ({
     providerId: provider.connection.id,
     providerName: provider.connection.display_name,
@@ -1023,6 +1048,7 @@ function ChatRunSelector({
       sandbox_mode: value.sandbox_mode,
       additional_writable_roots: value.additional_writable_roots,
       codex_feature_overrides: value.codex_feature_overrides,
+      codex_config_overrides: value.codex_config_overrides,
       team_preset: value.team_preset,
       personality: value.personality
     });
@@ -1046,6 +1072,7 @@ function ChatRunSelector({
   const teamValue = TEAM_PRESET_DETAILS[value.team_preset ?? "automatic"] ? value.team_preset ?? "automatic" : "automatic";
   const writableRoots = value.additional_writable_roots ?? [];
   const featureOverrides = value.codex_feature_overrides ?? {};
+  const configOverrides = value.codex_config_overrides ?? [];
   const configurableFeatures = codexFeatures.filter((feature) => !GOVERNED_CODEX_FEATURES.has(feature.name) && feature.stage !== "removed");
   const visibleFeatures = configurableFeatures.filter((feature) => {
     const query = featureSearch.trim().toLocaleLowerCase();
@@ -1056,6 +1083,25 @@ function ChatRunSelector({
     if (state === "default") delete next[feature];
     else next[feature] = state === "enabled";
     onChange({ ...value, codex_feature_overrides: next });
+  };
+  const addConfigOverride = () => {
+    const key = configKey.trim();
+    const keyError = codexConfigKeyError(key);
+    if (keyError) {
+      setConfigError(keyError);
+      return;
+    }
+    const raw = configValue.trim();
+    if (!raw) {
+      setConfigError("Enter a value. JSON values are typed; plain text is stored as a string.");
+      return;
+    }
+    let parsed: unknown = raw;
+    try { parsed = JSON.parse(raw); } catch { /* Codex-compatible literal string fallback. */ }
+    onChange({ ...value, codex_config_overrides: [...configOverrides, { key, value: parsed }] });
+    setConfigKey("");
+    setConfigValue("");
+    setConfigError(null);
   };
   const addWritableRoot = async () => {
     const path = await pickWritableFolder();
@@ -1078,6 +1124,7 @@ function ChatRunSelector({
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("speed")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="speed" /></span><span className="chat-run-menu-copy"><strong>Speed</strong><small>{speedLabel}</small></span><ChevronRight aria-hidden="true" /></button>
         {includeTeam && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("team")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="team" /></span><span className="chat-run-menu-copy"><strong>Team</strong><small>{TEAM_PRESET_DETAILS[teamValue].label}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("features")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="features" /></span><span className="chat-run-menu-copy"><strong>Session features</strong><small>{Object.keys(featureOverrides).length > 0 ? `${Object.keys(featureOverrides).length} override${Object.keys(featureOverrides).length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
+        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("config")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="config" /></span><span className="chat-run-menu-copy"><strong>Codex config</strong><small>{configOverrides.length > 0 ? `${configOverrides.length} ordered override${configOverrides.length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
         <details className="chat-run-advanced">
           <summary>Advanced <ChevronDown aria-hidden="true" /></summary>
           <div className="chat-run-model-status">
@@ -1106,7 +1153,7 @@ function ChatRunSelector({
           </div>
         </details>
       </> : <>
-        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "features" ? "Session features" : "Team"}</span></button>
+        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : "Team"}</span></button>
         {panel === "features" ? <div className="chat-run-feature-panel">
           <p>Override supported Codex flags for this run only. MetaCog-governed authority features are managed elsewhere.</p>
           <input type="search" aria-label="Search session features" placeholder="Search features" value={featureSearch} onChange={(event) => setFeatureSearch(event.target.value)} />
@@ -1123,6 +1170,21 @@ function ChatRunSelector({
               </div>;
             })}
             {visibleFeatures.length === 0 && <small className="empty-state">{codexFeatures.length === 0 ? "Feature catalog is still loading." : "No configurable features match."}</small>}
+          </div>
+        </div> : panel === "config" ? <div className="chat-run-config-panel">
+          <p>Set typed Codex configuration for this run only. Later rows with the same key win. MetaCog-governed authority and secret-bearing settings are blocked.</p>
+          <div className="chat-run-config-form">
+            <label><span>Key</span><input aria-label="Codex configuration key" placeholder="model_verbosity" value={configKey} onChange={(event) => { setConfigKey(event.target.value); setConfigError(null); }} /></label>
+            <label><span>Value</span><input aria-label="Codex configuration value" placeholder='"low", true, 42, or plain text' value={configValue} onChange={(event) => { setConfigValue(event.target.value); setConfigError(null); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addConfigOverride(); } }} /></label>
+            <button className="secondary" type="button" onClick={addConfigOverride}>Add override</button>
+          </div>
+          {configError && <small className="chat-run-config-error" role="alert">{configError}</small>}
+          <div className="chat-run-config-list" data-scroll-chain aria-label="Codex configuration overrides">
+            {configOverrides.map((config, index) => <div className="chat-run-config-row" key={`${config.key}-${index}`}>
+              <span><code>{config.key}</code><small title={JSON.stringify(config.value)}>{JSON.stringify(config.value)}</small></span>
+              <button type="button" aria-label={`Remove Codex configuration ${config.key}`} onClick={() => onChange({ ...value, codex_config_overrides: configOverrides.filter((_, candidate) => candidate !== index) })}><X aria-hidden="true" /></button>
+            </div>)}
+            {configOverrides.length === 0 && <small className="empty-state">No per-run configuration overrides.</small>}
           </div>
         </div> : <div className="chat-run-choice-list" role="menu" aria-label={panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team preset"}>
           {panel === "model" && <>
@@ -3070,6 +3132,7 @@ export function App() {
         sandbox_mode: conversation.execution_preferences.sandbox_mode,
         additional_writable_roots: conversation.execution_preferences.additional_writable_roots ?? [],
         codex_feature_overrides: conversation.execution_preferences.codex_feature_overrides ?? {},
+        codex_config_overrides: conversation.execution_preferences.codex_config_overrides ?? [],
         team_preset: conversation.execution_preferences.team_preset ?? "automatic",
         personality: conversation.execution_preferences.personality
       }));
@@ -4601,6 +4664,7 @@ export function App() {
         sandbox_mode: preferences.sandbox_mode,
         additional_writable_roots: preferences.additional_writable_roots,
         codex_feature_overrides: preferences.codex_feature_overrides,
+        codex_config_overrides: preferences.codex_config_overrides,
         team_preset: preferences.team_preset,
         personality: preferences.personality
       };
@@ -5048,6 +5112,7 @@ export function App() {
           sandbox_mode: uncertainTurn.execution_preferences.sandbox_mode,
           additional_writable_roots: uncertainTurn.execution_preferences.additional_writable_roots ?? [],
           codex_feature_overrides: uncertainTurn.execution_preferences.codex_feature_overrides ?? {},
+          codex_config_overrides: uncertainTurn.execution_preferences.codex_config_overrides ?? [],
           team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });
       }

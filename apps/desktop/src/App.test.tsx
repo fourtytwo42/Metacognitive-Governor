@@ -2603,6 +2603,32 @@ test("advanced run settings persist safe Codex feature overrides per conversatio
   ));
 });
 
+test("advanced run settings persist typed Codex config and block governed keys", async () => {
+  render(<App />);
+  await enableAdvancedMode();
+  const settings = openNewChatRunSettings().dialog;
+  fireEvent.click(within(settings).getByText("Codex config"));
+
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration key" }), { target: { value: "sandbox_mode" } });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration value" }), { target: { value: '"danger-full-access"' } });
+  fireEvent.click(within(settings).getByRole("button", { name: "Add override" }));
+  expect(within(settings).getByRole("alert")).toHaveTextContent("governed by MetaCog");
+
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration key" }), { target: { value: "model_verbosity" } });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration value" }), { target: { value: '"low"' } });
+  fireEvent.click(within(settings).getByRole("button", { name: "Add override" }));
+  expect(within(settings).getByText("model_verbosity")).toBeVisible();
+  expect(within(settings).getByText('"low"')).toBeVisible();
+
+  fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use concise output" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ codex_config_overrides: [{ key: "model_verbosity", value: "low" }] }) })
+  ));
+});
+
 test("goal and plan commands are available from Add and prepare the composer", () => {
   render(<App />);
 
@@ -3203,11 +3229,11 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(client.createConversation).toHaveBeenCalledWith({
     title: "Explain this repository",
     project_id: project.project_id,
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, team_preset: "automatic", personality: undefined }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, codex_config_overrides: [], team_preset: "automatic", personality: undefined }
   });
   expect(client.sendConversationMessage).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000c01", {
     content: "Explain this repository",
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, team_preset: "automatic", personality: undefined },
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, codex_config_overrides: [], team_preset: "automatic", personality: undefined },
     mentions: []
   });
   expect(client.createTask).not.toHaveBeenCalled();

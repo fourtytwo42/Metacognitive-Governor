@@ -2099,6 +2099,14 @@ impl TeamPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodexConfigOverride {
+    /// TOML-compatible dotted configuration path, retained for audit and UI editing.
+    pub key: String,
+    /// Value after Codex-compatible TOML parsing (or literal-string fallback).
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionPreferences {
     #[serde(default)]
     pub model_id: Option<String>,
@@ -2124,6 +2132,11 @@ pub struct ExecutionPreferences {
     /// authority boundary and never mutate the shared Codex configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub codex_feature_overrides: BTreeMap<String, bool>,
+    /// Ordered per-run Codex configuration overrides. Later entries win, matching
+    /// repeatable `-c key=value` CLI behavior. Runtime validation prevents these
+    /// values from expanding MetaCog-governed authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_config_overrides: Vec<CodexConfigOverride>,
     #[serde(default)]
     pub team_preset: TeamPreset,
     /// Optional owner-selected response style. This never expands authority.

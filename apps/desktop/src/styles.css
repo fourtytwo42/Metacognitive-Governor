@@ -1855,7 +1855,8 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .chat-run-selector[open] > summary { border-color: var(--mcg-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--mcg-accent) 20%, transparent); }
 .chat-run-popover { position: absolute; z-index: 55; right: 0; bottom: calc(100% + 9px); display: grid; width: min(324px, calc(100vw - 32px)); max-height: min(510px, calc(100vh - 96px)); overflow: hidden; border: 1px solid var(--mcg-border); border-radius: 14px; color: var(--mcg-text); background: var(--mcg-surface-raised); box-shadow: 0 18px 45px #0008; text-align: left; }
 .chat-run-popover[data-panel="model"] { width: min(350px, calc(100vw - 32px)); }
-.chat-run-popover[data-panel="features"] { width: min(430px, calc(100vw - 32px)); }
+.chat-run-popover[data-panel="features"],
+.chat-run-popover[data-panel="config"] { width: min(430px, calc(100vw - 32px)); }
 .task-actions .chat-run-popover { top: calc(100% + 8px); bottom: auto; }
 .chat-run-menu-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 18px; align-items: center; gap: 9px; width: 100%; min-height: 52px; padding: 7px 10px; border: 0; border-radius: 0; color: var(--mcg-text); background: transparent; text-align: left; }
 .chat-run-menu-back { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: center; gap: 6px; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--mcg-border); border-radius: 0; color: var(--mcg-text); background: transparent; text-align: left; font-size: .78rem; font-weight: 600; }
@@ -1911,9 +1912,27 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .chat-run-feature-row code { overflow: hidden; color: var(--mcg-accent); font-size: .62rem; text-overflow: ellipsis; white-space: nowrap; }
 .chat-run-feature-row small { overflow: hidden; color: var(--mcg-muted); font-size: .63rem; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .chat-run-feature-row select { min-width: 110px; min-height: 32px; padding: 5px 7px; border: 1px solid var(--mcg-border); border-radius: 7px; color: var(--mcg-text); background: var(--mcg-surface-raised); font: inherit; font-size: .68rem; }
+.chat-run-config-panel { display: grid; gap: 9px; min-height: 0; padding: 8px 10px 10px; }
+.chat-run-config-panel > p { margin: 0; color: var(--mcg-muted); font-size: .68rem; line-height: 1.4; }
+.chat-run-config-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 7px; }
+.chat-run-config-form label { display: grid; gap: 4px; min-width: 0; color: var(--mcg-muted); font-size: .65rem; }
+.chat-run-config-form input { width: 100%; min-width: 0; min-height: 34px; padding: 6px 8px; border: 1px solid var(--mcg-border); border-radius: 8px; color: var(--mcg-text); background: var(--mcg-surface); font: inherit; font-size: .7rem; }
+.chat-run-config-form .secondary { min-height: 34px; padding: 6px 9px; white-space: nowrap; font-size: .68rem; }
+.chat-run-config-error { color: var(--mcg-danger); font-size: .66rem; line-height: 1.35; }
+.chat-run-config-list { display: grid; gap: 5px; max-height: min(255px, calc(100vh - 330px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.chat-run-config-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; min-width: 0; padding: 8px; border: 1px solid var(--mcg-border); border-radius: 9px; background: var(--mcg-surface); }
+.chat-run-config-row > span { display: grid; gap: 3px; min-width: 0; }
+.chat-run-config-row code, .chat-run-config-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-config-row code { color: var(--mcg-accent); font-size: .67rem; }
+.chat-run-config-row small { color: var(--mcg-muted); font-size: .63rem; }
+.chat-run-config-row button { display: grid; width: 28px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 7px; color: var(--mcg-muted); background: transparent; }
+.chat-run-config-row button:hover { color: var(--mcg-text); background: var(--mcg-surface-raised); }
+.chat-run-config-row button svg { width: 14px; height: 14px; }
 @media (max-width: 560px) {
   .chat-run-feature-row { grid-template-columns: minmax(0, 1fr); }
   .chat-run-feature-row select { width: 100%; }
+  .chat-run-config-form { grid-template-columns: minmax(0, 1fr); }
+  .chat-run-config-form .secondary { width: 100%; }
 }
 .chat-run-refresh { flex: 0 0 auto; min-height: 30px; padding: 5px 9px; font-size: .68rem; }
 @media (max-width: 760px) {

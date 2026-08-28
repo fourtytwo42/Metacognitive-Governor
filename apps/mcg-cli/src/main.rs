@@ -65,19 +65,19 @@ use mcg_api::{
 };
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
-    AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
-    ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId, ConversationMode,
-    ConversationRole, ConversationState, ConversationTurnId, ConversationTurnState,
-    ConversationView, CoordinationBatchState, ExecutionApprovalPolicy, ExecutionPreferences,
-    ExecutionSandboxMode, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
-    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
-    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
-    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
-    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    AgentWakeState, ApprovalMode, CodexConfigOverride, ComposerMentionInput, ComputerUseCapability,
+    ComputerUseRegion, ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId,
+    ConversationMode, ConversationRole, ConversationState, ConversationTurnId,
+    ConversationTurnState, ConversationView, CoordinationBatchState, ExecutionApprovalPolicy,
+    ExecutionPreferences, ExecutionSandboxMode, MemoryClaimId, MemoryTransferId, MentionCandidate,
+    MentionKind, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
+    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
+    PluginSignatureState, ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState,
+    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
+    SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
     effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
@@ -1985,23 +1985,40 @@ impl From<TaskStateArg> for TaskState {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    // Keep the very broad noninteractive command dispatcher heap-backed. Its
-    // generated future contains every CLI subcommand branch and can otherwise
-    // exceed the default Windows main-thread stack as the registry grows.
-    if let Err(error) = Box::pin(run_cli()).await {
-        // Keep every failure machine-readable, including argument-independent API,
-        // authentication, and transport errors. This makes the CLI safe to compose
-        // in harnesses without scraping Rust's `Error: ...` debug wrapper.
-        eprintln!(
-            "{}",
-            serde_json::json!({
-                "error": "cli_error",
-                "message": error.to_string(),
-            })
-        );
-        std::process::exit(1);
+fn main() {
+    // The compatibility and MetaCog command trees intentionally coexist in one
+    // binary. Keep their broad generated parser/dispatcher off Windows' small
+    // process-main stack so additive typed preferences cannot destabilize startup.
+    let status = std::thread::Builder::new()
+        .name("mcg-cli-dispatch".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("initialize MetaCog CLI runtime");
+            match runtime.block_on(Box::pin(run_cli())) {
+                Ok(()) => 0,
+                Err(error) => {
+                    // Keep every failure machine-readable, including argument-independent API,
+                    // authentication, and transport errors. This makes the CLI safe to compose
+                    // in harnesses without scraping Rust's `Error: ...` debug wrapper.
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "error": "cli_error",
+                            "message": error.to_string(),
+                        })
+                    );
+                    1
+                }
+            }
+        })
+        .expect("start MetaCog CLI dispatcher")
+        .join()
+        .unwrap_or(1);
+    if status != 0 {
+        std::process::exit(status);
     }
 }
 
@@ -2018,6 +2035,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let (native_arguments, native_overrides) = extract_native_overrides(std::env::args_os())?;
     let add_dirs = native_overrides.add_dirs;
     let feature_overrides = native_overrides.feature_overrides;
+    let config_overrides = native_overrides.config_overrides;
     let cli = Cli::parse_from(native_arguments);
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
@@ -2161,6 +2179,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 || !images.is_empty()
                 || !add_dirs.is_empty()
                 || !feature_overrides.is_empty()
+                || !config_overrides.is_empty()
                 || sandbox.is_some()
                 || approval_policy.is_some()
                 || dangerously_bypass_approvals_and_sandbox
@@ -2195,6 +2214,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 conversation_preferences(None, effort, speed, approval.into()),
             );
             run_consumer_submission(
@@ -2223,6 +2243,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2250,6 +2271,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2274,6 +2296,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2357,6 +2380,8 @@ fn codex_compat_command_requested() -> bool {
                 | "--image"
                 | "-i"
                 | "--add-dir"
+                | "--config"
+                | "-c"
                 | "--enable"
                 | "--disable"
         ) {
@@ -2371,6 +2396,8 @@ fn codex_compat_command_requested() -> bool {
             || argument.starts_with("--ask-for-approval=")
             || argument.starts_with("--image=")
             || argument.starts_with("--add-dir=")
+            || argument.starts_with("--config=")
+            || (argument.starts_with("-c") && argument.len() > 2)
             || argument.starts_with("--enable=")
             || argument.starts_with("--disable=")
             || (argument.starts_with("-C") && argument.len() > 2)
@@ -2398,6 +2425,76 @@ fn root_help_requested() -> bool {
 struct NativeOverrides {
     add_dirs: Vec<PathBuf>,
     feature_overrides: BTreeMap<String, bool>,
+    config_overrides: Vec<CodexConfigOverride>,
+}
+
+fn codex_config_key_path(key: &str) -> Result<Vec<String>, String> {
+    let mut table = toml::from_str::<toml::Table>(&format!("{key} = 0"))
+        .map_err(|error| format!("invalid Codex configuration key `{key}`: {error}"))?;
+    let mut path = Vec::new();
+    loop {
+        if table.len() != 1 {
+            return Err(format!(
+                "Codex configuration key `{key}` must identify one dotted path"
+            ));
+        }
+        let (segment, value) = table.into_iter().next().expect("single TOML path segment");
+        if segment.trim().is_empty() {
+            return Err("Codex configuration key segments cannot be empty".into());
+        }
+        path.push(segment);
+        match value {
+            toml::Value::Table(next) => table = next,
+            toml::Value::Integer(0) => break,
+            _ => return Err(format!("unsupported Codex configuration key `{key}`")),
+        }
+    }
+    Ok(path)
+}
+
+fn record_codex_config_override(
+    expression: &str,
+    overrides: &mut NativeOverrides,
+) -> Result<(), String> {
+    let (key, raw_value) = expression
+        .split_once('=')
+        .ok_or_else(|| "Codex configuration overrides use KEY=VALUE".to_owned())?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("Codex configuration key cannot be empty".into());
+    }
+    let path = codex_config_key_path(key)?;
+    let parsed = toml::from_str::<toml::Table>(&format!("value = {raw_value}"))
+        .ok()
+        .and_then(|mut table| table.remove("value"))
+        .map_or_else(
+            || serde_json::Value::String(raw_value.to_owned()),
+            |value| serde_json::to_value(value).expect("TOML values serialize to JSON"),
+        );
+    if path.len() == 2 && path[0] == "features" {
+        let enabled = parsed
+            .as_bool()
+            .ok_or_else(|| format!("Codex feature override `{key}` requires a boolean value"))?;
+        overrides.feature_overrides.insert(path[1].clone(), enabled);
+        return Ok(());
+    }
+    if path.as_slice() == ["features"] {
+        let features = parsed.as_object().ok_or_else(|| {
+            "Codex `features` configuration requires an inline table of boolean values".to_owned()
+        })?;
+        for (feature, value) in features {
+            let enabled = value.as_bool().ok_or_else(|| {
+                format!("Codex feature override `features.{feature}` requires a boolean value")
+            })?;
+            overrides.feature_overrides.insert(feature.clone(), enabled);
+        }
+        return Ok(());
+    }
+    overrides.config_overrides.push(CodexConfigOverride {
+        key: key.to_owned(),
+        value: parsed,
+    });
+    Ok(())
 }
 
 fn extract_native_overrides(
@@ -2435,6 +2532,31 @@ fn extract_native_overrides(
                 return Err("--add-dir requires a directory".into());
             }
             overrides.add_dirs.push(PathBuf::from(value));
+            continue;
+        }
+        let config_expression = if argument == "--config" || argument == "-c" {
+            Some(
+                arguments
+                    .next()
+                    .ok_or_else(|| "--config requires KEY=VALUE".to_owned())?
+                    .into_string()
+                    .map_err(|_| {
+                        "Codex configuration overrides must be valid Unicode".to_owned()
+                    })?,
+            )
+        } else {
+            argument.to_str().and_then(|value| {
+                value
+                    .strip_prefix("--config=")
+                    .or_else(|| value.strip_prefix("-c"))
+                    .map(str::to_owned)
+            })
+        };
+        if let Some(expression) = config_expression {
+            if expression.is_empty() {
+                return Err("--config requires KEY=VALUE".into());
+            }
+            record_codex_config_override(&expression, &mut overrides)?;
             continue;
         }
         let feature_state = if argument == "--enable" {
@@ -2486,6 +2608,14 @@ fn combined_cli_command() -> clap::Command {
                 .long("add-dir")
                 .value_name("DIR")
                 .help("Additional directories writable alongside the primary project. Repeatable.")
+                .action(clap::ArgAction::Append),
+        )
+        .arg(
+            clap::Arg::new("config")
+                .short('c')
+                .long("config")
+                .value_name("KEY=VALUE")
+                .help("Override a Codex configuration value for this session. Repeatable; later values win.")
                 .action(clap::ArgAction::Append),
         )
         .arg(
@@ -2563,6 +2693,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     add_dirs.extend(native_overrides.add_dirs);
     let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
     let mut feature_overrides = native_overrides.feature_overrides;
+    let config_overrides = native_overrides.config_overrides;
     for feature in cli.enable_features {
         feature_overrides.insert(feature, true);
     }
@@ -2612,6 +2743,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 images,
                 output_last_message,
                 prompt,
@@ -2643,6 +2775,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 &conversation.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2689,6 +2822,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
                 &feature_overrides,
+                &config_overrides,
                 &fork.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -5714,6 +5848,7 @@ async fn run_codex_compatible_exec(
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
+    config_overrides: &[CodexConfigOverride],
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
     prompt: Vec<String>,
@@ -5728,6 +5863,7 @@ async fn run_codex_compatible_exec(
         dangerously_bypass_approvals_and_sandbox,
         additional_writable_roots,
         feature_overrides,
+        config_overrides,
         conversation_preferences(None, None, None, ApprovalMode::Ask),
     );
     let mentions = codex_exec_mentions(&images)?;
@@ -9928,6 +10064,7 @@ fn conversation_preferences_exact(
         sandbox_mode,
         additional_writable_roots: Vec::new(),
         codex_feature_overrides: BTreeMap::new(),
+        codex_config_overrides: Vec::new(),
         team_preset: Default::default(),
         personality: None,
     }
@@ -9940,6 +10077,7 @@ fn codex_execution_preferences(
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
+    config_overrides: &[CodexConfigOverride],
     mut fallback: ExecutionPreferences,
 ) -> ExecutionPreferences {
     let execution_controls_overridden = sandbox.is_some() || approval_policy.is_some();
@@ -9948,6 +10086,7 @@ fn codex_execution_preferences(
     }
     fallback.additional_writable_roots = additional_writable_roots.to_vec();
     fallback.codex_feature_overrides = feature_overrides.clone();
+    fallback.codex_config_overrides = config_overrides.to_vec();
     if dangerously_bypass_approvals_and_sandbox {
         fallback.approval_mode = ApprovalMode::FullAccess;
         fallback.approval_policy = Some(ExecutionApprovalPolicy::Never);
@@ -9994,6 +10133,7 @@ fn codex_execution_preferences_override(
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
+    config_overrides: &[CodexConfigOverride],
     fallback: &ExecutionPreferences,
 ) -> Option<ExecutionPreferences> {
     if model.is_none()
@@ -10001,6 +10141,7 @@ fn codex_execution_preferences_override(
         && approval_policy.is_none()
         && additional_writable_roots.is_empty()
         && feature_overrides.is_empty()
+        && config_overrides.is_empty()
         && !dangerously_bypass_approvals_and_sandbox
     {
         return None;
@@ -10012,6 +10153,7 @@ fn codex_execution_preferences_override(
         dangerously_bypass_approvals_and_sandbox,
         additional_writable_roots,
         feature_overrides,
+        config_overrides,
         fallback.clone(),
     ))
 }
@@ -12531,6 +12673,11 @@ mod tests {
                 ".",
                 "--enable",
                 "memories",
+                "--config=features={memories=true, sqlite=false}",
+                "-c",
+                "model_verbosity=\"low\"",
+                "--config=history.persistence=save-all",
+                "-cfeatures.sqlite=false",
                 "--disable=memories",
                 "--enable=sqlite",
             ]
@@ -12559,6 +12706,19 @@ mod tests {
         assert_eq!(
             interactive_overrides.feature_overrides.get("sqlite"),
             Some(&true)
+        );
+        assert_eq!(
+            interactive_overrides.config_overrides,
+            [
+                CodexConfigOverride {
+                    key: "model_verbosity".into(),
+                    value: serde_json::json!("low"),
+                },
+                CodexConfigOverride {
+                    key: "history.persistence".into(),
+                    value: serde_json::json!("save-all"),
+                },
+            ]
         );
 
         let (run_arguments, run_overrides) = extract_native_overrides(
@@ -12595,6 +12755,7 @@ mod tests {
             false,
             &["C:/shared".into()],
             &BTreeMap::from([("memories".into(), true)]),
+            &interactive_overrides.config_overrides,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(independent.model_id.as_deref(), Some("gpt-5.6-terra"));
@@ -12612,6 +12773,10 @@ mod tests {
             independent.codex_feature_overrides.get("memories"),
             Some(&true)
         );
+        assert_eq!(
+            independent.codex_config_overrides,
+            interactive_overrides.config_overrides
+        );
 
         let yolo = codex_execution_preferences(
             None,
@@ -12620,6 +12785,7 @@ mod tests {
             true,
             &[],
             &BTreeMap::new(),
+            &[],
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(yolo.approval_mode, ApprovalMode::FullAccess);

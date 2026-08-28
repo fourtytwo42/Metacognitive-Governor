@@ -275,6 +275,7 @@ export type TeamPreset = "automatic" | "fast" | "balanced" | "thorough";
 export type ApprovalMode = "ask" | "auto_review" | "read_only" | "full_access";
 export type ExecutionApprovalPolicy = "untrusted" | "on-request" | "never";
 export type ExecutionSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+export interface CodexConfigOverride { key: string; value: unknown; }
 
 export interface GitHubAccount {
   login: string;
@@ -312,6 +313,7 @@ export interface ChatRunPreferences {
   sandbox_mode?: ExecutionSandboxMode;
   additional_writable_roots?: string[];
   codex_feature_overrides?: Record<string, boolean>;
+  codex_config_overrides?: CodexConfigOverride[];
   team_preset: TeamPreset;
   personality?: string;
 }
@@ -325,6 +327,7 @@ export interface ExecutionPreferences {
   sandbox_mode?: ExecutionSandboxMode;
   additional_writable_roots?: string[];
   codex_feature_overrides?: Record<string, boolean>;
+  codex_config_overrides?: CodexConfigOverride[];
   team_preset?: TeamPreset;
   personality?: string;
 }
