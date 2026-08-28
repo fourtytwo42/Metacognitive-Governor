@@ -53,7 +53,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.40"
+version = "0.4.41"
 edition = "2024"
 license = "UNLICENSED"
 rust-version = "1.93"

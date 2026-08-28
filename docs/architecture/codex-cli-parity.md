@@ -18,8 +18,8 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 
 | Area | Codex surface | State | Remaining gap |
 | --- | --- | --- | --- |
-| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, steering, queueing, reconnect/replay | Native | Add native images and `Ctrl+L` display clearing. |
-| References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, and skills work; app completion and images are missing. |
+| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, steering, queueing, reconnect/replay | Native | Add `Ctrl+L` display clearing. Initial image attachments now enter the same durable mention queue as interactive picker selections. |
+| References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, skills, and initial image attachments work; app completion is missing. |
 | Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
 | Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 3 adds a durable read-only preset shared with desktop. Named permission profiles, exact nested selectors, and remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-3 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, model selection, independent `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-4 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -51,14 +51,20 @@ Environment variables alone are not capability discovery.
 
 ## Global flag compatibility
 
-MetaCog supports daemon host/token path and project path globally. Cycles 2-3 add
-`exec` model, independent approval-policy and sandbox selection (including
-read-only), image references, ephemeral cleanup, JSONL, output-last-message, and
-Git-check flags. Codex-compatible support remains for applying those execution
-flags to the interactive root command, `--add-dir`, search, local providers/OSS,
-profiles, permission profiles, remote endpoints/authentication, strict config,
-output schemas, and repeatable `-c key=value` overrides. These flags must map
-into governed requests; they may not bypass organization or approval policy.
+MetaCog supports daemon host/token path and project path globally. Cycle 4 moves
+model, approval policy, sandbox, `--yolo`, and repeatable/comma-separated initial
+image attachments to the shared global parser. They now work before or after
+`exec`, on the interactive root and bare/piped prompts, on resumed/forked TUI
+sessions, and on the MetaCog consumer `run` path. The safer interactive and bare
+prompt default is Ask; exact approval and sandbox selections remain independent
+and persist in governed execution preferences. Ephemeral cleanup, JSONL,
+output-last-message, and Git-check flags remain `exec`-specific.
+
+Codex-compatible support remains for `--add-dir`, live search, local
+providers/OSS, profiles, permission profiles, remote endpoints/authentication,
+strict config, output schemas, `--no-alt-screen`, feature toggles, hook trust,
+and repeatable `-c key=value` overrides. These flags must map into governed
+requests; they may not bypass organization or approval policy.
 
 ## Desktop alignment rule
 

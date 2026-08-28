@@ -170,6 +170,21 @@ struct Cli {
     /// Select the project directory for consumer work (defaults to the current directory).
     #[arg(short = 'C', long = "project", global = true)]
     project: Option<PathBuf>,
+    /// Model used for a new interactive session or bare prompt.
+    #[arg(short = 'm', long, global = true)]
+    model: Option<String>,
+    /// Sandbox applied to model-generated commands.
+    #[arg(short = 's', long, value_enum, global = true)]
+    sandbox: Option<CodexSandboxArg>,
+    /// Configure when model-generated commands require approval.
+    #[arg(short = 'a', long = "ask-for-approval", value_enum, global = true)]
+    approval_policy: Option<CodexApprovalPolicyArg>,
+    /// Disable both approval prompts and sandboxing for this new session.
+    #[arg(long, alias = "yolo", global = true)]
+    dangerously_bypass_approvals_and_sandbox: bool,
+    /// Attach image files to the first prompt or interactive draft.
+    #[arg(short = 'i', long = "image", value_name = "FILE", global = true)]
+    images: Vec<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -348,6 +363,16 @@ struct CodexCompatCli {
     token_file: Option<PathBuf>,
     #[arg(short = 'C', long = "project", global = true)]
     project: Option<PathBuf>,
+    #[arg(short = 'm', long, global = true)]
+    model: Option<String>,
+    #[arg(short = 's', long, value_enum, global = true)]
+    sandbox: Option<CodexSandboxArg>,
+    #[arg(short = 'a', long = "ask-for-approval", value_enum, global = true)]
+    approval_policy: Option<CodexApprovalPolicyArg>,
+    #[arg(long, alias = "yolo", global = true)]
+    dangerously_bypass_approvals_and_sandbox: bool,
+    #[arg(short = 'i', long = "image", value_name = "FILE", global = true)]
+    images: Vec<PathBuf>,
     #[command(subcommand)]
     command: CodexCompatCommand,
 }
@@ -423,16 +448,6 @@ struct ExecArgs {
     ephemeral: bool,
     #[arg(long)]
     skip_git_repo_check: bool,
-    #[arg(short = 'm', long)]
-    model: Option<String>,
-    #[arg(short = 's', long, value_enum)]
-    sandbox: Option<CodexSandboxArg>,
-    #[arg(short = 'a', long = "ask-for-approval", value_enum)]
-    approval_policy: Option<CodexApprovalPolicyArg>,
-    #[arg(long, alias = "yolo")]
-    dangerously_bypass_approvals_and_sandbox: bool,
-    #[arg(short = 'i', long = "image", value_name = "PATH")]
-    images: Vec<PathBuf>,
     #[arg(short = 'o', long)]
     output_last_message: Option<PathBuf>,
     #[arg(value_name = "PROMPT", num_args = 0..)]
@@ -2042,6 +2057,11 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = reqwest::Client::new();
     let project = cli.project.unwrap_or(std::env::current_dir()?);
+    let model = cli.model;
+    let sandbox = cli.sandbox;
+    let approval_policy = cli.approval_policy;
+    let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
+    let images = cli.images;
     let host = host.as_str();
 
     match cli.command {
@@ -2091,7 +2111,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             command: Some(command),
             json,
             stream_json,
-            model,
+            model: run_model,
             effort,
             speed,
             approval: _,
@@ -2100,10 +2120,15 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             if json
                 || stream_json
+                || run_model.is_some()
                 || model.is_some()
                 || effort.is_some()
                 || speed.is_some()
                 || !mentions.is_empty()
+                || !images.is_empty()
+                || sandbox.is_some()
+                || approval_policy.is_some()
+                || dangerously_bypass_approvals_and_sandbox
                 || !goal.is_empty()
             {
                 return Err(
@@ -2117,15 +2142,23 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             command: None,
             json,
             stream_json,
-            model,
+            model: run_model,
             effort,
             speed,
             approval,
-            mentions,
+            mut mentions,
             goal,
         }) => {
             let goal = validated_goal(&goal.join(" "))?;
             let supplemental = read_optional_piped_input()?;
+            mentions.extend(codex_exec_mentions(&images)?);
+            let preferences = codex_execution_preferences(
+                run_model.or(model.clone()),
+                sandbox,
+                approval_policy,
+                dangerously_bypass_approvals_and_sandbox,
+                conversation_preferences(None, effort, speed, approval.into()),
+            );
             run_consumer_submission(
                 &client,
                 host,
@@ -2134,7 +2167,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &goal,
                 supplemental,
                 consumer_output(json, stream_json),
-                conversation_preferences(model, effort, speed, approval.into()),
+                preferences,
                 &mentions,
                 None,
                 false,
@@ -2144,6 +2177,14 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Prompt(words)) => {
             let goal = os_words_to_goal(words)?;
             let supplemental = read_optional_piped_input()?;
+            let preferences = codex_execution_preferences(
+                model.clone(),
+                sandbox,
+                approval_policy,
+                dangerously_bypass_approvals_and_sandbox,
+                conversation_preferences(None, None, None, ApprovalMode::Ask),
+            );
+            let mentions = codex_exec_mentions(&images)?;
             run_consumer_submission(
                 &client,
                 host,
@@ -2152,18 +2193,43 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &goal,
                 supplemental,
                 ConsumerOutput::Human,
-                conversation_preferences(None, None, None, ApprovalMode::FullAccess),
-                &[],
+                preferences,
+                &mentions,
                 None,
                 false,
             )
             .await?;
         }
         None if std::io::stdin().is_terminal() => {
-            run_interactive(&client, host, token.trim(), &project, None).await?;
+            let preferences = codex_execution_preferences(
+                model.clone(),
+                sandbox,
+                approval_policy,
+                dangerously_bypass_approvals_and_sandbox,
+                conversation_preferences(None, None, None, ApprovalMode::Ask),
+            );
+            let mentions = codex_exec_mentions(&images)?;
+            run_interactive(
+                &client,
+                host,
+                token.trim(),
+                &project,
+                None,
+                Some(preferences),
+                mentions,
+            )
+            .await?;
         }
         None => {
             let goal = validated_goal(&read_bounded_stdin()?)?;
+            let preferences = codex_execution_preferences(
+                model,
+                sandbox,
+                approval_policy,
+                dangerously_bypass_approvals_and_sandbox,
+                conversation_preferences(None, None, None, ApprovalMode::Ask),
+            );
+            let mentions = codex_exec_mentions(&images)?;
             run_consumer_submission(
                 &client,
                 host,
@@ -2172,8 +2238,8 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &goal,
                 None,
                 ConsumerOutput::Human,
-                conversation_preferences(None, None, None, ApprovalMode::FullAccess),
-                &[],
+                preferences,
+                &mentions,
                 None,
                 false,
             )
@@ -2227,14 +2293,36 @@ fn codex_compat_command_requested() -> bool {
         let Some(argument) = argument.to_str() else {
             continue;
         };
-        if matches!(argument, "--host" | "--token-file" | "--project" | "-C") {
+        if matches!(
+            argument,
+            "--host"
+                | "--token-file"
+                | "--project"
+                | "-C"
+                | "--model"
+                | "-m"
+                | "--sandbox"
+                | "-s"
+                | "--ask-for-approval"
+                | "-a"
+                | "--image"
+                | "-i"
+        ) {
             let _ = arguments.next();
             continue;
         }
         if argument.starts_with("--host=")
             || argument.starts_with("--token-file=")
             || argument.starts_with("--project=")
+            || argument.starts_with("--model=")
+            || argument.starts_with("--sandbox=")
+            || argument.starts_with("--ask-for-approval=")
+            || argument.starts_with("--image=")
             || (argument.starts_with("-C") && argument.len() > 2)
+            || (argument.starts_with("-m") && argument.len() > 2)
+            || (argument.starts_with("-s") && argument.len() > 2)
+            || (argument.starts_with("-a") && argument.len() > 2)
+            || (argument.starts_with("-i") && argument.len() > 2)
         {
             continue;
         }
@@ -2265,6 +2353,11 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     if let CodexCompatCommand::Completion { shell } = &cli.command {
         return generate_cli_completion(*shell);
     }
+    let model = cli.model;
+    let sandbox = cli.sandbox;
+    let approval_policy = cli.approval_policy;
+    let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
+    let images = cli.images;
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
     let token_path = cli.token_file.unwrap_or_else(|| config.auth_token_path());
@@ -2289,11 +2382,6 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 json,
                 ephemeral,
                 skip_git_repo_check,
-                model,
-                sandbox,
-                approval_policy,
-                dangerously_bypass_approvals_and_sandbox,
-                images,
                 output_last_message,
                 prompt,
             } = *args;
@@ -2334,12 +2422,22 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(false),
             )
             .await?;
+            let preferences = codex_execution_preferences_override(
+                model.clone(),
+                sandbox,
+                approval_policy,
+                dangerously_bypass_approvals_and_sandbox,
+                &conversation.execution_preferences,
+            );
+            let mentions = codex_exec_mentions(&images)?;
             Box::pin(run_interactive(
                 &client,
                 host,
                 token,
                 &project,
                 Some(conversation),
+                preferences,
+                mentions,
             ))
             .await?;
         }
@@ -2368,7 +2466,24 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 "fork conversation",
             )
             .await?;
-            Box::pin(run_interactive(&client, host, token, &project, Some(fork))).await?;
+            let preferences = codex_execution_preferences_override(
+                model.clone(),
+                sandbox,
+                approval_policy,
+                dangerously_bypass_approvals_and_sandbox,
+                &fork.execution_preferences,
+            );
+            let mentions = codex_exec_mentions(&images)?;
+            Box::pin(run_interactive(
+                &client,
+                host,
+                token,
+                &project,
+                Some(fork),
+                preferences,
+                mentions,
+            ))
+            .await?;
         }
         CodexCompatCommand::Archive { session } => {
             run_cli_archive(&client, host, token, &project, &session, true).await?;
@@ -2796,6 +2911,8 @@ async fn run_interactive(
     token: &str,
     project: &std::path::Path,
     initial_conversation: Option<Conversation>,
+    initial_preferences: Option<ExecutionPreferences>,
+    initial_mentions: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut conversation, mut project_id, mut project_root, root, mut preferences) =
         if let Some(conversation) = initial_conversation {
@@ -2823,7 +2940,8 @@ async fn run_interactive(
                 || "project-free".to_owned(),
                 |root| root.display().to_string(),
             );
-            let preferences = conversation.execution_preferences.clone();
+            let preferences =
+                initial_preferences.unwrap_or_else(|| conversation.execution_preferences.clone());
             (conversation, project_id, project_root, root, preferences)
         } else {
             let canonical_root = std::fs::canonicalize(project)?;
@@ -2834,7 +2952,8 @@ async fn run_interactive(
             let resolved = resolve_consumer_project(client, host, token, &root).await?;
             let project_id = Some(resolved.project.project_id);
             let project_root = Some(canonical_root);
-            let preferences = conversation_preferences(None, None, None, ApprovalMode::FullAccess);
+            let preferences = initial_preferences
+                .unwrap_or_else(|| conversation_preferences(None, None, None, ApprovalMode::Ask));
             let conversation = create_interactive_conversation(
                 client,
                 host,
@@ -2846,7 +2965,7 @@ async fn run_interactive(
             .await?;
             (conversation, project_id, project_root, root, preferences)
         };
-    let mut pending_mentions = Vec::<String>::new();
+    let mut pending_mentions = initial_mentions;
     let initial_view =
         fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
     let branch = git_branch(project_root.as_deref()).unwrap_or_else(|| "no branch".into());
@@ -5239,31 +5358,13 @@ async fn run_codex_compatible_exec(
     if !skip_git_repo_check {
         require_git_repository(project)?;
     }
-    let approval = if dangerously_bypass_approvals_and_sandbox {
-        ApprovalMode::FullAccess
-    } else if matches!(sandbox, Some(CodexSandboxArg::ReadOnly)) {
-        ApprovalMode::ReadOnly
-    } else {
-        ApprovalMode::Ask
-    };
-    let exact_approval = if dangerously_bypass_approvals_and_sandbox {
-        Some(ExecutionApprovalPolicy::Never)
-    } else {
-        approval_policy.map(|policy| match policy {
-            CodexApprovalPolicyArg::Untrusted => ExecutionApprovalPolicy::Untrusted,
-            CodexApprovalPolicyArg::OnRequest => ExecutionApprovalPolicy::OnRequest,
-            CodexApprovalPolicyArg::Never => ExecutionApprovalPolicy::Never,
-        })
-    };
-    let exact_sandbox = if dangerously_bypass_approvals_and_sandbox {
-        Some(ExecutionSandboxMode::DangerFullAccess)
-    } else {
-        sandbox.map(|mode| match mode {
-            CodexSandboxArg::ReadOnly => ExecutionSandboxMode::ReadOnly,
-            CodexSandboxArg::WorkspaceWrite => ExecutionSandboxMode::WorkspaceWrite,
-            CodexSandboxArg::DangerFullAccess => ExecutionSandboxMode::DangerFullAccess,
-        })
-    };
+    let preferences = codex_execution_preferences(
+        model,
+        sandbox,
+        approval_policy,
+        dangerously_bypass_approvals_and_sandbox,
+        conversation_preferences(None, None, None, ApprovalMode::Ask),
+    );
     let mentions = codex_exec_mentions(&images)?;
     match command {
         None => {
@@ -5280,14 +5381,7 @@ async fn run_codex_compatible_exec(
                 } else {
                     ConsumerOutput::Human
                 },
-                conversation_preferences_exact(
-                    model,
-                    None,
-                    None,
-                    approval,
-                    exact_approval,
-                    exact_sandbox,
-                ),
+                preferences,
                 &mentions,
                 output_last_message.as_deref(),
                 ephemeral,
@@ -5317,14 +5411,6 @@ async fn run_codex_compatible_exec(
             let content = codex_exec_prompt(&follow_up)?;
             let (content, mentions) =
                 resolve_cli_mentions(client, host, token, content, &mentions).await?;
-            let preferences = conversation_preferences_exact(
-                model,
-                None,
-                None,
-                approval,
-                exact_approval,
-                exact_sandbox,
-            );
             let mut view: ConversationView = decode_api_response(
                 client
                     .post(format!(
@@ -9480,6 +9566,79 @@ fn conversation_preferences_exact(
     }
 }
 
+fn codex_execution_preferences(
+    model: Option<String>,
+    sandbox: Option<CodexSandboxArg>,
+    approval_policy: Option<CodexApprovalPolicyArg>,
+    dangerously_bypass_approvals_and_sandbox: bool,
+    mut fallback: ExecutionPreferences,
+) -> ExecutionPreferences {
+    let execution_controls_overridden = sandbox.is_some() || approval_policy.is_some();
+    if let Some(model) = model {
+        fallback.model_id = Some(model);
+    }
+    if dangerously_bypass_approvals_and_sandbox {
+        fallback.approval_mode = ApprovalMode::FullAccess;
+        fallback.approval_policy = Some(ExecutionApprovalPolicy::Never);
+        fallback.sandbox_mode = Some(ExecutionSandboxMode::DangerFullAccess);
+        return fallback;
+    }
+    if let Some(policy) = approval_policy {
+        fallback.approval_policy = Some(match policy {
+            CodexApprovalPolicyArg::Untrusted => ExecutionApprovalPolicy::Untrusted,
+            CodexApprovalPolicyArg::OnRequest => ExecutionApprovalPolicy::OnRequest,
+            CodexApprovalPolicyArg::Never => ExecutionApprovalPolicy::Never,
+        });
+    }
+    if let Some(mode) = sandbox {
+        fallback.sandbox_mode = Some(match mode {
+            CodexSandboxArg::ReadOnly => ExecutionSandboxMode::ReadOnly,
+            CodexSandboxArg::WorkspaceWrite => ExecutionSandboxMode::WorkspaceWrite,
+            CodexSandboxArg::DangerFullAccess => ExecutionSandboxMode::DangerFullAccess,
+        });
+    }
+    if execution_controls_overridden {
+        fallback.approval_mode =
+            if matches!(fallback.sandbox_mode, Some(ExecutionSandboxMode::ReadOnly)) {
+                ApprovalMode::ReadOnly
+            } else if matches!(
+                (fallback.approval_policy, fallback.sandbox_mode),
+                (
+                    Some(ExecutionApprovalPolicy::Never),
+                    Some(ExecutionSandboxMode::DangerFullAccess)
+                )
+            ) {
+                ApprovalMode::FullAccess
+            } else {
+                ApprovalMode::Ask
+            };
+    }
+    fallback
+}
+
+fn codex_execution_preferences_override(
+    model: Option<String>,
+    sandbox: Option<CodexSandboxArg>,
+    approval_policy: Option<CodexApprovalPolicyArg>,
+    dangerously_bypass_approvals_and_sandbox: bool,
+    fallback: &ExecutionPreferences,
+) -> Option<ExecutionPreferences> {
+    if model.is_none()
+        && sandbox.is_none()
+        && approval_policy.is_none()
+        && !dangerously_bypass_approvals_and_sandbox
+    {
+        return None;
+    }
+    Some(codex_execution_preferences(
+        model,
+        sandbox,
+        approval_policy,
+        dangerously_bypass_approvals_and_sandbox,
+        fallback.clone(),
+    ))
+}
+
 fn conversation_batch_terminal(state: CoordinationBatchState) -> bool {
     matches!(
         state,
@@ -11921,18 +12080,75 @@ mod tests {
         ])
         .expect("Codex-compatible exec command");
         assert!(matches!(
-            exec.command,
+            &exec.command,
             CodexCompatCommand::Exec(args)
                 if args.json
                     && args.ephemeral
                     && args.skip_git_repo_check
-                    && args.model.as_deref() == Some("gpt-5.6-terra")
-                    && matches!(args.sandbox, Some(CodexSandboxArg::ReadOnly))
-                    && matches!(args.approval_policy, Some(CodexApprovalPolicyArg::Untrusted))
-                    && args.images == [PathBuf::from("screen.png")]
                     && args.output_last_message.as_deref() == Some(std::path::Path::new("answer.txt"))
                     && args.prompt == ["fix the tests"]
         ));
+        assert_eq!(exec.model.as_deref(), Some("gpt-5.6-terra"));
+        assert!(matches!(exec.sandbox, Some(CodexSandboxArg::ReadOnly)));
+        assert!(matches!(
+            exec.approval_policy,
+            Some(CodexApprovalPolicyArg::Untrusted)
+        ));
+        assert_eq!(exec.images, [PathBuf::from("screen.png")]);
+
+        let before_command = CodexCompatCli::try_parse_from([
+            "mcg",
+            "--model",
+            "gpt-5.6-terra",
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "on-request",
+            "--image",
+            "screen.png",
+            "exec",
+            "--json",
+            "fix the tests",
+        ])
+        .expect("global Codex-compatible flags before exec");
+        assert_eq!(before_command.model.as_deref(), Some("gpt-5.6-terra"));
+        assert!(matches!(
+            before_command.sandbox,
+            Some(CodexSandboxArg::WorkspaceWrite)
+        ));
+        assert!(matches!(
+            before_command.approval_policy,
+            Some(CodexApprovalPolicyArg::OnRequest)
+        ));
+        assert_eq!(before_command.images, [PathBuf::from("screen.png")]);
+        assert!(matches!(
+            &before_command.command,
+            CodexCompatCommand::Exec(args) if args.json && args.prompt == ["fix the tests"]
+        ));
+
+        let interactive = Cli::try_parse_from([
+            "mcg",
+            "--model",
+            "gpt-5.6-luna",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "never",
+            "--image",
+            "diagram.png",
+        ])
+        .expect("interactive root execution flags");
+        assert!(interactive.command.is_none());
+        assert_eq!(interactive.model.as_deref(), Some("gpt-5.6-luna"));
+        assert!(matches!(
+            interactive.sandbox,
+            Some(CodexSandboxArg::ReadOnly)
+        ));
+        assert!(matches!(
+            interactive.approval_policy,
+            Some(CodexApprovalPolicyArg::Never)
+        ));
+        assert_eq!(interactive.images, [PathBuf::from("diagram.png")]);
 
         let exact = conversation_preferences_exact(
             None,
@@ -11947,6 +12163,38 @@ mod tests {
             Some(ExecutionApprovalPolicy::Untrusted)
         );
         assert_eq!(exact.sandbox_mode, Some(ExecutionSandboxMode::ReadOnly));
+
+        let independent = codex_execution_preferences(
+            Some("gpt-5.6-terra".to_owned()),
+            Some(CodexSandboxArg::DangerFullAccess),
+            Some(CodexApprovalPolicyArg::OnRequest),
+            false,
+            conversation_preferences(None, None, None, ApprovalMode::Ask),
+        );
+        assert_eq!(independent.model_id.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(
+            independent.approval_policy,
+            Some(ExecutionApprovalPolicy::OnRequest)
+        );
+        assert_eq!(
+            independent.sandbox_mode,
+            Some(ExecutionSandboxMode::DangerFullAccess)
+        );
+        assert_eq!(independent.approval_mode, ApprovalMode::Ask);
+
+        let yolo = codex_execution_preferences(
+            None,
+            Some(CodexSandboxArg::ReadOnly),
+            Some(CodexApprovalPolicyArg::Untrusted),
+            true,
+            conversation_preferences(None, None, None, ApprovalMode::Ask),
+        );
+        assert_eq!(yolo.approval_mode, ApprovalMode::FullAccess);
+        assert_eq!(yolo.approval_policy, Some(ExecutionApprovalPolicy::Never));
+        assert_eq!(
+            yolo.sandbox_mode,
+            Some(ExecutionSandboxMode::DangerFullAccess)
+        );
 
         let resume = CodexCompatCli::try_parse_from([
             "mcg",

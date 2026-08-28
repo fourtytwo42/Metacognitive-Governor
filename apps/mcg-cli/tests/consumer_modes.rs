@@ -117,6 +117,50 @@ fn run_cli_with_stdin(
     child.wait_with_output().expect("CLI output")
 }
 
+#[test]
+fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command() {
+    for arguments in [
+        vec![
+            "--model",
+            "gpt-5.6-terra",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "untrusted",
+            "--image",
+            "screen.png",
+            "exec",
+            "--help",
+        ],
+        vec![
+            "exec",
+            "--model",
+            "gpt-5.6-terra",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "untrusted",
+            "--image",
+            "screen.png",
+            "--help",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mcg"))
+            .args(arguments)
+            .output()
+            .expect("Codex-compatible help process");
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage: mcg"));
+        assert!(stdout.contains("--ask-for-approval"));
+        assert!(stdout.contains("--sandbox"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_supports_structured_task_and_error_workflows() {
     let project = tempfile::tempdir().expect("project directory");
