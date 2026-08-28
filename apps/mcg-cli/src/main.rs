@@ -364,8 +364,10 @@ struct CodexCompatCli {
     host: String,
     #[arg(long)]
     token_file: Option<PathBuf>,
-    #[arg(short = 'C', long = "project", global = true)]
+    #[arg(short = 'C', long = "cd", visible_alias = "project", global = true)]
     project: Option<PathBuf>,
+    #[arg(short = 'c', long = "config", value_name = "KEY=VALUE", global = true)]
+    config: Vec<String>,
     #[arg(short = 'm', long, global = true)]
     model: Option<String>,
     #[arg(short = 's', long, value_enum, global = true)]
@@ -424,6 +426,34 @@ enum CodexCompatCommand {
         #[command(subcommand)]
         command: FeaturesCommand,
     },
+    /// Run an owner-supplied command inside the pinned Codex Windows sandbox.
+    Sandbox(Box<SandboxArgs>),
+}
+
+#[derive(Debug, Args)]
+#[command(trailing_var_arg = true)]
+struct SandboxArgs {
+    /// JSON value returned by `codex/sandbox-state-meta` to apply directly.
+    #[arg(long)]
+    sandbox_state_json: Option<String>,
+    /// Add a readable root to the supplied sandbox state. Repeatable.
+    #[arg(long = "sandbox-state-readable-root")]
+    sandbox_state_readable_roots: Vec<PathBuf>,
+    /// Disable direct network access in the supplied sandbox state.
+    #[arg(long)]
+    sandbox_state_disable_network: bool,
+    /// Named permissions profile from the active Codex configuration stack.
+    #[arg(short = 'P', long)]
+    permission_profile: Option<String>,
+    /// Layer `$CODEX_HOME/<name>.config.toml` over the base Codex configuration.
+    #[arg(short = 'p', long)]
+    profile: Option<String>,
+    /// Include managed requirements while resolving an explicit permissions profile.
+    #[arg(long)]
+    include_managed_config: bool,
+    /// Full command and arguments to execute under the Codex sandbox.
+    #[arg(value_name = "COMMAND", required = true, allow_hyphen_values = true)]
+    command: Vec<OsString>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2410,6 +2440,7 @@ fn codex_compat_command_requested() -> bool {
         "login",
         "logout",
         "features",
+        "sandbox",
     ];
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -2477,6 +2508,7 @@ struct NativeOverrides {
     add_dirs: Vec<PathBuf>,
     feature_overrides: BTreeMap<String, bool>,
     config_overrides: Vec<CodexConfigOverride>,
+    raw_config_overrides: Vec<String>,
     no_alt_screen: bool,
 }
 
@@ -2516,6 +2548,7 @@ fn record_codex_config_override(
         return Err("Codex configuration key cannot be empty".into());
     }
     let path = codex_config_key_path(key)?;
+    overrides.raw_config_overrides.push(expression.to_owned());
     let parsed = toml::from_str::<toml::Table>(&format!("value = {raw_value}"))
         .ok()
         .and_then(|mut table| table.remove("value"))
@@ -2777,9 +2810,79 @@ fn run_codex_rollout_migration(
     Ok(())
 }
 
+fn run_codex_sandbox(
+    args: &SandboxArgs,
+    project: Option<&std::path::Path>,
+    overrides: &NativeOverrides,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex"));
+    let mut command = ProcessCommand::new(executable);
+    command.args(codex_sandbox_arguments(args, project, overrides));
+    let status = command.status()?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn codex_sandbox_arguments(
+    args: &SandboxArgs,
+    project: Option<&std::path::Path>,
+    overrides: &NativeOverrides,
+) -> Vec<OsString> {
+    let mut command = vec![OsString::from("sandbox")];
+    for expression in &overrides.raw_config_overrides {
+        command.push(OsString::from("--config"));
+        command.push(OsString::from(expression));
+    }
+    for (feature, enabled) in &overrides.feature_overrides {
+        command.push(OsString::from(if *enabled {
+            "--enable"
+        } else {
+            "--disable"
+        }));
+        command.push(OsString::from(feature));
+    }
+    if let Some(state) = &args.sandbox_state_json {
+        command.push(OsString::from("--sandbox-state-json"));
+        command.push(OsString::from(state));
+    }
+    for root in &args.sandbox_state_readable_roots {
+        command.push(OsString::from("--sandbox-state-readable-root"));
+        command.push(root.as_os_str().to_owned());
+    }
+    if args.sandbox_state_disable_network {
+        command.push(OsString::from("--sandbox-state-disable-network"));
+    }
+    if let Some(profile) = &args.permission_profile {
+        command.push(OsString::from("--permission-profile"));
+        command.push(OsString::from(profile));
+    }
+    if let Some(profile) = &args.profile {
+        command.push(OsString::from("--profile"));
+        command.push(OsString::from(profile));
+    }
+    if let Some(project) = project {
+        command.push(OsString::from("--cd"));
+        command.push(project.as_os_str().to_owned());
+    }
+    if args.include_managed_config {
+        command.push(OsString::from("--include-managed-config"));
+    }
+    command.push(OsString::from("--"));
+    command.extend(args.command.iter().cloned());
+    command
+}
+
 async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let (arguments, native_overrides) = extract_native_overrides(std::env::args_os())?;
     let cli = CodexCompatCli::parse_from(arguments);
+    debug_assert!(
+        cli.config.is_empty(),
+        "native config flags are extracted before parsing"
+    );
     if let CodexCompatCommand::Completion { shell } = &cli.command {
         return generate_cli_completion(*shell);
     }
@@ -2788,6 +2891,9 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let CodexCompatCommand::MigrateRollouts(args) = &cli.command {
         return run_codex_rollout_migration(args);
+    }
+    if let CodexCompatCommand::Sandbox(args) = &cli.command {
+        return run_codex_sandbox(args, cli.project.as_deref(), &native_overrides);
     }
     let model = cli.model;
     let sandbox = cli.sandbox;
@@ -2828,6 +2934,9 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         CodexCompatCommand::App(_) => unreachable!("app handled before daemon authentication"),
         CodexCompatCommand::MigrateRollouts(_) => {
             unreachable!("rollout migration handled before daemon authentication")
+        }
+        CodexCompatCommand::Sandbox(_) => {
+            unreachable!("sandbox handled before daemon authentication")
         }
         CodexCompatCommand::Agents => {
             run_codex_agents(&client, host, token).await?;
@@ -13223,6 +13332,36 @@ mod tests {
                 command: FeaturesCommand::Enable { feature }
             } if feature == "memories"
         ));
+
+        let sandbox = CodexCompatCli::try_parse_from([
+            "mcg",
+            "--project",
+            ".",
+            "sandbox",
+            "--sandbox-state-json",
+            r#"{"type":"windowsRestrictedToken"}"#,
+            "--sandbox-state-readable-root",
+            "docs",
+            "--sandbox-state-disable-network",
+            "--permission-profile",
+            "build",
+            "--profile",
+            "ci",
+            "--include-managed-config",
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Get-Location",
+        ])
+        .expect("Codex-compatible sandbox command");
+        assert!(matches!(
+            sandbox.command,
+            CodexCompatCommand::Sandbox(args)
+                if args.permission_profile.as_deref() == Some("build")
+                    && args.profile.as_deref() == Some("ci")
+                    && args.sandbox_state_disable_network
+                    && args.command.first() == Some(&OsString::from("powershell.exe"))
+        ));
     }
 
     #[test]
@@ -13238,6 +13377,7 @@ mod tests {
             "review",
             "completion",
             "features",
+            "sandbox",
             "login",
             "project",
             "organization",
@@ -13251,5 +13391,52 @@ mod tests {
                 "missing {name} from combined CLI registry"
             );
         }
+    }
+
+    #[test]
+    fn sandbox_forwarding_preserves_every_codex_option_and_literal_command() {
+        let (cleaned, overrides) = extract_native_overrides(
+            [
+                "mcg",
+                "-c",
+                "model_verbosity=\"low\"",
+                "--enable",
+                "memories",
+                "--disable",
+                "sqlite",
+                "sandbox",
+                "cmd.exe",
+                "/c",
+                "echo ok",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .expect("extract sandbox-native overrides");
+        let parsed = CodexCompatCli::try_parse_from(cleaned).expect("parse sandbox command");
+        let CodexCompatCommand::Sandbox(args) = parsed.command else {
+            panic!("expected sandbox command");
+        };
+        let arguments =
+            codex_sandbox_arguments(&args, Some(std::path::Path::new("C:/work")), &overrides);
+        assert_eq!(
+            arguments,
+            [
+                "sandbox",
+                "--config",
+                "model_verbosity=\"low\"",
+                "--enable",
+                "memories",
+                "--disable",
+                "sqlite",
+                "--cd",
+                "C:/work",
+                "--",
+                "cmd.exe",
+                "/c",
+                "echo ok",
+            ]
+            .map(OsString::from)
+        );
     }
 }

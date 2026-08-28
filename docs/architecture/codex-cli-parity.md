@@ -52,7 +52,8 @@ Environment variables alone are not capability discovery.
 | `queue` | Native | Resolves a conversation UUID or exact name, validates global execution and image-reference options, durably persists the queued owner turn, and returns after daemon acceptance while governed work continues FIFO. |
 | `migrate-rollouts` | Native | Daemon-free pass-through to the pinned Codex 0.150.1 migration engine with dry-run default, `--apply`, repeated `--thread`, throughput, JSON, and verbose controls. MetaCog does not reinterpret Codex rollout storage. |
 | global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
-| `apply`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
+| `sandbox` | Native | `mcg sandbox` is a daemon-free pass-through to the pinned Codex 0.150.1 Windows restricted-token sandbox. It preserves explicit state JSON, readable roots, network disabling, named permission/config profiles, managed configuration, working directory, literal command arguments, and repeatable config/feature overrides. The child process exit code and diagnostics pass through unchanged. |
+| `apply`, `update`, `mcp-server` | Missing | `apply` must not mutate Git outside MetaCog's review/apply authority, `update` must update the signed MetaCog bundle rather than only its Codex sidecar, and `mcp-server` must not expose an ungoverned agent endpoint. Native governed equivalents remain to be implemented. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
 ## Global flag compatibility
@@ -118,6 +119,16 @@ per-thread configuration boundary, and stable paginated `app/list` contract.
 The CLI now exposes `/apps` only when discovery confirms support, inserts the
 selected `$app-id`, and merges enabled accessible Apps into `$` completion with
 skills. Pagination is bounded at 10,000 entries and rejects repeated cursors.
+
+Cycle 14 adds the stable top-level `sandbox` family as an exact daemon-free
+owner utility over the pinned Codex executable. Unlike model-generated shell
+work, this command contains only the owner's literal argv and does not create or
+expand Chat, Coordinator, Coder, Tester, project, approval, or organization
+authority. MetaCog preserves the installed Codex permission/config profile and
+managed-requirements behavior instead of reimplementing or weakening the
+restricted-token sandbox. Direct-process parity is covered by complete argument
+projection tests and by comparing the wrapper's real exit code and diagnostic
+with the pinned Codex command on the same host.
 
 Codex-compatible support remains incomplete for local providers/OSS,
 profiles, permission profiles, remote endpoints/authentication, strict config,

@@ -258,6 +258,37 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
     assert!(root_help.contains("agents"));
     assert!(root_help.contains("queue"));
     assert!(root_help.contains("migrate-rollouts"));
+    assert!(root_help.contains("sandbox"));
+}
+
+#[test]
+fn sandbox_is_daemon_free_and_exposes_the_pinned_codex_contract() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mcg"))
+        .args(["sandbox", "--help"])
+        .env_remove("MCG_AUTH_TOKEN")
+        .output()
+        .expect("sandbox help process");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "Run an owner-supplied command inside the pinned Codex Windows sandbox",
+        "--sandbox-state-json",
+        "--sandbox-state-readable-root",
+        "--sandbox-state-disable-network",
+        "--permission-profile",
+        "--profile",
+        "--include-managed-config",
+        "<COMMAND>...",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in:\n{stdout}"
+        );
+    }
 }
 
 #[cfg(windows)]
