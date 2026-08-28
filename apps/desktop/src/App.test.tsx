@@ -2577,6 +2577,32 @@ test("project-free chats cannot add writable folders", async () => {
   expect(within(dialog).getByText("Choose a project before adding writable folders.")).toBeVisible();
 });
 
+test("advanced run settings persist safe Codex feature overrides per conversation", async () => {
+  client.getCodexFeatures.mockResolvedValue([
+    { name: "memories", stage: "beta", displayName: "Memories", description: "Use durable memories.", enabled: false, defaultEnabled: false },
+    { name: "shell_tool", stage: "stable", displayName: "Shell tool", enabled: true, defaultEnabled: true }
+  ]);
+  render(<App />);
+
+  let settings = openNewChatRunSettings().dialog;
+  expect(within(settings).queryByText("Session features")).not.toBeInTheDocument();
+  fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
+  await enableAdvancedMode();
+  settings = openNewChatRunSettings().dialog;
+  fireEvent.click(await within(settings).findByText("Session features"));
+  fireEvent.change(within(settings).getByRole("searchbox", { name: "Search session features" }), { target: { value: "memor" } });
+  expect(within(settings).getByText("Memories")).toBeVisible();
+  expect(within(settings).queryByText("Shell tool")).not.toBeInTheDocument();
+  fireEvent.change(within(settings).getByRole("combobox", { name: "Memories session override" }), { target: { value: "enabled" } });
+  fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use memories for this turn" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ codex_feature_overrides: { memories: true } }) })
+  ));
+});
+
 test("goal and plan commands are available from Add and prepare the composer", () => {
   render(<App />);
 
@@ -3177,11 +3203,11 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(client.createConversation).toHaveBeenCalledWith({
     title: "Explain this repository",
     project_id: project.project_id,
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic", personality: undefined }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, team_preset: "automatic", personality: undefined }
   });
   expect(client.sendConversationMessage).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000c01", {
     content: "Explain this repository",
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", team_preset: "automatic", personality: undefined },
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, team_preset: "automatic", personality: undefined },
     mentions: []
   });
   expect(client.createTask).not.toHaveBeenCalled();

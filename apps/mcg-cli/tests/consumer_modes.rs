@@ -200,6 +200,10 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "screen.png",
             "--add-dir",
             ".",
+            "--enable",
+            "memories",
+            "--disable",
+            "sqlite",
             "exec",
             "--help",
         ],
@@ -215,6 +219,10 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "screen.png",
             "--add-dir",
             ".",
+            "--enable",
+            "memories",
+            "--disable",
+            "sqlite",
             "--help",
         ],
     ] {
@@ -232,6 +240,8 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
         assert!(stdout.contains("--ask-for-approval"));
         assert!(stdout.contains("--sandbox"));
         assert!(stdout.contains("--add-dir"));
+        assert!(stdout.contains("--enable"));
+        assert!(stdout.contains("--disable"));
     }
 }
 

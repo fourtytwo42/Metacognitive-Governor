@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::OpenOptions,
     io::{IsTerminal, Read, Write},
@@ -375,6 +375,10 @@ struct CodexCompatCli {
     images: Vec<PathBuf>,
     #[arg(long = "add-dir", value_name = "DIR", global = true)]
     add_dirs: Vec<PathBuf>,
+    #[arg(long = "enable", value_name = "FEATURE", global = true)]
+    enable_features: Vec<String>,
+    #[arg(long = "disable", value_name = "FEATURE", global = true)]
+    disable_features: Vec<String>,
     #[command(subcommand)]
     command: CodexCompatCommand,
 }
@@ -2011,7 +2015,9 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     if codex_compat_command_requested() {
         return Box::pin(run_codex_compat_cli()).await;
     }
-    let (native_arguments, add_dirs) = extract_native_add_dirs(std::env::args_os())?;
+    let (native_arguments, native_overrides) = extract_native_overrides(std::env::args_os())?;
+    let add_dirs = native_overrides.add_dirs;
+    let feature_overrides = native_overrides.feature_overrides;
     let cli = Cli::parse_from(native_arguments);
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
@@ -2154,6 +2160,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 || !mentions.is_empty()
                 || !images.is_empty()
                 || !add_dirs.is_empty()
+                || !feature_overrides.is_empty()
                 || sandbox.is_some()
                 || approval_policy.is_some()
                 || dangerously_bypass_approvals_and_sandbox
@@ -2187,6 +2194,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 conversation_preferences(None, effort, speed, approval.into()),
             );
             run_consumer_submission(
@@ -2214,6 +2222,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2240,6 +2249,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2263,6 +2273,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2346,6 +2357,8 @@ fn codex_compat_command_requested() -> bool {
                 | "--image"
                 | "-i"
                 | "--add-dir"
+                | "--enable"
+                | "--disable"
         ) {
             let _ = arguments.next();
             continue;
@@ -2358,6 +2371,8 @@ fn codex_compat_command_requested() -> bool {
             || argument.starts_with("--ask-for-approval=")
             || argument.starts_with("--image=")
             || argument.starts_with("--add-dir=")
+            || argument.starts_with("--enable=")
+            || argument.starts_with("--disable=")
             || (argument.starts_with("-C") && argument.len() > 2)
             || (argument.starts_with("-m") && argument.len() > 2)
             || (argument.starts_with("-s") && argument.len() > 2)
@@ -2379,15 +2394,21 @@ fn root_help_requested() -> bool {
     matches!(arguments.as_slice(), [argument] if argument == "--help" || argument == "-h")
 }
 
-fn extract_native_add_dirs(
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NativeOverrides {
+    add_dirs: Vec<PathBuf>,
+    feature_overrides: BTreeMap<String, bool>,
+}
+
+fn extract_native_overrides(
     arguments: impl IntoIterator<Item = OsString>,
-) -> Result<(Vec<OsString>, Vec<PathBuf>), String> {
+) -> Result<(Vec<OsString>, NativeOverrides), String> {
     let mut arguments = arguments.into_iter();
     let program = arguments
         .next()
         .ok_or_else(|| "CLI argument vector is missing the program name".to_owned())?;
     let mut cleaned = vec![program];
-    let mut add_dirs = Vec::new();
+    let mut overrides = NativeOverrides::default();
     let mut literal_arguments = false;
     while let Some(argument) = arguments.next() {
         if literal_arguments {
@@ -2403,7 +2424,7 @@ fn extract_native_add_dirs(
             let value = arguments
                 .next()
                 .ok_or_else(|| "--add-dir requires a directory".to_owned())?;
-            add_dirs.push(PathBuf::from(value));
+            overrides.add_dirs.push(PathBuf::from(value));
             continue;
         }
         if let Some(value) = argument
@@ -2413,22 +2434,74 @@ fn extract_native_add_dirs(
             if value.is_empty() {
                 return Err("--add-dir requires a directory".into());
             }
-            add_dirs.push(PathBuf::from(value));
+            overrides.add_dirs.push(PathBuf::from(value));
+            continue;
+        }
+        let feature_state = if argument == "--enable" {
+            Some(true)
+        } else if argument == "--disable" {
+            Some(false)
+        } else {
+            None
+        };
+        if let Some(enabled) = feature_state {
+            let value = arguments.next().ok_or_else(|| {
+                format!(
+                    "{} requires a feature name",
+                    if enabled { "--enable" } else { "--disable" }
+                )
+            })?;
+            let value = value
+                .into_string()
+                .map_err(|_| "Codex feature names must be valid Unicode".to_owned())?;
+            if value.is_empty() {
+                return Err("Codex feature name cannot be empty".into());
+            }
+            overrides.feature_overrides.insert(value, enabled);
+            continue;
+        }
+        if let Some((enabled, value)) = argument.to_str().and_then(|value| {
+            value
+                .strip_prefix("--enable=")
+                .map(|value| (true, value))
+                .or_else(|| value.strip_prefix("--disable=").map(|value| (false, value)))
+        }) {
+            if value.is_empty() {
+                return Err("Codex feature name cannot be empty".into());
+            }
+            overrides
+                .feature_overrides
+                .insert(value.to_owned(), enabled);
             continue;
         }
         cleaned.push(argument);
     }
-    Ok((cleaned, add_dirs))
+    Ok((cleaned, overrides))
 }
 
 fn combined_cli_command() -> clap::Command {
-    let mut command = Cli::command().arg(
-        clap::Arg::new("add-dir")
-            .long("add-dir")
-            .value_name("DIR")
-            .help("Additional directories writable alongside the primary project. Repeatable.")
-            .action(clap::ArgAction::Append),
-    );
+    let mut command = Cli::command()
+        .arg(
+            clap::Arg::new("add-dir")
+                .long("add-dir")
+                .value_name("DIR")
+                .help("Additional directories writable alongside the primary project. Repeatable.")
+                .action(clap::ArgAction::Append),
+        )
+        .arg(
+            clap::Arg::new("enable")
+                .long("enable")
+                .value_name("FEATURE")
+                .help("Enable a Codex feature for this session only. Repeatable; later flags win.")
+                .action(clap::ArgAction::Append),
+        )
+        .arg(
+            clap::Arg::new("disable")
+                .long("disable")
+                .value_name("FEATURE")
+                .help("Disable a Codex feature for this session only. Repeatable; later flags win.")
+                .action(clap::ArgAction::Append),
+        );
     let compatibility = CodexCompatCli::command();
     for subcommand in compatibility.get_subcommands() {
         command = command.subcommand(subcommand.clone());
@@ -2473,7 +2546,8 @@ fn run_codex_app(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error
 }
 
 async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = CodexCompatCli::parse();
+    let (arguments, native_overrides) = extract_native_overrides(std::env::args_os())?;
+    let cli = CodexCompatCli::parse_from(arguments);
     if let CodexCompatCommand::Completion { shell } = &cli.command {
         return generate_cli_completion(*shell);
     }
@@ -2485,7 +2559,16 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let approval_policy = cli.approval_policy;
     let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
     let images = cli.images;
-    let additional_writable_roots = codex_additional_writable_roots(&cli.add_dirs)?;
+    let mut add_dirs = cli.add_dirs;
+    add_dirs.extend(native_overrides.add_dirs);
+    let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
+    let mut feature_overrides = native_overrides.feature_overrides;
+    for feature in cli.enable_features {
+        feature_overrides.insert(feature, true);
+    }
+    for feature in cli.disable_features {
+        feature_overrides.insert(feature, false);
+    }
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
     let token_path = cli.token_file.unwrap_or_else(|| config.auth_token_path());
@@ -2528,6 +2611,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 images,
                 output_last_message,
                 prompt,
@@ -2558,6 +2642,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 &conversation.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2603,6 +2688,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
                 &additional_writable_roots,
+                &feature_overrides,
                 &fork.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -5627,6 +5713,7 @@ async fn run_codex_compatible_exec(
     approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
+    feature_overrides: &BTreeMap<String, bool>,
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
     prompt: Vec<String>,
@@ -5640,6 +5727,7 @@ async fn run_codex_compatible_exec(
         approval_policy,
         dangerously_bypass_approvals_and_sandbox,
         additional_writable_roots,
+        feature_overrides,
         conversation_preferences(None, None, None, ApprovalMode::Ask),
     );
     let mentions = codex_exec_mentions(&images)?;
@@ -9839,6 +9927,7 @@ fn conversation_preferences_exact(
         approval_policy,
         sandbox_mode,
         additional_writable_roots: Vec::new(),
+        codex_feature_overrides: BTreeMap::new(),
         team_preset: Default::default(),
         personality: None,
     }
@@ -9850,6 +9939,7 @@ fn codex_execution_preferences(
     approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
+    feature_overrides: &BTreeMap<String, bool>,
     mut fallback: ExecutionPreferences,
 ) -> ExecutionPreferences {
     let execution_controls_overridden = sandbox.is_some() || approval_policy.is_some();
@@ -9857,6 +9947,7 @@ fn codex_execution_preferences(
         fallback.model_id = Some(model);
     }
     fallback.additional_writable_roots = additional_writable_roots.to_vec();
+    fallback.codex_feature_overrides = feature_overrides.clone();
     if dangerously_bypass_approvals_and_sandbox {
         fallback.approval_mode = ApprovalMode::FullAccess;
         fallback.approval_policy = Some(ExecutionApprovalPolicy::Never);
@@ -9902,12 +9993,14 @@ fn codex_execution_preferences_override(
     approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
     additional_writable_roots: &[String],
+    feature_overrides: &BTreeMap<String, bool>,
     fallback: &ExecutionPreferences,
 ) -> Option<ExecutionPreferences> {
     if model.is_none()
         && sandbox.is_none()
         && approval_policy.is_none()
         && additional_writable_roots.is_empty()
+        && feature_overrides.is_empty()
         && !dangerously_bypass_approvals_and_sandbox
     {
         return None;
@@ -9918,6 +10011,7 @@ fn codex_execution_preferences_override(
         approval_policy,
         dangerously_bypass_approvals_and_sandbox,
         additional_writable_roots,
+        feature_overrides,
         fallback.clone(),
     ))
 }
@@ -12422,7 +12516,7 @@ mod tests {
             CodexCompatCommand::Exec(args) if args.json && args.prompt == ["fix the tests"]
         ));
 
-        let (interactive_arguments, interactive_add_dirs) = extract_native_add_dirs(
+        let (interactive_arguments, interactive_overrides) = extract_native_overrides(
             [
                 "mcg",
                 "--model",
@@ -12435,6 +12529,10 @@ mod tests {
                 "diagram.png",
                 "--add-dir",
                 ".",
+                "--enable",
+                "memories",
+                "--disable=memories",
+                "--enable=sqlite",
             ]
             .into_iter()
             .map(OsString::from),
@@ -12453,9 +12551,17 @@ mod tests {
             Some(CodexApprovalPolicyArg::Never)
         ));
         assert_eq!(interactive.images, [PathBuf::from("diagram.png")]);
-        assert_eq!(interactive_add_dirs, [PathBuf::from(".")]);
+        assert_eq!(interactive_overrides.add_dirs, [PathBuf::from(".")]);
+        assert_eq!(
+            interactive_overrides.feature_overrides.get("memories"),
+            Some(&false)
+        );
+        assert_eq!(
+            interactive_overrides.feature_overrides.get("sqlite"),
+            Some(&true)
+        );
 
-        let (run_arguments, run_add_dirs) = extract_native_add_dirs(
+        let (run_arguments, run_overrides) = extract_native_overrides(
             ["mcg", "run", "--add-dir=.", "fix the tests"]
                 .into_iter()
                 .map(OsString::from),
@@ -12466,7 +12572,7 @@ mod tests {
             run.command,
             Some(Command::Run { command: None, .. })
         ));
-        assert_eq!(run_add_dirs, [PathBuf::from(".")]);
+        assert_eq!(run_overrides.add_dirs, [PathBuf::from(".")]);
 
         let exact = conversation_preferences_exact(
             None,
@@ -12488,6 +12594,7 @@ mod tests {
             Some(CodexApprovalPolicyArg::OnRequest),
             false,
             &["C:/shared".into()],
+            &BTreeMap::from([("memories".into(), true)]),
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(independent.model_id.as_deref(), Some("gpt-5.6-terra"));
@@ -12501,6 +12608,10 @@ mod tests {
         );
         assert_eq!(independent.approval_mode, ApprovalMode::Ask);
         assert_eq!(independent.additional_writable_roots, ["C:/shared"]);
+        assert_eq!(
+            independent.codex_feature_overrides.get("memories"),
+            Some(&true)
+        );
 
         let yolo = codex_execution_preferences(
             None,
@@ -12508,6 +12619,7 @@ mod tests {
             Some(CodexApprovalPolicyArg::Untrusted),
             true,
             &[],
+            &BTreeMap::new(),
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(yolo.approval_mode, ApprovalMode::FullAccess);

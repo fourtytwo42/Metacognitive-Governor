@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-6 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-8 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -47,7 +47,7 @@ Environment variables alone are not capability discovery.
 | `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API. Human-formatted findings and remaining global overrides need exact alignment. |
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
-| `features` | Partial | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Global `-c` and session-local `--enable`/`--disable` overlays remain. |
+| `features` | Partial | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` flags now create session-local overrides without mutating that configuration. Generic repeatable `-c key=value` remains. |
 | `apply`, `sandbox`, `update` | Missing | Add compatible top-level behavior without removing MetaCog commands. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
@@ -75,12 +75,20 @@ Cycle 7 adds native `features list|enable|disable` behavior through the pinned
 Codex app-server's typed feature discovery and mutation methods. This is a
 process-wide Codex configuration surface, not a MetaCog authority override. The
 same searchable flag list is available in Advanced Settings while Simple stays
-uncluttered. Global repeatable `--enable`/`--disable` overlays remain separate
-work because they are session-local overrides rather than persisted mutations.
+uncluttered.
+
+Cycle 8 adds repeatable global `--enable FEATURE` and `--disable FEATURE` before
+or after compatible commands and on interactive, bare/piped, consumer-run, and
+resumed/forked work. Raw argument order is preserved and the last occurrence
+wins, matching Codex's `features.<name>` override behavior. Overrides are
+persisted with the originating run but do not mutate shared Codex configuration.
+Names are bounded and validated. MetaCog rejects flags controlling its shell,
+agent, browser/computer, app/plugin, image-generation, or workspace-dependency
+authority, and role-scoped configuration is recursively merged last.
 
 Codex-compatible support remains incomplete for live search, local providers/OSS,
 profiles, permission profiles, remote endpoints/authentication, strict config,
-output schemas, `--no-alt-screen`, session-local feature overlays, hook trust, and repeatable
+output schemas, `--no-alt-screen`, hook trust, and repeatable
 `-c key=value` overrides. These flags must map into governed requests; they may
 not bypass organization or approval policy.
 
@@ -107,6 +115,12 @@ under Advanced Settings → Configuration. It shows the pinned runtime's stage,
 effective state, and description, and writes through the same typed app-server
 contract as `mcg features`; no flag can expand MetaCog organization, approval,
 or delegated-agent authority.
+
+Cycle 8 adds Session features to the existing Advanced run-settings hierarchy in
+New Chat, established Chat, and task execution. It uses the discovered pinned
+catalog, offers Default/On/Off per safe flag, clearly distinguishes per-run
+overrides from persistent Settings, excludes MetaCog-governed capabilities, and
+retains the same bounded responsive popover and independent scrolling behavior.
 
 ## Safety invariants
 

@@ -470,6 +470,29 @@ test("advanced run settings manage additional writable folders without overflow"
   await expect(dialog.getByText("C:\\Shared\\assets")).toHaveCount(0);
 });
 
+test("advanced run settings expose bounded per-session Codex feature overrides", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+  await page.getByRole("button", { name: "Use advanced mode" }).click();
+
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByText("Session features", { exact: true }).click();
+  await expect(dialog.getByText("MetaCog-governed authority features are managed elsewhere.")).toBeVisible();
+  await dialog.getByRole("searchbox", { name: "Search session features" }).fill("memor");
+  await expect(dialog.getByText("Memories", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("shell_tool", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("combobox", { name: "Memories session override" }).selectOption("enabled");
+  await expect(dialog.getByRole("combobox", { name: "Memories session override" })).toHaveValue("enabled");
+
+  const box = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+});
+
 test("new chat resolves project mentions with keyboard selection and exclusive palettes", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");

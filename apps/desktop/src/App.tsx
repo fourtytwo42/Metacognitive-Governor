@@ -545,6 +545,7 @@ const DEFAULT_CHAT_RUN_PREFERENCES: ChatRunPreferences = {
   reasoning_effort: "medium",
   speed: "standard",
   approval_mode: "ask",
+  codex_feature_overrides: {},
   team_preset: "automatic"
 };
 
@@ -572,7 +573,9 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       approval_policy: parsed.approval_policy,
       sandbox_mode: parsed.sandbox_mode,
       additional_writable_roots: parsed.additional_writable_roots ?? [],
-      team_preset: parsed.team_preset ?? "automatic"
+      codex_feature_overrides: parsed.codex_feature_overrides ?? {},
+      team_preset: parsed.team_preset ?? "automatic",
+      personality: parsed.personality
     };
   } catch {
     return DEFAULT_CHAT_RUN_PREFERENCES;
@@ -925,14 +928,21 @@ function TechnicalDetails({ title, summary, children }: { title: string; summary
   </details>;
 }
 
-type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team";
+type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "features";
 
 function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
   if (panel === "model") return <Cpu aria-hidden="true" />;
   if (panel === "effort") return <BrainCircuit aria-hidden="true" />;
   if (panel === "speed") return <Gauge aria-hidden="true" />;
+  if (panel === "features") return <SlidersHorizontal aria-hidden="true" />;
   return <Users aria-hidden="true" />;
 }
+
+const GOVERNED_CODEX_FEATURES = new Set([
+  "shell_tool", "unified_exec", "multi_agent", "enable_fanout", "browser_use",
+  "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
+  "computer_use", "apps", "plugins", "image_generation", "workspace_dependencies"
+]);
 
 function ChatRunChoice({
   selected,
@@ -961,7 +971,9 @@ function ChatRunSelector({
   onRefresh,
   label = "Run settings",
   includeTeam = false,
-  hasProject = false
+  hasProject = false,
+  advanced = false,
+  codexFeatures = []
 }: {
   providers: ProviderListItem[];
   codexModels?: CodexModel[];
@@ -973,8 +985,11 @@ function ChatRunSelector({
   label?: string;
   includeTeam?: boolean;
   hasProject?: boolean;
+  advanced?: boolean;
+  codexFeatures?: CodexFeature[];
 }) {
   const [panel, setPanel] = useState<ChatRunPanel>("root");
+  const [featureSearch, setFeatureSearch] = useState("");
   const providerModels = providers.flatMap((provider) => (provider.catalog?.models ?? []).map((model) => ({
     providerId: provider.connection.id,
     providerName: provider.connection.display_name,
@@ -1007,7 +1022,9 @@ function ChatRunSelector({
       approval_policy: value.approval_policy,
       sandbox_mode: value.sandbox_mode,
       additional_writable_roots: value.additional_writable_roots,
-      team_preset: value.team_preset
+      codex_feature_overrides: value.codex_feature_overrides,
+      team_preset: value.team_preset,
+      personality: value.personality
     });
   };
   const selectedCodexModel = value.model_id
@@ -1028,6 +1045,18 @@ function ChatRunSelector({
   const speedLabel = /fast|priority/i.test(value.service_tier ?? "") || value.speed === "fast" ? "Fast" : "Standard";
   const teamValue = TEAM_PRESET_DETAILS[value.team_preset ?? "automatic"] ? value.team_preset ?? "automatic" : "automatic";
   const writableRoots = value.additional_writable_roots ?? [];
+  const featureOverrides = value.codex_feature_overrides ?? {};
+  const configurableFeatures = codexFeatures.filter((feature) => !GOVERNED_CODEX_FEATURES.has(feature.name) && feature.stage !== "removed");
+  const visibleFeatures = configurableFeatures.filter((feature) => {
+    const query = featureSearch.trim().toLocaleLowerCase();
+    return !query || `${feature.displayName ?? ""} ${feature.name} ${feature.description ?? ""}`.toLocaleLowerCase().includes(query);
+  });
+  const setFeatureOverride = (feature: string, state: "default" | "enabled" | "disabled") => {
+    const next = { ...featureOverrides };
+    if (state === "default") delete next[feature];
+    else next[feature] = state === "enabled";
+    onChange({ ...value, codex_feature_overrides: next });
+  };
   const addWritableRoot = async () => {
     const path = await pickWritableFolder();
     if (!path || writableRoots.some((root) => root.toLocaleLowerCase() === path.toLocaleLowerCase())) return;
@@ -1048,6 +1077,7 @@ function ChatRunSelector({
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("effort")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="effort" /></span><span className="chat-run-menu-copy"><strong>Effort</strong><small>{effortLabel(value.reasoning_effort)}</small></span><ChevronRight aria-hidden="true" /></button>
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("speed")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="speed" /></span><span className="chat-run-menu-copy"><strong>Speed</strong><small>{speedLabel}</small></span><ChevronRight aria-hidden="true" /></button>
         {includeTeam && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("team")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="team" /></span><span className="chat-run-menu-copy"><strong>Team</strong><small>{TEAM_PRESET_DETAILS[teamValue].label}</small></span><ChevronRight aria-hidden="true" /></button>}
+        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("features")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="features" /></span><span className="chat-run-menu-copy"><strong>Session features</strong><small>{Object.keys(featureOverrides).length > 0 ? `${Object.keys(featureOverrides).length} override${Object.keys(featureOverrides).length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
         <details className="chat-run-advanced">
           <summary>Advanced <ChevronDown aria-hidden="true" /></summary>
           <div className="chat-run-model-status">
@@ -1076,8 +1106,25 @@ function ChatRunSelector({
           </div>
         </details>
       </> : <>
-        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team"}</span></button>
-        <div className="chat-run-choice-list" role="menu" aria-label={panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team preset"}>
+        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "features" ? "Session features" : "Team"}</span></button>
+        {panel === "features" ? <div className="chat-run-feature-panel">
+          <p>Override supported Codex flags for this run only. MetaCog-governed authority features are managed elsewhere.</p>
+          <input type="search" aria-label="Search session features" placeholder="Search features" value={featureSearch} onChange={(event) => setFeatureSearch(event.target.value)} />
+          <div className="chat-run-feature-list" data-scroll-chain>
+            {visibleFeatures.map((feature) => {
+              const state = feature.name in featureOverrides ? featureOverrides[feature.name] ? "enabled" : "disabled" : "default";
+              return <div className="chat-run-feature-row" key={feature.name}>
+                <span><strong>{feature.displayName || feature.name}</strong><code>{feature.name}</code><small>{feature.description || `${feature.stage} Codex feature`}</small></span>
+                <select aria-label={`${feature.displayName || feature.name} session override`} value={state} onChange={(event) => setFeatureOverride(feature.name, event.target.value as "default" | "enabled" | "disabled")}>
+                  <option value="default">Default ({feature.enabled ? "on" : "off"})</option>
+                  <option value="enabled">On</option>
+                  <option value="disabled">Off</option>
+                </select>
+              </div>;
+            })}
+            {visibleFeatures.length === 0 && <small className="empty-state">{codexFeatures.length === 0 ? "Feature catalog is still loading." : "No configurable features match."}</small>}
+          </div>
+        </div> : <div className="chat-run-choice-list" role="menu" aria-label={panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team preset"}>
           {panel === "model" && <>
             <ChatRunChoice selected={!modelKey} label="Automatic" description="Use the account default" onSelect={(target) => { updateModel(""); closeSelector(target); setPanel("root"); }} />
             {models.map(({ providerId, providerName, model }) => {
@@ -1091,7 +1138,7 @@ function ChatRunSelector({
             return <ChatRunChoice selected={selectedTier} label={tier.name} description={tier.id ? "Faster responses, more usage" : "Default speed"} key={tier.id || "standard"} onSelect={(target) => { onChange({ ...value, service_tier: tier.id || undefined, speed: /fast|priority/i.test(tier.id) ? "fast" : "standard" as ExecutionSpeed }); closeSelector(target); setPanel("root"); }} />;
           })}
           {panel === "team" && (Object.entries(TEAM_PRESET_DETAILS) as [TeamPreset, (typeof TEAM_PRESET_DETAILS)[TeamPreset]][]).map(([preset, detail]) => <ChatRunChoice selected={teamValue === preset} label={detail.label} description={detail.description} key={preset} onSelect={(target) => { onChange({ ...value, team_preset: preset }); closeSelector(target); setPanel("root"); }} />)}
-        </div>
+        </div>}
       </>}
     </div>
   </details>;
@@ -3022,6 +3069,7 @@ export function App() {
         approval_policy: conversation.execution_preferences.approval_policy,
         sandbox_mode: conversation.execution_preferences.sandbox_mode,
         additional_writable_roots: conversation.execution_preferences.additional_writable_roots ?? [],
+        codex_feature_overrides: conversation.execution_preferences.codex_feature_overrides ?? {},
         team_preset: conversation.execution_preferences.team_preset ?? "automatic",
         personality: conversation.execution_preferences.personality
       }));
@@ -4552,6 +4600,7 @@ export function App() {
         approval_policy: preferences.approval_policy,
         sandbox_mode: preferences.sandbox_mode,
         additional_writable_roots: preferences.additional_writable_roots,
+        codex_feature_overrides: preferences.codex_feature_overrides,
         team_preset: preferences.team_preset,
         personality: preferences.personality
       };
@@ -4998,6 +5047,7 @@ export function App() {
           approval_policy: uncertainTurn.execution_preferences.approval_policy,
           sandbox_mode: uncertainTurn.execution_preferences.sandbox_mode,
           additional_writable_roots: uncertainTurn.execution_preferences.additional_writable_roots ?? [],
+          codex_feature_overrides: uncertainTurn.execution_preferences.codex_feature_overrides ?? {},
           team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });
       }
@@ -7344,7 +7394,7 @@ export function App() {
                 <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
                 <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
-                <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
+                <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
                 <button className="primary new-chat-send" type="button" aria-label="Send" title="Send message" disabled={taskBusy || !taskGoal.trim()} onClick={() => void addTask()}>
                   {taskBusy ? <span aria-hidden="true">…</span> : <ArrowUp aria-hidden="true" />}
                 </button>
@@ -7450,7 +7500,7 @@ export function App() {
                     <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
                     <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
-                    <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
+                    <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
                     <button className="primary new-chat-send" type="button" aria-label={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue message (Ctrl+Enter steers now)" : "Run command or send message"} onClick={() => conversationIsActive && !parseSlashCommand(taskGoal) ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>
                   </div>
                   {taskError && <p className="error-message" role="alert">{taskError}</p>}
@@ -7485,6 +7535,9 @@ export function App() {
                 <div className="task-actions">
                   <ChatRunSelector
                     providers={providers}
+                    codexModels={codexModels}
+                    codexFeatures={codexFeatures}
+                    advanced={advanced}
                     value={taskRunPreferences[task.id] ?? newChatRunPreferences}
                     onChange={(preferences) => setTaskRunPreferences((current) => ({ ...current, [task.id]: preferences }))}
                     discovering={modelDiscoveryBusy}

@@ -2484,6 +2484,7 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
             }
         }),
         writable_roots: preferences.additional_writable_roots.clone(),
+        feature_overrides: preferences.codex_feature_overrides.clone(),
     }
 }
 
@@ -2491,6 +2492,46 @@ fn validate_execution_preferences(
     preferences: &mut ExecutionPreferences,
     has_project: bool,
 ) -> Result<(), RuntimeError> {
+    const MAX_CODEX_FEATURE_OVERRIDES: usize = 32;
+    const GOVERNED_CODEX_FEATURES: &[&str] = &[
+        "shell_tool",
+        "unified_exec",
+        "multi_agent",
+        "enable_fanout",
+        "browser_use",
+        "browser_use_external",
+        "browser_use_full_cdp_access",
+        "in_app_browser",
+        "computer_use",
+        "apps",
+        "plugins",
+        "image_generation",
+        "workspace_dependencies",
+    ];
+    if preferences.codex_feature_overrides.len() > MAX_CODEX_FEATURE_OVERRIDES {
+        return Err(StorageError::InvalidData(format!(
+            "at most {MAX_CODEX_FEATURE_OVERRIDES} Codex feature overrides are allowed per run"
+        ))
+        .into());
+    }
+    for feature in preferences.codex_feature_overrides.keys() {
+        if feature.is_empty()
+            || !feature
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(StorageError::InvalidData(format!(
+                "invalid Codex feature name `{feature}`; use lowercase letters, numbers, and underscores"
+            ))
+            .into());
+        }
+        if GOVERNED_CODEX_FEATURES.contains(&feature.as_str()) {
+            return Err(StorageError::InvalidData(format!(
+                "Codex feature `{feature}` is governed by MetaCog and cannot be overridden per run"
+            ))
+            .into());
+        }
+    }
     const MAX_ADDITIONAL_WRITABLE_ROOTS: usize = 16;
     if preferences.additional_writable_roots.len() > MAX_ADDITIONAL_WRITABLE_ROOTS {
         return Err(StorageError::InvalidData(format!(
@@ -3871,6 +3912,11 @@ impl AppRuntime {
                 .conversation
                 .execution_preferences
                 .additional_writable_roots
+                .clone(),
+            feature_overrides: view
+                .conversation
+                .execution_preferences
+                .codex_feature_overrides
                 .clone(),
         };
         let scope = delegation.map_or_else(
@@ -9952,6 +9998,10 @@ impl AppRuntime {
             approval_policy: None,
             sandbox_mode: Some(CodexSandboxMode::ReadOnly),
             writable_roots: Vec::new(),
+            feature_overrides: conversation
+                .execution_preferences
+                .codex_feature_overrides
+                .clone(),
         };
         let host_thread_id = self
             .codex_harness
@@ -10929,6 +10979,7 @@ impl AppRuntime {
                 }
             }),
             writable_roots: preferences.additional_writable_roots.clone(),
+            feature_overrides: preferences.codex_feature_overrides.clone(),
         };
         let previous_thread = chat_session.codex_thread_id.clone();
         let thread_id = if let Some(thread_id) = previous_thread {
@@ -25582,6 +25633,31 @@ mod tests {
             effective_delegation_permission_mode(&writable),
             mcg_domain::ApprovalMode::AutoReview
         );
+    }
+
+    #[test]
+    fn session_feature_overrides_are_bounded_and_cannot_expand_authority() {
+        let mut preferences = ExecutionPreferences {
+            codex_feature_overrides: BTreeMap::from([
+                ("memories".into(), true),
+                ("sqlite".into(), false),
+            ]),
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut preferences, true).expect("safe feature overrides");
+        assert_eq!(
+            codex_preferences(&preferences).feature_overrides,
+            preferences.codex_feature_overrides
+        );
+
+        preferences.codex_feature_overrides = BTreeMap::from([("browser_use".into(), true)]);
+        assert!(validate_execution_preferences(&mut preferences, true).is_err());
+        preferences.codex_feature_overrides = BTreeMap::from([("Bad-Feature".into(), true)]);
+        assert!(validate_execution_preferences(&mut preferences, true).is_err());
+        preferences.codex_feature_overrides = (0..33)
+            .map(|index| (format!("safe_feature_{index}"), true))
+            .collect();
+        assert!(validate_execution_preferences(&mut preferences, true).is_err());
     }
 
     #[test]

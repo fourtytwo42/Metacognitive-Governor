@@ -311,6 +311,7 @@ export interface ChatRunPreferences {
   approval_policy?: ExecutionApprovalPolicy;
   sandbox_mode?: ExecutionSandboxMode;
   additional_writable_roots?: string[];
+  codex_feature_overrides?: Record<string, boolean>;
   team_preset: TeamPreset;
   personality?: string;
 }
@@ -323,6 +324,7 @@ export interface ExecutionPreferences {
   approval_policy?: ExecutionApprovalPolicy;
   sandbox_mode?: ExecutionSandboxMode;
   additional_writable_roots?: string[];
+  codex_feature_overrides?: Record<string, boolean>;
   team_preset?: TeamPreset;
   personality?: string;
 }

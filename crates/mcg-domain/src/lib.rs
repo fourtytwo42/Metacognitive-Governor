@@ -1,6 +1,6 @@
 //! Stable, versioned domain types shared by every MCG interface.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -2120,6 +2120,10 @@ pub struct ExecutionPreferences {
     /// Runtime validation re-resolves these paths before every originating turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_writable_roots: Vec<String>,
+    /// Per-run Codex feature overrides. These are validated against MetaCog's
+    /// authority boundary and never mutate the shared Codex configuration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub codex_feature_overrides: BTreeMap<String, bool>,
     #[serde(default)]
     pub team_preset: TeamPreset,
     /// Optional owner-selected response style. This never expands authority.

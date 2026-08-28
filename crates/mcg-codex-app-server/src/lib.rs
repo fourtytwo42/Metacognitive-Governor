@@ -324,6 +324,8 @@ pub struct CodexExecutionPreferences {
     pub sandbox_mode: Option<CodexSandboxMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub feature_overrides: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -585,6 +587,22 @@ pub enum CodexSandboxMode {
 }
 
 impl CodexExecutionPreferences {
+    fn thread_config(&self, instructions: Option<&CodexThreadInstructions>) -> Option<Value> {
+        let mut config = if self.feature_overrides.is_empty() {
+            Value::Object(Default::default())
+        } else {
+            json!({"features": self.feature_overrides})
+        };
+        if let Some(role_config) = instructions.and_then(|value| value.config.as_ref()) {
+            merge_json_objects(&mut config, role_config);
+        }
+        if config.as_object().is_some_and(|object| object.is_empty()) {
+            None
+        } else {
+            Some(config)
+        }
+    }
+
     fn approval_policy(&self, writable: bool) -> &'static str {
         if !writable {
             return "never";
@@ -639,6 +657,22 @@ impl CodexExecutionPreferences {
             }),
             CodexSandboxMode::DangerFullAccess => json!({"type": "dangerFullAccess"}),
         }
+    }
+}
+
+fn merge_json_objects(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(key) {
+                    Some(existing) => merge_json_objects(existing, value),
+                    None => {
+                        base.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay.clone(),
     }
 }
 
@@ -1165,6 +1199,7 @@ impl CodexAppServerHarness {
         writable: bool,
         instructions: Option<&CodexThreadInstructions>,
     ) -> Result<String, CodexHarnessError> {
+        let config = preferences.thread_config(instructions);
         let response = self
             .request(
                 "thread/start",
@@ -1177,7 +1212,7 @@ impl CodexAppServerHarness {
                     "sandbox": preferences.thread_sandbox(writable),
                     "baseInstructions": instructions.and_then(|value| value.base.as_deref()),
                     "developerInstructions": instructions.and_then(|value| value.developer.as_deref()),
-                    "config": instructions.and_then(|value| value.config.as_ref()),
+                    "config": config,
                     "threadSource": "mcg"
                 }),
             )
@@ -1228,6 +1263,7 @@ impl CodexAppServerHarness {
         writable: bool,
         instructions: Option<&CodexThreadInstructions>,
     ) -> Result<(), CodexHarnessError> {
+        let config = preferences.thread_config(instructions);
         self.request(
             "thread/resume",
             json!({
@@ -1240,7 +1276,7 @@ impl CodexAppServerHarness {
                 "sandbox": preferences.thread_sandbox(writable)
                 ,"baseInstructions": instructions.and_then(|value| value.base.as_deref())
                 ,"developerInstructions": instructions.and_then(|value| value.developer.as_deref())
-                ,"config": instructions.and_then(|value| value.config.as_ref())
+                ,"config": config
             }),
         )
         .await
@@ -2296,6 +2332,31 @@ mod tests {
             })
         );
         assert_eq!(expanded.turn_sandbox(false), json!({"type": "readOnly"}));
+    }
+
+    #[test]
+    fn session_features_merge_beneath_role_authority_config() {
+        let preferences = CodexExecutionPreferences {
+            feature_overrides: BTreeMap::from([
+                ("memories".into(), true),
+                ("browser_use".into(), true),
+            ]),
+            ..Default::default()
+        };
+        let role = CodexThreadInstructions {
+            config: Some(json!({
+                "features": {"browser_use": false, "shell_tool": false},
+                "custom": {"value": 1}
+            })),
+            ..Default::default()
+        };
+        let config = preferences
+            .thread_config(Some(&role))
+            .expect("merged config");
+        assert_eq!(config["features"]["memories"], true);
+        assert_eq!(config["features"]["browser_use"], false);
+        assert_eq!(config["features"]["shell_tool"], false);
+        assert_eq!(config["custom"]["value"], 1);
     }
 
     #[test]
