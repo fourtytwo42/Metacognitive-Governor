@@ -2534,6 +2534,10 @@ fn extract_native_overrides(
             overrides.add_dirs.push(PathBuf::from(value));
             continue;
         }
+        if argument == "--search" {
+            record_codex_config_override("web_search=\"live\"", &mut overrides)?;
+            continue;
+        }
         let config_expression = if argument == "--config" || argument == "-c" {
             Some(
                 arguments
@@ -2609,6 +2613,12 @@ fn combined_cli_command() -> clap::Command {
                 .value_name("DIR")
                 .help("Additional directories writable alongside the primary project. Repeatable.")
                 .action(clap::ArgAction::Append),
+        )
+        .arg(
+            clap::Arg::new("search")
+                .long("search")
+                .help("Enable live web search for this session.")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             clap::Arg::new("config")
@@ -12673,6 +12683,10 @@ mod tests {
                 ".",
                 "--enable",
                 "memories",
+                "--search",
+                "-c",
+                "web_search=\"disabled\"",
+                "--search",
                 "--config=features={memories=true, sqlite=false}",
                 "-c",
                 "model_verbosity=\"low\"",
@@ -12710,6 +12724,18 @@ mod tests {
         assert_eq!(
             interactive_overrides.config_overrides,
             [
+                CodexConfigOverride {
+                    key: "web_search".into(),
+                    value: serde_json::json!("live"),
+                },
+                CodexConfigOverride {
+                    key: "web_search".into(),
+                    value: serde_json::json!("disabled"),
+                },
+                CodexConfigOverride {
+                    key: "web_search".into(),
+                    value: serde_json::json!("live"),
+                },
                 CodexConfigOverride {
                     key: "model_verbosity".into(),
                     value: serde_json::json!("low"),

@@ -2413,6 +2413,10 @@ mod tests {
                     path: vec!["model_verbosity".into()],
                     value: json!("high"),
                 },
+                CodexConfigOverride {
+                    path: vec!["web_search".into()],
+                    value: json!("live"),
+                },
             ],
             feature_overrides: BTreeMap::from([("memories".into(), true)]),
             ..Default::default()
@@ -2420,7 +2424,8 @@ mod tests {
         let role = CodexThreadInstructions {
             config: Some(json!({
                 "history": {"persistence": "save-all"},
-                "features": {"memories": false}
+                "features": {"memories": false},
+                "web_search": "cached"
             })),
             ..Default::default()
         };
@@ -2430,6 +2435,7 @@ mod tests {
         assert_eq!(config["model_verbosity"], "high");
         assert_eq!(config["history"]["persistence"], "save-all");
         assert_eq!(config["features"]["memories"], false);
+        assert_eq!(config["web_search"], "cached");
     }
 
     #[test]

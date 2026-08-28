@@ -931,12 +931,13 @@ function TechnicalDetails({ title, summary, children }: { title: string; summary
   </details>;
 }
 
-type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "features" | "config";
+type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "search" | "features" | "config";
 
 function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
   if (panel === "model") return <Cpu aria-hidden="true" />;
   if (panel === "effort") return <BrainCircuit aria-hidden="true" />;
   if (panel === "speed") return <Gauge aria-hidden="true" />;
+  if (panel === "search") return <Search aria-hidden="true" />;
   if (panel === "features") return <SlidersHorizontal aria-hidden="true" />;
   if (panel === "config") return <Braces aria-hidden="true" />;
   return <Users aria-hidden="true" />;
@@ -955,7 +956,7 @@ const GOVERNED_CODEX_CONFIG_SEGMENTS = new Set([
   "model_provider", "model_providers", "network_access", "oss_provider", "permissions",
   "plugin", "plugins", "process", "remote", "rules", "sandbox", "sandbox_mode",
   "shell_environment_policy", "skills", "show_raw_agent_reasoning", "tools",
-  "user_instructions", "web_search", "workspace_write"
+  "user_instructions", "workspace_write"
 ]);
 
 function codexConfigKeyError(key: string): string | null {
@@ -1073,6 +1074,10 @@ function ChatRunSelector({
   const writableRoots = value.additional_writable_roots ?? [];
   const featureOverrides = value.codex_feature_overrides ?? {};
   const configOverrides = value.codex_config_overrides ?? [];
+  const webSearchOverride = [...configOverrides].reverse().find((config) => config.key.trim().toLocaleLowerCase().replaceAll("-", "_") === "web_search");
+  const webSearchMode = typeof webSearchOverride?.value === "string" && ["cached", "live", "disabled"].includes(webSearchOverride.value)
+    ? webSearchOverride.value as "cached" | "live" | "disabled"
+    : "cached";
   const configurableFeatures = codexFeatures.filter((feature) => !GOVERNED_CODEX_FEATURES.has(feature.name) && feature.stage !== "removed");
   const visibleFeatures = configurableFeatures.filter((feature) => {
     const query = featureSearch.trim().toLocaleLowerCase();
@@ -1098,10 +1103,18 @@ function ChatRunSelector({
     }
     let parsed: unknown = raw;
     try { parsed = JSON.parse(raw); } catch { /* Codex-compatible literal string fallback. */ }
+    if (key.toLocaleLowerCase().replaceAll("-", "_") === "web_search" && (typeof parsed !== "string" || !["cached", "live", "disabled"].includes(parsed))) {
+      setConfigError("Web search must be cached, live, or disabled.");
+      return;
+    }
     onChange({ ...value, codex_config_overrides: [...configOverrides, { key, value: parsed }] });
     setConfigKey("");
     setConfigValue("");
     setConfigError(null);
+  };
+  const setWebSearchMode = (mode: "cached" | "live" | "disabled") => {
+    const withoutWebSearch = configOverrides.filter((config) => config.key.trim().toLocaleLowerCase().replaceAll("-", "_") !== "web_search");
+    onChange({ ...value, codex_config_overrides: mode === "cached" ? withoutWebSearch : [...withoutWebSearch, { key: "web_search", value: mode }] });
   };
   const addWritableRoot = async () => {
     const path = await pickWritableFolder();
@@ -1123,6 +1136,7 @@ function ChatRunSelector({
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("effort")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="effort" /></span><span className="chat-run-menu-copy"><strong>Effort</strong><small>{effortLabel(value.reasoning_effort)}</small></span><ChevronRight aria-hidden="true" /></button>
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("speed")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="speed" /></span><span className="chat-run-menu-copy"><strong>Speed</strong><small>{speedLabel}</small></span><ChevronRight aria-hidden="true" /></button>
         {includeTeam && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("team")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="team" /></span><span className="chat-run-menu-copy"><strong>Team</strong><small>{TEAM_PRESET_DETAILS[teamValue].label}</small></span><ChevronRight aria-hidden="true" /></button>}
+        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("search")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="search" /></span><span className="chat-run-menu-copy"><strong>Web search</strong><small>{webSearchMode === "live" ? "Live" : webSearchMode === "disabled" ? "Off" : "Default (cached)"}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("features")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="features" /></span><span className="chat-run-menu-copy"><strong>Session features</strong><small>{Object.keys(featureOverrides).length > 0 ? `${Object.keys(featureOverrides).length} override${Object.keys(featureOverrides).length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("config")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="config" /></span><span className="chat-run-menu-copy"><strong>Codex config</strong><small>{configOverrides.length > 0 ? `${configOverrides.length} ordered override${configOverrides.length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
         <details className="chat-run-advanced">
@@ -1153,8 +1167,12 @@ function ChatRunSelector({
           </div>
         </details>
       </> : <>
-        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : "Team"}</span></button>
-        {panel === "features" ? <div className="chat-run-feature-panel">
+        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "search" ? "Web search" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : "Team"}</span></button>
+        {panel === "search" ? <div className="chat-run-choice-list" role="menu" aria-label="Web search">
+          <ChatRunChoice selected={webSearchMode === "cached"} label="Default" description="Use cached search when available" onSelect={(target) => { setWebSearchMode("cached"); closeSelector(target); setPanel("root"); }} />
+          <ChatRunChoice selected={webSearchMode === "live"} label="Live" description="Use current web results for this run" onSelect={(target) => { setWebSearchMode("live"); closeSelector(target); setPanel("root"); }} />
+          <ChatRunChoice selected={webSearchMode === "disabled"} label="Off" description="Do not use web search for this run" onSelect={(target) => { setWebSearchMode("disabled"); closeSelector(target); setPanel("root"); }} />
+        </div> : panel === "features" ? <div className="chat-run-feature-panel">
           <p>Override supported Codex flags for this run only. MetaCog-governed authority features are managed elsewhere.</p>
           <input type="search" aria-label="Search session features" placeholder="Search features" value={featureSearch} onChange={(event) => setFeatureSearch(event.target.value)} />
           <div className="chat-run-feature-list" data-scroll-chain>

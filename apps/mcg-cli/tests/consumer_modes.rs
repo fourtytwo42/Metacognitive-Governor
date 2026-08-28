@@ -200,6 +200,7 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "screen.png",
             "--add-dir",
             ".",
+            "--search",
             "--enable",
             "memories",
             "--disable",
@@ -219,6 +220,7 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "screen.png",
             "--add-dir",
             ".",
+            "--search",
             "--enable",
             "memories",
             "--disable",
@@ -243,6 +245,13 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
         assert!(stdout.contains("--enable"));
         assert!(stdout.contains("--disable"));
     }
+
+    let root_help = Command::new(env!("CARGO_BIN_EXE_mcg"))
+        .arg("--help")
+        .output()
+        .expect("root help process");
+    assert!(root_help.status.success());
+    assert!(String::from_utf8_lossy(&root_help.stdout).contains("--search"));
 }
 
 #[cfg(windows)]

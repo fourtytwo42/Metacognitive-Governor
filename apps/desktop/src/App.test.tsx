@@ -2586,6 +2586,7 @@ test("advanced run settings persist safe Codex feature overrides per conversatio
 
   let settings = openNewChatRunSettings().dialog;
   expect(within(settings).queryByText("Session features")).not.toBeInTheDocument();
+  expect(within(settings).queryByText("Web search")).not.toBeInTheDocument();
   fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
   await enableAdvancedMode();
   settings = openNewChatRunSettings().dialog;
@@ -2603,6 +2604,21 @@ test("advanced run settings persist safe Codex feature overrides per conversatio
   ));
 });
 
+test("advanced run settings persist live web search per conversation", async () => {
+  render(<App />);
+  await enableAdvancedMode();
+  const settings = openNewChatRunSettings().dialog;
+  fireEvent.click(within(settings).getByText("Web search"));
+  fireEvent.click(within(settings).getByRole("menuitemradio", { name: /Live/ }));
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Find current information" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ codex_config_overrides: [{ key: "web_search", value: "live" }] }) })
+  ));
+});
+
 test("advanced run settings persist typed Codex config and block governed keys", async () => {
   render(<App />);
   await enableAdvancedMode();
@@ -2613,6 +2629,11 @@ test("advanced run settings persist typed Codex config and block governed keys",
   fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration value" }), { target: { value: '"danger-full-access"' } });
   fireEvent.click(within(settings).getByRole("button", { name: "Add override" }));
   expect(within(settings).getByRole("alert")).toHaveTextContent("governed by MetaCog");
+
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration key" }), { target: { value: "web_search" } });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration value" }), { target: { value: "true" } });
+  fireEvent.click(within(settings).getByRole("button", { name: "Add override" }));
+  expect(within(settings).getByRole("alert")).toHaveTextContent("cached, live, or disabled");
 
   fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration key" }), { target: { value: "model_verbosity" } });
   fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration value" }), { target: { value: '"low"' } });

@@ -519,6 +519,26 @@ test("advanced run settings expose typed bounded Codex config overrides", async 
   expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
 });
 
+test("advanced run settings expose live web search without changing Simple", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  let dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await expect(dialog.getByText("Web search", { exact: true })).toHaveCount(0);
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+
+  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByText("Web search", { exact: true }).click();
+  await expect(dialog.getByRole("menuitemradio", { name: /Default/ })).toHaveAttribute("aria-checked", "true");
+  await dialog.getByRole("menuitemradio", { name: /Live/ }).click();
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  await expect(dialog.getByText("Live", { exact: true })).toBeVisible();
+});
+
 test("new chat resolves project mentions with keyboard selection and exclusive palettes", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");

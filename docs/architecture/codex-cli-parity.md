@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-9 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-10 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, global `--search`, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -96,7 +96,14 @@ rejects approval, sandbox, filesystem, network, agent, app/plugin, tool,
 instruction, provider, credential, secret-bearing, and hidden-reasoning paths.
 Role-scoped configuration remains authoritative and merges last.
 
-Codex-compatible support remains incomplete for live search, local providers/OSS,
+Cycle 10 adds stable global `--search` across interactive, bare/piped,
+consumer-run, exec, resume, fork, queue, and retry paths. Each occurrence is
+recorded in raw argument order as `web_search = "live"`, so later `-c` or
+`--search` occurrences win exactly as they do in Codex. Runtime validation also
+accepts explicit `cached`, `live`, and `disabled` values while rejecting other
+types or strings. Role-scoped configuration remains final.
+
+Codex-compatible support remains incomplete for local providers/OSS,
 profiles, permission profiles, remote endpoints/authentication, strict config,
 output schemas, `--no-alt-screen`, and hook trust. These flags must map into governed requests; they may
 not bypass organization or approval policy.
@@ -136,6 +143,11 @@ run-settings hierarchy. It accepts a validated dotted key plus a typed JSON valu
 or literal string, displays ordered removable rows, persists them across drafts,
 queues, retries, and resumed conversations, and exposes the same governance
 boundary as the CLI. Simple mode remains unchanged.
+
+Cycle 10 adds a dedicated Web search panel to the same Advanced run-settings
+hierarchy. Default uses cached search, Live maps to Codex's global `--search`
+semantics, and Off remains available as the validated explicit configuration.
+The setting persists with the originating run and remains absent from Simple.
 
 ## Safety invariants
 

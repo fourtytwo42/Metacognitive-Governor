@@ -2617,7 +2617,6 @@ fn validate_execution_preferences(
         "show_raw_agent_reasoning",
         "tools",
         "user_instructions",
-        "web_search",
         "workspace_write",
     ];
     if preferences.codex_config_overrides.len() > MAX_CODEX_CONFIG_OVERRIDES {
@@ -2637,6 +2636,17 @@ fn validate_execution_preferences(
     }
     for config_override in &preferences.codex_config_overrides {
         let path = codex_config_path(config_override.key.trim())?;
+        if path.as_slice() == ["web_search"]
+            && !matches!(
+                config_override.value.as_str(),
+                Some("cached" | "live" | "disabled")
+            )
+        {
+            return Err(StorageError::InvalidData(
+                "Codex configuration `web_search` must be `cached`, `live`, or `disabled`".into(),
+            )
+            .into());
+        }
         for segment in &path {
             let normalized = segment.to_ascii_lowercase().replace('-', "_");
             let contains_secret = [
@@ -25806,14 +25816,26 @@ mod tests {
                     key: "model_verbosity".into(),
                     value: serde_json::json!("high"),
                 },
+                mcg_domain::CodexConfigOverride {
+                    key: "web_search".into(),
+                    value: serde_json::json!("live"),
+                },
             ],
             ..Default::default()
         };
         validate_execution_preferences(&mut preferences, true).expect("safe config overrides");
         let mapped = codex_preferences(&preferences).config_overrides;
-        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped.len(), 4);
         assert_eq!(mapped[1].path, ["history", "persistence"]);
         assert_eq!(mapped[2].value, serde_json::json!("high"));
+        assert_eq!(mapped[3].path, ["web_search"]);
+        assert_eq!(mapped[3].value, serde_json::json!("live"));
+
+        preferences.codex_config_overrides = vec![mcg_domain::CodexConfigOverride {
+            key: "web_search".into(),
+            value: serde_json::json!(true),
+        }];
+        assert!(validate_execution_preferences(&mut preferences, true).is_err());
 
         for governed in [
             "sandbox_mode",

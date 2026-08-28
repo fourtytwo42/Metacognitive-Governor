@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-28 - Codex parity Cycle 10 live-search implementation checkpoint
+
+- Context: Current Codex 0.144.6 exposes stable global `--search`, which forces `web_search = "live"`; MetaCog's official parity ledger still marked live search missing.
+- Decision: Extract each `--search` occurrence into the existing ordered per-run Codex configuration list at its original CLI position, preserving last-occurrence precedence with repeatable `-c/--config`. Accept only `cached`, `live`, or `disabled`; merge organization/role configuration last. Advanced Chat exposes Default/Live/Off in the shared run-settings hierarchy while Simple remains unchanged.
+- Files: `apps/mcg-cli/src/main.rs`, `crates/mcg-{runtime,codex-app-server}/src/lib.rs`, `apps/desktop/src/{App.tsx,App.test.tsx}`, `tests/e2e/desktop-smoke.spec.ts`, and `docs/architecture/codex-cli-parity.md`.
+- Commands/tests: Workspace Cargo check; app-server 14 active plus one packaged qualification ignored; runtime 88 active plus two Windows Sandbox qualifications ignored; API 92/92; CLI 42/42 unit plus 6/6 real-process; desktop typecheck/production build; complete single-worker Vitest 108/108; serialized Playwright 23/23; documentation, packaging, formatting, and diff checks. The first focused Playwright invocation used a path incompatible with the root config and found no tests; the supported root invocation passed. A CLI help assertion was corrected to check root global help rather than `exec --help`.
+- Result: Native Windows UAT on the exact v0.4.47 portable verified Advanced Default/Live/Off selection and summaries, restored Default afterward, confirmed Simple omission, and found no overlap or page overflow. MetaCog was closed and Computer Use immediately released. The sole portable is `target/portable/MetaCog-Portable-Windows-x64-v0.4.47/MetaCog-Desktop-v0.4.47.exe` (516,555,264 bytes; SHA-256 `E248707E7129D6FFACBD204B17F174A350824978CA54C28C611891E20F02AAE4`; ProductName/FileDescription MetaCog; Product/FileVersion 0.4.47); the builder removed v0.4.46.
+- Follow-up: Commit/push v0.4.47 with local/remote parity, re-audit the official Codex 0.144.6 surface, and begin the next bounded parity gap.
+
 ### 2026-08-28 - Codex parity Cycle 9 config-override release
 
 - Context: Current Codex 0.144.6 supports repeatable global `-c/--config key=value`; MetaCog previously lacked the CLI behavior, persistence, app-server projection, and matching desktop control.
