@@ -2142,6 +2142,10 @@ pub struct ExecutionPreferences {
     /// values from expanding MetaCog-governed authority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub codex_config_overrides: Vec<CodexConfigOverride>,
+    /// Require Codex's own strict configuration loader to accept the current
+    /// base and project configuration before this run is persisted or sent.
+    #[serde(default)]
+    pub strict_config: bool,
     #[serde(default)]
     pub team_preset: TeamPreset,
     /// Optional owner-selected response style. This never expands authority.
@@ -2504,6 +2508,7 @@ mod tests {
         execution_preferences.remove("approval_policy");
         execution_preferences.remove("sandbox_mode");
         execution_preferences.remove("additional_writable_roots");
+        execution_preferences.remove("strict_config");
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
@@ -2513,6 +2518,7 @@ mod tests {
         assert!(decoded.execution_preferences.personality.is_none());
         assert!(decoded.execution_preferences.approval_policy.is_none());
         assert!(decoded.execution_preferences.sandbox_mode.is_none());
+        assert!(!decoded.execution_preferences.strict_config);
         assert!(
             decoded
                 .execution_preferences

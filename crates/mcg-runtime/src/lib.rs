@@ -10086,6 +10086,32 @@ impl AppRuntime {
         }
     }
 
+    async fn validate_codex_strict_config(
+        &self,
+        preferences: &ExecutionPreferences,
+        project_id: Option<ProjectId>,
+    ) -> Result<(), RuntimeError> {
+        if !preferences.strict_config {
+            return Ok(());
+        }
+        let cwd = if let Some(project_id) = project_id {
+            let project = self
+                .project(project_id)?
+                .ok_or(StorageError::ProjectNotFound(project_id))?;
+            Some(fs::canonicalize(&project.root).map_err(|error| {
+                StorageError::InvalidData(format!(
+                    "project cannot be resolved for strict Codex configuration validation: {error}"
+                ))
+            })?)
+        } else {
+            None
+        };
+        self.codex_harness
+            .validate_strict_config(cwd.as_deref())
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_codex_feature(
         &self,
         name: &str,
@@ -11241,6 +11267,8 @@ impl AppRuntime {
         let mut preferences =
             turn_preferences.unwrap_or_else(|| conversation.execution_preferences.clone());
         validate_execution_preferences(&mut preferences, conversation.project_id.is_some())?;
+        self.validate_codex_strict_config(&preferences, conversation.project_id)
+            .await?;
         self.validate_codex_permission_profile(&preferences, conversation.project_id)
             .await?;
         conversation.execution_preferences = preferences.clone();
@@ -26061,6 +26089,7 @@ mod tests {
     #[test]
     fn session_config_overrides_are_typed_ordered_and_cannot_expand_authority() {
         let mut preferences = ExecutionPreferences {
+            strict_config: true,
             codex_config_overrides: vec![
                 mcg_domain::CodexConfigOverride {
                     key: "model_verbosity".into(),
@@ -26082,6 +26111,7 @@ mod tests {
             ..Default::default()
         };
         validate_execution_preferences(&mut preferences, true).expect("safe config overrides");
+        assert!(preferences.strict_config);
         let mapped = codex_preferences(&preferences).config_overrides;
         assert_eq!(mapped.len(), 4);
         assert_eq!(mapped[1].path, ["history", "persistence"]);

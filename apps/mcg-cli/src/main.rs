@@ -2106,6 +2106,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let add_dirs = native_overrides.add_dirs;
     let feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
     let cli = Cli::parse_from(native_arguments);
     let config = AppConfig::default();
@@ -2289,6 +2290,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 conversation_preferences(None, effort, speed, approval.into()),
             );
             run_consumer_submission(
@@ -2319,6 +2321,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2348,6 +2351,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2375,6 +2379,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2509,6 +2514,7 @@ struct NativeOverrides {
     feature_overrides: BTreeMap<String, bool>,
     config_overrides: Vec<CodexConfigOverride>,
     raw_config_overrides: Vec<String>,
+    strict_config: bool,
     no_alt_screen: bool,
 }
 
@@ -2623,6 +2629,10 @@ fn extract_native_overrides(
             record_codex_config_override("web_search=\"live\"", &mut overrides)?;
             continue;
         }
+        if argument == "--strict-config" {
+            overrides.strict_config = true;
+            continue;
+        }
         if argument == "--no-alt-screen" {
             overrides.no_alt_screen = true;
             continue;
@@ -2707,6 +2717,12 @@ fn combined_cli_command() -> clap::Command {
             clap::Arg::new("search")
                 .long("search")
                 .help("Enable live web search for this session.")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("strict-config")
+                .long("strict-config")
+                .help("Fail before dispatch when Codex rejects the effective user or project configuration.")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -2906,6 +2922,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
     let mut feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
     for feature in cli.enable_features {
         feature_overrides.insert(feature, true);
@@ -2967,6 +2984,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 images,
                 output_last_message,
                 prompt,
@@ -3000,6 +3018,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 &conversation.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -3037,6 +3056,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 &conversation.execution_preferences,
             );
             let pending_mentions = codex_exec_mentions(&images)?;
@@ -3098,6 +3118,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                strict_config,
                 &fork.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -6293,6 +6314,7 @@ async fn run_codex_compatible_exec(
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
+    strict_config: bool,
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
     prompt: Vec<String>,
@@ -6309,6 +6331,7 @@ async fn run_codex_compatible_exec(
         additional_writable_roots,
         feature_overrides,
         config_overrides,
+        strict_config,
         conversation_preferences(None, None, None, ApprovalMode::Ask),
     );
     let mentions = codex_exec_mentions(&images)?;
@@ -10511,6 +10534,7 @@ fn conversation_preferences_exact(
         additional_writable_roots: Vec::new(),
         codex_feature_overrides: BTreeMap::new(),
         codex_config_overrides: Vec::new(),
+        strict_config: false,
         team_preset: Default::default(),
         personality: None,
     }
@@ -10525,6 +10549,7 @@ fn codex_execution_preferences(
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
+    strict_config: bool,
     mut fallback: ExecutionPreferences,
 ) -> ExecutionPreferences {
     let execution_controls_overridden =
@@ -10538,6 +10563,7 @@ fn codex_execution_preferences(
     fallback.additional_writable_roots = additional_writable_roots.to_vec();
     fallback.codex_feature_overrides = feature_overrides.clone();
     fallback.codex_config_overrides = config_overrides.to_vec();
+    fallback.strict_config = strict_config;
     if dangerously_bypass_approvals_and_sandbox {
         fallback.approval_mode = ApprovalMode::FullAccess;
         fallback.approval_policy = Some(ExecutionApprovalPolicy::Never);
@@ -10592,6 +10618,7 @@ fn codex_execution_preferences_override(
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
+    strict_config: bool,
     fallback: &ExecutionPreferences,
 ) -> Option<ExecutionPreferences> {
     if model.is_none()
@@ -10601,6 +10628,7 @@ fn codex_execution_preferences_override(
         && additional_writable_roots.is_empty()
         && feature_overrides.is_empty()
         && config_overrides.is_empty()
+        && !strict_config
         && !dangerously_bypass_approvals_and_sandbox
     {
         return None;
@@ -10614,6 +10642,7 @@ fn codex_execution_preferences_override(
         additional_writable_roots,
         feature_overrides,
         config_overrides,
+        strict_config,
         fallback.clone(),
     ))
 }
@@ -13131,6 +13160,7 @@ mod tests {
                 "--enable",
                 "memories",
                 "--search",
+                "--strict-config",
                 "--no-alt-screen",
                 "-c",
                 "web_search=\"disabled\"",
@@ -13161,6 +13191,7 @@ mod tests {
         ));
         assert_eq!(interactive.images, [PathBuf::from("diagram.png")]);
         assert_eq!(interactive_overrides.add_dirs, [PathBuf::from(".")]);
+        assert!(interactive_overrides.strict_config);
         assert!(interactive_overrides.no_alt_screen);
         assert_eq!(
             interactive_overrides.feature_overrides.get("memories"),
@@ -13232,6 +13263,7 @@ mod tests {
             &["C:/shared".into()],
             &BTreeMap::from([("memories".into(), true)]),
             &interactive_overrides.config_overrides,
+            true,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(independent.model_id.as_deref(), Some("gpt-5.6-terra"));
@@ -13253,6 +13285,7 @@ mod tests {
             independent.codex_config_overrides,
             interactive_overrides.config_overrides
         );
+        assert!(independent.strict_config);
 
         let yolo = codex_execution_preferences(
             None,
@@ -13263,6 +13296,7 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &[],
+            false,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(yolo.approval_mode, ApprovalMode::FullAccess);
@@ -13281,6 +13315,7 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &[],
+            false,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(approve_for_me.approval_mode, ApprovalMode::AutoReview);

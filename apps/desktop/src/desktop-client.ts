@@ -315,6 +315,7 @@ export interface ChatRunPreferences {
   additional_writable_roots?: string[];
   codex_feature_overrides?: Record<string, boolean>;
   codex_config_overrides?: CodexConfigOverride[];
+  strict_config?: boolean;
   team_preset: TeamPreset;
   personality?: string;
 }
@@ -330,6 +331,7 @@ export interface ExecutionPreferences {
   additional_writable_roots?: string[];
   codex_feature_overrides?: Record<string, boolean>;
   codex_config_overrides?: CodexConfigOverride[];
+  strict_config?: boolean;
   team_preset?: TeamPreset;
   personality?: string;
 }

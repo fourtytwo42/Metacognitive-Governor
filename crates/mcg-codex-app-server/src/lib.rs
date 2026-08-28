@@ -856,6 +856,48 @@ impl CodexAppServerHarness {
             .collect()
     }
 
+    /// Loads the effective Codex configuration through the pinned binary's
+    /// native strict loader. Closing stdin makes the temporary stdio server
+    /// exit immediately after configuration initialization, so this does not
+    /// create a second long-lived app-server or disturb active threads.
+    pub async fn validate_strict_config(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<(), CodexHarnessError> {
+        let executable = self.inner.lock().await.executable.clone();
+        let mut command = Command::new(executable);
+        command
+            .arg("app-server")
+            .arg("--strict-config")
+            .arg("--listen")
+            .arg("stdio://")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+            .await
+            .map_err(|_| CodexHarnessError::Timeout)?
+            .map_err(|error| CodexHarnessError::Start(error.to_string()))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        let diagnostic = diagnostic.trim();
+        let diagnostic = if diagnostic.is_empty() {
+            format!(
+                "Codex strict configuration validation exited with {}",
+                output.status
+            )
+        } else {
+            diagnostic.chars().take(4_096).collect()
+        };
+        Err(CodexHarnessError::Protocol(diagnostic))
+    }
+
     pub async fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.inner.lock().await.notifications.subscribe()
     }
@@ -2704,6 +2746,20 @@ mod tests {
             assert!(!profile.id.trim().is_empty());
             assert!(ids.insert(profile.id), "duplicate Codex permission profile");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "qualification gate: requires the packaged pinned Codex binary"]
+    async fn installed_pinned_binary_accepts_current_strict_configuration() {
+        let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("codex"));
+        let harness = CodexAppServerHarness::new(executable);
+        let cwd = std::env::current_dir().expect("current directory");
+        harness
+            .validate_strict_config(Some(&cwd))
+            .await
+            .expect("current Codex configuration should pass its native strict loader");
     }
 
     #[test]

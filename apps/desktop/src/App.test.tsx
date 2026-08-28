@@ -2629,6 +2629,10 @@ test("advanced run settings persist typed Codex config and block governed keys",
   await enableAdvancedMode();
   const settings = openNewChatRunSettings().dialog;
   fireEvent.click(within(settings).getByText("Codex config"));
+  const strictConfig = within(settings).getByRole("checkbox", { name: "Require strict Codex configuration" });
+  expect(strictConfig).not.toBeChecked();
+  fireEvent.click(strictConfig);
+  expect(strictConfig).toBeChecked();
 
   fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration key" }), { target: { value: "sandbox_mode" } });
   fireEvent.change(within(settings).getByRole("textbox", { name: "Codex configuration value" }), { target: { value: '"danger-full-access"' } });
@@ -2651,8 +2655,15 @@ test("advanced run settings persist typed Codex config and block governed keys",
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
     "00000000-0000-4000-8000-000000000c01",
-    expect.objectContaining({ execution_preferences: expect.objectContaining({ codex_config_overrides: [{ key: "model_verbosity", value: "low" }] }) })
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ codex_config_overrides: [{ key: "model_verbosity", value: "low" }], strict_config: true }) })
   ));
+});
+
+test("simple run settings omit strict Codex configuration", () => {
+  render(<App />);
+  const settings = openNewChatRunSettings().dialog;
+  expect(within(settings).queryByText("Codex config", { exact: true })).not.toBeInTheDocument();
+  expect(within(settings).queryByRole("checkbox", { name: "Require strict Codex configuration" })).not.toBeInTheDocument();
 });
 
 test("goal and plan commands are available from Add and prepare the composer", () => {
@@ -3280,11 +3291,11 @@ test("new chat opens immediately as a conversation without creating a project or
   expect(client.createConversation).toHaveBeenCalledWith({
     title: "Explain this repository",
     project_id: project.project_id,
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, codex_config_overrides: [], team_preset: "automatic", personality: undefined }
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, permission_profile: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, codex_config_overrides: [], strict_config: false, team_preset: "automatic", personality: undefined }
   });
   expect(client.sendConversationMessage).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000c01", {
     content: "Explain this repository",
-    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, codex_config_overrides: [], team_preset: "automatic", personality: undefined },
+    execution_preferences: { model_id: undefined, reasoning_effort: "medium", service_tier: undefined, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined, permission_profile: undefined, additional_writable_roots: undefined, codex_feature_overrides: {}, codex_config_overrides: [], strict_config: false, team_preset: "automatic", personality: undefined },
     mentions: []
   });
   expect(client.createTask).not.toHaveBeenCalled();

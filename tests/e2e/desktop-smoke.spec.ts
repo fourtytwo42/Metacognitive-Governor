@@ -543,6 +543,10 @@ test("advanced run settings expose typed bounded Codex config overrides", async 
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
   const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
   await dialog.getByText("Codex config", { exact: true }).click();
+  const strictConfig = dialog.getByRole("checkbox", { name: "Require strict Codex configuration" });
+  await expect(strictConfig).not.toBeChecked();
+  await strictConfig.check();
+  await expect(strictConfig).toBeChecked();
   await dialog.getByRole("textbox", { name: "Codex configuration key" }).fill("sandbox_mode");
   await dialog.getByRole("textbox", { name: "Codex configuration value" }).fill('"danger-full-access"');
   await dialog.getByRole("button", { name: "Add override" }).click();
@@ -552,6 +556,13 @@ test("advanced run settings expose typed bounded Codex config overrides", async 
   await dialog.getByRole("button", { name: "Add override" }).click();
   await expect(dialog.getByText("model_verbosity", { exact: true })).toBeVisible();
   await expect(dialog.getByText('"low"', { exact: true })).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Codex config", exact: true }).click();
+  await expect(dialog.getByText(/^Strict/)).toBeVisible();
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  await dialog.getByText("Codex config", { exact: true }).click();
+  await expect(dialog.getByRole("checkbox", { name: "Require strict Codex configuration" })).toBeChecked();
 
   const box = await dialog.boundingBox();
   const viewport = page.viewportSize();

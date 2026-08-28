@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-10 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, global `--search`, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-16 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, global `--search`, native `--strict-config` preflight, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -140,9 +140,21 @@ the mutually exclusive `permissions` field on thread start, thread resume, and
 turn start, while project-free Chat remains read-only and MetaCog's role,
 organization, lease, integration, and approval boundaries stay authoritative.
 
+Cycle 16 adds global `--strict-config` to interactive, bare/piped, consumer-run,
+`exec`, resume, fork, and queue execution. The daemon asks the pinned Codex
+binary to load the effective user and project configuration with its native
+strict loader before persisting the owner message or turn. Unknown fields and
+other strict-loader failures therefore fail before dispatch without creating an
+orphaned pending turn. The bounded qualification process closes stdin, has a
+30-second timeout, is killed on drop, and never disturbs the long-lived Codex
+app-server. The selected preference is durable and auditable per originating
+turn.
+
 Codex-compatible support remains incomplete for local providers/OSS,
-configuration profiles, global non-sandbox `--permission-profile`, remote
-endpoints/authentication, strict config, output schemas, and hook trust. These
+configuration profiles, remote endpoints/authentication, output schemas, and
+hook trust. Current Codex 0.150.1 documents `--permission-profile` only for the
+Windows `sandbox` command; that exact contract is already Native rather than a
+missing global non-sandbox flag. These
 flags must map into governed requests; they may not bypass organization or
 approval policy.
 
@@ -209,6 +221,12 @@ human-readable modes and still displays an already selected profile without
 hiding the active execution choice. Selecting a standard mode clears the named
 profile. The shared menu is independently scrollable, bounded, accessible, and
 uses the existing MetaCog permission visual language.
+
+Cycle 16 adds Strict config to the existing Advanced Codex config panel in both
+New Chat and established Chat. Simple remains unchanged. The control uses the
+shared run-preference model, persists with ordinary drafts and conversations,
+and summarizes its active state in the existing selector without adding a new
+page or exposing raw diagnostics by default.
 
 ## Safety invariants
 

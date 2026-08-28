@@ -1273,6 +1273,10 @@ body { background: var(--mcg-bg); }
 .settings-switch input:checked + i::after { transform: translateX(14px); }
 .settings-switch input:focus-visible + i { outline: 3px solid #f6bf54; outline-offset: 3px; }
 .settings-switch input:disabled + i { opacity: .78; }
+.chat-run-strict-config { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--mcg-border); border-radius: 12px; background: var(--mcg-surface); }
+.chat-run-strict-config > span:first-child { display: grid; min-width: 0; gap: 3px; }
+.chat-run-strict-config strong, .chat-run-strict-config small { overflow-wrap: anywhere; }
+.chat-run-strict-config small { color: var(--mcg-muted); line-height: 1.35; }
 .settings-empty-card { min-height: 104px; display: grid; place-items: center; align-content: center; gap: 8px; padding: 24px; border: 1px solid var(--mcg-border); border-radius: 16px; color: var(--mcg-muted); background: var(--mcg-surface); text-align: center; }
 .settings-empty-card p { max-width: 60ch; margin: 0; line-height: 1.5; }
 .settings-empty-card strong { color: #dedede; }
