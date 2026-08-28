@@ -112,6 +112,8 @@ pub struct CodexCommandExecRequest {
     pub command: Vec<String>,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<String>,
     #[serde(default)]
     pub writable: bool,
 }
@@ -1530,10 +1532,22 @@ impl CodexAppServerHarness {
     }
 
     pub async fn fork_thread(&self, thread_id: &str) -> Result<String, CodexHarnessError> {
+        self.fork_thread_at(thread_id, None).await
+    }
+
+    pub async fn fork_thread_at(
+        &self,
+        thread_id: &str,
+        last_turn_id: Option<&str>,
+    ) -> Result<String, CodexHarnessError> {
         let response = self
             .request(
                 "thread/fork",
-                json!({"threadId": thread_id, "threadSource": "mcg"}),
+                json!({
+                    "threadId": thread_id,
+                    "lastTurnId": last_turn_id,
+                    "threadSource": "mcg"
+                }),
             )
             .await?;
         response
@@ -1785,8 +1799,10 @@ impl CodexAppServerHarness {
                 "command/exec",
                 json!({
                     "command": request.command,
+                    "processId": request.process_id,
                     "cwd": request.cwd,
                     "timeoutMs": request.timeout_ms,
+                    "outputBytesCap": 1_048_576,
                     "sandboxPolicy": sandbox,
                 }),
             )
@@ -1807,6 +1823,12 @@ impl CodexAppServerHarness {
                 .unwrap_or_default()
                 .to_owned(),
         })
+    }
+
+    pub async fn terminate_command(&self, process_id: &str) -> Result<(), CodexHarnessError> {
+        self.request("command/exec/terminate", json!({"processId": process_id}))
+            .await
+            .map(drop)
     }
 
     pub async fn watch_path(

@@ -10,6 +10,7 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use mcg_config::CliTuiPreferences;
 use mcg_domain::{
     ComposerMentionInput, ConversationActivityKind, ConversationActivityState,
     ConversationInputQuestion, ConversationRole, ConversationTurnState, ConversationView,
@@ -30,6 +31,7 @@ const MAX_VISIBLE_CHOICES: usize = 8;
 pub enum PaletteKind {
     Slash,
     Mention,
+    Dollar,
     CommandOption,
 }
 
@@ -43,6 +45,11 @@ pub struct SlashCandidate {
 pub enum PaletteCandidate {
     Slash(SlashCandidate),
     Mention(MentionCandidate),
+    Reference {
+        value: String,
+        label: String,
+        detail: String,
+    },
     Choice {
         value: String,
         label: String,
@@ -55,6 +62,7 @@ impl PaletteCandidate {
         match self {
             Self::Slash(candidate) => format!("/{}", candidate.name),
             Self::Mention(candidate) => format!("@{}", candidate.label),
+            Self::Reference { label, .. } => format!("${label}"),
             Self::Choice { label, .. } => label.clone(),
         }
     }
@@ -63,6 +71,7 @@ impl PaletteCandidate {
         match self {
             Self::Slash(candidate) => candidate.description,
             Self::Mention(candidate) => candidate.detail.as_deref().unwrap_or(&candidate.resource),
+            Self::Reference { detail, .. } => detail,
             Self::Choice { detail, .. } => detail,
         }
     }
@@ -150,6 +159,10 @@ impl TuiTerminal {
     }
 
     pub fn draw(&mut self, model: &mut TuiModel) -> io::Result<()> {
+        execute!(
+            self.terminal.backend_mut(),
+            terminal::SetTitle(model.terminal_title())
+        )?;
         self.terminal.draw(|frame| model.render(frame))?;
         Ok(())
     }
@@ -184,6 +197,8 @@ pub struct TuiModel {
     last_escape: Option<Instant>,
     question_overlay: Option<QuestionOverlay>,
     notices: VecDeque<(chrono::DateTime<chrono::Utc>, String)>,
+    cli_preferences: CliTuiPreferences,
+    vim_insert: bool,
 }
 
 impl TuiModel {
@@ -205,6 +220,32 @@ impl TuiModel {
             last_escape: None,
             question_overlay: None,
             notices: VecDeque::new(),
+            cli_preferences: CliTuiPreferences::default(),
+            vim_insert: true,
+        }
+    }
+
+    pub fn set_cli_preferences(&mut self, preferences: CliTuiPreferences) {
+        if !preferences.vim_mode {
+            self.vim_insert = true;
+        }
+        self.cli_preferences = preferences;
+    }
+
+    fn terminal_title(&self) -> String {
+        let mut fields = Vec::new();
+        for field in &self.cli_preferences.title_fields {
+            match field.as_str() {
+                "project" => fields.push(self.project.clone()),
+                "conversation" => fields.push(self.view.conversation.title.clone()),
+                "branch" => fields.push(self.branch.clone()),
+                _ => {}
+            }
+        }
+        if fields.is_empty() {
+            "MetaCog".into()
+        } else {
+            format!("{} · MetaCog", fields.join(" · "))
         }
     }
 
@@ -379,6 +420,31 @@ impl TuiModel {
             }
             return Ok(None);
         }
+        if self.cli_preferences.vim_mode && !self.vim_insert {
+            match key.code {
+                KeyCode::Char('i') => self.vim_insert = true,
+                KeyCode::Char('a') => {
+                    self.editor.cursor = (self.editor.cursor + 1).min(self.editor.chars().len());
+                    self.vim_insert = true;
+                }
+                KeyCode::Char('h') | KeyCode::Left => {
+                    self.editor.cursor = self.editor.cursor.saturating_sub(1)
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    self.editor.cursor = (self.editor.cursor + 1).min(self.editor.chars().len())
+                }
+                KeyCode::Char('0') | KeyCode::Home => self.editor.cursor = 0,
+                KeyCode::Char('$') | KeyCode::End => self.editor.cursor = self.editor.chars().len(),
+                KeyCode::Char('x') | KeyCode::Delete
+                    if self.editor.cursor < self.editor.chars().len() =>
+                {
+                    self.editor.delete_forward();
+                }
+                KeyCode::Enter => return self.submit_action(false),
+                _ => {}
+            }
+            return Ok(None);
+        }
         let palette_open = self.editor.palette_request().is_some() && !self.candidates.is_empty();
         match key.code {
             KeyCode::Enter | KeyCode::Tab if palette_open => {
@@ -397,6 +463,8 @@ impl TuiModel {
             KeyCode::Esc => {
                 if self.editor.palette_request().is_some() {
                     self.editor.dismiss_palette();
+                } else if self.cli_preferences.vim_mode && self.vim_insert {
+                    self.vim_insert = false;
                 } else if self.editor.buffer.is_empty()
                     && self
                         .last_escape
@@ -568,6 +636,12 @@ impl TuiModel {
 
     fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.area();
+        if self.cli_preferences.theme == "light" {
+            frame.render_widget(
+                Block::default().style(Style::default().fg(Color::Black).bg(Color::White)),
+                area,
+            );
+        }
         let composer_height =
             u16::try_from(self.editor.buffer.lines().count().clamp(1, 6)).unwrap_or(1) + 4;
         let layout = Layout::default()
@@ -589,7 +663,13 @@ impl TuiModel {
         frame.render_widget(transcript, layout[0]);
         frame.render_widget(Paragraph::new(self.status_line()), layout[1]);
         let composer = Paragraph::new(self.editor.buffer.as_str())
-            .style(Style::default().fg(Color::White))
+            .style(
+                Style::default().fg(if self.cli_preferences.theme == "light" {
+                    Color::Black
+                } else {
+                    Color::White
+                }),
+            )
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -663,6 +743,15 @@ impl TuiModel {
                     Style::default().fg(Color::DarkGray),
                 ),
             ));
+            if self.cli_preferences.raw_mode {
+                entries.push((
+                    activity.updated_at,
+                    Line::styled(
+                        serde_json::to_string(activity).unwrap_or_else(|_| "{}".into()),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ));
+            }
         }
         for (created_at, notice) in &self.notices {
             entries.push((
@@ -680,6 +769,18 @@ impl TuiModel {
             lines.push(Line::raw(""));
         }
         if lines.is_empty() {
+            if let Some(pet) = &self.cli_preferences.pet {
+                lines.push(Line::styled(
+                    match pet.as_str() {
+                        "ferris" => "(\u{2267}\u{25e1}\u{2266})",
+                        "owl" => "(\u{25c9}v\u{25c9})",
+                        other => other,
+                    }
+                    .to_owned(),
+                    Style::default().fg(Color::Gray),
+                ));
+                lines.push(Line::raw(""));
+            }
             lines.push(Line::styled(
                 "What should we build?",
                 Style::default()
@@ -698,6 +799,25 @@ impl TuiModel {
             .goal
             .as_ref()
             .map_or("no goal".into(), |goal| format!("goal: {:?}", goal.status));
+        let mut fields = Vec::new();
+        for field in &self.cli_preferences.status_line {
+            let value = match field.as_str() {
+                "project" => self.project.clone(),
+                "branch" => self.branch.clone(),
+                "model" => prefs.model_id.as_deref().unwrap_or("Automatic").to_owned(),
+                "effort" => prefs
+                    .reasoning_effort
+                    .as_deref()
+                    .unwrap_or("Automatic")
+                    .to_owned(),
+                "permissions" => format!("{:?}", prefs.approval_mode),
+                "goal" => goal.clone(),
+                "usage" => "usage: /usage".into(),
+                "queue" => format!("{} queued", self.queued.len()),
+                _ => continue,
+            };
+            fields.push(value);
+        }
         Line::from(vec![
             Span::styled(
                 format!(" {} ", self.status),
@@ -709,16 +829,7 @@ impl TuiModel {
                     })
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                "  {}  {}  {}  {}  {:?}  {} queued  {}",
-                self.project,
-                self.branch,
-                prefs.model_id.as_deref().unwrap_or("Automatic"),
-                prefs.reasoning_effort.as_deref().unwrap_or("Automatic"),
-                prefs.approval_mode,
-                self.queued.len(),
-                goal
-            )),
+            Span::raw(format!("  {}", fields.join("  "))),
         ])
     }
 
@@ -1085,6 +1196,13 @@ impl EditorState {
             let input = chars[1..self.cursor].iter().collect::<String>();
             if let Some((command, query)) = input.split_once(char::is_whitespace) {
                 let query = query.trim_start();
+                if command == "mention" {
+                    return Some(PaletteRequest {
+                        kind: PaletteKind::Mention,
+                        query: query.to_owned(),
+                        command: Some(command.to_owned()),
+                    });
+                }
                 if [
                     "model",
                     "permissions",
@@ -1124,6 +1242,18 @@ impl EditorState {
                 command: None,
             });
         }
+        if chars.get(start) == Some(&'$')
+            && (start == 0
+                || chars
+                    .get(start.wrapping_sub(1))
+                    .is_none_or(|value| value.is_whitespace()))
+        {
+            return Some(PaletteRequest {
+                kind: PaletteKind::Dollar,
+                query: chars[start + 1..self.cursor].iter().collect(),
+                command: None,
+            });
+        }
         None
     }
 
@@ -1131,7 +1261,7 @@ impl EditorState {
         let request = self.palette_request()?;
         match request.kind {
             PaletteKind::Slash => Some((0, self.cursor)),
-            PaletteKind::Mention => {
+            PaletteKind::Mention | PaletteKind::Dollar => {
                 let chars = self.chars();
                 let mut start = self.cursor;
                 while start > 0 && !chars[start - 1].is_whitespace() {
@@ -1167,6 +1297,12 @@ impl EditorState {
                     end: mention_end,
                     candidate: candidate.clone(),
                 });
+                if self.cursor == self.chars().len() {
+                    self.edit(self.cursor, self.cursor, " ");
+                }
+            }
+            PaletteCandidate::Reference { value, .. } => {
+                self.edit(start, end, &format!("${value}"));
                 if self.cursor == self.chars().len() {
                     self.edit(self.cursor, self.cursor, " ");
                 }

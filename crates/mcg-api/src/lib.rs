@@ -32,7 +32,7 @@ use mcg_agents::{
     RoleDefinition, RoleKind, RoleRelationship, ShadowExecutionReceipt, SuccessCondition,
     SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
 };
-use mcg_config::{AutonomyPreset, UserSettings, UserSettingsRevision};
+use mcg_config::{AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComposerMentionInput,
     ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, Conversation,
@@ -238,6 +238,34 @@ pub struct UpdateConversationRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationListResponse {
     pub conversations: Vec<Conversation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkConversationRequest {
+    #[serde(default)]
+    pub origin_turn_id: Option<ConversationTurnId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteConversationRequest {
+    pub confirmation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationDeletionPreview {
+    pub conversation: Conversation,
+    pub children: Vec<Conversation>,
+    pub confirmation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationDeletionResult {
+    pub deleted_conversation_ids: Vec<ConversationId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageAgentSessionRequest {
+    pub content: String,
 }
 
 /// A resumable, conversation-scoped projection for terminal and desktop clients.
@@ -1438,6 +1466,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             "/api/v1/settings",
             get(get_user_settings).put(update_user_settings),
         )
+        .route(
+            "/api/v1/cli/preferences",
+            get(get_cli_tui_preferences).put(update_cli_tui_preferences),
+        )
         .route("/api/v1/settings/history", get(user_settings_history))
         .route("/api/v1/backups", get(list_backups))
         .route("/api/v1/backups/{backup_id}", post(create_backup))
@@ -1581,7 +1613,22 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         )
         .route(
             "/api/v1/conversations/{conversation_id}",
-            get(get_conversation).put(update_conversation),
+            get(get_conversation)
+                .put(update_conversation)
+                .patch(update_conversation)
+                .delete(delete_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/delete-preview",
+            get(preview_conversation_deletion),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/fork",
+            post(fork_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/side",
+            post(create_side_conversation),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/events/stream",
@@ -1610,6 +1657,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/team",
             get(get_conversation_team),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/agent-sessions/{session_id}/messages",
+            post(message_agent_session),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/context/search",
@@ -1697,6 +1748,14 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/codex/command",
             post(exec_governed_codex_command),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/commands",
+            get(list_conversation_commands).post(start_conversation_command),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/commands/{command_id}/stop",
+            post(stop_conversation_command),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/codex/watch",
@@ -2390,6 +2449,27 @@ async fn diagnostics(State(state): State<ApiState>) -> Result<Json<DiagnosticRep
 
 async fn get_user_settings(State(state): State<ApiState>) -> Json<UserSettings> {
     Json(state.runtime.user_settings())
+}
+
+async fn get_cli_tui_preferences(
+    State(state): State<ApiState>,
+) -> Result<Json<CliTuiPreferences>, ApiError> {
+    state
+        .runtime
+        .cli_tui_preferences()
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+async fn update_cli_tui_preferences(
+    State(state): State<ApiState>,
+    Json(preferences): Json<CliTuiPreferences>,
+) -> Result<Json<CliTuiPreferences>, ApiError> {
+    state
+        .runtime
+        .update_cli_tui_preferences(preferences)
+        .map(Json)
+        .map_err(map_runtime_error)
 }
 
 async fn update_user_settings(
@@ -3826,6 +3906,77 @@ async fn get_conversation(
     }
 }
 
+async fn fork_conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<ForkConversationRequest>,
+) -> Result<(StatusCode, Json<ConversationView>), ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .runtime
+                .fork_conversation(conversation_id, request.origin_turn_id, false)
+                .await
+                .map_err(map_runtime_error)?,
+        ),
+    ))
+}
+
+async fn create_side_conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<ForkConversationRequest>,
+) -> Result<(StatusCode, Json<ConversationView>), ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .runtime
+                .fork_conversation(conversation_id, request.origin_turn_id, true)
+                .await
+                .map_err(map_runtime_error)?,
+        ),
+    ))
+}
+
+async fn preview_conversation_deletion(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<ConversationDeletionPreview>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    let (conversation, children) = state
+        .runtime
+        .conversation_deletion_preview(conversation_id)
+        .map_err(map_runtime_error)?;
+    Ok(Json(ConversationDeletionPreview {
+        conversation,
+        children,
+        confirmation: conversation_id.to_string(),
+    }))
+}
+
+async fn delete_conversation(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<DeleteConversationRequest>,
+) -> Result<Json<ConversationDeletionResult>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    if request.confirmation != conversation_id.to_string() {
+        return Err(ApiError::bad_request(
+            "deletion confirmation must exactly match the conversation id",
+        ));
+    }
+    Ok(Json(ConversationDeletionResult {
+        deleted_conversation_ids: state
+            .runtime
+            .delete_conversation(conversation_id)
+            .map_err(map_runtime_error)?,
+    }))
+}
+
 async fn stream_conversation_events(
     State(state): State<ApiState>,
     Path(conversation_id): Path<String>,
@@ -4054,6 +4205,24 @@ async fn get_conversation_team(
         state
             .runtime
             .conversation_team(conversation_id)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn message_agent_session(
+    State(state): State<ApiState>,
+    Path((conversation_id, session_id)): Path<(String, String)>,
+    Json(request): Json<MessageAgentSessionRequest>,
+) -> Result<Json<ConversationTeamState>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    let session_id = session_id
+        .parse::<ConversationAgentSessionId>()
+        .map_err(|_| ApiError::bad_request("agent session id is invalid"))?;
+    Ok(Json(
+        state
+            .runtime
+            .message_agent_session(conversation_id, session_id, request.content)
+            .await
             .map_err(map_runtime_error)?,
     ))
 }
@@ -4462,6 +4631,49 @@ async fn exec_governed_codex_command(
         state
             .runtime
             .exec_governed_codex_command(parse_conversation_id(&conversation_id)?, request)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn start_conversation_command(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<mcg_codex_app_server::CodexCommandExecRequest>,
+) -> Result<(StatusCode, Json<mcg_runtime::ConversationCommandExecution>), ApiError> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            state
+                .runtime
+                .start_conversation_command(parse_conversation_id(&conversation_id)?, request)
+                .await
+                .map_err(map_runtime_error)?,
+        ),
+    ))
+}
+
+async fn list_conversation_commands(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Vec<mcg_runtime::ConversationCommandExecution>>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .conversation_commands(parse_conversation_id(&conversation_id)?)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn stop_conversation_command(
+    State(state): State<ApiState>,
+    Path((conversation_id, command_id)): Path<(String, String)>,
+) -> Result<Json<mcg_runtime::ConversationCommandExecution>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .stop_conversation_command(parse_conversation_id(&conversation_id)?, &command_id)
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -21159,5 +21371,136 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("preview response");
         assert_eq!(stale.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn cli_session_fork_preferences_and_confirmed_tree_deletion_are_native() {
+        let runtime = test_runtime();
+        let parent = runtime
+            .create_conversation(
+                Some("CLI parent".into()),
+                None,
+                ExecutionPreferences::default(),
+            )
+            .expect("parent conversation");
+        let app = router(runtime.clone());
+
+        let side = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/conversations/{}/side",
+                    parent.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"origin_turn_id":null}"#))
+                .expect("side request"),
+            )
+            .await
+            .expect("side response");
+        assert_eq!(side.status(), StatusCode::CREATED);
+        let side: ConversationView =
+            serde_json::from_value(response_json(side).await).expect("side view");
+        assert_eq!(side.conversation.parent_conversation_id, Some(parent.id));
+        assert_eq!(
+            side.conversation.visibility,
+            mcg_domain::ConversationVisibility::Ephemeral
+        );
+
+        let preferences = CliTuiPreferences {
+            keymap: "vim".into(),
+            vim_mode: true,
+            theme: "light".into(),
+            status_line: vec!["project".into(), "model".into()],
+            title_fields: vec!["conversation".into()],
+            raw_mode: true,
+            pet: Some("ferris".into()),
+        };
+        let saved = app
+            .clone()
+            .oneshot(
+                authorized(Request::put("/api/v1/cli/preferences"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&preferences).expect("preferences body"),
+                    ))
+                    .expect("preferences request"),
+            )
+            .await
+            .expect("preferences response");
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(
+            serde_json::from_value::<CliTuiPreferences>(response_json(saved).await)
+                .expect("saved preferences"),
+            preferences
+        );
+
+        let preview = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/conversations/{}/delete-preview",
+                    parent.id
+                )))
+                .body(Body::empty())
+                .expect("preview request"),
+            )
+            .await
+            .expect("preview response");
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview: ConversationDeletionPreview =
+            serde_json::from_value(response_json(preview).await).expect("preview");
+        assert_eq!(preview.children.len(), 1);
+        assert_eq!(preview.confirmation, parent.id.to_string());
+
+        let refused = app
+            .clone()
+            .oneshot(
+                authorized(Request::delete(format!(
+                    "/api/v1/conversations/{}",
+                    parent.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmation":"wrong"}"#))
+                .expect("refused delete request"),
+            )
+            .await
+            .expect("refused delete response");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                authorized(Request::delete(format!(
+                    "/api/v1/conversations/{}",
+                    parent.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"confirmation": parent.id.to_string()}).to_string(),
+                ))
+                .expect("delete request"),
+            )
+            .await
+            .expect("delete response");
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let deleted: ConversationDeletionResult =
+            serde_json::from_value(response_json(deleted).await).expect("delete result");
+        assert_eq!(deleted.deleted_conversation_ids.len(), 2);
+
+        for conversation_id in [parent.id, side.conversation.id] {
+            let missing = app
+                .clone()
+                .oneshot(
+                    authorized(Request::get(format!(
+                        "/api/v1/conversations/{conversation_id}"
+                    )))
+                    .body(Body::empty())
+                    .expect("missing request"),
+                )
+                .await
+                .expect("missing response");
+            assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        }
     }
 }

@@ -7,6 +7,56 @@ use serde::{Deserialize, Serialize};
 
 pub const USER_SETTINGS_SCHEMA_VERSION: u16 = 1;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliTuiPreferences {
+    pub keymap: String,
+    pub vim_mode: bool,
+    pub theme: String,
+    pub status_line: Vec<String>,
+    pub title_fields: Vec<String>,
+    pub raw_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet: Option<String>,
+}
+
+impl Default for CliTuiPreferences {
+    fn default() -> Self {
+        Self {
+            keymap: "default".into(),
+            vim_mode: false,
+            theme: "system".into(),
+            status_line: vec![
+                "project".into(),
+                "branch".into(),
+                "model".into(),
+                "effort".into(),
+                "permissions".into(),
+                "goal".into(),
+                "usage".into(),
+            ],
+            title_fields: vec!["project".into(), "conversation".into()],
+            raw_mode: false,
+            pet: None,
+        }
+    }
+}
+
+impl CliTuiPreferences {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        ["default", "vim"].contains(&self.keymap.as_str())
+            && ["system", "dark", "light"].contains(&self.theme.as_str())
+            && self.status_line.len() <= 16
+            && self.title_fields.len() <= 8
+            && self
+                .status_line
+                .iter()
+                .chain(self.title_fields.iter())
+                .all(|field| !field.is_empty() && field.len() <= 32)
+            && self.pet.as_ref().is_none_or(|pet| pet.len() <= 32)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutonomyPreset {

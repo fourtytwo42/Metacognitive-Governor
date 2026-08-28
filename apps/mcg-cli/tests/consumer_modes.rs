@@ -146,7 +146,11 @@ async fn cli_supports_structured_task_and_error_workflows() {
             "--json",
         ],
     );
-    assert!(created.status.success());
+    assert!(
+        created.status.success(),
+        "create stderr: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let created: serde_json::Value =
         serde_json::from_slice(&created.stdout).expect("task JSON result");
     let task_id = created["task"]["id"].as_str().expect("task id");
@@ -244,7 +248,11 @@ async fn cli_completes_explicit_provider_backed_task_workflows() {
                 "--json",
             ],
         );
-        assert!(created.status.success());
+        assert!(
+            created.status.success(),
+            "create stderr: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
         let created: serde_json::Value =
             serde_json::from_slice(&created.stdout).expect("created task JSON");
         let task_id = created["task"]["id"].as_str().expect("created task id");

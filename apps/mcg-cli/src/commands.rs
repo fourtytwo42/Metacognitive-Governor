@@ -138,9 +138,9 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     command!(
         "delete",
         "Delete the current conversation after confirmation",
-        None,
+        OptionalText,
         RejectWhileActive,
-        Experimental
+        Always
     ),
     command!(
         "exit",
@@ -192,26 +192,20 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         Immediate,
         Always
     ),
-    command!(
-        "raw",
-        "Toggle raw event display",
-        None,
-        Immediate,
-        Experimental
-    ),
+    command!("raw", "Toggle raw event display", None, Immediate, Always),
     command!(
         "ps",
         "Show commands owned by this conversation",
         None,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "stop",
         "Stop a command owned by this conversation",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "model",
@@ -286,19 +280,13 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         Immediate,
         Always
     ),
-    command!(
-        "agent",
-        "Select an agent thread",
-        Picker,
-        Immediate,
-        Experimental
-    ),
+    command!("agent", "Select an agent thread", Picker, Immediate, Always),
     command!(
         "subagents",
         "Inspect subagent threads",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "experimental",
@@ -312,35 +300,29 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         "Choose terminal key bindings",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
-    command!(
-        "vim",
-        "Toggle Vim editing mode",
-        None,
-        Immediate,
-        Experimental
-    ),
+    command!("vim", "Toggle Vim editing mode", None, Immediate, Always),
     command!(
         "statusline",
         "Configure status-line fields",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "title",
         "Configure terminal title fields",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "theme",
         "Choose a terminal theme",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "pets",
@@ -348,14 +330,14 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         "Choose a terminal pet",
         Picker,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "debug-config",
         "Show effective CLI configuration",
         None,
         Immediate,
-        Experimental
+        Always
     ),
     command!("ide", "Connect the detected IDE", Picker, Immediate, Ide),
     command!(
@@ -376,9 +358,9 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     command!(
         "logout",
         "Disconnect MetaCog from Codex after confirmation",
-        None,
+        OptionalText,
         Immediate,
-        Experimental
+        Always
     ),
     command!(
         "app",

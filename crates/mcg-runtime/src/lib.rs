@@ -49,7 +49,9 @@ use mcg_codex_app_server::{
     CodexReviewDelivery, CodexReviewResult, CodexReviewTarget, CodexStableDiscovery,
     CodexThreadInstructions, CodexTurnProgress, verify_pinned_two_agent_conformance,
 };
-use mcg_config::{AppConfig, AutonomyPreset, UserSettings, UserSettingsRevision};
+use mcg_config::{
+    AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
+};
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
     AgentCredentialAudit, AgentCredentialAuditId, AgentCredentialAuditKind, AgentDelegation,
@@ -65,14 +67,14 @@ use mcg_domain::{
     ConversationGoalStatus, ConversationId, ConversationInputOption, ConversationInputQuestion,
     ConversationInputRequest, ConversationMention, ConversationMessage, ConversationMessageId,
     ConversationMode, ConversationPreview, ConversationPreviewId, ConversationPreviewState,
-    ConversationPreviewStrategy, ConversationRole, ConversationState, ConversationTurn,
-    ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatch,
-    CoordinationBatchId, CoordinationBatchState, CoordinatorReviewDecision, EvaluationId,
-    ExecutionPreferences, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId,
-    GovernorProposalId, LeaseId, ManagedWorktree, ManagedWorktreeId, ManagedWorktreeState,
-    MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind, MentionTarget,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
+    ConversationPreviewStrategy, ConversationRole, ConversationState, ConversationTeamState,
+    ConversationTurn, ConversationTurnId, ConversationTurnState, ConversationView,
+    ConversationVisibility, CoordinationBatch, CoordinationBatchId, CoordinationBatchState,
+    CoordinatorReviewDecision, EvaluationId, ExecutionPreferences, ExperimentBenchmarkId,
+    ExperimentDecisionId, ExperimentId, GovernorProposalId, LeaseId, ManagedWorktree,
+    ManagedWorktreeId, ManagedWorktreeState, MemoryClaimId, MemoryTransferId, MentionCandidate,
+    MentionKind, MentionTarget, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
@@ -192,6 +194,48 @@ fn normalized_mention_relative_path(value: &str) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn conversation_external_artifact_paths(view: &ConversationView) -> BTreeSet<String> {
+    view.messages
+        .iter()
+        .flat_map(|message| message.mentions.iter())
+        .filter_map(|mention| match &mention.target {
+            MentionTarget::ExternalPath {
+                artifact_relative_path: Some(relative_path),
+                ..
+            } => Some(relative_path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn remove_unreferenced_mention_artifact(data_directory: &Path, relative_path: &str) {
+    let mut components = relative_path.split('/');
+    let (Some(shard), Some(digest), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return;
+    };
+    if shard.len() != 2
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !digest[..2].eq_ignore_ascii_case(shard)
+    {
+        return;
+    }
+    let artifacts = data_directory.join("artifacts");
+    let shard_path = artifacts.join(shard);
+    let artifact_path = shard_path.join(digest);
+    let Ok(metadata) = fs::symlink_metadata(&artifact_path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return;
+    }
+    if fs::remove_file(&artifact_path).is_ok() {
+        let _ = fs::remove_dir(&shard_path);
+    }
 }
 
 fn mention_path_excluded(relative: &str) -> bool {
@@ -376,6 +420,30 @@ pub struct RuntimeStatus {
     pub recovered_reviewed_topology_plans: u64,
     pub recovered_shadow_workspaces: u64,
     pub recovered_plugin_invocations: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationCommandState {
+    Running,
+    Stopping,
+    Succeeded,
+    Failed,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationCommandExecution {
+    pub id: String,
+    pub conversation_id: ConversationId,
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub state: ConversationCommandState,
+    pub exit_code: Option<i64>,
+    pub stdout: String,
+    pub stderr: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2472,6 +2540,7 @@ pub struct AppRuntime {
     live_conversation_previews:
         Arc<tokio::sync::Mutex<BTreeMap<ConversationPreviewId, LiveConversationPreview>>>,
     project_mention_cache: Arc<Mutex<BTreeMap<ProjectId, ProjectMentionCache>>>,
+    conversation_commands: Arc<tokio::sync::Mutex<BTreeMap<String, ConversationCommandExecution>>>,
     oauth_state: OAuthRuntimeState,
     oauth_refresh: Arc<OAuthRefreshCoordinator>,
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
@@ -2790,6 +2859,7 @@ impl AppRuntime {
             conversation_team: Arc::new(ConversationTeamCoordinator::default()),
             live_conversation_previews: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             project_mention_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            conversation_commands: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             oauth_state: OAuthRuntimeState::new(browser_config, device_config),
             oauth_refresh,
             shadow_command_verifier: default_shadow_command_verifier(),
@@ -3360,6 +3430,375 @@ impl AppRuntime {
 
     pub fn conversations(&self, include_archived: bool) -> Result<Vec<Conversation>, RuntimeError> {
         Ok(self.store()?.conversations(include_archived)?)
+    }
+
+    pub fn cli_tui_preferences(&self) -> Result<CliTuiPreferences, RuntimeError> {
+        Ok(self.store()?.cli_tui_preferences()?)
+    }
+
+    pub fn update_cli_tui_preferences(
+        &self,
+        preferences: CliTuiPreferences,
+    ) -> Result<CliTuiPreferences, RuntimeError> {
+        self.store()?.save_cli_tui_preferences(&preferences)?;
+        Ok(preferences)
+    }
+
+    /// Creates a durable child conversation and, when possible, forks its owned Codex thread.
+    pub async fn fork_conversation(
+        &self,
+        parent_id: ConversationId,
+        origin_turn_id: Option<ConversationTurnId>,
+        ephemeral: bool,
+    ) -> Result<ConversationView, RuntimeError> {
+        let parent = self.conversation(parent_id)?;
+        let selected_origin_id = origin_turn_id.or_else(|| {
+            parent
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == ConversationRole::User)
+                .map(|message| message.turn_id)
+        });
+        let selected_origin = selected_origin_id
+            .map(|origin_turn_id| {
+                parent
+                    .turns
+                    .iter()
+                    .find(|turn| turn.id == origin_turn_id)
+                    .cloned()
+                    .ok_or(StorageError::ConversationTurnNotFound(origin_turn_id))
+            })
+            .transpose()?;
+        if selected_origin.as_ref().is_some_and(|origin| {
+            origin.conversation_id != parent_id
+                || matches!(
+                    origin.state,
+                    ConversationTurnState::Pending
+                        | ConversationTurnState::Streaming
+                        | ConversationTurnState::Recovering
+                )
+        }) {
+            return Err(StorageError::Conflict(
+                "fork origin must be a settled turn in the parent conversation".into(),
+            )
+            .into());
+        }
+        let existing_binding = self
+            .store()?
+            .codex_thread_binding_for_conversation(parent_id)?
+            .filter(|binding| {
+                binding.manageable && binding.ownership_source.as_deref() == Some("mcg")
+            });
+        if selected_origin.is_some() && existing_binding.is_none() {
+            return Err(StorageError::Conflict(
+                "this conversation has no MetaCog-owned Codex thread to fork safely".into(),
+            )
+            .into());
+        }
+        if selected_origin
+            .as_ref()
+            .is_some_and(|origin| origin.codex_turn_id.is_none())
+        {
+            return Err(StorageError::Conflict(
+                "the selected turn has no stable Codex turn identity to fork".into(),
+            )
+            .into());
+        }
+        let forked_thread_id = if let Some(binding) = &existing_binding {
+            Some(
+                self.codex_harness
+                    .fork_thread_at(
+                        &binding.codex_thread_id,
+                        selected_origin
+                            .as_ref()
+                            .and_then(|origin| origin.codex_turn_id.as_deref()),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let mut child = Conversation::new(
+            if ephemeral {
+                format!("{} · side", parent.conversation.title)
+            } else {
+                format!("{} · fork", parent.conversation.title)
+            },
+            parent.conversation.project_id,
+        );
+        child.execution_preferences = parent.conversation.execution_preferences.clone();
+        child.mode = parent.conversation.mode;
+        child.parent_conversation_id = Some(parent_id);
+        child.fork_origin_turn_id = selected_origin_id;
+        child.visibility = if ephemeral {
+            ConversationVisibility::Ephemeral
+        } else {
+            ConversationVisibility::Normal
+        };
+        let event = self.store()?.create_conversation(&child, None)?;
+        let _ = self.event_sender.send(event);
+
+        if let Some(origin) = &selected_origin {
+            for source_turn in &parent.turns {
+                let mut turn = source_turn.clone();
+                let source_id = turn.id;
+                turn.id = ConversationTurnId::new();
+                turn.conversation_id = child.id;
+                turn.codex_thread_id = forked_thread_id.clone();
+                let event = self.store()?.save_conversation_turn(&turn)?;
+                let _ = self.event_sender.send(event);
+                for source_message in parent
+                    .messages
+                    .iter()
+                    .filter(|message| message.turn_id == source_id)
+                {
+                    let mut message = source_message.clone();
+                    message.id = ConversationMessageId::new();
+                    message.conversation_id = child.id;
+                    message.turn_id = turn.id;
+                    let event = self.store()?.append_conversation_message(&message)?;
+                    let _ = self.event_sender.send(event);
+                }
+                if source_id == origin.id {
+                    break;
+                }
+            }
+        }
+
+        if let (Some(mut binding), Some(thread_id)) = (existing_binding, forked_thread_id) {
+            let (mut chat_session, _) = self.ensure_chat_agent_session(&child)?;
+            chat_session.codex_thread_id = Some(thread_id.clone());
+            chat_session.state = ConversationAgentSessionState::Ready;
+            chat_session.updated_at = Utc::now();
+            let event = self
+                .store()?
+                .save_conversation_agent_session(&chat_session)?;
+            let _ = self.event_sender.send(event);
+            binding.conversation_id = Some(child.id);
+            binding.conversation_turn_id = None;
+            binding.agent_session_id = Some(chat_session.id);
+            binding.delegation_id = None;
+            binding.codex_thread_id = thread_id;
+            binding.codex_turn_id = None;
+            binding.codex_item_id = None;
+            binding.last_reconciled_item_id = None;
+            binding.recovery_state = CodexRecoveryState::Forked;
+            self.store()?.save_codex_thread_binding(&binding)?;
+        }
+        self.conversation(child.id)
+    }
+
+    pub fn conversation_deletion_preview(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(Conversation, Vec<Conversation>), RuntimeError> {
+        let conversation = self
+            .store()?
+            .conversation(conversation_id)?
+            .ok_or(StorageError::ConversationNotFound(conversation_id))?;
+        let all = self.store()?.conversations(true)?;
+        let mut descendants = Vec::new();
+        let mut parents = vec![conversation_id];
+        let mut cursor = 0_usize;
+        while cursor < parents.len() {
+            let parent = parents[cursor];
+            let children = all
+                .iter()
+                .filter(|candidate| {
+                    candidate.parent_conversation_id == Some(parent)
+                        && !parents.contains(&candidate.id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            parents.extend(children.iter().map(|child| child.id));
+            descendants.extend(children);
+            cursor += 1;
+        }
+        Ok((conversation, descendants))
+    }
+
+    pub fn delete_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<ConversationId>, RuntimeError> {
+        let (conversation, descendants) = self.conversation_deletion_preview(conversation_id)?;
+        let mut affected = vec![conversation];
+        affected.extend(descendants);
+        for item in &affected {
+            let view = self.conversation(item.id)?;
+            let turn_active = view.turns.iter().any(|turn| {
+                matches!(
+                    turn.state,
+                    ConversationTurnState::Pending
+                        | ConversationTurnState::Streaming
+                        | ConversationTurnState::Recovering
+                )
+            });
+            let goal_active = view
+                .conversation
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == ConversationGoalStatus::Active);
+            if turn_active || goal_active {
+                return Err(StorageError::Conflict(format!(
+                    "conversation {} cannot be deleted while a turn or goal is active",
+                    item.id
+                ))
+                .into());
+            }
+        }
+        let target_ids = affected
+            .iter()
+            .map(|conversation| conversation.id)
+            .collect::<BTreeSet<_>>();
+        let candidate_artifacts = affected
+            .iter()
+            .map(|conversation| self.conversation(conversation.id))
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .flat_map(conversation_external_artifact_paths)
+            .collect::<BTreeSet<_>>();
+        let retained_artifacts = self
+            .conversations(true)?
+            .into_iter()
+            .filter(|conversation| !target_ids.contains(&conversation.id))
+            .map(|conversation| self.conversation(conversation.id))
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .flat_map(conversation_external_artifact_paths)
+            .collect::<BTreeSet<_>>();
+        let (deleted, event) = self
+            .store()?
+            .delete_conversation_tree(conversation_id, Utc::now())?;
+        let _ = self.event_sender.send(event);
+        for relative_path in candidate_artifacts.difference(&retained_artifacts) {
+            if !self
+                .store()?
+                .artifact_relative_path_is_registered(relative_path)?
+            {
+                remove_unreferenced_mention_artifact(&self.config.data_directory, relative_path);
+            }
+        }
+        Ok(deleted)
+    }
+
+    pub async fn message_agent_session(
+        self: &Arc<Self>,
+        conversation_id: ConversationId,
+        session_id: ConversationAgentSessionId,
+        content: String,
+    ) -> Result<ConversationTeamState, RuntimeError> {
+        let content = content.trim();
+        if content.is_empty() || content.chars().count() > 32_768 {
+            return Err(StorageError::InvalidData(
+                "agent-session messages must contain 1-32768 characters".into(),
+            )
+            .into());
+        }
+        let view = self.conversation(conversation_id)?;
+        let target = view
+            .team
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+            .ok_or_else(|| StorageError::InvalidData("agent session was not found".into()))?;
+        if target.kind == ConversationAgentKind::Chat {
+            return Ok(self
+                .send_conversation_message(conversation_id, content.to_owned(), None, Vec::new())
+                .await?
+                .team);
+        }
+        if !matches!(
+            target.state,
+            ConversationAgentSessionState::Ready | ConversationAgentSessionState::Waiting
+        ) {
+            return Err(StorageError::Conflict(
+                "agent-session messaging is available only while that agent is ready or waiting"
+                    .into(),
+            )
+            .into());
+        }
+        let source_session_id = target.parent_session_id.ok_or_else(|| {
+            StorageError::InvalidData("agent session has no governing parent session".into())
+        })?;
+        let delegation = view
+            .team
+            .delegations
+            .iter()
+            .find(|delegation| delegation.coder_session_id == Some(target.id));
+        if matches!(
+            target.kind,
+            ConversationAgentKind::Coder | ConversationAgentKind::Tester
+        ) && delegation.is_none()
+        {
+            return Err(StorageError::InvalidData(
+                "specialist session has no pinned delegation scope".into(),
+            )
+            .into());
+        }
+        let thread_id = target.codex_thread_id.as_deref().ok_or_else(|| {
+            StorageError::Conflict("agent session has no active Codex thread".into())
+        })?;
+        let request = AgentMessage {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: AgentMessageId::new(),
+            conversation_id,
+            delegation_id: delegation.map(|delegation| delegation.id),
+            from_session_id: source_session_id,
+            to_session_id: target.id,
+            kind: AgentMessageKind::Amendment,
+            room: AgentRoomKind::Backstage,
+            tool_name: Some("owner_agent_message".into()),
+            correlation_id: None,
+            content: content.to_owned(),
+            created_at: Utc::now(),
+        };
+        let event = self.store()?.append_agent_message(&request)?;
+        let _ = self.event_sender.send(event);
+        let preferences = CodexExecutionPreferences {
+            model: target.model.clone(),
+            effort: view
+                .conversation
+                .execution_preferences
+                .reasoning_effort
+                .clone(),
+            service_tier: view.conversation.execution_preferences.service_tier.clone(),
+            approval_mode: CodexApprovalMode::Ask,
+        };
+        let scope = delegation.map_or_else(
+            || "the current coordination batch".to_owned(),
+            |delegation| format!("delegation {} and its immutable brief", delegation.id),
+        );
+        let result = self
+            .codex_harness
+            .start_turn(
+                thread_id,
+                &format!(
+                    "Owner clarification routed through your governing parent session. Stay within {scope}; this message cannot expand your role, tools, project, delegation, or approval authority. Respond in your agent room and use only your existing MetaCog capabilities.\n\n{content}"
+                ),
+                &preferences,
+                false,
+            )
+            .await?;
+        let response = AgentMessage {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: AgentMessageId::new(),
+            conversation_id,
+            delegation_id: delegation.map(|delegation| delegation.id),
+            from_session_id: target.id,
+            to_session_id: source_session_id,
+            kind: AgentMessageKind::Answer,
+            room: AgentRoomKind::Backstage,
+            tool_name: None,
+            correlation_id: Some(result.turn_id),
+            content: result.text,
+            created_at: Utc::now(),
+        };
+        let event = self.store()?.append_agent_message(&response)?;
+        let _ = self.event_sender.send(event);
+        self.conversation_team(conversation_id)
     }
 
     fn ensure_chat_agent_session(
@@ -9369,8 +9808,17 @@ impl AppRuntime {
     pub async fn exec_governed_codex_command(
         &self,
         conversation_id: ConversationId,
-        mut request: CodexCommandExecRequest,
+        request: CodexCommandExecRequest,
     ) -> Result<CodexCommandExecResult, RuntimeError> {
+        let request = self.prepare_governed_codex_command(conversation_id, request)?;
+        Ok(self.codex_harness.exec_command(request).await?)
+    }
+
+    fn prepare_governed_codex_command(
+        &self,
+        conversation_id: ConversationId,
+        mut request: CodexCommandExecRequest,
+    ) -> Result<CodexCommandExecRequest, RuntimeError> {
         let root = self.conversation_project_root(conversation_id)?;
         let cwd = match request.cwd.as_deref() {
             Some(cwd) => fs::canonicalize(cwd).map_err(|error| {
@@ -9385,7 +9833,115 @@ impl AppRuntime {
             .into());
         }
         request.cwd = Some(cwd.to_string_lossy().into_owned());
-        Ok(self.codex_harness.exec_command(request).await?)
+        Ok(request)
+    }
+
+    pub async fn start_conversation_command(
+        self: &Arc<Self>,
+        conversation_id: ConversationId,
+        mut request: CodexCommandExecRequest,
+    ) -> Result<ConversationCommandExecution, RuntimeError> {
+        let id = Uuid::new_v4().to_string();
+        request.process_id = Some(id.clone());
+        let request = self.prepare_governed_codex_command(conversation_id, request)?;
+        let execution = ConversationCommandExecution {
+            id: id.clone(),
+            conversation_id,
+            command: request.command.clone(),
+            cwd: request.cwd.clone().unwrap_or_default(),
+            state: ConversationCommandState::Running,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            started_at: Utc::now(),
+            completed_at: None,
+        };
+        self.conversation_commands
+            .lock()
+            .await
+            .insert(id.clone(), execution.clone());
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let result = runtime.codex_harness.exec_command(request).await;
+            let mut commands = runtime.conversation_commands.lock().await;
+            let Some(execution) = commands.get_mut(&id) else {
+                return;
+            };
+            execution.completed_at = Some(Utc::now());
+            match result {
+                Ok(result) => {
+                    execution.exit_code = Some(result.exit_code);
+                    execution.stdout = result.stdout;
+                    execution.stderr = result.stderr;
+                    execution.state = if execution.state == ConversationCommandState::Stopping {
+                        ConversationCommandState::Stopped
+                    } else if result.exit_code == 0 {
+                        ConversationCommandState::Succeeded
+                    } else {
+                        ConversationCommandState::Failed
+                    };
+                }
+                Err(error) => {
+                    execution.stderr = error.to_string();
+                    execution.state = if execution.state == ConversationCommandState::Stopping {
+                        ConversationCommandState::Stopped
+                    } else {
+                        ConversationCommandState::Failed
+                    };
+                }
+            }
+        });
+        Ok(execution)
+    }
+
+    pub async fn conversation_commands(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<ConversationCommandExecution>, RuntimeError> {
+        self.conversation(conversation_id)?;
+        Ok(self
+            .conversation_commands
+            .lock()
+            .await
+            .values()
+            .filter(|execution| execution.conversation_id == conversation_id)
+            .cloned()
+            .collect())
+    }
+
+    pub async fn stop_conversation_command(
+        &self,
+        conversation_id: ConversationId,
+        command_id: &str,
+    ) -> Result<ConversationCommandExecution, RuntimeError> {
+        self.conversation(conversation_id)?;
+        {
+            let mut commands = self.conversation_commands.lock().await;
+            let execution = commands.get_mut(command_id).ok_or_else(|| {
+                StorageError::InvalidData("conversation command was not found".into())
+            })?;
+            if execution.conversation_id != conversation_id {
+                return Err(StorageError::InvalidData(
+                    "conversation command belongs to another conversation".into(),
+                )
+                .into());
+            }
+            if execution.state != ConversationCommandState::Running {
+                return Err(StorageError::Conflict(
+                    "conversation command is no longer running".into(),
+                )
+                .into());
+            }
+            execution.state = ConversationCommandState::Stopping;
+        }
+        self.codex_harness.terminate_command(command_id).await?;
+        Ok(self
+            .conversation_commands
+            .lock()
+            .await
+            .get(command_id)
+            .cloned()
+            .ok_or_else(|| StorageError::InvalidData("conversation command was lost".into()))?)
     }
 
     pub async fn watch_conversation_project(
@@ -24835,6 +25391,22 @@ mod tests {
         ResearchClaimEvidence, TOOL_SCHEMA_VERSION, ToolBroker, ToolExecutor, ToolOutcome,
         ToolOutcomeStatus, ToolRequest, ToolRequestKind, VerificationEvidence,
     };
+
+    #[test]
+    fn mention_artifact_cleanup_accepts_only_content_addressed_store_paths() {
+        let data = tempfile::tempdir().expect("data directory");
+        let artifact = ArtifactStore::open(data.path().join("artifacts"))
+            .expect("artifact store")
+            .capture(b"temporary mention", "text/plain")
+            .expect("capture mention");
+        let artifact_path = data.path().join("artifacts").join(&artifact.relative_path);
+        assert!(artifact_path.is_file());
+
+        remove_unreferenced_mention_artifact(data.path(), "../outside");
+        assert!(artifact_path.is_file());
+        remove_unreferenced_mention_artifact(data.path(), &artifact.relative_path);
+        assert!(!artifact_path.exists());
+    }
 
     #[test]
     fn mention_paths_are_normalized_and_sensitive_trees_are_excluded() {

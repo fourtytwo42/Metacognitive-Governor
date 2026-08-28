@@ -1154,7 +1154,7 @@ pub struct PluginInvocationRecord {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 2;
 pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2184,6 +2184,12 @@ pub struct Conversation {
     pub goal: Option<ConversationGoal>,
     #[serde(default)]
     pub pending_input_requests: Vec<ConversationInputRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_origin_turn_id: Option<ConversationTurnId>,
+    #[serde(default)]
+    pub visibility: ConversationVisibility,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -2202,10 +2208,21 @@ impl Conversation {
             mode: ConversationMode::Default,
             goal: None,
             pending_input_requests: Vec::new(),
+            parent_conversation_id: None,
+            fork_origin_turn_id: None,
+            visibility: ConversationVisibility::Normal,
             created_at: now,
             updated_at: now,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationVisibility {
+    #[default]
+    Normal,
+    Ephemeral,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

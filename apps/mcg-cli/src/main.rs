@@ -29,13 +29,14 @@ use mcg_api::{
     AnswerConversationInputRequest, ApplyComputerActionsRequest, ApprovalListResponse,
     ArchiveConversationRequest, ArchiveProjectRequest, AssembleContextRequest,
     AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    ConversationListResponse, ConversationStreamEvent, CorrectMemoryClaimRequest,
-    CreateConversationRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
-    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
-    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DecideSharedOrganizationRequest, DelegationMutationRequest, DelegationRetryRequest,
-    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
-    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    ConversationDeletionPreview, ConversationDeletionResult, ConversationListResponse,
+    ConversationStreamEvent, CorrectMemoryClaimRequest, CreateConversationRequest,
+    CreateEncryptedBackupRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
+    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
+    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DecideSharedOrganizationRequest,
+    DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
+    EvaluationMutationResponse, ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse,
+    ExperimentDecisionListResponse, ExperimentListResponse, ForkConversationRequest,
     ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
     InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
     LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
@@ -61,7 +62,7 @@ use mcg_api::{
     UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
     UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
-use mcg_config::{AppConfig, AutonomyPreset, UserSettings};
+use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, ComposerMentionInput, ComputerUseCapability, ComputerUseRegion,
     ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId, ConversationMode,
@@ -1770,7 +1771,10 @@ impl From<TaskStateArg> for TaskState {
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run_cli().await {
+    // Keep the very broad noninteractive command dispatcher heap-backed. Its
+    // generated future contains every CLI subcommand branch and can otherwise
+    // exceed the default Windows main-thread stack as the registry grows.
+    if let Err(error) = Box::pin(run_cli()).await {
         // Keep every failure machine-readable, including argument-independent API,
         // authentication, and transport errors. This makes the CLI safe to compose
         // in harnesses without scraping Rust's `Error: ...` debug wrapper.
@@ -2117,6 +2121,9 @@ async fn run_interactive(
         fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
     let branch = git_branch(project_root.as_deref()).unwrap_or_else(|| "no branch".into());
     let mut model = TuiModel::new(initial_view, root.clone(), branch);
+    if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await {
+        model.set_cli_preferences(tui_preferences);
+    }
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut stream_task = spawn_conversation_stream(
         client.clone(),
@@ -2170,6 +2177,10 @@ async fn run_interactive(
                     Err(error) => model.set_status(format!("Queued message failed: {error}")),
                 }
                 model.push_notices(command_output);
+                if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await
+                {
+                    model.set_cli_preferences(tui_preferences);
+                }
             }
         }
 
@@ -2179,6 +2190,7 @@ async fn run_interactive(
                 client,
                 host,
                 token,
+                conversation.id,
                 project_id,
                 &preferences,
                 &plugins,
@@ -2255,6 +2267,10 @@ async fn run_interactive(
                     model.set_status(format!("Fork failed: {error}"));
                 }
                 model.push_notices(command_output);
+                if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await
+                {
+                    model.set_cli_preferences(tui_preferences);
+                }
             }
             TuiAction::Steer(line) => {
                 if let Some((requested, _, _)) = parse_interactive_slash(&line) {
@@ -2311,6 +2327,11 @@ async fn run_interactive(
                                     }
                                 }
                                 model.push_notices(command_output);
+                                if let Ok(tui_preferences) =
+                                    interactive_tui_preferences(client, host, token).await
+                                {
+                                    model.set_cli_preferences(tui_preferences);
+                                }
                             }
                         }
                         continue;
@@ -2369,6 +2390,10 @@ async fn run_interactive(
                     Err(error) => model.set_status(format!("Command failed: {error}")),
                 }
                 model.push_notices(command_output);
+                if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await
+                {
+                    model.set_cli_preferences(tui_preferences);
+                }
             }
         }
     }
@@ -2430,6 +2455,79 @@ async fn dispatch_interactive_line(
         if control == InteractiveControl::Exit {
             return Err("/exit".into());
         }
+        return Ok(Some(
+            fetch_conversation(client, host, token, &conversation.id.to_string()).await?,
+        ));
+    }
+    if let Some(command) = line.content.trim_start().strip_prefix('!') {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("add a command after !".into());
+        }
+        let (command, background) = command
+            .strip_suffix(" &")
+            .map_or((command, false), |command| (command.trim_end(), true));
+        let argv = if cfg!(windows) {
+            vec![
+                "powershell.exe".to_owned(),
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-Command".to_owned(),
+                command.to_owned(),
+            ]
+        } else {
+            vec!["sh".to_owned(), "-lc".to_owned(), command.to_owned()]
+        };
+        let request = mcg_codex_app_server::CodexCommandExecRequest {
+            command: argv,
+            cwd: None,
+            timeout_ms: Some(120_000),
+            process_id: None,
+            writable: preferences.approval_mode == ApprovalMode::FullAccess,
+        };
+        command_output.push(format!("$ {command}"));
+        if background {
+            let execution: mcg_runtime::ConversationCommandExecution = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/codex/commands",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&request)
+                    .send()
+                    .await?,
+                "start governed background command",
+            )
+            .await?;
+            command_output.push(format!(
+                "started {} · use /ps or /stop {}",
+                execution.id, execution.id
+            ));
+            return Ok(Some(
+                fetch_conversation(client, host, token, &conversation.id.to_string()).await?,
+            ));
+        }
+        let result: mcg_codex_app_server::CodexCommandExecResult = decode_api_response(
+            client
+                .post(format!(
+                    "{host}/api/v1/conversations/{}/codex/command",
+                    conversation.id
+                ))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await?,
+            "run governed shell command",
+        )
+        .await?;
+        if !result.stdout.trim().is_empty() {
+            command_output.push(result.stdout.trim_end().to_owned());
+        }
+        if !result.stderr.trim().is_empty() {
+            command_output.push(format!("stderr: {}", result.stderr.trim_end()));
+        }
+        command_output.push(format!("exit {}", result.exit_code));
         return Ok(Some(
             fetch_conversation(client, host, token, &conversation.id.to_string()).await?,
         ));
@@ -2641,6 +2739,7 @@ async fn interactive_palette_candidates(
     client: &reqwest::Client,
     host: &str,
     token: &str,
+    conversation_id: ConversationId,
     project_id: Option<ProjectId>,
     preferences: &ExecutionPreferences,
     plugins: &[MentionCandidate],
@@ -2662,7 +2761,7 @@ async fn interactive_palette_candidates(
             .collect();
     }
     if request.kind == PaletteKind::CommandOption {
-        return interactive_command_options(client, host, token, &request)
+        return interactive_command_options(client, host, token, conversation_id, &request)
             .await
             .into_iter()
             .map(|(value, label, detail)| PaletteCandidate::Choice {
@@ -2670,6 +2769,47 @@ async fn interactive_palette_candidates(
                 label,
                 detail,
             })
+            .collect();
+    }
+    if request.kind == PaletteKind::Dollar {
+        let discovery = client
+            .post(format!("{host}/api/v1/codex/discovery"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "cwds": [], "force_reload": false }))
+            .send()
+            .await;
+        let Ok(response) = discovery else {
+            return Vec::new();
+        };
+        let Ok(response) = response.error_for_status() else {
+            return Vec::new();
+        };
+        let Ok(discovery) = response.json::<serde_json::Value>().await else {
+            return Vec::new();
+        };
+        return discovery
+            .get("skills")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|skill| {
+                let name = skill
+                    .get("name")
+                    .or_else(|| skill.get("displayName"))
+                    .and_then(serde_json::Value::as_str)?;
+                (needle.is_empty() || name.to_ascii_lowercase().contains(&needle)).then(|| {
+                    PaletteCandidate::Reference {
+                        value: name.to_owned(),
+                        label: name.to_owned(),
+                        detail: skill
+                            .get("description")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Enabled skill")
+                            .to_owned(),
+                    }
+                })
+            })
+            .take(100)
             .collect();
     }
     let mut candidates = if let Some(project_id) = project_id {
@@ -2710,6 +2850,7 @@ async fn interactive_command_options(
     client: &reqwest::Client,
     host: &str,
     token: &str,
+    conversation_id: ConversationId,
     request: &PaletteRequest,
 ) -> Vec<(String, String, String)> {
     let command = request.command.as_deref().unwrap_or_default();
@@ -2773,16 +2914,56 @@ async fn interactive_command_options(
             ),
             ("vim".into(), "Vim".into(), "Modal composer editing".into()),
         ],
-        "agent" | "subagents" => ["chat", "coordinator", "coder", "tester"]
-            .into_iter()
-            .map(|role| {
-                (
-                    role.into(),
-                    role.to_ascii_uppercase(),
-                    "Audited agent session".into(),
-                )
-            })
-            .collect(),
+        "statusline" => vec![
+            (
+                "project,branch,model,effort,permissions,goal,usage".into(),
+                "Standard".into(),
+                "Project, execution, goal, and usage".into(),
+            ),
+            (
+                "project,branch,model".into(),
+                "Compact".into(),
+                "Project, branch, and model".into(),
+            ),
+        ],
+        "title" => vec![
+            (
+                "project,conversation".into(),
+                "Project and conversation".into(),
+                "Descriptive terminal title".into(),
+            ),
+            (
+                "conversation".into(),
+                "Conversation only".into(),
+                "Short terminal title".into(),
+            ),
+        ],
+        "pets" => vec![
+            ("none".into(), "None".into(), "Hide the terminal pet".into()),
+            ("ferris".into(), "Ferris".into(), "A small Rust crab".into()),
+            ("owl".into(), "Owl".into(), "A quiet MetaCog owl".into()),
+        ],
+        "agent" | "subagents" => {
+            let mut sessions = Vec::new();
+            if let Ok(response) = client
+                .get(format!("{host}/api/v1/conversations/{conversation_id}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(view) = response.json::<ConversationView>().await {
+                    sessions.extend(view.team.sessions.into_iter().map(|session| {
+                        (
+                            session.id.to_string(),
+                            session.display_name,
+                            format!("{:?} · {:?}", session.kind, session.state),
+                        )
+                    }));
+                }
+            }
+            sessions
+        }
         "model" => {
             let mut models = vec![(
                 "model=automatic".into(),
@@ -2874,6 +3055,69 @@ async fn interactive_command_options(
                 }
             }
             conversations
+        }
+        "fork" => {
+            let mut turns = Vec::new();
+            if let Ok(response) = client
+                .get(format!("{host}/api/v1/conversations/{conversation_id}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(view) = response.json::<ConversationView>().await {
+                    for turn in view.turns {
+                        let label = view
+                            .messages
+                            .iter()
+                            .find(|message| {
+                                message.turn_id == turn.id && message.role == ConversationRole::User
+                            })
+                            .map(|message| {
+                                message
+                                    .content
+                                    .replace(['\r', '\n'], " ")
+                                    .chars()
+                                    .take(72)
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| "User request".into());
+                        turns.push((turn.id.to_string(), label, turn.created_at.to_rfc3339()));
+                    }
+                }
+            }
+            turns.reverse();
+            turns
+        }
+        "stop" => {
+            let mut commands = Vec::new();
+            if let Ok(response) = client
+                .get(format!(
+                    "{host}/api/v1/conversations/{conversation_id}/codex/commands"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                if let Ok(items) = response
+                    .json::<Vec<mcg_runtime::ConversationCommandExecution>>()
+                    .await
+                {
+                    commands.extend(items.into_iter().filter_map(|execution| {
+                        (execution.state == mcg_runtime::ConversationCommandState::Running).then(
+                            || {
+                                (
+                                    execution.id,
+                                    execution.command.join(" "),
+                                    format!("Started {}", execution.started_at),
+                                )
+                            },
+                        )
+                    }));
+                }
+            }
+            commands
         }
         _ => Vec::new(),
     };
@@ -3230,22 +3474,51 @@ async fn run_interactive_slash(
             .await?;
             *conversation = archived;
         }
-        "new" | "side" => {
+        "new" => {
             *conversation = create_interactive_conversation(
                 client,
                 host,
                 token,
                 *project_id,
                 preferences,
-                if name == "side" {
-                    "MetaCog CLI side chat"
-                } else {
-                    "MetaCog CLI"
-                },
+                "MetaCog CLI",
             )
             .await?;
             pending_mentions.clear();
             println!("Started conversation {}.", conversation.id);
+            if !argument.is_empty() {
+                let view = send_interactive_message(
+                    client,
+                    host,
+                    token,
+                    conversation,
+                    preferences,
+                    slash_argument_line(line, argument_start),
+                    pending_mentions,
+                )
+                .await?;
+                *conversation = view.conversation;
+            }
+        }
+        "side" => {
+            let view: ConversationView = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/side",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&ForkConversationRequest {
+                        origin_turn_id: None,
+                    })
+                    .send()
+                    .await?,
+                "create side conversation",
+            )
+            .await?;
+            *conversation = view.conversation;
+            pending_mentions.clear();
+            println!("Started ephemeral side conversation {}.", conversation.id);
             if !argument.is_empty() {
                 let view = send_interactive_message(
                     client,
@@ -3351,7 +3624,20 @@ async fn run_interactive_slash(
             println!("Goal {}.", if clear { "cleared" } else { "updated" });
         }
         "mention" => {
-            if argument.is_empty() {
+            if !line.mentions.is_empty() {
+                for mention in &line.mentions {
+                    pending_mentions.push(format!(
+                        "{}:{}",
+                        match mention.kind {
+                            MentionKind::File => "file",
+                            MentionKind::Folder => "folder",
+                            MentionKind::Plugin => "plugin",
+                        },
+                        mention.resource
+                    ));
+                    println!("Attached {} to the next message.", mention.label);
+                }
+            } else if argument.is_empty() {
                 println!("Type @ to search the project, or use /mention <path>.");
             } else {
                 let path = PathBuf::from(argument);
@@ -3560,6 +3846,58 @@ async fn run_interactive_slash(
                 }))?
             );
         }
+        "raw" => {
+            let mut tui = interactive_tui_preferences(client, host, token).await?;
+            tui.raw_mode = !tui.raw_mode;
+            save_interactive_tui_preferences(client, host, token, &tui).await?;
+            println!(
+                "Raw event display {}.",
+                if tui.raw_mode { "on" } else { "off" }
+            );
+        }
+        "ps" => {
+            let commands: Vec<mcg_runtime::ConversationCommandExecution> = decode_api_response(
+                client
+                    .get(format!(
+                        "{host}/api/v1/conversations/{}/codex/commands",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "list conversation commands",
+            )
+            .await?;
+            if commands.is_empty() {
+                println!("No commands belong to this conversation.");
+            }
+            for command in commands {
+                println!(
+                    "{} · {:?} · {}",
+                    command.id,
+                    command.state,
+                    command.command.join(" ")
+                );
+            }
+        }
+        "stop" => {
+            if argument.is_empty() {
+                return Err("choose a running command from the /stop picker".into());
+            }
+            let execution: mcg_runtime::ConversationCommandExecution = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/codex/commands/{}/stop",
+                        conversation.id, argument
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "stop conversation command",
+            )
+            .await?;
+            println!("{} · {:?}", execution.id, execution.state);
+        }
         "copy" => {
             let view =
                 fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
@@ -3589,21 +3927,115 @@ async fn run_interactive_slash(
             }
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
-        "compact" | "fork" => {
-            let operation = name.as_str();
+        "compact" => {
             let _: serde_json::Value = decode_api_response(
                 client
                     .post(format!(
-                        "{host}/api/v1/codex/owned-threads/{}/{operation}",
+                        "{host}/api/v1/codex/owned-threads/{}/compact",
                         conversation.id
                     ))
                     .bearer_auth(token)
                     .send()
                     .await?,
-                operation,
+                "compact",
             )
             .await?;
-            println!("Context {operation} completed.");
+            println!("Context compact completed.");
+        }
+        "fork" => {
+            let origin_turn_id = if argument.is_empty() {
+                None
+            } else {
+                Some(
+                    argument
+                        .parse::<ConversationTurnId>()
+                        .map_err(|_| "choose a user turn from the /fork picker")?,
+                )
+            };
+            let view: ConversationView = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/fork",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&ForkConversationRequest { origin_turn_id })
+                    .send()
+                    .await?,
+                "fork conversation",
+            )
+            .await?;
+            *conversation = view.conversation;
+            pending_mentions.clear();
+            println!("Forked to conversation {}.", conversation.id);
+        }
+        "delete" => {
+            let preview: ConversationDeletionPreview = decode_api_response(
+                client
+                    .get(format!(
+                        "{host}/api/v1/conversations/{}/delete-preview",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await?,
+                "preview conversation deletion",
+            )
+            .await?;
+            if argument != preview.confirmation {
+                println!(
+                    "Delete '{}' ({}) and {} child conversation(s)? Re-run `/delete {}` to confirm.",
+                    preview.conversation.title,
+                    preview.conversation.id,
+                    preview.children.len(),
+                    preview.confirmation
+                );
+            } else {
+                let result: ConversationDeletionResult = decode_api_response(
+                    client
+                        .delete(format!("{host}/api/v1/conversations/{}", conversation.id))
+                        .bearer_auth(token)
+                        .json(&mcg_api::DeleteConversationRequest {
+                            confirmation: argument.to_owned(),
+                        })
+                        .send()
+                        .await?,
+                    "delete conversation",
+                )
+                .await?;
+                println!(
+                    "Deleted {} conversation(s).",
+                    result.deleted_conversation_ids.len()
+                );
+                *conversation = create_interactive_conversation(
+                    client,
+                    host,
+                    token,
+                    *project_id,
+                    preferences,
+                    "MetaCog CLI",
+                )
+                .await?;
+                pending_mentions.clear();
+            }
+        }
+        "logout" => {
+            if !argument.eq_ignore_ascii_case("confirm") {
+                println!(
+                    "This disconnects the device-wide Codex account. Re-run `/logout confirm` to continue."
+                );
+            } else {
+                let _: serde_json::Value = decode_api_response(
+                    client
+                        .post(format!("{host}/api/v1/codex/account/logout"))
+                        .bearer_auth(token)
+                        .send()
+                        .await?,
+                    "logout Codex account",
+                )
+                .await?;
+                println!("Codex account disconnected.");
+            }
         }
         "approve" => {
             if !argument.eq_ignore_ascii_case("confirm") {
@@ -3808,6 +4240,121 @@ async fn run_interactive_slash(
                 );
             }
         }
+        "agent" | "subagents" => {
+            let view =
+                fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+            let (selector, message) = argument
+                .trim()
+                .split_once(char::is_whitespace)
+                .map_or((argument.trim(), None), |(selector, message)| {
+                    (selector, Some(message.trim()))
+                });
+            let requested = selector.to_ascii_lowercase();
+            let matching = view
+                .team
+                .sessions
+                .iter()
+                .filter(|session| {
+                    requested.is_empty()
+                        || session.id.to_string() == requested
+                        || format!("{:?}", session.kind).to_ascii_lowercase() == requested
+                        || session
+                            .display_name
+                            .to_ascii_lowercase()
+                            .contains(&requested)
+                })
+                .collect::<Vec<_>>();
+            if let Some(message) = message.filter(|message| !message.is_empty()) {
+                let target = matching
+                    .last()
+                    .ok_or("no agent session matches that selector")?;
+                let team: mcg_domain::ConversationTeamState = decode_api_response(
+                    client
+                        .post(format!(
+                            "{host}/api/v1/conversations/{}/agent-sessions/{}/messages",
+                            conversation.id, target.id
+                        ))
+                        .bearer_auth(token)
+                        .json(&mcg_api::MessageAgentSessionRequest {
+                            content: message.to_owned(),
+                        })
+                        .send()
+                        .await?,
+                    "message agent session",
+                )
+                .await?;
+                if let Some(response) = team
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|item| item.from_session_id == target.id)
+                {
+                    println!("{}: {}", target.display_name, response.content);
+                }
+                *conversation = view.conversation;
+                return Ok(InteractiveControl::Continue);
+            }
+            let sessions = matching.into_iter();
+            for session in sessions {
+                println!(
+                    "{} · {:?} · {:?} · {}",
+                    session.display_name, session.kind, session.state, session.id
+                );
+                for message in view.team.messages.iter().filter(|message| {
+                    message.from_session_id == session.id || message.to_session_id == session.id
+                }) {
+                    println!("  {:?}: {}", message.kind, message.content);
+                }
+            }
+            *conversation = view.conversation;
+        }
+        "keymap" | "theme" | "statusline" | "title" | "pets" => {
+            let mut tui = interactive_tui_preferences(client, host, token).await?;
+            match name.as_str() {
+                "keymap" if !argument.is_empty() => {
+                    tui.keymap = argument.to_owned();
+                    tui.vim_mode = argument == "vim";
+                }
+                "theme" if !argument.is_empty() => tui.theme = argument.to_owned(),
+                "statusline" if !argument.is_empty() => {
+                    tui.status_line = argument
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "title" if !argument.is_empty() => {
+                    tui.title_fields = argument
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "pets" if argument.eq_ignore_ascii_case("none") => tui.pet = None,
+                "pets" if !argument.is_empty() => tui.pet = Some(argument.to_owned()),
+                _ => {}
+            }
+            if !argument.is_empty() {
+                save_interactive_tui_preferences(client, host, token, &tui).await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&tui)?);
+        }
+        "vim" => {
+            let mut tui = interactive_tui_preferences(client, host, token).await?;
+            tui.vim_mode = !tui.vim_mode;
+            tui.keymap = if tui.vim_mode { "vim" } else { "default" }.into();
+            save_interactive_tui_preferences(client, host, token, &tui).await?;
+            println!(
+                "Vim editing mode {}.",
+                if tui.vim_mode { "on" } else { "off" }
+            );
+        }
+        "debug-config" => println!(
+            "{}",
+            serde_json::to_string_pretty(&interactive_tui_preferences(client, host, token).await?)?
+        ),
         "feedback" => println!(
             "Use `mcg doctor` for a support report and include it with your GitHub feedback."
         ),
@@ -3820,10 +4367,44 @@ async fn run_interactive_slash(
         "ide-context" => println!(
             "IDE selection context is unavailable in the standalone CLI; use @ references instead."
         ),
-        "pet" => println!("MetaCog does not ship a desktop pet."),
         _ => unreachable!("all commands are handled above"),
     }
     Ok(InteractiveControl::Continue)
+}
+
+async fn interactive_tui_preferences(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+) -> Result<CliTuiPreferences, Box<dyn std::error::Error>> {
+    decode_api_response(
+        client
+            .get(format!("{host}/api/v1/cli/preferences"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "read CLI preferences",
+    )
+    .await
+}
+
+async fn save_interactive_tui_preferences(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    preferences: &CliTuiPreferences,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _: CliTuiPreferences = decode_api_response(
+        client
+            .put(format!("{host}/api/v1/cli/preferences"))
+            .bearer_auth(token)
+            .json(preferences)
+            .send()
+            .await?,
+        "save CLI preferences",
+    )
+    .await?;
+    Ok(())
 }
 
 async fn run_consumer_submission(

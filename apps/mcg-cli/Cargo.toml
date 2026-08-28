@@ -20,6 +20,7 @@ eventsource-stream.workspace = true
 futures-util.workspace = true
 mcg-agents = { path = "../../crates/mcg-agents" }
 mcg-api = { path = "../../crates/mcg-api" }
+mcg-codex-app-server = { path = "../../crates/mcg-codex-app-server" }
 mcg-config = { path = "../../crates/mcg-config" }
 mcg-domain = { path = "../../crates/mcg-domain" }
 mcg-events = { path = "../../crates/mcg-events" }

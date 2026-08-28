@@ -70,7 +70,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 47;
+pub const STORAGE_SCHEMA_VERSION: i64 = 49;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1652,6 +1652,32 @@ BEFORE DELETE ON governor_proposals BEGIN
 END;
 ";
 
+const MIGRATION_48: &str = r"
+CREATE TABLE IF NOT EXISTS conversation_tombstones (
+    conversation_id TEXT PRIMARY KEY,
+    parent_conversation_id TEXT,
+    deleted_at TEXT NOT NULL,
+    deleted_child_count INTEGER NOT NULL,
+    reason TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS conversation_tombstones_no_update
+BEFORE UPDATE ON conversation_tombstones BEGIN
+    SELECT RAISE(FAIL, 'conversation deletion tombstones are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS conversation_tombstones_no_delete
+BEFORE DELETE ON conversation_tombstones BEGIN
+    SELECT RAISE(FAIL, 'conversation deletion tombstones are immutable');
+END;
+";
+
+const MIGRATION_49: &str = r"
+CREATE TABLE IF NOT EXISTS cli_tui_preferences (
+    owner_key TEXT PRIMARY KEY CHECK(owner_key = 'local-owner'),
+    preferences_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1834,6 +1860,8 @@ impl SqliteEventStore {
             (45_i64, MIGRATION_45),
             (46_i64, MIGRATION_46),
             (47_i64, MIGRATION_47),
+            (48_i64, MIGRATION_48),
+            (49_i64, MIGRATION_49),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1906,6 +1934,211 @@ impl SqliteEventStore {
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    pub fn cli_tui_preferences(&self) -> Result<mcg_config::CliTuiPreferences, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT preferences_json FROM cli_tui_preferences WHERE owner_key='local-owner'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .transpose()
+            .map(|preferences| preferences.unwrap_or_default())
+    }
+
+    pub fn save_cli_tui_preferences(
+        &mut self,
+        preferences: &mcg_config::CliTuiPreferences,
+    ) -> Result<(), StorageError> {
+        if !preferences.is_valid() {
+            return Err(StorageError::InvalidData(
+                "CLI TUI preferences are invalid".into(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO cli_tui_preferences(owner_key, preferences_json, updated_at)
+             VALUES ('local-owner', ?1, ?2)
+             ON CONFLICT(owner_key) DO UPDATE SET
+                preferences_json=excluded.preferences_json,
+                updated_at=excluded.updated_at",
+            params![serde_json::to_string(preferences)?, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn artifact_relative_path_is_registered(
+        &self,
+        relative_path: &str,
+    ) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE relative_path=?1)",
+                [relative_path],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::from)
+    }
+
+    /// Permanently removes one conversation tree and retains only content-free tombstones.
+    pub fn delete_conversation_tree(
+        &mut self,
+        root_id: ConversationId,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<(Vec<ConversationId>, EventEnvelope), StorageError> {
+        let conversations = self.conversations(true)?;
+        if !conversations
+            .iter()
+            .any(|conversation| conversation.id == root_id)
+        {
+            return Err(StorageError::ConversationNotFound(root_id));
+        }
+        let mut targets = vec![root_id];
+        let mut cursor = 0_usize;
+        while cursor < targets.len() {
+            let parent = targets[cursor];
+            let children = conversations
+                .iter()
+                .filter(|conversation| {
+                    conversation.parent_conversation_id == Some(parent)
+                        && !targets.contains(&conversation.id)
+                })
+                .map(|conversation| conversation.id)
+                .collect::<Vec<_>>();
+            targets.extend(children);
+            cursor += 1;
+        }
+        let target_strings = targets.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let transaction = self.connection.transaction()?;
+        for id in &target_strings {
+            transaction.execute(
+                "DELETE FROM events WHERE EXISTS (
+                    SELECT 1 FROM json_tree(events.payload)
+                    WHERE json_tree.key = 'conversation_id' AND json_tree.value = ?1
+                )",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM conversation_previews WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute("DELETE FROM agent_wakes WHERE conversation_id=?1", [id])?;
+            transaction.execute(
+                "DELETE FROM agent_credential_audit WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM agent_context_checkpoints WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM delegation_retry_requests WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM hidden_delegation_tasks WHERE delegation_id IN (
+                    SELECT delegation_id FROM agent_delegations WHERE conversation_id=?1
+                )",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM integration_journals WHERE delegation_id IN (
+                    SELECT delegation_id FROM agent_delegations WHERE conversation_id=?1
+                )",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM worktree_baseline_entries WHERE worktree_id IN (
+                    SELECT worktree_id FROM managed_worktrees WHERE conversation_id=?1
+                )",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM worktree_baseline_exclusions WHERE worktree_id IN (
+                    SELECT worktree_id FROM managed_worktrees WHERE conversation_id=?1
+                )",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM managed_worktrees WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM coordination_batches WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM blackboard_entries WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute("DELETE FROM agent_messages WHERE conversation_id=?1", [id])?;
+            transaction.execute(
+                "DELETE FROM agent_delegations WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM codex_thread_bindings WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM conversation_activities WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM conversation_turns WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM conversation_agent_sessions WHERE conversation_id=?1",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM conversation_context_fts WHERE conversation_id=?1",
+                [id],
+            )?;
+        }
+        let child_count = targets.len().saturating_sub(1);
+        for conversation in conversations
+            .iter()
+            .filter(|conversation| targets.contains(&conversation.id))
+        {
+            transaction.execute(
+                "INSERT INTO conversation_tombstones(
+                    conversation_id, parent_conversation_id, deleted_at, deleted_child_count, reason
+                 ) VALUES (?1, ?2, ?3, ?4, 'owner_confirmed')",
+                params![
+                    conversation.id.to_string(),
+                    conversation.parent_conversation_id.map(|id| id.to_string()),
+                    deleted_at.to_rfc3339(),
+                    if conversation.id == root_id {
+                        i64::try_from(child_count).unwrap_or(i64::MAX)
+                    } else {
+                        0
+                    },
+                ],
+            )?;
+        }
+        for id in &target_strings {
+            transaction.execute("DELETE FROM conversations WHERE conversation_id=?1", [id])?;
+        }
+        let event = EventEnvelope::new(
+            EventKind::ConversationDeleted,
+            None,
+            serde_json::json!({
+                "conversation_id": root_id,
+                "deleted_child_count": child_count,
+                "deleted_at": deleted_at,
+            }),
+        );
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((targets, event))
     }
 
     pub fn save_conversation_turn(
@@ -5312,6 +5545,54 @@ mod tests {
             store.codex_thread_bindings().expect("all bindings").len(),
             2
         );
+    }
+
+    #[test]
+    fn confirmed_conversation_tree_deletion_removes_content_and_retains_tombstones() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        let parent = Conversation::new("private parent content", None);
+        store
+            .create_conversation(&parent, None)
+            .expect("parent should persist");
+        let mut child = Conversation::new("private child content", None);
+        child.parent_conversation_id = Some(parent.id);
+        child.visibility = mcg_domain::ConversationVisibility::Ephemeral;
+        store
+            .create_conversation(&child, None)
+            .expect("child should persist");
+
+        let (deleted, event) = store
+            .delete_conversation_tree(parent.id, Utc::now())
+            .expect("tree deletion should settle");
+        assert_eq!(deleted.len(), 2);
+        assert_eq!(event.kind, EventKind::ConversationDeleted);
+        assert!(
+            store
+                .conversation(parent.id)
+                .expect("parent lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .conversation(child.id)
+                .expect("child lookup")
+                .is_none()
+        );
+        let tombstones: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM conversation_tombstones", [], |row| {
+                row.get(0)
+            })
+            .expect("tombstone count");
+        assert_eq!(tombstones, 2);
+        let serialized_events: String = store
+            .connection
+            .query_row("SELECT group_concat(payload, '') FROM events", [], |row| {
+                row.get(0)
+            })
+            .expect("remaining event payloads");
+        assert!(!serialized_events.contains("private parent content"));
+        assert!(!serialized_events.contains("private child content"));
     }
 
     #[test]

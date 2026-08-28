@@ -13,6 +13,7 @@ pub const EVENT_SCHEMA_VERSION: u16 = 1;
 pub enum EventKind {
     ConversationCreated,
     ConversationUpdated,
+    ConversationDeleted,
     ConversationMessageRecorded,
     ConversationTurnUpdated,
     ConversationActivityUpdated,
@@ -89,6 +90,7 @@ impl EventKind {
         match self {
             Self::ConversationCreated => "conversation_created",
             Self::ConversationUpdated => "conversation_updated",
+            Self::ConversationDeleted => "conversation_deleted",
             Self::ConversationMessageRecorded => "conversation_message_recorded",
             Self::ConversationTurnUpdated => "conversation_turn_updated",
             Self::ConversationActivityUpdated => "conversation_activity_updated",
@@ -170,6 +172,7 @@ impl EventKind {
         match value {
             "conversation_created" | "ConversationCreated" => Ok(Self::ConversationCreated),
             "conversation_updated" | "ConversationUpdated" => Ok(Self::ConversationUpdated),
+            "conversation_deleted" | "ConversationDeleted" => Ok(Self::ConversationDeleted),
             "conversation_message_recorded" | "ConversationMessageRecorded" => {
                 Ok(Self::ConversationMessageRecorded)
             }

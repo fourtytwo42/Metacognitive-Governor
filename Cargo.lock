@@ -3934,6 +3934,7 @@ dependencies = [
  "futures-util",
  "mcg-agents",
  "mcg-api",
+ "mcg-codex-app-server",
  "mcg-config",
  "mcg-domain",
  "mcg-events",
