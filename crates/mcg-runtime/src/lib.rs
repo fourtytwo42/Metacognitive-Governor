@@ -2482,7 +2482,75 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
                 CodexSandboxMode::DangerFullAccess
             }
         }),
+        writable_roots: preferences.additional_writable_roots.clone(),
     }
+}
+
+fn validate_execution_preferences(
+    preferences: &mut ExecutionPreferences,
+    has_project: bool,
+) -> Result<(), RuntimeError> {
+    const MAX_ADDITIONAL_WRITABLE_ROOTS: usize = 16;
+    if preferences.additional_writable_roots.len() > MAX_ADDITIONAL_WRITABLE_ROOTS {
+        return Err(StorageError::InvalidData(format!(
+            "at most {MAX_ADDITIONAL_WRITABLE_ROOTS} additional writable directories are allowed"
+        ))
+        .into());
+    }
+    if !has_project && !preferences.additional_writable_roots.is_empty() {
+        return Err(StorageError::InvalidData(
+            "additional writable directories require a linked project".into(),
+        )
+        .into());
+    }
+    if !preferences.additional_writable_roots.is_empty()
+        && (preferences.approval_mode == mcg_domain::ApprovalMode::ReadOnly
+            || matches!(
+                preferences.sandbox_mode,
+                Some(mcg_domain::ExecutionSandboxMode::ReadOnly)
+            ))
+    {
+        return Err(StorageError::InvalidData(
+            "additional writable directories cannot be combined with a read-only sandbox".into(),
+        )
+        .into());
+    }
+    let mut normalized = Vec::with_capacity(preferences.additional_writable_roots.len());
+    let mut identities = BTreeSet::new();
+    for root in &preferences.additional_writable_roots {
+        if root.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "additional writable directory cannot be empty".into(),
+            )
+            .into());
+        }
+        let canonical = fs::canonicalize(root).map_err(|error| {
+            StorageError::InvalidData(format!(
+                "additional writable directory `{root}` is unavailable: {error}"
+            ))
+        })?;
+        if !canonical.is_dir() {
+            return Err(StorageError::InvalidData(format!(
+                "additional writable path is not a directory: {}",
+                canonical.display()
+            ))
+            .into());
+        }
+        let value = canonical.to_str().ok_or_else(|| {
+            StorageError::InvalidData(
+                "additional writable directory paths must be valid Unicode".into(),
+            )
+        })?;
+        #[cfg(windows)]
+        let identity = value.to_lowercase();
+        #[cfg(not(windows))]
+        let identity = value.to_owned();
+        if identities.insert(identity) {
+            normalized.push(value.to_owned());
+        }
+    }
+    preferences.additional_writable_roots = normalized;
+    Ok(())
 }
 
 fn execution_is_read_only(preferences: &ExecutionPreferences) -> bool {
@@ -3438,13 +3506,14 @@ impl AppRuntime {
         &self,
         title: Option<String>,
         project_id: Option<ProjectId>,
-        execution_preferences: ExecutionPreferences,
+        mut execution_preferences: ExecutionPreferences,
     ) -> Result<Conversation, RuntimeError> {
         if let Some(project_id) = project_id {
             if self.store()?.project(project_id)?.is_none() {
                 return Err(StorageError::ProjectNotFound(project_id).into());
             }
         }
+        validate_execution_preferences(&mut execution_preferences, project_id.is_some())?;
         let mut conversation = Conversation::new(
             title
                 .filter(|value| !value.trim().is_empty())
@@ -3797,6 +3866,11 @@ impl AppRuntime {
             approval_mode: CodexApprovalMode::Ask,
             approval_policy: None,
             sandbox_mode: None,
+            writable_roots: view
+                .conversation
+                .execution_preferences
+                .additional_writable_roots
+                .clone(),
         };
         let scope = delegation.map_or_else(
             || "the current coordination batch".to_owned(),
@@ -9864,6 +9938,7 @@ impl AppRuntime {
             approval_mode: CodexApprovalMode::Ask,
             approval_policy: None,
             sandbox_mode: Some(CodexSandboxMode::ReadOnly),
+            writable_roots: Vec::new(),
         };
         let host_thread_id = self
             .codex_harness
@@ -10746,8 +10821,9 @@ impl AppRuntime {
         if let Some(mode) = requested_mode {
             conversation.mode = mode;
         }
-        let preferences =
+        let mut preferences =
             turn_preferences.unwrap_or_else(|| conversation.execution_preferences.clone());
+        validate_execution_preferences(&mut preferences, conversation.project_id.is_some())?;
         conversation.execution_preferences = preferences.clone();
         conversation.updated_at = Utc::now();
         if conversation.title == "New chat" {
@@ -10839,6 +10915,7 @@ impl AppRuntime {
                     CodexSandboxMode::DangerFullAccess
                 }
             }),
+            writable_roots: preferences.additional_writable_roots.clone(),
         };
         let previous_thread = chat_session.codex_thread_id.clone();
         let thread_id = if let Some(thread_id) = previous_thread {
@@ -25492,6 +25569,47 @@ mod tests {
             effective_delegation_permission_mode(&writable),
             mcg_domain::ApprovalMode::AutoReview
         );
+    }
+
+    #[test]
+    fn additional_writable_roots_are_canonical_bounded_and_sandbox_compatible() {
+        let directory = tempfile::tempdir().expect("writable directory");
+        let canonical = fs::canonicalize(directory.path()).expect("canonical directory");
+        let mut preferences = ExecutionPreferences {
+            sandbox_mode: Some(mcg_domain::ExecutionSandboxMode::WorkspaceWrite),
+            additional_writable_roots: vec![
+                directory.path().to_string_lossy().into_owned(),
+                canonical.to_string_lossy().into_owned(),
+            ],
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut preferences, true).expect("valid writable roots");
+        assert_eq!(preferences.additional_writable_roots.len(), 1);
+        assert_eq!(
+            preferences.additional_writable_roots[0],
+            canonical.to_string_lossy()
+        );
+        assert_eq!(
+            codex_preferences(&preferences).writable_roots,
+            preferences.additional_writable_roots
+        );
+
+        preferences.sandbox_mode = Some(mcg_domain::ExecutionSandboxMode::ReadOnly);
+        assert!(validate_execution_preferences(&mut preferences, true).is_err());
+
+        let file = directory.path().join("not-a-directory.txt");
+        fs::write(&file, "fixture").expect("fixture file");
+        let mut file_preferences = ExecutionPreferences {
+            additional_writable_roots: vec![file.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut file_preferences, true).is_err());
+
+        let mut project_free = ExecutionPreferences {
+            additional_writable_roots: vec![canonical.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut project_free, false).is_err());
     }
     use axum::{
         Json, Router,

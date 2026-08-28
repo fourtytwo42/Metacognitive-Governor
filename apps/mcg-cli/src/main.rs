@@ -373,6 +373,8 @@ struct CodexCompatCli {
     dangerously_bypass_approvals_and_sandbox: bool,
     #[arg(short = 'i', long = "image", value_name = "FILE", global = true)]
     images: Vec<PathBuf>,
+    #[arg(long = "add-dir", value_name = "DIR", global = true)]
+    add_dirs: Vec<PathBuf>,
     #[command(subcommand)]
     command: CodexCompatCommand,
 }
@@ -1994,7 +1996,8 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     if codex_compat_command_requested() {
         return Box::pin(run_codex_compat_cli()).await;
     }
-    let cli = Cli::parse();
+    let (native_arguments, add_dirs) = extract_native_add_dirs(std::env::args_os())?;
+    let cli = Cli::parse_from(native_arguments);
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
     let token_path = cli
@@ -2135,6 +2138,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 || speed.is_some()
                 || !mentions.is_empty()
                 || !images.is_empty()
+                || !add_dirs.is_empty()
                 || sandbox.is_some()
                 || approval_policy.is_some()
                 || dangerously_bypass_approvals_and_sandbox
@@ -2161,11 +2165,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             let goal = validated_goal(&goal.join(" "))?;
             let supplemental = read_optional_piped_input()?;
             mentions.extend(codex_exec_mentions(&images)?);
+            let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 run_model.or(model.clone()),
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 conversation_preferences(None, effort, speed, approval.into()),
             );
             run_consumer_submission(
@@ -2186,11 +2192,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Prompt(words)) => {
             let goal = os_words_to_goal(words)?;
             let supplemental = read_optional_piped_input()?;
+            let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 model.clone(),
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2210,11 +2218,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         None if std::io::stdin().is_terminal() => {
+            let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 model.clone(),
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2231,11 +2241,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let goal = validated_goal(&read_bounded_stdin()?)?;
+            let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 model,
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2317,6 +2329,7 @@ fn codex_compat_command_requested() -> bool {
                 | "-a"
                 | "--image"
                 | "-i"
+                | "--add-dir"
         ) {
             let _ = arguments.next();
             continue;
@@ -2328,6 +2341,7 @@ fn codex_compat_command_requested() -> bool {
             || argument.starts_with("--sandbox=")
             || argument.starts_with("--ask-for-approval=")
             || argument.starts_with("--image=")
+            || argument.starts_with("--add-dir=")
             || (argument.starts_with("-C") && argument.len() > 2)
             || (argument.starts_with("-m") && argument.len() > 2)
             || (argument.starts_with("-s") && argument.len() > 2)
@@ -2349,8 +2363,56 @@ fn root_help_requested() -> bool {
     matches!(arguments.as_slice(), [argument] if argument == "--help" || argument == "-h")
 }
 
+fn extract_native_add_dirs(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<(Vec<OsString>, Vec<PathBuf>), String> {
+    let mut arguments = arguments.into_iter();
+    let program = arguments
+        .next()
+        .ok_or_else(|| "CLI argument vector is missing the program name".to_owned())?;
+    let mut cleaned = vec![program];
+    let mut add_dirs = Vec::new();
+    let mut literal_arguments = false;
+    while let Some(argument) = arguments.next() {
+        if literal_arguments {
+            cleaned.push(argument);
+            continue;
+        }
+        if argument == "--" {
+            literal_arguments = true;
+            cleaned.push(argument);
+            continue;
+        }
+        if argument == "--add-dir" {
+            let value = arguments
+                .next()
+                .ok_or_else(|| "--add-dir requires a directory".to_owned())?;
+            add_dirs.push(PathBuf::from(value));
+            continue;
+        }
+        if let Some(value) = argument
+            .to_str()
+            .and_then(|value| value.strip_prefix("--add-dir="))
+        {
+            if value.is_empty() {
+                return Err("--add-dir requires a directory".into());
+            }
+            add_dirs.push(PathBuf::from(value));
+            continue;
+        }
+        cleaned.push(argument);
+    }
+    Ok((cleaned, add_dirs))
+}
+
 fn combined_cli_command() -> clap::Command {
-    let mut command = Cli::command();
+    let mut command = Cli::command().arg(
+        clap::Arg::new("add-dir")
+            .long("add-dir")
+            .value_name("DIR")
+            .help("Additional directories writable alongside the primary project. Repeatable.")
+            .action(clap::ArgAction::Append),
+    );
     let compatibility = CodexCompatCli::command();
     for subcommand in compatibility.get_subcommands() {
         command = command.subcommand(subcommand.clone());
@@ -2407,6 +2469,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let approval_policy = cli.approval_policy;
     let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
     let images = cli.images;
+    let additional_writable_roots = codex_additional_writable_roots(&cli.add_dirs)?;
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
     let token_path = cli.token_file.unwrap_or_else(|| config.auth_token_path());
@@ -2448,6 +2511,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 images,
                 output_last_message,
                 prompt,
@@ -2477,6 +2541,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 &conversation.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -2521,6 +2586,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 sandbox,
                 approval_policy,
                 dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
                 &fork.execution_preferences,
             );
             let mentions = codex_exec_mentions(&images)?;
@@ -5383,6 +5449,46 @@ fn codex_exec_mentions(images: &[PathBuf]) -> Result<Vec<String>, Box<dyn std::e
     Ok(mentions)
 }
 
+fn codex_additional_writable_roots(
+    directories: &[PathBuf],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    const MAX_ADDITIONAL_WRITABLE_ROOTS: usize = 16;
+    if directories.len() > MAX_ADDITIONAL_WRITABLE_ROOTS {
+        return Err(format!(
+            "at most {MAX_ADDITIONAL_WRITABLE_ROOTS} --add-dir values are allowed"
+        )
+        .into());
+    }
+    let mut roots = Vec::with_capacity(directories.len());
+    let mut identities = std::collections::BTreeSet::new();
+    for directory in directories {
+        let canonical = std::fs::canonicalize(directory).map_err(|error| {
+            format!(
+                "additional writable directory {} is unavailable: {error}",
+                directory.display()
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(format!(
+                "additional writable path is not a directory: {}",
+                canonical.display()
+            )
+            .into());
+        }
+        let value = canonical
+            .to_str()
+            .ok_or("additional writable directory paths must be valid Unicode")?;
+        #[cfg(windows)]
+        let identity = value.to_lowercase();
+        #[cfg(not(windows))]
+        let identity = value.to_owned();
+        if identities.insert(identity) {
+            roots.push(value.to_owned());
+        }
+    }
+    Ok(roots)
+}
+
 fn require_git_repository(project: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let output = ProcessCommand::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -5412,6 +5518,7 @@ async fn run_codex_compatible_exec(
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
+    additional_writable_roots: &[String],
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
     prompt: Vec<String>,
@@ -5424,6 +5531,7 @@ async fn run_codex_compatible_exec(
         sandbox,
         approval_policy,
         dangerously_bypass_approvals_and_sandbox,
+        additional_writable_roots,
         conversation_preferences(None, None, None, ApprovalMode::Ask),
     );
     let mentions = codex_exec_mentions(&images)?;
@@ -9622,6 +9730,7 @@ fn conversation_preferences_exact(
         approval_mode: approval,
         approval_policy,
         sandbox_mode,
+        additional_writable_roots: Vec::new(),
         team_preset: Default::default(),
         personality: None,
     }
@@ -9632,12 +9741,14 @@ fn codex_execution_preferences(
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
+    additional_writable_roots: &[String],
     mut fallback: ExecutionPreferences,
 ) -> ExecutionPreferences {
     let execution_controls_overridden = sandbox.is_some() || approval_policy.is_some();
     if let Some(model) = model {
         fallback.model_id = Some(model);
     }
+    fallback.additional_writable_roots = additional_writable_roots.to_vec();
     if dangerously_bypass_approvals_and_sandbox {
         fallback.approval_mode = ApprovalMode::FullAccess;
         fallback.approval_policy = Some(ExecutionApprovalPolicy::Never);
@@ -9682,11 +9793,13 @@ fn codex_execution_preferences_override(
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
     dangerously_bypass_approvals_and_sandbox: bool,
+    additional_writable_roots: &[String],
     fallback: &ExecutionPreferences,
 ) -> Option<ExecutionPreferences> {
     if model.is_none()
         && sandbox.is_none()
         && approval_policy.is_none()
+        && additional_writable_roots.is_empty()
         && !dangerously_bypass_approvals_and_sandbox
     {
         return None;
@@ -9696,6 +9809,7 @@ fn codex_execution_preferences_override(
         sandbox,
         approval_policy,
         dangerously_bypass_approvals_and_sandbox,
+        additional_writable_roots,
         fallback.clone(),
     ))
 }
@@ -12142,6 +12256,8 @@ mod tests {
             "untrusted",
             "--image",
             "screen.png",
+            "--add-dir",
+            ".",
             "--output-last-message",
             "answer.txt",
             "fix the tests",
@@ -12163,6 +12279,7 @@ mod tests {
             Some(CodexApprovalPolicyArg::Untrusted)
         ));
         assert_eq!(exec.images, [PathBuf::from("screen.png")]);
+        assert_eq!(exec.add_dirs, [PathBuf::from(".")]);
 
         let before_command = CodexCompatCli::try_parse_from([
             "mcg",
@@ -12174,6 +12291,8 @@ mod tests {
             "on-request",
             "--image",
             "screen.png",
+            "--add-dir",
+            ".",
             "exec",
             "--json",
             "fix the tests",
@@ -12189,23 +12308,32 @@ mod tests {
             Some(CodexApprovalPolicyArg::OnRequest)
         ));
         assert_eq!(before_command.images, [PathBuf::from("screen.png")]);
+        assert_eq!(before_command.add_dirs, [PathBuf::from(".")]);
         assert!(matches!(
             &before_command.command,
             CodexCompatCommand::Exec(args) if args.json && args.prompt == ["fix the tests"]
         ));
 
-        let interactive = Cli::try_parse_from([
-            "mcg",
-            "--model",
-            "gpt-5.6-luna",
-            "--sandbox",
-            "read-only",
-            "--ask-for-approval",
-            "never",
-            "--image",
-            "diagram.png",
-        ])
-        .expect("interactive root execution flags");
+        let (interactive_arguments, interactive_add_dirs) = extract_native_add_dirs(
+            [
+                "mcg",
+                "--model",
+                "gpt-5.6-luna",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "--image",
+                "diagram.png",
+                "--add-dir",
+                ".",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .expect("extract interactive writable roots");
+        let interactive =
+            Cli::try_parse_from(interactive_arguments).expect("interactive root execution flags");
         assert!(interactive.command.is_none());
         assert_eq!(interactive.model.as_deref(), Some("gpt-5.6-luna"));
         assert!(matches!(
@@ -12217,6 +12345,20 @@ mod tests {
             Some(CodexApprovalPolicyArg::Never)
         ));
         assert_eq!(interactive.images, [PathBuf::from("diagram.png")]);
+        assert_eq!(interactive_add_dirs, [PathBuf::from(".")]);
+
+        let (run_arguments, run_add_dirs) = extract_native_add_dirs(
+            ["mcg", "run", "--add-dir=.", "fix the tests"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("extract run writable roots");
+        let run = Cli::try_parse_from(run_arguments).expect("consumer run after extraction");
+        assert!(matches!(
+            run.command,
+            Some(Command::Run { command: None, .. })
+        ));
+        assert_eq!(run_add_dirs, [PathBuf::from(".")]);
 
         let exact = conversation_preferences_exact(
             None,
@@ -12237,6 +12379,7 @@ mod tests {
             Some(CodexSandboxArg::DangerFullAccess),
             Some(CodexApprovalPolicyArg::OnRequest),
             false,
+            &["C:/shared".into()],
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(independent.model_id.as_deref(), Some("gpt-5.6-terra"));
@@ -12249,12 +12392,14 @@ mod tests {
             Some(ExecutionSandboxMode::DangerFullAccess)
         );
         assert_eq!(independent.approval_mode, ApprovalMode::Ask);
+        assert_eq!(independent.additional_writable_roots, ["C:/shared"]);
 
         let yolo = codex_execution_preferences(
             None,
             Some(CodexSandboxArg::ReadOnly),
             Some(CodexApprovalPolicyArg::Untrusted),
             true,
+            &[],
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
         assert_eq!(yolo.approval_mode, ApprovalMode::FullAccess);

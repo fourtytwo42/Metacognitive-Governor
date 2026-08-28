@@ -61,6 +61,7 @@ const client = vi.hoisted(() => ({
   searchProjectMentions: vi.fn(),
   pickMentionFiles: vi.fn(),
   pickMentionFolder: vi.fn(),
+  pickWritableFolder: vi.fn(),
   getCodexModels: vi.fn(),
   getCodexAccount: vi.fn(),
   getCodexRateLimits: vi.fn(),
@@ -251,6 +252,7 @@ vi.mock("./desktop-client", () => ({
   searchProjectMentions: client.searchProjectMentions,
   pickMentionFiles: client.pickMentionFiles,
   pickMentionFolder: client.pickMentionFolder,
+  pickWritableFolder: client.pickWritableFolder,
   getCodexModels: client.getCodexModels,
   getCodexAccount: client.getCodexAccount,
   getCodexRateLimits: client.getCodexRateLimits,
@@ -455,6 +457,7 @@ beforeEach(() => {
   client.searchProjectMentions.mockReset();
   client.pickMentionFiles.mockReset();
   client.pickMentionFolder.mockReset();
+  client.pickWritableFolder.mockReset();
   client.getCodexModels.mockReset();
   client.getCodexAccount.mockReset();
   client.getCodexRateLimits.mockReset();
@@ -678,6 +681,7 @@ beforeEach(() => {
   client.searchProjectMentions.mockResolvedValue({ candidates: [] });
   client.pickMentionFiles.mockResolvedValue([]);
   client.pickMentionFolder.mockResolvedValue(null);
+  client.pickWritableFolder.mockResolvedValue(null);
   client.getCodexModels.mockResolvedValue([]);
   client.getCodexAccount.mockResolvedValue({ authenticated: false, requires_openai_auth: true });
   client.getCodexRateLimits.mockResolvedValue({ refreshed_at: "2026-08-22T00:00:00Z" });
@@ -2518,6 +2522,51 @@ test("new chat presents project, workspace, branch, add, permission, and run set
   expect(within(addMenu).getByRole("menuitem", { name: /Remove project/ })).toBeEnabled();
   expect(screen.getByLabelText("Change permissions")).toBeInTheDocument();
   expect(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]')).toBeInTheDocument();
+});
+
+test("advanced run settings add and persist governed writable folders", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000020",
+    project_id: "00000000-0000-4000-8000-000000000021",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-28T00:00:00Z",
+    repository: { is_git: true, branch: "main", head: "0123456789abcdef", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.pickWritableFolder.mockResolvedValue("C:\\Shared\\assets");
+  render(<App />);
+
+  await selectNewChatProject("sample");
+  const { dialog } = openNewChatRunSettings();
+  fireEvent.click(within(dialog).getByText("Advanced"));
+  const addFolder = within(dialog).getByRole("button", { name: "Add folder" });
+  expect(addFolder).toBeEnabled();
+  fireEvent.click(addFolder);
+  expect(await within(dialog).findByText("C:\\Shared\\assets")).toBeVisible();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove writable folder C:\\Shared\\assets" }));
+  expect(within(dialog).queryByText("C:\\Shared\\assets")).not.toBeInTheDocument();
+  fireEvent.click(addFolder);
+  expect(await within(dialog).findByText("C:\\Shared\\assets")).toBeVisible();
+
+  fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Update shared assets" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ additional_writable_roots: ["C:\\Shared\\assets"] }) })
+  ));
+});
+
+test("project-free chats cannot add writable folders", async () => {
+  render(<App />);
+  const { dialog } = openNewChatRunSettings();
+  fireEvent.click(within(dialog).getByText("Advanced"));
+  expect(within(dialog).getByRole("button", { name: "Add folder" })).toBeDisabled();
+  expect(within(dialog).getByText("Choose a project before adding writable folders.")).toBeVisible();
 });
 
 test("goal and plan commands are available from Add and prepare the composer", () => {

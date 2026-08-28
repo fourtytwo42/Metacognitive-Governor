@@ -1877,6 +1877,19 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .chat-run-model-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 0 13px 12px; }
 .chat-run-model-status small { min-width: 0; color: var(--mcg-muted); font-size: .67rem; line-height: 1.35; }
 .chat-run-model-status small[role="alert"] { color: var(--mcg-danger); }
+.chat-run-writable-roots { display: grid; gap: 7px; padding: 0 13px 12px; min-width: 0; }
+.chat-run-writable-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.chat-run-writable-heading > span { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--mcg-text); font-size: .72rem; font-weight: 650; }
+.chat-run-writable-heading svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.chat-run-writable-heading .secondary { min-height: 28px; padding: 4px 9px; font-size: .68rem; }
+.chat-run-writable-roots > small { color: var(--mcg-muted); font-size: .66rem; line-height: 1.35; }
+.chat-run-writable-roots > small[role="alert"] { color: var(--mcg-danger); }
+.chat-run-writable-roots ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; max-height: 120px; overflow-y: auto; overscroll-behavior: contain; }
+.chat-run-writable-roots li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 6px 7px; border: 1px solid var(--mcg-border); border-radius: 8px; background: var(--mcg-surface); }
+.chat-run-writable-roots code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mcg-text); font-size: .65rem; }
+.chat-run-writable-roots li button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--mcg-muted); }
+.chat-run-writable-roots li button:hover { background: var(--mcg-surface-raised); color: var(--mcg-text); }
+.chat-run-writable-roots li button svg { width: 13px; height: 13px; }
 .chat-run-refresh { flex: 0 0 auto; min-height: 30px; padding: 5px 9px; font-size: .68rem; }
 @media (max-width: 760px) {
   .chat-run-selector { width: 100%; }

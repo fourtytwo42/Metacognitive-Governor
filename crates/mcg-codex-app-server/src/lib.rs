@@ -291,6 +291,8 @@ pub struct CodexExecutionPreferences {
     pub approval_policy: Option<CodexApprovalPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_mode: Option<CodexSandboxMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -597,7 +599,13 @@ impl CodexExecutionPreferences {
     fn turn_sandbox(&self, writable: bool) -> Value {
         match self.effective_sandbox(writable) {
             CodexSandboxMode::ReadOnly => json!({"type": "readOnly"}),
-            CodexSandboxMode::WorkspaceWrite => json!({"type": "workspaceWrite"}),
+            CodexSandboxMode::WorkspaceWrite if self.writable_roots.is_empty() => {
+                json!({"type": "workspaceWrite"})
+            }
+            CodexSandboxMode::WorkspaceWrite => json!({
+                "type": "workspaceWrite",
+                "writableRoots": self.writable_roots
+            }),
             CodexSandboxMode::DangerFullAccess => json!({"type": "dangerFullAccess"}),
         }
     }
@@ -2193,6 +2201,20 @@ mod tests {
         };
         assert_eq!(exact.approval_policy(true), "untrusted");
         assert_eq!(exact.turn_sandbox(true), json!({"type": "readOnly"}));
+
+        let expanded = CodexExecutionPreferences {
+            approval_mode: CodexApprovalMode::Ask,
+            writable_roots: vec!["C:/shared-one".into(), "C:/shared-two".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            expanded.turn_sandbox(true),
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["C:/shared-one", "C:/shared-two"]
+            })
+        );
+        assert_eq!(expanded.turn_sandbox(false), json!({"type": "readOnly"}));
     }
 
     #[test]

@@ -310,6 +310,7 @@ export interface ChatRunPreferences {
   approval_mode: ApprovalMode;
   approval_policy?: ExecutionApprovalPolicy;
   sandbox_mode?: ExecutionSandboxMode;
+  additional_writable_roots?: string[];
   team_preset: TeamPreset;
   personality?: string;
 }
@@ -321,6 +322,7 @@ export interface ExecutionPreferences {
   approval_mode?: ApprovalMode;
   approval_policy?: ExecutionApprovalPolicy;
   sandbox_mode?: ExecutionSandboxMode;
+  additional_writable_roots?: string[];
   team_preset?: TeamPreset;
   personality?: string;
 }
@@ -1919,6 +1921,7 @@ export function searchProjectMentions(projectId: string, query = "", limit = 50)
 
 export function pickMentionFiles(): Promise<string[]> { return invoke("pick_mention_files"); }
 export function pickMentionFolder(): Promise<string | null> { return invoke("pick_mention_folder"); }
+export function pickWritableFolder(): Promise<string | null> { return invoke("pick_writable_folder"); }
 
 export function updateConversationMode(conversationId: string, mode: ConversationMode): Promise<ConversationView> {
   return invoke("update_conversation_mode", { conversationId, request: { mode } });

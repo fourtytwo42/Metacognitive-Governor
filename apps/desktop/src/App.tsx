@@ -304,6 +304,7 @@ import {
   pickProjectDirectory,
   pickMentionFiles,
   pickMentionFolder,
+  pickWritableFolder,
   searchProjectMentions,
   type ProjectModel,
   type MentionCandidate,
@@ -562,6 +563,7 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       approval_mode: parsed.approval_mode ?? "ask",
       approval_policy: parsed.approval_policy,
       sandbox_mode: parsed.sandbox_mode,
+      additional_writable_roots: parsed.additional_writable_roots ?? [],
       team_preset: parsed.team_preset ?? "automatic"
     };
   } catch {
@@ -950,7 +952,8 @@ function ChatRunSelector({
   discoveryError,
   onRefresh,
   label = "Run settings",
-  includeTeam = false
+  includeTeam = false,
+  hasProject = false
 }: {
   providers: ProviderListItem[];
   codexModels?: CodexModel[];
@@ -961,6 +964,7 @@ function ChatRunSelector({
   onRefresh: () => void;
   label?: string;
   includeTeam?: boolean;
+  hasProject?: boolean;
 }) {
   const [panel, setPanel] = useState<ChatRunPanel>("root");
   const providerModels = providers.flatMap((provider) => (provider.catalog?.models ?? []).map((model) => ({
@@ -994,6 +998,7 @@ function ChatRunSelector({
       approval_mode: value.approval_mode,
       approval_policy: value.approval_policy,
       sandbox_mode: value.sandbox_mode,
+      additional_writable_roots: value.additional_writable_roots,
       team_preset: value.team_preset
     });
   };
@@ -1014,6 +1019,12 @@ function ChatRunSelector({
   } as Record<string, string>)[effort] ?? "Model-supported reasoning level";
   const speedLabel = /fast|priority/i.test(value.service_tier ?? "") || value.speed === "fast" ? "Fast" : "Standard";
   const teamValue = TEAM_PRESET_DETAILS[value.team_preset ?? "automatic"] ? value.team_preset ?? "automatic" : "automatic";
+  const writableRoots = value.additional_writable_roots ?? [];
+  const addWritableRoot = async () => {
+    const path = await pickWritableFolder();
+    if (!path || writableRoots.some((root) => root.toLocaleLowerCase() === path.toLocaleLowerCase())) return;
+    onChange({ ...value, additional_writable_roots: [...writableRoots, path] });
+  };
   const closeSelector = (target: HTMLElement) => target.closest("details")?.removeAttribute("open");
   return <details className="chat-run-selector" data-transient-popover onToggle={(event) => {
     if (!(event.currentTarget as HTMLDetailsElement).open) setPanel("root");
@@ -1042,6 +1053,18 @@ function ChatRunSelector({
                     ? "No models have been reported yet."
                     : "Connect a model provider to choose a specific model."}</small>
             <button className="secondary chat-run-refresh" type="button" disabled={discovering || (!useCodexCatalog && providers.length === 0)} onClick={onRefresh}>{discovering ? "Loading…" : "Refresh"}</button>
+          </div>
+          <div className="chat-run-writable-roots">
+            <div className="chat-run-writable-heading">
+              <span><FolderOpen aria-hidden="true" /> Additional writable folders</span>
+              <button className="secondary" type="button" disabled={!hasProject || value.approval_mode === "read_only" || value.sandbox_mode === "read-only"} title={!hasProject ? "Choose a project first" : value.approval_mode === "read_only" || value.sandbox_mode === "read-only" ? "Choose a writable permission mode first" : undefined} onClick={() => void addWritableRoot()}>Add folder</button>
+            </div>
+            <small>Explicitly allows workspace-write turns to modify these folders. Normal approvals and governance still apply.</small>
+            {!hasProject && <small>Choose a project before adding writable folders.</small>}
+            {(value.approval_mode === "read_only" || value.sandbox_mode === "read-only") && writableRoots.length > 0 && <small role="alert">Read only cannot be combined with additional writable folders.</small>}
+            {writableRoots.length > 0 && <ul aria-label="Additional writable folders">
+              {writableRoots.map((root) => <li key={root}><code title={root}>{root}</code><button type="button" aria-label={`Remove writable folder ${root}`} onClick={() => onChange({ ...value, additional_writable_roots: writableRoots.filter((candidate) => candidate !== root) })}><X aria-hidden="true" /></button></li>)}
+            </ul>}
           </div>
         </details>
       </> : <>
@@ -2986,6 +3009,7 @@ export function App() {
         approval_mode: conversation.execution_preferences.approval_mode ?? "ask",
         approval_policy: conversation.execution_preferences.approval_policy,
         sandbox_mode: conversation.execution_preferences.sandbox_mode,
+        additional_writable_roots: conversation.execution_preferences.additional_writable_roots ?? [],
         team_preset: conversation.execution_preferences.team_preset ?? "automatic",
         personality: conversation.execution_preferences.personality
       }));
@@ -4500,6 +4524,7 @@ export function App() {
         approval_mode: preferences.approval_mode,
         approval_policy: preferences.approval_policy,
         sandbox_mode: preferences.sandbox_mode,
+        additional_writable_roots: preferences.additional_writable_roots,
         team_preset: preferences.team_preset,
         personality: preferences.personality
       };
@@ -4945,6 +4970,7 @@ export function App() {
           approval_mode: uncertainTurn.execution_preferences.approval_mode ?? newChatRunPreferences.approval_mode,
           approval_policy: uncertainTurn.execution_preferences.approval_policy,
           sandbox_mode: uncertainTurn.execution_preferences.sandbox_mode,
+          additional_writable_roots: uncertainTurn.execution_preferences.additional_writable_roots ?? [],
           team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });
       }
@@ -7289,9 +7315,9 @@ export function App() {
               <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
               <div className="composer-actions">
                 <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
-                <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined }))} hasProject={Boolean(selectedProject)} />
+                <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(selectedProject)} />
                 <span className="composer-action-spacer" />
-                <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam />
+                <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
                 <button className="primary new-chat-send" type="button" aria-label="Send" title="Send message" disabled={taskBusy || !taskGoal.trim()} onClick={() => void addTask()}>
                   {taskBusy ? <span aria-hidden="true">…</span> : <ArrowUp aria-hidden="true" />}
                 </button>
@@ -7395,9 +7421,9 @@ export function App() {
                   <MentionPalette open={mentionPaletteOpen} candidates={mentionCandidates} onSelect={chooseMention} />
                   <div className="composer-actions">
                     <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
-                    <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined }))} hasProject={Boolean(workspaceProject)} />
+                    <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(workspaceProject)} />
                     <span className="composer-action-spacer" />
-                    <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam />
+                    <ChatRunSelector providers={providers} codexModels={codexModels} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
                     <button className="primary new-chat-send" type="button" aria-label={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue message (Ctrl+Enter steers now)" : "Run command or send message"} onClick={() => conversationIsActive && !parseSlashCommand(taskGoal) ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>
                   </div>
                   {taskError && <p className="error-message" role="alert">{taskError}</p>}
@@ -7438,6 +7464,7 @@ export function App() {
                     discoveryError={modelDiscoveryError}
                     onRefresh={() => void discoverModelCatalogs(providers, true)}
                     label={`Model, effort, and speed for ${task.goal}`}
+                    hasProject={Boolean(task.project_id)}
                   />
                   {task.state === "pending" && <TeamPresetSelector value={(taskRunPreferences[task.id] ?? newChatRunPreferences).team_preset} onChange={(team_preset) => setTaskRunPreferences((current) => ({ ...current, [task.id]: { ...(current[task.id] ?? newChatRunPreferences), team_preset } }))} />}
                   {advanced && task.state === "pending" && <label className="task-team-select"><span>Custom organization</span><select aria-label={`Custom organization for ${task.goal}`} value={taskOrganizationIds[task.id] ?? ""} onChange={(event) => setTaskOrganizationIds((current) => ({ ...current, [task.id]: event.target.value }))}>

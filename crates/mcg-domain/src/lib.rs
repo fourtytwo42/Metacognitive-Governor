@@ -2116,6 +2116,10 @@ pub struct ExecutionPreferences {
     /// execution can still reduce this authority at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_mode: Option<ExecutionSandboxMode>,
+    /// Owner-selected, canonical local directories that a workspace-write turn may also mutate.
+    /// Runtime validation re-resolves these paths before every originating turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_writable_roots: Vec<String>,
     #[serde(default)]
     pub team_preset: TeamPreset,
     /// Optional owner-selected response style. This never expands authority.
@@ -2477,6 +2481,7 @@ mod tests {
             .expect("execution preferences");
         execution_preferences.remove("approval_policy");
         execution_preferences.remove("sandbox_mode");
+        execution_preferences.remove("additional_writable_roots");
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
@@ -2486,6 +2491,12 @@ mod tests {
         assert!(decoded.execution_preferences.personality.is_none());
         assert!(decoded.execution_preferences.approval_policy.is_none());
         assert!(decoded.execution_preferences.sandbox_mode.is_none());
+        assert!(
+            decoded
+                .execution_preferences
+                .additional_writable_roots
+                .is_empty()
+        );
         assert!(decoded.goal.is_none());
         assert!(decoded.pending_input_requests.is_empty());
     }

@@ -21374,6 +21374,72 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    async fn conversation_api_validates_and_persists_additional_writable_roots() {
+        let runtime = test_runtime();
+        let fixture = tempfile::tempdir().expect("writable-root fixture");
+        let project_root = fixture.path().join("project");
+        let additional_root = fixture.path().join("shared-assets");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::create_dir_all(&additional_root).expect("additional writable root");
+        let project = runtime
+            .discover_project(&project_root, ProjectId::new())
+            .expect("discover project")
+            .project;
+        let app = router(runtime);
+        let preferences = ExecutionPreferences {
+            sandbox_mode: Some(mcg_domain::ExecutionSandboxMode::WorkspaceWrite),
+            additional_writable_roots: vec![additional_root.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+
+        let rejected = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/conversations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateConversationRequest {
+                            title: Some("Project-free roots".into()),
+                            project_id: None,
+                            execution_preferences: preferences.clone(),
+                        })
+                        .expect("project-free request body"),
+                    ))
+                    .expect("project-free request"),
+            )
+            .await
+            .expect("project-free response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+        let created = app
+            .oneshot(
+                authorized(Request::post("/api/v1/conversations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateConversationRequest {
+                            title: Some("Governed writable roots".into()),
+                            project_id: Some(project.project_id),
+                            execution_preferences: preferences,
+                        })
+                        .expect("project request body"),
+                    ))
+                    .expect("project request"),
+            )
+            .await
+            .expect("project response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: Conversation =
+            serde_json::from_value(response_json(created).await).expect("created conversation");
+        assert_eq!(
+            created.execution_preferences.additional_writable_roots,
+            [std::fs::canonicalize(&additional_root)
+                .expect("canonical additional root")
+                .to_string_lossy()
+                .into_owned()]
+        );
+    }
+
+    #[tokio::test]
     async fn cli_session_fork_preferences_and_confirmed_tree_deletion_are_native() {
         let runtime = test_runtime();
         let parent = runtime

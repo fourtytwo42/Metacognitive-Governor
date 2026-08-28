@@ -129,6 +129,8 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "untrusted",
             "--image",
             "screen.png",
+            "--add-dir",
+            ".",
             "exec",
             "--help",
         ],
@@ -142,6 +144,8 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "untrusted",
             "--image",
             "screen.png",
+            "--add-dir",
+            ".",
             "--help",
         ],
     ] {
@@ -158,6 +162,7 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
         assert!(stdout.contains("Usage: mcg"));
         assert!(stdout.contains("--ask-for-approval"));
         assert!(stdout.contains("--sandbox"));
+        assert!(stdout.contains("--add-dir"));
     }
 }
 

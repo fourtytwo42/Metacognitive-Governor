@@ -108,6 +108,7 @@ test.beforeEach(async ({ page }) => {
           if (command === "list_ssh_hosts") return { hosts: sshHosts };
           if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
           if (command === "list_projects") return { projects: [project] };
+          if (command === "pick_writable_folder") return "C:\\Shared\\assets";
           if (command === "search_project_mentions") return {
             candidates: [
               { kind: "file", label: "main.ts", resource: "src/main.ts", detail: "src/main.ts" },
@@ -425,6 +426,29 @@ test("new chat exposes a compact read-only authority preset", async ({ page }) =
   await expect(trigger).toContainText("Read only");
   await expect(trigger.locator("svg").first()).toBeVisible();
   await expect(menu).toBeHidden();
+});
+
+test("advanced run settings manage additional writable folders without overflow", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+
+  const selector = page.locator('summary[aria-label="New chat model, effort, speed, and team"]');
+  await selector.click();
+  const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByText("Advanced", { exact: true }).click();
+  const addFolder = dialog.getByRole("button", { name: "Add folder" });
+  await expect(addFolder).toBeEnabled();
+  await addFolder.click();
+  await expect(dialog.getByText("C:\\Shared\\assets")).toBeVisible();
+
+  const dialogBox = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(dialogBox).not.toBeNull();
+  expect((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+  await dialog.getByRole("button", { name: "Remove writable folder C:\\Shared\\assets" }).click();
+  await expect(dialog.getByText("C:\\Shared\\assets")).toHaveCount(0);
 });
 
 test("new chat resolves project mentions with keyboard selection and exclusive palettes", async ({ page }) => {

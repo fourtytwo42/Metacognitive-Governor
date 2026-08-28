@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-4 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-6 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles/config overlays, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -61,11 +61,20 @@ prompt default is Ask; exact approval and sandbox selections remain independent
 and persist in governed execution preferences. Ephemeral cleanup, JSONL,
 output-last-message, and Git-check flags remain `exec`-specific.
 
-Codex-compatible support remains for `--add-dir`, live search, local
-providers/OSS, profiles, permission profiles, remote endpoints/authentication,
-strict config, output schemas, `--no-alt-screen`, feature toggles, hook trust,
-and repeatable `-c key=value` overrides. These flags must map into governed
-requests; they may not bypass organization or approval policy.
+Cycle 6 adds repeatable `--add-dir` before or after `exec`, on interactive and
+bare/piped prompts, on resumed/forked sessions, and on the MetaCog consumer
+`run` path. MetaCog canonicalizes and de-duplicates at most sixteen existing
+directories, requires a linked project, persists them with the conversation and
+turn, revalidates them before each originating turn, and forwards them only as
+Codex `workspaceWrite.writableRoots`. Read-only execution rejects the setting;
+normal approval and organization policy remain authoritative. The desktop offers
+the same control in the existing Advanced run-settings disclosure.
+
+Codex-compatible support remains incomplete for live search, local providers/OSS,
+profiles, permission profiles, remote endpoints/authentication, strict config,
+output schemas, `--no-alt-screen`, feature toggles, hook trust, and repeatable
+`-c key=value` overrides. These flags must map into governed requests; they may
+not bypass organization or approval policy.
 
 ## Desktop alignment rule
 
@@ -79,6 +88,11 @@ interactions require automated accessibility coverage and native UAT.
 Cycle 3 adds the shared Read only permission choice to New Chat and established
 Chat. It is enforced through Coordinator/Coder delegation, report acceptance,
 and integration, rather than treated as a presentation-only preference.
+
+Cycle 6 adds Additional writable folders to the same Advanced run-settings
+disclosure in New Chat, established Chat, and task execution. Project-free and
+read-only runs cannot add them; selected folders remain removable and are sent
+through the shared execution-preference contract.
 
 ## Safety invariants
 

@@ -2935,6 +2935,20 @@ async fn pick_mention_folder(app: tauri::AppHandle) -> Result<Option<String>, St
 }
 
 #[tauri::command]
+async fn pick_writable_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    app.dialog()
+        .file()
+        .set_title("Allow MetaCog to write to an additional folder")
+        .blocking_pick_folder()
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|_| "The selected folder is not a local filesystem path".to_owned())
+        })
+        .transpose()
+}
+
+#[tauri::command]
 async fn discover_project(request: DiscoverProjectRequest) -> Result<ProjectMutation, String> {
     let response = reqwest::Client::new()
         .post(format!("{LOCAL_DAEMON}/api/v1/projects"))
@@ -3942,6 +3956,7 @@ pub fn run() {
             pick_project_directory,
             pick_mention_files,
             pick_mention_folder,
+            pick_writable_folder,
             discover_project,
             initialize_project_git,
             list_projects,
