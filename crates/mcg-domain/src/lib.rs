@@ -2124,6 +2124,11 @@ pub struct ExecutionPreferences {
     /// execution can still reduce this authority at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_mode: Option<ExecutionSandboxMode>,
+    /// Optional named Codex permission profile selected by the owner. The
+    /// runtime re-resolves it against the pinned Codex catalog before use and
+    /// never permits it to expand MetaCog role or organization authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_profile: Option<String>,
     /// Owner-selected, canonical local directories that a workspace-write turn may also mutate.
     /// Runtime validation re-resolves these paths before every originating turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

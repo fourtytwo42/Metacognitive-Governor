@@ -1180,6 +1180,18 @@ async fn codex_features() -> Result<Vec<mcg_codex_app_server::CodexFeature>, Str
 }
 
 #[tauri::command]
+async fn codex_permission_profiles(
+    project_id: Option<String>,
+) -> Result<Vec<mcg_codex_app_server::CodexPermissionProfile>, String> {
+    let mut request =
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/permission-profiles"));
+    if let Some(project_id) = project_id {
+        request = request.query(&[("project_id", project_id)]);
+    }
+    daemon_json(request, None::<&()>, "Codex permission profile discovery").await
+}
+
+#[tauri::command]
 async fn set_codex_feature(
     name: String,
     enabled: bool,
@@ -3926,6 +3938,7 @@ pub fn run() {
             steer_conversation_turn,
             codex_models,
             codex_features,
+            codex_permission_profiles,
             set_codex_feature,
             codex_account,
             codex_rate_limits,

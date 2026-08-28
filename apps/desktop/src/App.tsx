@@ -206,6 +206,7 @@ import {
   updateConversation,
   getCodexModels,
   getCodexFeatures,
+  getCodexPermissionProfiles,
   setCodexFeature,
   getCodexAccount,
   getCodexRateLimits,
@@ -285,6 +286,7 @@ import {
   type ManagedWorktree,
   type CodexModel,
   type CodexFeature,
+  type CodexPermissionProfile,
   type CodexAccount,
   type CodexRateLimits,
   type CodexHarnessStatus,
@@ -575,6 +577,7 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       approval_mode: parsed.approval_mode ?? "ask",
       approval_policy: parsed.approval_policy,
       sandbox_mode: parsed.sandbox_mode,
+      permission_profile: parsed.permission_profile,
       additional_writable_roots: parsed.additional_writable_roots ?? [],
       codex_feature_overrides: parsed.codex_feature_overrides ?? {},
       codex_config_overrides: parsed.codex_config_overrides ?? [],
@@ -706,20 +709,28 @@ function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
 function PermissionSelector({
   value,
   onChange,
-  hasProject
+  hasProject,
+  permissionProfile,
+  permissionProfiles = [],
+  advanced = false,
+  onPermissionProfileChange
 }: {
   value: ApprovalMode;
   onChange: (mode: ApprovalMode) => void;
   hasProject: boolean;
+  permissionProfile?: string;
+  permissionProfiles?: CodexPermissionProfile[];
+  advanced?: boolean;
+  onPermissionProfileChange: (profile?: string) => void;
 }) {
   const selected = APPROVAL_MODE_DETAILS[value];
   return <details className={`permission-selector permission-${value}`} data-transient-popover>
     <summary aria-label="Change permissions" title="Change permissions">
       <ApprovalModeIcon mode={value} />
-      <span>{selected.label}</span>
+      <span>{permissionProfile ?? selected.label}</span>
       <ChevronDown aria-hidden="true" />
     </summary>
-    <div className="permission-popover" role="menu" aria-label="How should MetaCog actions be approved?">
+    <div className="permission-popover" data-scroll-chain role="menu" aria-label="How should MetaCog actions be approved?">
       <div className="permission-popover-heading">
         <strong>How should MetaCog actions be approved?</strong>
         <small>Applies to the next message and future turns in this chat.</small>
@@ -732,6 +743,7 @@ function PermissionSelector({
           className={mode === "full_access" ? "danger-option" : ""}
           key={mode}
           onClick={(event) => {
+            onPermissionProfileChange(undefined);
             onChange(mode);
             event.currentTarget.closest("details")?.removeAttribute("open");
           }}
@@ -741,6 +753,26 @@ function PermissionSelector({
           <span className="permission-option-check" aria-hidden="true">{value === mode && <Check />}</span>
         </button>;
       })}
+      {advanced && hasProject && permissionProfiles.some((profile) => profile.allowed) && <>
+        <div className="permission-popover-heading permission-profile-heading">
+          <strong>Codex permission profiles</strong>
+          <small>Profiles come from this project's effective Codex configuration. MetaCog governance remains authoritative.</small>
+        </div>
+        {permissionProfiles.filter((profile) => profile.allowed).map((profile) => <button
+          type="button"
+          role="menuitemradio"
+          aria-checked={permissionProfile === profile.id}
+          key={profile.id}
+          onClick={(event) => {
+            onPermissionProfileChange(profile.id);
+            event.currentTarget.closest("details")?.removeAttribute("open");
+          }}
+        >
+          <span className="permission-option-icon"><ShieldCheck aria-hidden="true" /></span>
+          <span><strong>{profile.id}</strong><small>{profile.description || "Codex permission profile"}</small></span>
+          <span className="permission-option-check" aria-hidden="true">{permissionProfile === profile.id && <Check />}</span>
+        </button>)}
+      </>}
       {!hasProject && <p>Your selection is saved. Project-free turns stay read-only until you attach a project.</p>}
     </div>
   </details>;
@@ -1075,6 +1107,7 @@ function ChatRunSelector({
       approval_mode: value.approval_mode,
       approval_policy: value.approval_policy,
       sandbox_mode: value.sandbox_mode,
+      permission_profile: value.permission_profile,
       additional_writable_roots: value.additional_writable_roots,
       codex_feature_overrides: value.codex_feature_overrides,
       codex_config_overrides: value.codex_config_overrides,
@@ -2431,6 +2464,7 @@ export function App() {
   const [conversationViews, setConversationViews] = useState<Record<string, ConversationView | undefined>>({});
   const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [codexFeatures, setCodexFeatures] = useState<CodexFeature[]>([]);
+  const [codexPermissionProfiles, setCodexPermissionProfiles] = useState<CodexPermissionProfile[]>([]);
   const [codexFeatureSearch, setCodexFeatureSearch] = useState("");
   const [codexFeatureBusy, setCodexFeatureBusy] = useState<string | null>(null);
   const [codexFeatureError, setCodexFeatureError] = useState<string | null>(null);
@@ -2752,6 +2786,19 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("mcg.chat-run-preferences.default", JSON.stringify(newChatRunPreferences));
   }, [newChatRunPreferences]);
+
+  useEffect(() => {
+    let active = true;
+    const projectId = selectedProject?.project_id;
+    if (!projectId) {
+      setCodexPermissionProfiles([]);
+      return () => { active = false; };
+    }
+    void getCodexPermissionProfiles(projectId)
+      .then((profiles) => { if (active) setCodexPermissionProfiles(profiles); })
+      .catch(() => { if (active) setCodexPermissionProfiles([]); });
+    return () => { active = false; };
+  }, [selectedProject?.project_id]);
 
   useEffect(() => {
     window.localStorage.setItem("mcg.chat-run-preferences.tasks", JSON.stringify(taskRunPreferences));
@@ -3180,6 +3227,7 @@ export function App() {
         approval_mode: conversation.execution_preferences.approval_mode ?? "ask",
         approval_policy: conversation.execution_preferences.approval_policy,
         sandbox_mode: conversation.execution_preferences.sandbox_mode,
+        permission_profile: conversation.execution_preferences.permission_profile,
         additional_writable_roots: conversation.execution_preferences.additional_writable_roots ?? [],
         codex_feature_overrides: conversation.execution_preferences.codex_feature_overrides ?? {},
         codex_config_overrides: conversation.execution_preferences.codex_config_overrides ?? [],
@@ -4712,6 +4760,7 @@ export function App() {
         approval_mode: preferences.approval_mode,
         approval_policy: preferences.approval_policy,
         sandbox_mode: preferences.sandbox_mode,
+        permission_profile: preferences.permission_profile,
         additional_writable_roots: preferences.additional_writable_roots,
         codex_feature_overrides: preferences.codex_feature_overrides,
         codex_config_overrides: preferences.codex_config_overrides,
@@ -5218,6 +5267,7 @@ export function App() {
           approval_mode: uncertainTurn.execution_preferences.approval_mode ?? newChatRunPreferences.approval_mode,
           approval_policy: uncertainTurn.execution_preferences.approval_policy,
           sandbox_mode: uncertainTurn.execution_preferences.sandbox_mode,
+          permission_profile: uncertainTurn.execution_preferences.permission_profile,
           additional_writable_roots: uncertainTurn.execution_preferences.additional_writable_roots ?? [],
           codex_feature_overrides: uncertainTurn.execution_preferences.codex_feature_overrides ?? {},
           codex_config_overrides: uncertainTurn.execution_preferences.codex_config_overrides ?? [],
@@ -7582,7 +7632,15 @@ export function App() {
               <AppReferencePalette open={appPaletteOpen} apps={codexStableDiscovery?.apps ?? []} query={appQuery} onSelect={chooseAppReference} />
               <div className="composer-actions">
                 <NewChatAddMenu project={selectedProject} disabled={taskBusy} onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onApps={openAppReferences} onPlugins={openPluginMentions} onOpenFolder={() => chooseProject("task")} onClearProject={() => setSelectedProject(null)} onPlan={() => { setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onGoal={() => { setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setAppPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => goalInputRef.current?.focus()); }} />
-                <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(selectedProject)} />
+                <PermissionSelector
+                  value={newChatRunPreferences.approval_mode}
+                  permissionProfile={newChatRunPreferences.permission_profile}
+                  permissionProfiles={codexPermissionProfiles}
+                  advanced={advanced}
+                  onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, permission_profile: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))}
+                  onPermissionProfileChange={(permission_profile) => setNewChatRunPreferences((current) => ({ ...current, permission_profile, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined }))}
+                  hasProject={Boolean(selectedProject)}
+                />
                 <span className="composer-action-spacer" />
                 <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
                 <button className="primary new-chat-send" type="button" aria-label="Send" title="Send message" disabled={taskBusy || !taskGoal.trim()} onClick={() => void addTask()}>
@@ -7689,7 +7747,15 @@ export function App() {
                   <AppReferencePalette open={appPaletteOpen} apps={codexStableDiscovery?.apps ?? []} query={appQuery} onSelect={chooseAppReference} />
                   <div className="composer-actions">
                     <NewChatAddMenu project={workspaceProject ?? null} disabled={taskBusy} existingChat onAttachFiles={() => void attachMentionFiles()} onAttachFolder={() => void attachMentionFolder()} onApps={openAppReferences} onPlugins={openPluginMentions} onOpenFolder={() => { startNewChat(); void chooseProject("task"); }} onClearProject={() => startNewChat()} onPlan={() => setTaskGoal((value) => value.startsWith("/plan") ? value : `/plan ${value}`)} onGoal={() => setTaskGoal((value) => value.startsWith("/goal") ? value : `/goal ${value}`)} onCommands={() => { setTaskGoal("/"); setMentionPaletteOpen(false); setAppPaletteOpen(false); setSlashPaletteOpen(true); window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#chat-message")?.focus()); }} />
-                    <PermissionSelector value={newChatRunPreferences.approval_mode} onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))} hasProject={Boolean(workspaceProject)} />
+                    <PermissionSelector
+                      value={newChatRunPreferences.approval_mode}
+                      permissionProfile={newChatRunPreferences.permission_profile}
+                      permissionProfiles={codexPermissionProfiles}
+                      advanced={advanced}
+                      onChange={(approval_mode) => setNewChatRunPreferences((current) => ({ ...current, approval_mode, approval_policy: undefined, sandbox_mode: undefined, permission_profile: undefined, additional_writable_roots: approval_mode === "read_only" ? [] : current.additional_writable_roots }))}
+                      onPermissionProfileChange={(permission_profile) => setNewChatRunPreferences((current) => ({ ...current, permission_profile, approval_mode: "ask", approval_policy: undefined, sandbox_mode: undefined }))}
+                      hasProject={Boolean(workspaceProject)}
+                    />
                     <span className="composer-action-spacer" />
                     <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
                     <button className="primary new-chat-send" type="button" aria-label={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue message (Ctrl+Enter steers now)" : "Run command or send message"} onClick={() => conversationIsActive && !parseSlashCommand(taskGoal) ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>

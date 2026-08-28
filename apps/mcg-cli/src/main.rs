@@ -4492,6 +4492,11 @@ async fn interactive_command_options(
                 "Ask only for actions detected as unsafe".into(),
             ),
             (
+                "read-only".into(),
+                "Read only".into(),
+                "Inspect without file changes or unrestricted commands".into(),
+            ),
+            (
                 "full-access".into(),
                 "Full access".into(),
                 "Unrestricted project and internet authority".into(),
@@ -4788,6 +4793,40 @@ async fn interactive_command_options(
         }
         _ => Vec::new(),
     };
+    if command == "permissions" {
+        let project_id = fetch_conversation(client, host, token, &conversation_id.to_string())
+            .await
+            .ok()
+            .and_then(|view| view.conversation.project_id);
+        if let Some(project_id) = project_id
+            && let Ok(response) = client
+                .get(format!("{host}/api/v1/codex/permission-profiles"))
+                .query(&[("project_id", project_id.to_string())])
+                .bearer_auth(token)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            && let Ok(profiles) = response
+                .json::<Vec<mcg_codex_app_server::CodexPermissionProfile>>()
+                .await
+        {
+            values.extend(
+                profiles
+                    .into_iter()
+                    .filter(|profile| profile.allowed)
+                    .map(|profile| {
+                        let id = profile.id;
+                        (
+                            format!("profile:{id}"),
+                            id,
+                            profile
+                                .description
+                                .unwrap_or_else(|| "Codex permission profile".into()),
+                        )
+                    }),
+            );
+        }
+    }
     let needle = request.query.to_ascii_lowercase();
     values.retain(|(value, label, _)| {
         needle.is_empty()
@@ -5422,11 +5461,23 @@ async fn run_interactive_slash(
         }
         "permissions" => {
             if argument.is_empty() {
-                println!(
-                    "Current permissions: {:?}. Choose ask, auto-review, read-only, or full-access.",
-                    preferences.approval_mode
-                );
+                if let Some(profile) = &preferences.permission_profile {
+                    println!("Current permissions: Codex profile {profile}.");
+                } else {
+                    println!(
+                        "Current permissions: {:?}. Choose ask, auto-review, read-only, full-access, or profile:<id>.",
+                        preferences.approval_mode
+                    );
+                }
             } else {
+                if let Some(profile) = argument.strip_prefix("profile:") {
+                    preferences.permission_profile = Some(profile.to_owned());
+                    preferences.approval_mode = ApprovalMode::Ask;
+                    preferences.approval_policy = None;
+                    preferences.sandbox_mode = None;
+                    println!("Permissions set to Codex profile {profile}.");
+                    return Ok(InteractiveControl::Continue);
+                }
                 preferences.approval_mode = match argument.to_ascii_lowercase().as_str() {
                     "ask" => ApprovalMode::Ask,
                     "auto" | "auto-review" | "approve-for-me" => ApprovalMode::AutoReview,
@@ -5434,13 +5485,14 @@ async fn run_interactive_slash(
                     "full" | "full-access" => ApprovalMode::FullAccess,
                     _ => {
                         return Err(
-                            "permissions must be ask, auto-review, read-only, or full-access"
+                            "permissions must be ask, auto-review, read-only, full-access, or profile:<id>"
                                 .into(),
                         );
                     }
                 };
                 preferences.approval_policy = None;
                 preferences.sandbox_mode = None;
+                preferences.permission_profile = None;
                 println!("Permissions set to {:?}.", preferences.approval_mode);
             }
         }
@@ -10455,6 +10507,7 @@ fn conversation_preferences_exact(
         approval_mode: approval,
         approval_policy,
         sandbox_mode,
+        permission_profile: None,
         additional_writable_roots: Vec::new(),
         codex_feature_overrides: BTreeMap::new(),
         codex_config_overrides: Vec::new(),
@@ -10476,6 +10529,9 @@ fn codex_execution_preferences(
 ) -> ExecutionPreferences {
     let execution_controls_overridden =
         sandbox.is_some() || approval_policy.is_some() || approve_for_me;
+    if execution_controls_overridden || dangerously_bypass_approvals_and_sandbox {
+        fallback.permission_profile = None;
+    }
     if let Some(model) = model {
         fallback.model_id = Some(model);
     }

@@ -311,6 +311,7 @@ export interface ChatRunPreferences {
   approval_mode: ApprovalMode;
   approval_policy?: ExecutionApprovalPolicy;
   sandbox_mode?: ExecutionSandboxMode;
+  permission_profile?: string;
   additional_writable_roots?: string[];
   codex_feature_overrides?: Record<string, boolean>;
   codex_config_overrides?: CodexConfigOverride[];
@@ -325,6 +326,7 @@ export interface ExecutionPreferences {
   approval_mode?: ApprovalMode;
   approval_policy?: ExecutionApprovalPolicy;
   sandbox_mode?: ExecutionSandboxMode;
+  permission_profile?: string;
   additional_writable_roots?: string[];
   codex_feature_overrides?: Record<string, boolean>;
   codex_config_overrides?: CodexConfigOverride[];
@@ -617,6 +619,7 @@ export interface CodexFeature {
   enabled: boolean;
   defaultEnabled: boolean;
 }
+export interface CodexPermissionProfile { id: string; description?: string; allowed: boolean; }
 export interface CodexAccount { authenticated: boolean; account_type?: string; email?: string; plan_type?: string; requires_openai_auth: boolean; }
 export interface CodexLoginStart { loginId: string; authUrl: string; }
 export interface CodexRateLimitWindow { used_percent: number; remaining_percent: number; resets_at?: number; }
@@ -2010,6 +2013,7 @@ export function steerConversationTurn(conversationId: string, turnId: string, co
 
 export function getCodexModels(): Promise<CodexModel[]> { return invoke("codex_models"); }
 export function getCodexFeatures(): Promise<CodexFeature[]> { return invoke("codex_features"); }
+export function getCodexPermissionProfiles(projectId?: string): Promise<CodexPermissionProfile[]> { return invoke("codex_permission_profiles", { projectId }); }
 export function setCodexFeature(name: string, enabled: boolean): Promise<CodexFeature[]> { return invoke("set_codex_feature", { name, enabled }); }
 export function getCodexAccount(): Promise<CodexAccount> { return invoke("codex_account"); }
 export function getCodexRateLimits(): Promise<CodexRateLimits> { return invoke("codex_rate_limits"); }

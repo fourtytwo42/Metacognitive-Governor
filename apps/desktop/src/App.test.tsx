@@ -63,6 +63,7 @@ const client = vi.hoisted(() => ({
   pickMentionFolder: vi.fn(),
   pickWritableFolder: vi.fn(),
   getCodexModels: vi.fn(),
+  getCodexPermissionProfiles: vi.fn(),
   getCodexFeatures: vi.fn(),
   setCodexFeature: vi.fn(),
   getCodexAccount: vi.fn(),
@@ -256,6 +257,7 @@ vi.mock("./desktop-client", () => ({
   pickMentionFolder: client.pickMentionFolder,
   pickWritableFolder: client.pickWritableFolder,
   getCodexModels: client.getCodexModels,
+  getCodexPermissionProfiles: client.getCodexPermissionProfiles,
   getCodexFeatures: client.getCodexFeatures,
   setCodexFeature: client.setCodexFeature,
   getCodexAccount: client.getCodexAccount,
@@ -463,6 +465,7 @@ beforeEach(() => {
   client.pickMentionFolder.mockReset();
   client.pickWritableFolder.mockReset();
   client.getCodexModels.mockReset();
+  client.getCodexPermissionProfiles.mockReset();
   client.getCodexFeatures.mockReset();
   client.setCodexFeature.mockReset();
   client.getCodexAccount.mockReset();
@@ -689,6 +692,7 @@ beforeEach(() => {
   client.pickMentionFolder.mockResolvedValue(null);
   client.pickWritableFolder.mockResolvedValue(null);
   client.getCodexModels.mockResolvedValue([]);
+  client.getCodexPermissionProfiles.mockResolvedValue([]);
   client.getCodexFeatures.mockResolvedValue([]);
   client.setCodexFeature.mockResolvedValue([]);
   client.getCodexAccount.mockResolvedValue({ authenticated: false, requires_openai_auth: true });
@@ -3700,6 +3704,86 @@ test("permission mode is selected before prompting and sent with the conversatio
   await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
     "00000000-0000-4000-8000-000000000c01",
     expect.objectContaining({ execution_preferences: expect.objectContaining({ approval_mode: "auto_review" }) })
+  ));
+});
+
+test("advanced project chats discover and persist allowed Codex permission profiles", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.getCodexPermissionProfiles.mockResolvedValue([
+    { id: "workspace-safe", description: "Write only inside the project.", allowed: true },
+    { id: "organization-blocked", description: "Blocked by managed policy.", allowed: false }
+  ]);
+  render(<App />);
+
+  await enableAdvancedMode();
+  await selectNewChatProject("sample");
+  await waitFor(() => expect(client.getCodexPermissionProfiles).toHaveBeenCalledWith(project.project_id));
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  expect(await screen.findByRole("menuitemradio", { name: /workspace-safe/i })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitemradio", { name: /organization-blocked/i })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /workspace-safe/i }));
+  expect(screen.getByLabelText("Change permissions")).toHaveTextContent("workspace-safe");
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use the managed profile" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({
+      execution_preferences: expect.objectContaining({
+        approval_mode: "ask",
+        permission_profile: "workspace-safe"
+      })
+    })
+  ));
+});
+
+test("selecting a standard permission mode clears a named Codex profile", async () => {
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    project_id: "00000000-0000-4000-8000-000000000011",
+    root: "C:\\Projects\\sample",
+    observed_at: "2026-08-14T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.getCodexPermissionProfiles.mockResolvedValue([
+    { id: "workspace-safe", description: "Write only inside the project.", allowed: true }
+  ]);
+  render(<App />);
+
+  await enableAdvancedMode();
+  await selectNewChatProject("sample");
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: /workspace-safe/i }));
+  fireEvent.click(screen.getByLabelText("Change permissions"));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /Read only/ }));
+  expect(screen.getByLabelText("Change permissions")).toHaveTextContent("Read only");
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Inspect only" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({
+      execution_preferences: expect.objectContaining({
+        approval_mode: "read_only",
+        permission_profile: undefined
+      })
+    })
   ));
 });
 

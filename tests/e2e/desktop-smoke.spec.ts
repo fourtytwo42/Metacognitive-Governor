@@ -112,6 +112,10 @@ test.beforeEach(async ({ page }) => {
           if (command === "list_ssh_hosts") return { hosts: sshHosts };
           if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
           if (command === "list_projects") return { projects: [project] };
+          if (command === "codex_permission_profiles") return [
+            { id: "workspace-safe", description: "Write only inside the project.", allowed: true },
+            { id: "organization-blocked", description: "Blocked by managed policy.", allowed: false }
+          ];
           if (command === "pick_writable_folder") return "C:\\Shared\\assets";
           if (command === "search_project_mentions") return {
             candidates: [
@@ -451,6 +455,36 @@ test("new chat exposes a compact read-only authority preset", async ({ page }) =
 
   await expect(trigger).toContainText("Read only");
   await expect(trigger.locator("svg").first()).toBeVisible();
+  await expect(menu).toBeHidden();
+});
+
+test("advanced project chat exposes only allowed Codex permission profiles without overflow", async ({ page }) => {
+  await page.goto("/");
+  await enableAdvancedMode(page);
+  await page.getByRole("button", { name: "consumer-app", exact: true }).hover();
+  await page.getByRole("button", { name: "New chat in consumer-app" }).click();
+
+  const trigger = page.getByLabel("Change permissions");
+  await trigger.click();
+  const menu = page.getByRole("menu", { name: "How should MetaCog actions be approved?" });
+  await expect(menu.getByText("Codex permission profiles", { exact: true })).toBeVisible();
+  const profile = menu.getByRole("menuitemradio", { name: /workspace-safe/i });
+  await expect(profile).toContainText("Write only inside the project.");
+  await expect(menu.getByRole("menuitemradio", { name: /organization-blocked/i })).toHaveCount(0);
+
+  const layout = await menu.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: getComputedStyle(element).overflowY
+  }));
+  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+  expect(["auto", "scroll"]).toContain(layout.overflowY);
+  expect(layout.clientHeight).toBeLessThanOrEqual(520);
+
+  await profile.click();
+  await expect(trigger).toContainText("workspace-safe");
   await expect(menu).toBeHidden();
 });
 

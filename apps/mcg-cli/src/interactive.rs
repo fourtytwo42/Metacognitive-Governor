@@ -848,7 +848,10 @@ impl TuiModel {
                     .as_deref()
                     .unwrap_or("Automatic")
                     .to_owned(),
-                "permissions" => format!("{:?}", prefs.approval_mode),
+                "permissions" => prefs.permission_profile.as_ref().map_or_else(
+                    || format!("{:?}", prefs.approval_mode),
+                    |profile| format!("profile:{profile}"),
+                ),
                 "goal" => goal.clone(),
                 "usage" => "usage: /usage".into(),
                 "queue" => format!("{} queued", self.queued.len()),

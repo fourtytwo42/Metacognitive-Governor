@@ -4,8 +4,8 @@ Last verified 2026-08-28 against:
 
 - pinned Codex app-server `0.150.1` schema
   `844b52d4a5a8cda58794e28b3b119c3a3d20a588b7db83209c298bec62704092`;
-- current official [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli);
-- current official [slash-command reference](https://learn.chatgpt.com/docs/reference/slash-commands).
+- current official [Codex CLI command reference](https://developers.openai.com/codex/cli/reference/);
+- current official [slash-command reference](https://developers.openai.com/codex/cli/slash-commands/).
 
 This is a gap ledger, not a completion claim. `Native` means the interaction
 and effect match current Codex. `MetaCog` means the same objective is supported
@@ -22,7 +22,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | References | `@`, `/mention`, `$skill`, `$app` | Native | Files/folders, explicitly attached resources, MetaCog plugins, Codex skills, Apps, and initial image attachments use bounded searchable completion. `$` lists accessible enabled Apps and skills; `/apps` inserts the selected `$app-id` instead of sending a command. |
 | Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
-| Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 3 adds a durable read-only preset shared with desktop. Named permission profiles, exact nested selectors, and remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
+| Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 15 adds live project-aware Codex permission-profile discovery and durable selection in the nested `/permissions` picker. Exact remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
 | Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. Several other commands still print discovery data; agent selection does not replace the transcript viewport. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
@@ -130,10 +130,21 @@ restricted-token sandbox. Direct-process parity is covered by complete argument
 projection tests and by comparing the wrapper's real exit code and diagnostic
 with the pinned Codex command on the same host.
 
+Cycle 15 adds stable `permissionProfile/list` discovery to the pinned adapter
+and the interactive `/permissions` picker. A selected profile is persisted with
+the conversation and originating turn, shown in the terminal status line, and
+re-resolved against the current project-aware Codex configuration immediately
+before dispatch. Disallowed, missing, malformed, project-free, or explicitly
+sandboxed combinations fail closed. The adapter supplies the profile through
+the mutually exclusive `permissions` field on thread start, thread resume, and
+turn start, while project-free Chat remains read-only and MetaCog's role,
+organization, lease, integration, and approval boundaries stay authoritative.
+
 Codex-compatible support remains incomplete for local providers/OSS,
-profiles, permission profiles, remote endpoints/authentication, strict config,
-output schemas, and hook trust. These flags must map into governed requests; they may
-not bypass organization or approval policy.
+configuration profiles, global non-sandbox `--permission-profile`, remote
+endpoints/authentication, strict config, output schemas, and hook trust. These
+flags must map into governed requests; they may not bypass organization or
+approval policy.
 
 ## Desktop alignment rule
 
@@ -190,6 +201,14 @@ turn before returning while the daemon retains responsibility for execution.
 `migrate-rollouts` delegates unchanged to the pinned Codex migration engine.
 The first `agents` surface exposes the complete governed session catalog, but
 remains Partial until its searchable live terminal browser is implemented.
+
+Cycle 15 adds project-aware Codex permission profiles to the existing Advanced
+permission menu in New Chat and established Chat. Only profiles that the current
+Codex configuration marks allowed are shown; Simple retains the four frequent
+human-readable modes and still displays an already selected profile without
+hiding the active execution choice. Selecting a standard mode clears the named
+profile. The shared menu is independently scrollable, bounded, accessible, and
+uses the existing MetaCog permission visual language.
 
 ## Safety invariants
 

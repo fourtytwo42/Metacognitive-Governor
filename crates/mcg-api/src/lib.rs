@@ -299,6 +299,11 @@ pub struct MentionSearchQuery {
     pub limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CodexPermissionProfileQuery {
+    pub project_id: Option<ProjectId>,
+}
+
 const fn default_mention_search_limit() -> usize {
     50
 }
@@ -1719,6 +1724,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route("/api/v1/codex/models", get(codex_models))
         .route("/api/v1/codex/features", get(codex_features))
         .route("/api/v1/codex/features/{name}", put(set_codex_feature))
+        .route(
+            "/api/v1/codex/permission-profiles",
+            get(codex_permission_profiles),
+        )
         .route("/api/v1/codex/account", get(codex_account))
         .route("/api/v1/codex/rate-limits", get(codex_rate_limits))
         .route("/api/v1/codex/account/usage", get(codex_account_usage))
@@ -4496,6 +4505,19 @@ async fn codex_features(
         state
             .runtime
             .codex_features()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_permission_profiles(
+    State(state): State<ApiState>,
+    Query(query): Query<CodexPermissionProfileQuery>,
+) -> Result<Json<Vec<mcg_codex_app_server::CodexPermissionProfile>>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_permission_profiles_for_project(query.project_id)
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -7557,6 +7579,21 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("lowercase ASCII key"))
         );
+    }
+
+    #[tokio::test]
+    async fn codex_permission_profile_route_rejects_an_invalid_project_identifier() {
+        let response = router(test_runtime())
+            .oneshot(
+                authorized(Request::get(
+                    "/api/v1/codex/permission-profiles?project_id=not-a-project-id",
+                ))
+                .body(Body::empty())
+                .expect("permission profile request"),
+            )
+            .await
+            .expect("permission profile response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

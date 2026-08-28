@@ -47,9 +47,9 @@ use mcg_codex_app_server::{
     CodexCommandExecResult, CodexConfigOverride as CodexAppConfigOverride,
     CodexConfigurationStatus, CodexExecutionPreferences, CodexFeature, CodexFsWatch,
     CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
-    CodexRateLimits, CodexReviewDelivery, CodexReviewResult, CodexReviewTarget, CodexSandboxMode,
-    CodexStableDiscovery, CodexThreadInstructions, CodexTurnProgress,
-    verify_pinned_two_agent_conformance,
+    CodexPermissionProfile, CodexRateLimits, CodexReviewDelivery, CodexReviewResult,
+    CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery, CodexThreadInstructions,
+    CodexTurnProgress, verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
@@ -2484,6 +2484,7 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
                 CodexSandboxMode::DangerFullAccess
             }
         }),
+        permission_profile: preferences.permission_profile.clone(),
         writable_roots: preferences.additional_writable_roots.clone(),
         feature_overrides: preferences.codex_feature_overrides.clone(),
         config_overrides: codex_config_overrides(preferences),
@@ -2540,6 +2541,33 @@ fn validate_execution_preferences(
     preferences: &mut ExecutionPreferences,
     has_project: bool,
 ) -> Result<(), RuntimeError> {
+    if let Some(profile) = preferences.permission_profile.as_mut() {
+        *profile = profile.trim().to_owned();
+        if profile.is_empty()
+            || profile.len() > 128
+            || !profile.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+        {
+            return Err(StorageError::InvalidData(
+                "Codex permission profile must be a non-empty identifier using letters, numbers, dash, underscore, dot, or colon".into(),
+            )
+            .into());
+        }
+        if !has_project {
+            return Err(StorageError::InvalidData(
+                "Codex permission profiles require a linked project".into(),
+            )
+            .into());
+        }
+        if preferences.sandbox_mode.is_some() {
+            return Err(StorageError::InvalidData(
+                "a Codex permission profile cannot be combined with an explicit sandbox mode"
+                    .into(),
+            )
+            .into());
+        }
+    }
     const MAX_CODEX_FEATURE_OVERRIDES: usize = 32;
     const GOVERNED_CODEX_FEATURES: &[&str] = &[
         "shell_tool",
@@ -4050,6 +4078,11 @@ impl AppRuntime {
             approval_mode: CodexApprovalMode::Ask,
             approval_policy: None,
             sandbox_mode: None,
+            permission_profile: view
+                .conversation
+                .execution_preferences
+                .permission_profile
+                .clone(),
             writable_roots: view
                 .conversation
                 .execution_preferences
@@ -9986,6 +10019,73 @@ impl AppRuntime {
         Ok(self.codex_harness.features().await?)
     }
 
+    pub async fn codex_permission_profiles(
+        &self,
+        cwd: Option<&str>,
+    ) -> Result<Vec<CodexPermissionProfile>, RuntimeError> {
+        Ok(self.codex_harness.permission_profiles(cwd).await?)
+    }
+
+    pub async fn codex_permission_profiles_for_project(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<Vec<CodexPermissionProfile>, RuntimeError> {
+        let cwd = if let Some(project_id) = project_id {
+            let project = self
+                .project(project_id)?
+                .ok_or(StorageError::ProjectNotFound(project_id))?;
+            Some(
+                fs::canonicalize(&project.root)
+                    .map_err(|error| {
+                        StorageError::InvalidData(format!(
+                            "project cannot be resolved for permission profiles: {error}"
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        } else {
+            None
+        };
+        self.codex_permission_profiles(cwd.as_deref()).await
+    }
+
+    async fn validate_codex_permission_profile(
+        &self,
+        preferences: &ExecutionPreferences,
+        project_id: Option<ProjectId>,
+    ) -> Result<(), RuntimeError> {
+        let Some(selected) = preferences.permission_profile.as_deref() else {
+            return Ok(());
+        };
+        let project_id = project_id.ok_or_else(|| {
+            StorageError::InvalidData("Codex permission profiles require a linked project".into())
+        })?;
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let cwd = fs::canonicalize(&project.root)
+            .map_err(|error| {
+                StorageError::InvalidData(format!(
+                    "project cannot be resolved for permission profiles: {error}"
+                ))
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let profiles = self.codex_permission_profiles(Some(&cwd)).await?;
+        match profiles.iter().find(|profile| profile.id == selected) {
+            Some(profile) if profile.allowed => Ok(()),
+            Some(_) => Err(StorageError::InvalidData(format!(
+                "Codex permission profile `{selected}` is blocked by the effective requirements"
+            ))
+            .into()),
+            None => Err(StorageError::InvalidData(format!(
+                "Codex permission profile `{selected}` is no longer available; choose permissions again"
+            ))
+            .into()),
+        }
+    }
+
     pub async fn set_codex_feature(
         &self,
         name: &str,
@@ -10140,6 +10240,7 @@ impl AppRuntime {
             approval_mode: CodexApprovalMode::Ask,
             approval_policy: None,
             sandbox_mode: Some(CodexSandboxMode::ReadOnly),
+            permission_profile: None,
             writable_roots: Vec::new(),
             feature_overrides: conversation
                 .execution_preferences
@@ -11140,6 +11241,8 @@ impl AppRuntime {
         let mut preferences =
             turn_preferences.unwrap_or_else(|| conversation.execution_preferences.clone());
         validate_execution_preferences(&mut preferences, conversation.project_id.is_some())?;
+        self.validate_codex_permission_profile(&preferences, conversation.project_id)
+            .await?;
         conversation.execution_preferences = preferences.clone();
         conversation.updated_at = Utc::now();
         if conversation.title == "New chat" {
@@ -11239,6 +11342,7 @@ impl AppRuntime {
                     CodexSandboxMode::DangerFullAccess
                 }
             }),
+            permission_profile: preferences.permission_profile.clone(),
             writable_roots: preferences.additional_writable_roots.clone(),
             feature_overrides: preferences.codex_feature_overrides.clone(),
             config_overrides: codex_config_overrides(&preferences),
@@ -25895,6 +25999,38 @@ mod tests {
             effective_delegation_permission_mode(&writable),
             mcg_domain::ApprovalMode::AutoReview
         );
+    }
+
+    #[test]
+    fn named_permission_profiles_are_project_bound_and_mutually_exclusive_with_sandbox() {
+        let mut preferences = ExecutionPreferences {
+            permission_profile: Some("  locked-down:ci  ".into()),
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut preferences, true).expect("valid named profile");
+        assert_eq!(
+            preferences.permission_profile.as_deref(),
+            Some("locked-down:ci")
+        );
+        assert_eq!(
+            codex_preferences(&preferences)
+                .permission_profile
+                .as_deref(),
+            Some("locked-down:ci")
+        );
+
+        let mut project_free = preferences.clone();
+        assert!(validate_execution_preferences(&mut project_free, false).is_err());
+
+        let mut combined = preferences.clone();
+        combined.sandbox_mode = Some(mcg_domain::ExecutionSandboxMode::WorkspaceWrite);
+        assert!(validate_execution_preferences(&mut combined, true).is_err());
+
+        let mut malformed = ExecutionPreferences {
+            permission_profile: Some("bad profile".into()),
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut malformed, true).is_err());
     }
 
     #[test]

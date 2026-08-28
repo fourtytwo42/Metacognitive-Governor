@@ -313,6 +313,21 @@ pub struct CodexRateLimitBucket {
     pub secondary: Option<CodexRateLimitWindow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexPermissionProfile {
+    pub id: String,
+    pub description: Option<String>,
+    pub allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexPermissionProfileList {
+    data: Vec<CodexPermissionProfile>,
+    next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CodexConfigOverride {
     pub path: Vec<String>,
@@ -330,6 +345,8 @@ pub struct CodexExecutionPreferences {
     pub approval_policy: Option<CodexApprovalPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_mode: Option<CodexSandboxMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -658,16 +675,28 @@ impl CodexExecutionPreferences {
         })
     }
 
-    fn thread_sandbox(&self, writable: bool) -> &'static str {
-        match self.effective_sandbox(writable) {
+    fn effective_permission_profile(&self, writable: bool) -> Option<&str> {
+        writable
+            .then_some(self.permission_profile.as_deref())
+            .flatten()
+    }
+
+    fn thread_sandbox(&self, writable: bool) -> Option<&'static str> {
+        if self.effective_permission_profile(writable).is_some() {
+            return None;
+        }
+        Some(match self.effective_sandbox(writable) {
             CodexSandboxMode::ReadOnly => "read-only",
             CodexSandboxMode::WorkspaceWrite => "workspace-write",
             CodexSandboxMode::DangerFullAccess => "danger-full-access",
-        }
+        })
     }
 
-    fn turn_sandbox(&self, writable: bool) -> Value {
-        match self.effective_sandbox(writable) {
+    fn turn_sandbox(&self, writable: bool) -> Option<Value> {
+        if self.effective_permission_profile(writable).is_some() {
+            return None;
+        }
+        Some(match self.effective_sandbox(writable) {
             CodexSandboxMode::ReadOnly => json!({"type": "readOnly"}),
             CodexSandboxMode::WorkspaceWrite if self.writable_roots.is_empty() => {
                 json!({"type": "workspaceWrite"})
@@ -677,7 +706,7 @@ impl CodexExecutionPreferences {
                 "writableRoots": self.writable_roots
             }),
             CodexSandboxMode::DangerFullAccess => json!({"type": "dangerFullAccess"}),
-        }
+        })
     }
 }
 
@@ -1090,6 +1119,35 @@ impl CodexAppServerHarness {
         Ok(features)
     }
 
+    pub async fn permission_profiles(
+        &self,
+        cwd: Option<&str>,
+    ) -> Result<Vec<CodexPermissionProfile>, CodexHarnessError> {
+        let mut cursor: Option<String> = None;
+        let mut profiles = Vec::new();
+        let mut observed = BTreeSet::new();
+        loop {
+            let response = self
+                .request(
+                    "permissionProfile/list",
+                    json!({"cursor": cursor, "cwd": cwd, "limit": 100}),
+                )
+                .await?;
+            let page: CodexPermissionProfileList = serde_json::from_value(response)?;
+            profiles.extend(page.data);
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            if !observed.insert(next.clone()) || profiles.len() >= 10_000 {
+                return Err(CodexHarnessError::Protocol(
+                    "permissionProfile/list returned an invalid pagination sequence".into(),
+                ));
+            }
+            cursor = Some(next);
+        }
+        Ok(profiles)
+    }
+
     pub async fn set_feature(
         &self,
         name: &str,
@@ -1255,6 +1313,7 @@ impl CodexAppServerHarness {
                     "approvalPolicy": preferences.approval_policy(writable),
                     "approvalsReviewer": preferences.approvals_reviewer(),
                     "sandbox": preferences.thread_sandbox(writable),
+                    "permissions": preferences.effective_permission_profile(writable),
                     "baseInstructions": instructions.and_then(|value| value.base.as_deref()),
                     "developerInstructions": instructions.and_then(|value| value.developer.as_deref()),
                     "config": config,
@@ -1319,6 +1378,7 @@ impl CodexAppServerHarness {
                 "approvalPolicy": preferences.approval_policy(writable),
                 "approvalsReviewer": preferences.approvals_reviewer(),
                 "sandbox": preferences.thread_sandbox(writable)
+                ,"permissions": preferences.effective_permission_profile(writable)
                 ,"baseInstructions": instructions.and_then(|value| value.base.as_deref())
                 ,"developerInstructions": instructions.and_then(|value| value.developer.as_deref())
                 ,"config": config
@@ -1523,6 +1583,7 @@ impl CodexAppServerHarness {
                     "approvalPolicy": preferences.approval_policy(writable),
                     "approvalsReviewer": preferences.approvals_reviewer(),
                     "sandboxPolicy": preferences.turn_sandbox(writable),
+                    "permissions": preferences.effective_permission_profile(writable),
                     "outputSchema": output_schema
                     ,"collaborationMode": collaboration_mode
                 }),
@@ -2380,7 +2441,10 @@ mod tests {
         };
         assert_eq!(ask.approval_policy(true), "on-request");
         assert_eq!(ask.approvals_reviewer(), "user");
-        assert_eq!(ask.turn_sandbox(true), json!({"type": "workspaceWrite"}));
+        assert_eq!(
+            ask.turn_sandbox(true),
+            Some(json!({"type": "workspaceWrite"}))
+        );
 
         let auto = CodexExecutionPreferences {
             approval_mode: CodexApprovalMode::AutoReview,
@@ -2388,7 +2452,10 @@ mod tests {
         };
         assert_eq!(auto.approval_policy(true), "on-request");
         assert_eq!(auto.approvals_reviewer(), "auto_review");
-        assert_eq!(auto.turn_sandbox(true), json!({"type": "workspaceWrite"}));
+        assert_eq!(
+            auto.turn_sandbox(true),
+            Some(json!({"type": "workspaceWrite"}))
+        );
 
         let full = CodexExecutionPreferences {
             approval_mode: CodexApprovalMode::FullAccess,
@@ -2396,10 +2463,13 @@ mod tests {
         };
         assert_eq!(full.approval_policy(true), "never");
         assert_eq!(full.approvals_reviewer(), "user");
-        assert_eq!(full.turn_sandbox(true), json!({"type": "dangerFullAccess"}));
+        assert_eq!(
+            full.turn_sandbox(true),
+            Some(json!({"type": "dangerFullAccess"}))
+        );
 
         assert_eq!(full.approval_policy(false), "never");
-        assert_eq!(full.turn_sandbox(false), json!({"type": "readOnly"}));
+        assert_eq!(full.turn_sandbox(false), Some(json!({"type": "readOnly"})));
 
         let exact = CodexExecutionPreferences {
             approval_mode: CodexApprovalMode::Ask,
@@ -2408,7 +2478,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(exact.approval_policy(true), "untrusted");
-        assert_eq!(exact.turn_sandbox(true), json!({"type": "readOnly"}));
+        assert_eq!(exact.turn_sandbox(true), Some(json!({"type": "readOnly"})));
 
         let expanded = CodexExecutionPreferences {
             approval_mode: CodexApprovalMode::Ask,
@@ -2417,12 +2487,28 @@ mod tests {
         };
         assert_eq!(
             expanded.turn_sandbox(true),
-            json!({
+            Some(json!({
                 "type": "workspaceWrite",
                 "writableRoots": ["C:/shared-one", "C:/shared-two"]
-            })
+            }))
         );
-        assert_eq!(expanded.turn_sandbox(false), json!({"type": "readOnly"}));
+        assert_eq!(
+            expanded.turn_sandbox(false),
+            Some(json!({"type": "readOnly"}))
+        );
+
+        let named = CodexExecutionPreferences {
+            permission_profile: Some("locked-down".into()),
+            ..Default::default()
+        };
+        assert_eq!(named.thread_sandbox(true), None);
+        assert_eq!(named.turn_sandbox(true), None);
+        assert_eq!(
+            named.effective_permission_profile(true),
+            Some("locked-down")
+        );
+        assert_eq!(named.effective_permission_profile(false), None);
+        assert_eq!(named.turn_sandbox(false), Some(json!({"type": "readOnly"})));
     }
 
     #[test]
@@ -2600,6 +2686,26 @@ mod tests {
         assert!(!discovery.apps.is_empty());
     }
 
+    #[tokio::test]
+    #[ignore = "qualification gate: requires the packaged pinned Codex binary"]
+    async fn installed_pinned_binary_lists_permission_profiles() {
+        let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("codex"));
+        let harness = CodexAppServerHarness::new(executable);
+        let cwd = std::env::current_dir().expect("current directory");
+        let cwd = cwd.to_string_lossy();
+        let profiles = harness
+            .permission_profiles(Some(cwd.as_ref()))
+            .await
+            .expect("Codex permission profiles");
+        let mut ids = BTreeSet::new();
+        for profile in profiles {
+            assert!(!profile.id.trim().is_empty());
+            assert!(ids.insert(profile.id), "duplicate Codex permission profile");
+        }
+    }
+
     #[test]
     fn stable_review_and_command_payloads_match_the_pinned_schema() {
         assert_eq!(
@@ -2636,6 +2742,7 @@ mod tests {
         );
         for method in [
             "review/start",
+            "permissionProfile/list",
             "skills/list",
             "hooks/list",
             "app/list",
@@ -2651,6 +2758,15 @@ mod tests {
         }
         assert!(protocol_generated::SERVER_NOTIFICATION_METHODS.contains(&"fs/changed"));
         assert!(protocol_generated::SERVER_NOTIFICATION_METHODS.contains(&"skills/changed"));
+        let schema_value: Value = serde_json::from_str(schema).expect("pinned protocol schema");
+        for definition in ["ThreadStartParams", "ThreadResumeParams", "TurnStartParams"] {
+            assert!(
+                schema_value
+                    .pointer(&format!("/definitions/{definition}/properties/permissions"))
+                    .is_some(),
+                "missing named permissions field in {definition}"
+            );
+        }
     }
 
     #[test]
