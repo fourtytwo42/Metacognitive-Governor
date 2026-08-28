@@ -18,7 +18,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 
 | Area | Codex surface | State | Remaining gap |
 | --- | --- | --- | --- |
-| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, `Ctrl+L`, steering, queueing, reconnect/replay | Native | `Ctrl+L` clears only the rendered transcript; durable conversation history and replay remain intact. Initial image attachments enter the same durable mention queue as interactive picker selections. |
+| Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, `Ctrl+L`, steering, queueing, reconnect/replay, `--no-alt-screen` | Native | `Ctrl+L` clears only the rendered transcript; durable conversation history and replay remain intact. Initial image attachments enter the same durable mention queue as interactive picker selections. Inline mode preserves terminal scrollback without entering the alternate screen. |
 | References | `@`, `/mention`, `$skill`, `$app` | Partial | Files/folders, plugins, skills, and initial image attachments work; app completion is missing. |
 | Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
@@ -103,9 +103,14 @@ recorded in raw argument order as `web_search = "live"`, so later `-c` or
 accepts explicit `cached`, `live`, and `disabled` values while rejecting other
 types or strings. Role-scoped configuration remains final.
 
+Cycle 11 adds global `--no-alt-screen` to interactive, resumed, and forked
+terminal sessions. It selects Ratatui's inline viewport, never enters the
+terminal alternate screen, and restores raw mode, mouse capture, and cursor
+state on exit while leaving prior terminal scrollback available.
+
 Codex-compatible support remains incomplete for local providers/OSS,
 profiles, permission profiles, remote endpoints/authentication, strict config,
-output schemas, `--no-alt-screen`, and hook trust. These flags must map into governed requests; they may
+output schemas, and hook trust. These flags must map into governed requests; they may
 not bypass organization or approval policy.
 
 ## Desktop alignment rule

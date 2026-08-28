@@ -2,14 +2,29 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
-### 2026-08-28 - Codex parity Cycle 10 live-search implementation checkpoint
+### 2026-08-28 - Codex parity Cycle 11 inline terminal release
+
+- Context: Current Codex 0.144.6 exposes global `--no-alt-screen`; MetaCog always entered the alternate terminal screen and therefore could not preserve normal scrollback.
+- Decision: Extract the global flag before the broad Clap tree, propagate it through new, resumed, and forked TUI sessions, and select Ratatui's inline viewport without entering the alternate screen. Always restore raw mode, mouse capture, and cursor state on exit. This is terminal-only behavior and does not require a desktop duplicate or GUI UAT.
+- Files: `apps/mcg-cli/src/{main.rs,interactive.rs}`, `apps/mcg-cli/tests/consumer_modes.rs`, `docs/architecture/codex-cli-parity.md`, version manifests/locks, and `MEMORY.md`.
+- Commands/tests: Workspace Cargo check all targets; CLI 42/42 unit and 6/6 real-process/API tests; desktop typecheck/production build; complete deterministic Vitest 108/108; serialized Playwright 23/23; documentation, packaging, formatting, and diff checks. A real PTY launch rendered inline, emitted no alternate-screen entry sequence, exited with Ctrl+C, and restored terminal state; the temporary daemon was stopped cleanly.
+- Result: The sole portable is `target/portable/MetaCog-Portable-Windows-x64-v0.4.48/MetaCog-Desktop-v0.4.48.exe` (516,551,168 bytes; SHA-256 `F653843828A6F49CF13FAA612465E5B8CF03EC212318528CC95FA9B9ED312DC3`); the builder removed v0.4.47.
+- Follow-up: Commit/push v0.4.48 with exact local/remote parity, then re-audit the next stable bounded Codex gap. `update` requires extracting the existing owner-signed desktop updater rather than substituting a launcher.
+
+### 2026-08-28 - Codex parity Cycle 10 live-search release
 
 - Context: Current Codex 0.144.6 exposes stable global `--search`, which forces `web_search = "live"`; MetaCog's official parity ledger still marked live search missing.
 - Decision: Extract each `--search` occurrence into the existing ordered per-run Codex configuration list at its original CLI position, preserving last-occurrence precedence with repeatable `-c/--config`. Accept only `cached`, `live`, or `disabled`; merge organization/role configuration last. Advanced Chat exposes Default/Live/Off in the shared run-settings hierarchy while Simple remains unchanged.
 - Files: `apps/mcg-cli/src/main.rs`, `crates/mcg-{runtime,codex-app-server}/src/lib.rs`, `apps/desktop/src/{App.tsx,App.test.tsx}`, `tests/e2e/desktop-smoke.spec.ts`, and `docs/architecture/codex-cli-parity.md`.
 - Commands/tests: Workspace Cargo check; app-server 14 active plus one packaged qualification ignored; runtime 88 active plus two Windows Sandbox qualifications ignored; API 92/92; CLI 42/42 unit plus 6/6 real-process; desktop typecheck/production build; complete single-worker Vitest 108/108; serialized Playwright 23/23; documentation, packaging, formatting, and diff checks. The first focused Playwright invocation used a path incompatible with the root config and found no tests; the supported root invocation passed. A CLI help assertion was corrected to check root global help rather than `exec --help`.
-- Result: Native Windows UAT on the exact v0.4.47 portable verified Advanced Default/Live/Off selection and summaries, restored Default afterward, confirmed Simple omission, and found no overlap or page overflow. MetaCog was closed and Computer Use immediately released. The sole portable is `target/portable/MetaCog-Portable-Windows-x64-v0.4.47/MetaCog-Desktop-v0.4.47.exe` (516,555,264 bytes; SHA-256 `E248707E7129D6FFACBD204B17F174A350824978CA54C28C611891E20F02AAE4`; ProductName/FileDescription MetaCog; Product/FileVersion 0.4.47); the builder removed v0.4.46.
-- Follow-up: Commit/push v0.4.47 with local/remote parity, re-audit the official Codex 0.144.6 surface, and begin the next bounded parity gap.
+- Result: Native Windows UAT on the exact v0.4.47 portable verified Advanced Default/Live/Off selection and summaries, restored Default afterward, confirmed Simple omission, and found no overlap or page overflow. MetaCog was closed and Computer Use immediately released. The sole portable is `target/portable/MetaCog-Portable-Windows-x64-v0.4.47/MetaCog-Desktop-v0.4.47.exe` (516,555,264 bytes; SHA-256 `E248707E7129D6FFACBD204B17F174A350824978CA54C28C611891E20F02AAE4`; ProductName/FileDescription MetaCog; Product/FileVersion 0.4.47); the builder removed v0.4.46. Commit `db875c270d4ca4970da315e0ada992e55fd0cd6f` is pushed with exact local/remote parity and a clean worktree.
+- Follow-up: Cycle 11 will implement exact CLI-only `--no-alt-screen` behavior. Stable `update` remains a later gap because the owner-signed installer currently lives in the desktop host and must be extracted rather than imitated by a launcher.
+
+### 2026-08-28 - Windows Update restart classification correction
+
+- Context: The owner reconfirmed that the earlier host interruption happened because Windows updated and restarted.
+- Decision: Do not classify that interruption as MetaCog resource exhaustion or a product crash. Keep it distinct from the later reproducible Windows CLI stack overflow, which was separately diagnosed, fixed, and covered by real-process tests.
+- Result: Parity-cycle results remain valid; no corrective product work is warranted from the Windows Update restart alone.
 
 ### 2026-08-28 - Codex parity Cycle 9 config-override release
 

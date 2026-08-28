@@ -17,7 +17,7 @@ use mcg_domain::{
     MentionCandidate,
 };
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -142,20 +142,39 @@ impl QuestionOverlay {
 
 pub struct TuiTerminal {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    alternate_screen: bool,
 }
 
 impl TuiTerminal {
-    pub fn enter() -> io::Result<Self> {
+    pub fn enter(no_alt_screen: bool) -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            event::EnableMouseCapture,
-            cursor::Hide
-        )?;
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        Ok(Self { terminal })
+        if no_alt_screen {
+            execute!(stdout, event::EnableMouseCapture, cursor::Hide)?;
+        } else {
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                event::EnableMouseCapture,
+                cursor::Hide
+            )?;
+        }
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = if no_alt_screen {
+            let (_, rows) = terminal::size()?;
+            Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(rows.saturating_sub(1).max(1)),
+                },
+            )?
+        } else {
+            Terminal::new(backend)?
+        };
+        Ok(Self {
+            terminal,
+            alternate_screen: !no_alt_screen,
+        })
     }
 
     pub fn draw(&mut self, model: &mut TuiModel) -> io::Result<()> {
@@ -171,12 +190,20 @@ impl TuiTerminal {
 impl Drop for TuiTerminal {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            event::DisableMouseCapture,
-            LeaveAlternateScreen,
-            cursor::Show
-        );
+        if self.alternate_screen {
+            let _ = execute!(
+                self.terminal.backend_mut(),
+                event::DisableMouseCapture,
+                LeaveAlternateScreen,
+                cursor::Show
+            );
+        } else {
+            let _ = execute!(
+                self.terminal.backend_mut(),
+                event::DisableMouseCapture,
+                cursor::Show
+            );
+        }
         let _ = self.terminal.show_cursor();
     }
 }

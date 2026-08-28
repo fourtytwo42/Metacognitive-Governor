@@ -2036,6 +2036,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let add_dirs = native_overrides.add_dirs;
     let feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let no_alt_screen = native_overrides.no_alt_screen;
     let cli = Cli::parse_from(native_arguments);
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
@@ -2283,6 +2284,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 Some(preferences),
                 mentions,
+                no_alt_screen,
             )
             .await?;
         }
@@ -2426,6 +2428,7 @@ struct NativeOverrides {
     add_dirs: Vec<PathBuf>,
     feature_overrides: BTreeMap<String, bool>,
     config_overrides: Vec<CodexConfigOverride>,
+    no_alt_screen: bool,
 }
 
 fn codex_config_key_path(key: &str) -> Result<Vec<String>, String> {
@@ -2538,6 +2541,10 @@ fn extract_native_overrides(
             record_codex_config_override("web_search=\"live\"", &mut overrides)?;
             continue;
         }
+        if argument == "--no-alt-screen" {
+            overrides.no_alt_screen = true;
+            continue;
+        }
         let config_expression = if argument == "--config" || argument == "-c" {
             Some(
                 arguments
@@ -2618,6 +2625,12 @@ fn combined_cli_command() -> clap::Command {
             clap::Arg::new("search")
                 .long("search")
                 .help("Enable live web search for this session.")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("no-alt-screen")
+                .long("no-alt-screen")
+                .help("Run the terminal UI inline and preserve terminal scrollback history.")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -2704,6 +2717,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
     let mut feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let no_alt_screen = native_overrides.no_alt_screen;
     for feature in cli.enable_features {
         feature_overrides.insert(feature, true);
     }
@@ -2797,6 +2811,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(conversation),
                 preferences,
                 mentions,
+                no_alt_screen,
             ))
             .await?;
         }
@@ -2844,6 +2859,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(fork),
                 preferences,
                 mentions,
+                no_alt_screen,
             ))
             .await?;
         }
@@ -3367,6 +3383,7 @@ async fn run_interactive(
     initial_conversation: Option<Conversation>,
     initial_preferences: Option<ExecutionPreferences>,
     initial_mentions: Vec<String>,
+    no_alt_screen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut conversation, mut project_id, mut project_root, root, mut preferences) =
         if let Some(conversation) = initial_conversation {
@@ -3435,7 +3452,7 @@ async fn run_interactive(
         conversation.id,
         stream_tx.clone(),
     );
-    let mut terminal = TuiTerminal::enter()?;
+    let mut terminal = TuiTerminal::enter(no_alt_screen)?;
     loop {
         while let Ok(event) = stream_rx.try_recv() {
             if event.view.conversation.id == conversation.id {
@@ -12684,6 +12701,7 @@ mod tests {
                 "--enable",
                 "memories",
                 "--search",
+                "--no-alt-screen",
                 "-c",
                 "web_search=\"disabled\"",
                 "--search",
@@ -12713,6 +12731,7 @@ mod tests {
         ));
         assert_eq!(interactive.images, [PathBuf::from("diagram.png")]);
         assert_eq!(interactive_overrides.add_dirs, [PathBuf::from(".")]);
+        assert!(interactive_overrides.no_alt_screen);
         assert_eq!(
             interactive_overrides.feature_overrides.get("memories"),
             Some(&false)

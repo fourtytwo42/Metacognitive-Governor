@@ -251,7 +251,9 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
         .output()
         .expect("root help process");
     assert!(root_help.status.success());
-    assert!(String::from_utf8_lossy(&root_help.stdout).contains("--search"));
+    let root_help = String::from_utf8_lossy(&root_help.stdout);
+    assert!(root_help.contains("--search"));
+    assert!(root_help.contains("--no-alt-screen"));
 }
 
 #[cfg(windows)]
