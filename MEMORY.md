@@ -8,8 +8,8 @@ Durable project context lives here. Update this file whenever information should
 - Decision: Extract the global flag before the broad Clap tree, propagate it through new, resumed, and forked TUI sessions, and select Ratatui's inline viewport without entering the alternate screen. Always restore raw mode, mouse capture, and cursor state on exit. This is terminal-only behavior and does not require a desktop duplicate or GUI UAT.
 - Files: `apps/mcg-cli/src/{main.rs,interactive.rs}`, `apps/mcg-cli/tests/consumer_modes.rs`, `docs/architecture/codex-cli-parity.md`, version manifests/locks, and `MEMORY.md`.
 - Commands/tests: Workspace Cargo check all targets; CLI 42/42 unit and 6/6 real-process/API tests; desktop typecheck/production build; complete deterministic Vitest 108/108; serialized Playwright 23/23; documentation, packaging, formatting, and diff checks. A real PTY launch rendered inline, emitted no alternate-screen entry sequence, exited with Ctrl+C, and restored terminal state; the temporary daemon was stopped cleanly.
-- Result: The sole portable is `target/portable/MetaCog-Portable-Windows-x64-v0.4.48/MetaCog-Desktop-v0.4.48.exe` (516,551,168 bytes; SHA-256 `F653843828A6F49CF13FAA612465E5B8CF03EC212318528CC95FA9B9ED312DC3`); the builder removed v0.4.47.
-- Follow-up: Commit/push v0.4.48 with exact local/remote parity, then re-audit the next stable bounded Codex gap. `update` requires extracting the existing owner-signed desktop updater rather than substituting a launcher.
+- Result: The sole portable is `target/portable/MetaCog-Portable-Windows-x64-v0.4.48/MetaCog-Desktop-v0.4.48.exe` (516,551,168 bytes; SHA-256 `F653843828A6F49CF13FAA612465E5B8CF03EC212318528CC95FA9B9ED312DC3`; ProductName/FileDescription MetaCog; Product/FileVersion 0.4.48); the builder removed v0.4.47. Commit `69b599b0c721a36fac7a7527630b6a05e0a4923f` is pushed with exact local/remote parity.
+- Follow-up: Re-audit the next stable bounded Codex gap. `update` requires extracting the existing owner-signed desktop updater rather than substituting a launcher.
 
 ### 2026-08-28 - Codex parity Cycle 10 live-search release
 
