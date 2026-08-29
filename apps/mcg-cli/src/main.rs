@@ -3938,6 +3938,43 @@ async fn run_interactive(
                 model.queue(line);
                 model.set_status(format!("{} queued", model.queued_len()));
             }
+            TuiAction::MessageAgent {
+                session_id,
+                content,
+            } => {
+                let result: Result<mcg_domain::ConversationTeamState, _> = decode_api_response(
+                    client
+                        .post(format!(
+                            "{host}/api/v1/conversations/{}/agent-sessions/{session_id}/messages",
+                            conversation.id
+                        ))
+                        .bearer_auth(token)
+                        .json(&mcg_api::MessageAgentSessionRequest { content })
+                        .send()
+                        .await?,
+                    "message agent thread",
+                )
+                .await;
+                match result {
+                    Ok(_) => {
+                        match fetch_conversation(client, host, token, &conversation.id.to_string())
+                            .await
+                        {
+                            Ok(view) => {
+                                conversation = view.conversation.clone();
+                                model.set_view(view);
+                                model.set_status("Agent message delivered");
+                            }
+                            Err(error) => {
+                                model.set_status(format!(
+                                    "Refresh after agent reply failed: {error}"
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => model.set_status(format!("Agent message failed: {error}")),
+                }
+            }
             TuiAction::CopyLatest => {
                 model.set_status(
                     if copy_to_clipboard(model.latest_assistant_text().unwrap_or_default()) {

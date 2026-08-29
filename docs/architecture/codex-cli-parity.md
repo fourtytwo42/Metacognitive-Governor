@@ -24,7 +24,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Top-level review targets and human findings are native; interactive review target picking, raw terminal scrollback, and exact usage/status presentation remain. |
 | Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 15 adds live project-aware Codex permission-profile discovery and durable selection in the nested `/permissions` picker. Exact remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
-| Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. Several other commands still print discovery data; agent selection does not replace the transcript viewport. |
+| Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. `/agent` and `/subagents` now provide a searchable live-thread picker, replace the transcript viewport, and route replies through the selected governed session. Several other context commands still print discovery data, and approval-source thread jumping remains. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
 | Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout and `/app` workspace/conversation handoff work. Direct desktop deep-linking to the active conversation, IDE context, and import remain; hooks/feedback are informational. |
 | Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Missing | Implement a governed sandbox mutation contract and mirror it in Settings. |
@@ -48,7 +48,7 @@ Environment variables alone are not capability discovery.
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
-| `agents` | Partial | Lists every active MetaCog Chat, Coordinator, Coder, Tester, and future governed agent session across conversations. The Codex-style searchable live browser and direct thread switching remain pending. |
+| `agents` | Partial | Lists every active MetaCog Chat, Coordinator, Coder, Tester, and future governed agent session across conversations. `/agent` provides searchable inspection and messaging inside the active conversation; a global cross-conversation live browser remains pending. |
 | `queue` | Native | Resolves a conversation UUID or exact name, validates global execution and image-reference options, durably persists the queued owner turn, and returns after daemon acceptance while governed work continues FIFO. |
 | `migrate-rollouts` | Native | Daemon-free pass-through to the pinned Codex 0.150.1 migration engine with dry-run default, `--apply`, repeated `--thread`, throughput, JSON, and verbose controls. MetaCog does not reinterpret Codex rollout storage. |
 | global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
@@ -182,6 +182,20 @@ no longer presented as the ordinary result. A resumed conversation still keeps
 its saved MetaCog project binding because that binding is an authority boundary;
 current-vs-saved-directory selection remains an explicit gap until it can be
 modeled without silently changing project authority.
+
+Cycle 20 adds the Codex-style active-conversation agent browser behind `/agent`
+and `/subagents`. Active sessions sort before completed sessions, fuzzy filtering
+and bounded scrolling work at compact terminal sizes, selection replaces the
+main transcript with that agent's messages and activity, direct input is routed
+through the existing role-scoped agent-session API, and Escape returns to the
+owner-facing conversation. Messages to a working specialist steer only its
+pinned active Codex turn; missing bindings fail before an agent-room message is
+persisted, and ready/waiting sessions retain their governed continuation path.
+MetaCog's existing desktop agent widgets already expose the same Chat,
+Coordinator, Coder, Tester, message, and activity records, while Tester browser
+authority remains independently bounded and non-mutating, so no desktop visual
+change is required for this cycle. Cross-conversation agent browsing and jumping
+from an approval overlay to its source thread remain explicit gaps.
 
 Codex-compatible support remains incomplete for local providers/OSS, remote
 endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1

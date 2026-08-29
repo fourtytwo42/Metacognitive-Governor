@@ -13,8 +13,8 @@ use crossterm::{
 use mcg_config::CliTuiPreferences;
 use mcg_domain::{
     ComposerMentionInput, ConversationActivityKind, ConversationActivityState,
-    ConversationInputQuestion, ConversationRole, ConversationTurnState, ConversationView,
-    MentionCandidate,
+    ConversationAgentSessionId, ConversationAgentSessionState, ConversationInputQuestion,
+    ConversationRole, ConversationTurnState, ConversationView, MentionCandidate,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -109,6 +109,10 @@ pub enum TuiAction {
     Submit(SubmittedLine),
     Steer(SubmittedLine),
     Queue(SubmittedLine),
+    MessageAgent {
+        session_id: ConversationAgentSessionId,
+        content: String,
+    },
     CopyLatest,
     ForkPrevious,
     AnswerInput {
@@ -127,6 +131,12 @@ struct QuestionOverlay {
     text: String,
     other_mode: bool,
     answers: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentPickerOverlay {
+    query: String,
+    selected: usize,
 }
 
 impl QuestionOverlay {
@@ -300,6 +310,17 @@ fn fuzzy_session_indices(candidates: &[SessionPickerCandidate], query: &str) -> 
     matches.into_iter().map(|(index, _)| index).collect()
 }
 
+fn fuzzy_subsequence(haystack: &str, needle: &str) -> bool {
+    let mut cursor = 0_usize;
+    for character in needle.chars() {
+        let Some(relative) = haystack[cursor..].find(character) else {
+            return false;
+        };
+        cursor += relative + character.len_utf8();
+    }
+    true
+}
+
 fn render_session_picker(
     frame: &mut ratatui::Frame<'_>,
     candidates: &[SessionPickerCandidate],
@@ -462,6 +483,8 @@ pub struct TuiModel {
     details_expanded: bool,
     last_escape: Option<Instant>,
     question_overlay: Option<QuestionOverlay>,
+    agent_picker: Option<AgentPickerOverlay>,
+    selected_agent_session_id: Option<ConversationAgentSessionId>,
     notices: VecDeque<(chrono::DateTime<chrono::Utc>, String)>,
     cli_preferences: CliTuiPreferences,
     vim_insert: bool,
@@ -486,6 +509,8 @@ impl TuiModel {
             details_expanded: false,
             last_escape: None,
             question_overlay: None,
+            agent_picker: None,
+            selected_agent_session_id: None,
             notices: VecDeque::new(),
             cli_preferences: CliTuiPreferences::default(),
             vim_insert: true,
@@ -518,6 +543,16 @@ impl TuiModel {
 
     pub fn set_view(&mut self, view: ConversationView) {
         self.view = view;
+        if self.selected_agent_session_id.is_some_and(|selected| {
+            !self
+                .view
+                .team
+                .sessions
+                .iter()
+                .any(|session| session.id == selected)
+        }) {
+            self.selected_agent_session_id = None;
+        }
         if self.question_overlay.is_none() {
             self.question_overlay = self
                 .view
@@ -611,6 +646,16 @@ impl TuiModel {
 
     #[must_use]
     pub fn latest_assistant_text(&self) -> Option<&str> {
+        if let Some(session_id) = self.selected_agent_session_id {
+            return self
+                .view
+                .team
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.from_session_id == session_id)
+                .map(|message| message.content.as_str());
+        }
         self.view
             .messages
             .iter()
@@ -645,6 +690,9 @@ impl TuiModel {
         &mut self,
         key: KeyEvent,
     ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        if self.agent_picker.is_some() {
+            return self.handle_agent_picker_key(key);
+        }
         if self.question_overlay.is_some() {
             return self.handle_question_key(key);
         }
@@ -719,7 +767,9 @@ impl TuiModel {
             return Ok(None);
         }
         let palette_open = self.editor.palette_request().is_some() && !self.candidates.is_empty();
+        let opens_agent_picker = matches!(self.editor.buffer.trim(), "/agent" | "/subagents");
         match key.code {
+            KeyCode::Enter if opens_agent_picker => return self.submit_action(false),
             KeyCode::Enter | KeyCode::Tab if palette_open => {
                 self.editor.select(&self.candidates[self.editor.selected]);
             }
@@ -736,6 +786,10 @@ impl TuiModel {
             KeyCode::Esc => {
                 if self.editor.palette_request().is_some() {
                     self.editor.dismiss_palette();
+                } else if self.selected_agent_session_id.is_some() && self.editor.buffer.is_empty()
+                {
+                    self.selected_agent_session_id = None;
+                    self.status = "Returned to main thread".into();
                 } else if self.cli_preferences.vim_mode && self.vim_insert {
                     self.vim_insert = false;
                 } else if self.editor.buffer.is_empty()
@@ -895,16 +949,179 @@ impl TuiModel {
         if matches!(line.content.trim(), "/exit" | "/quit" | ":exit" | ":quit") {
             return Ok(Some(TuiAction::Exit));
         }
+        if self.handle_agent_command(line.content.trim()) {
+            return Ok(None);
+        }
         self.history.push(line.content.clone());
         self.history_index = self.history.len();
         self.candidates.clear();
-        if queue {
+        if let Some(session_id) = self.selected_agent_session_id
+            && !line.content.trim_start().starts_with('/')
+            && !line.content.trim_start().starts_with('!')
+        {
+            Ok(Some(TuiAction::MessageAgent {
+                session_id,
+                content: line.content,
+            }))
+        } else if queue {
             Ok(Some(TuiAction::Queue(line)))
         } else if self.is_active() {
             Ok(Some(TuiAction::Steer(line)))
         } else {
             Ok(Some(TuiAction::Submit(line)))
         }
+    }
+
+    fn handle_agent_command(&mut self, content: &str) -> bool {
+        let Some(argument) = content
+            .strip_prefix("/agent")
+            .or_else(|| content.strip_prefix("/subagents"))
+        else {
+            return false;
+        };
+        if !argument.is_empty() && !argument.starts_with(char::is_whitespace) {
+            return false;
+        }
+        let selector = argument.trim();
+        if selector.is_empty() {
+            self.agent_picker = Some(AgentPickerOverlay {
+                query: String::new(),
+                selected: 0,
+            });
+            self.status = "Choose an agent thread".into();
+            return true;
+        }
+        if selector.eq_ignore_ascii_case("main") || selector.eq_ignore_ascii_case("chat") {
+            self.selected_agent_session_id = None;
+            self.status = "Viewing main thread".into();
+            return true;
+        }
+        let selector = selector.to_ascii_lowercase();
+        let matches = self
+            .view
+            .team
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.id.to_string() == selector
+                    || format!("{:?}", session.kind).to_ascii_lowercase() == selector
+                    || session.display_name.to_ascii_lowercase() == selector
+            })
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [session_id] => {
+                self.selected_agent_session_id = Some(*session_id);
+                self.transcript_scroll = 0;
+                self.status = format!("Viewing {}", self.selected_agent_name());
+                true
+            }
+            [] => {
+                self.status = format!("No agent thread matches `{selector}`");
+                true
+            }
+            _ => {
+                self.status =
+                    format!("Multiple agent threads match `{selector}`; choose one from /agent");
+                true
+            }
+        }
+    }
+
+    fn agent_picker_candidates(&self) -> Vec<(Option<ConversationAgentSessionId>, String, String)> {
+        let query = self
+            .agent_picker
+            .as_ref()
+            .map_or("", |overlay| overlay.query.trim());
+        let query = query.to_ascii_lowercase();
+        let mut sessions = self.view.team.sessions.iter().collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            agent_session_state_rank(left.state)
+                .cmp(&agent_session_state_rank(right.state))
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| left.display_name.cmp(&right.display_name))
+        });
+        let mut candidates = vec![(
+            None,
+            "Main thread".to_owned(),
+            "Owner-facing MetaCog conversation".to_owned(),
+        )];
+        candidates.extend(sessions.into_iter().map(|session| {
+            let group = if agent_session_state_rank(session.state) == 0 {
+                "Active"
+            } else {
+                "Done"
+            };
+            (
+                Some(session.id),
+                session.display_name.clone(),
+                format!("{group} · {:?} · {:?}", session.kind, session.state),
+            )
+        }));
+        if query.is_empty() {
+            return candidates;
+        }
+        candidates
+            .into_iter()
+            .filter(|(_, label, detail)| {
+                let searchable = format!("{label} {detail}").to_ascii_lowercase();
+                searchable.contains(&query) || fuzzy_subsequence(&searchable, &query)
+            })
+            .collect()
+    }
+
+    fn handle_agent_picker_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<Option<TuiAction>, Box<dyn std::error::Error>> {
+        let candidates = self.agent_picker_candidates();
+        let overlay = self.agent_picker.as_mut().expect("agent picker");
+        overlay.selected = overlay.selected.min(candidates.len().saturating_sub(1));
+        match key.code {
+            KeyCode::Esc => {
+                self.agent_picker = None;
+                self.status = "Agent selection cancelled".into();
+            }
+            KeyCode::Up => overlay.selected = overlay.selected.saturating_sub(1),
+            KeyCode::Down => {
+                overlay.selected = (overlay.selected + 1).min(candidates.len().saturating_sub(1));
+            }
+            KeyCode::Backspace => {
+                overlay.query.pop();
+                overlay.selected = 0;
+            }
+            KeyCode::Char(value)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                overlay.query.push(value);
+                overlay.selected = 0;
+            }
+            KeyCode::Enter if !candidates.is_empty() => {
+                self.selected_agent_session_id = candidates[overlay.selected].0;
+                self.transcript_scroll = 0;
+                self.agent_picker = None;
+                self.status = format!("Viewing {}", self.selected_agent_name());
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    fn selected_agent_name(&self) -> String {
+        self.selected_agent_session_id
+            .and_then(|id| {
+                self.view
+                    .team
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == id)
+            })
+            .map_or_else(
+                || "main thread".into(),
+                |session| session.display_name.clone(),
+            )
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
@@ -926,11 +1143,17 @@ impl TuiModel {
             ])
             .split(area);
         let transcript = Paragraph::new(self.transcript_text())
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .title(format!(" MetaCog · {} ", self.view.conversation.title)),
-            )
+            .block(Block::default().borders(Borders::BOTTOM).title(
+                if self.selected_agent_session_id.is_some() {
+                    format!(
+                        " MetaCog · {} · Agent: {} · Esc returns ",
+                        self.view.conversation.title,
+                        self.selected_agent_name()
+                    )
+                } else {
+                    format!(" MetaCog · {} ", self.view.conversation.title)
+                },
+            ))
             .wrap(Wrap { trim: false })
             .scroll((self.transcript_scroll, 0));
         frame.render_widget(transcript, layout[0]);
@@ -943,15 +1166,15 @@ impl TuiModel {
                     Color::White
                 }),
             )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(if self.is_active() {
-                        " Steer now · Tab queues "
-                    } else {
-                        " Message MetaCog "
-                    }),
-            )
+            .block(Block::default().borders(Borders::ALL).title(
+                if self.selected_agent_session_id.is_some() {
+                    " Message selected agent "
+                } else if self.is_active() {
+                    " Steer now · Tab queues "
+                } else {
+                    " Message MetaCog "
+                },
+            ))
             .wrap(Wrap { trim: false });
         frame.render_widget(composer, layout[2]);
         let cursor = cursor_position(layout[2], &self.editor.buffer, self.editor.cursor);
@@ -959,9 +1182,13 @@ impl TuiModel {
         self.render_palette(frame, layout[2], area);
         self.render_history_search(frame, area);
         self.render_question_overlay(frame, area);
+        self.render_agent_picker(frame, area);
     }
 
     fn transcript_text(&self) -> Text<'static> {
+        if self.selected_agent_session_id.is_some() {
+            return self.agent_transcript_text();
+        }
         let mut entries = Vec::<(chrono::DateTime<chrono::Utc>, Line<'static>)>::new();
         for message in &self.view.messages {
             let (label, color) = match message.role {
@@ -1009,10 +1236,25 @@ impl TuiModel {
                 .as_deref()
                 .or(activity.output.as_deref())
                 .unwrap_or(state);
+            let source = activity
+                .agent_session_id
+                .and_then(|id| {
+                    self.view
+                        .team
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == id)
+                })
+                .map_or_else(String::new, |session| {
+                    format!("{} · ", session.display_name)
+                });
             entries.push((
                 activity.updated_at,
                 Line::styled(
-                    format!("  {icon} {} · {detail}", activity_kind_label(activity.kind)),
+                    format!(
+                        "  {icon} {source}{} · {detail}",
+                        activity_kind_label(activity.kind)
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ),
             ));
@@ -1067,6 +1309,111 @@ impl TuiModel {
         Text::from(lines)
     }
 
+    fn agent_transcript_text(&self) -> Text<'static> {
+        let session_id = self.selected_agent_session_id.expect("selected agent");
+        let session = self
+            .view
+            .team
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id);
+        let mut entries = Vec::<(chrono::DateTime<chrono::Utc>, Line<'static>)>::new();
+        if let Some(session) = session {
+            entries.push((
+                session.created_at,
+                Line::styled(
+                    format!(
+                        "{} · {:?} · {:?} · {}",
+                        session.display_name, session.kind, session.state, session.id
+                    ),
+                    Style::default()
+                        .fg(match session.state {
+                            ConversationAgentSessionState::Failed => Color::Red,
+                            ConversationAgentSessionState::Working
+                            | ConversationAgentSessionState::Starting => Color::Yellow,
+                            _ => Color::Cyan,
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ));
+        }
+        for message in self.view.team.messages.iter().filter(|message| {
+            message.from_session_id == session_id || message.to_session_id == session_id
+        }) {
+            let source = if message.tool_name.as_deref() == Some("owner_agent_message") {
+                "You"
+            } else {
+                self.view
+                    .team
+                    .sessions
+                    .iter()
+                    .find(|candidate| candidate.id == message.from_session_id)
+                    .map_or("Owner", |candidate| candidate.display_name.as_str())
+            };
+            let color = if message.from_session_id == session_id {
+                Color::Green
+            } else {
+                Color::Cyan
+            };
+            entries.push((
+                message.created_at,
+                Line::from(vec![
+                    Span::styled(
+                        format!("{source}: "),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(message.content.clone()),
+                ]),
+            ));
+        }
+        for activity in self
+            .view
+            .activities
+            .iter()
+            .filter(|activity| activity.agent_session_id == Some(session_id))
+        {
+            let detail = activity
+                .command
+                .as_deref()
+                .or(activity.output.as_deref())
+                .unwrap_or_else(|| match activity.state {
+                    ConversationActivityState::Running => "running",
+                    ConversationActivityState::Completed => "done",
+                    ConversationActivityState::Failed => "failed",
+                    ConversationActivityState::Declined => "declined",
+                });
+            entries.push((
+                activity.updated_at,
+                Line::styled(
+                    format!("  {} · {detail}", activity_kind_label(activity.kind)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ));
+            if self.cli_preferences.raw_mode {
+                entries.push((
+                    activity.updated_at,
+                    Line::styled(
+                        serde_json::to_string(activity).unwrap_or_else(|_| "{}".into()),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ));
+            }
+        }
+        entries.sort_by_key(|entry| entry.0);
+        let mut lines = Vec::new();
+        for (_, line) in entries {
+            lines.push(line);
+            lines.push(Line::raw(""));
+        }
+        if lines.is_empty() {
+            lines.push(Line::styled(
+                "No activity has been recorded in this agent thread.",
+                Style::default().fg(Color::Gray),
+            ));
+        }
+        Text::from(lines)
+    }
+
     fn status_line(&self) -> Line<'static> {
         let prefs = &self.view.conversation.execution_preferences;
         let goal = self
@@ -1076,6 +1423,9 @@ impl TuiModel {
             .as_ref()
             .map_or("no goal".into(), |goal| format!("goal: {:?}", goal.status));
         let mut fields = Vec::new();
+        if self.selected_agent_session_id.is_some() {
+            fields.push(format!("agent: {}", self.selected_agent_name()));
+        }
         for field in &self.cli_preferences.status_line {
             let value = match field.as_str() {
                 "project" => self.project.clone(),
@@ -1253,6 +1603,58 @@ impl TuiModel {
             popup,
         );
     }
+
+    fn render_agent_picker(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let Some(overlay) = &self.agent_picker else {
+            return;
+        };
+        let candidates = self.agent_picker_candidates();
+        let height = u16::try_from(candidates.len().min(MAX_VISIBLE_CHOICES) + 4)
+            .unwrap_or(12)
+            .min(area.height);
+        let popup = centered_rect(76, height.max(7), area);
+        frame.render_widget(Clear, popup);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(popup);
+        frame.render_widget(
+            Paragraph::new(overlay.query.as_str()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Switch agent thread · type to filter · Esc cancel "),
+            ),
+            rows[0],
+        );
+        let selected = overlay.selected.min(candidates.len().saturating_sub(1));
+        let start = selected
+            .saturating_sub(MAX_VISIBLE_CHOICES.saturating_sub(1))
+            .min(candidates.len().saturating_sub(MAX_VISIBLE_CHOICES));
+        let items = candidates
+            .iter()
+            .skip(start)
+            .take(MAX_VISIBLE_CHOICES)
+            .map(|(_, label, detail)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{label:<24}"),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(" Threads "))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
+        let mut state = ListState::default()
+            .with_selected((!candidates.is_empty()).then_some(selected.saturating_sub(start)));
+        frame.render_stateful_widget(list, rows[1], &mut state);
+    }
 }
 
 fn activity_kind_label(kind: ConversationActivityKind) -> &'static str {
@@ -1275,6 +1677,16 @@ fn activity_kind_label(kind: ConversationActivityKind) -> &'static str {
         ConversationActivityKind::Interruption => "Interrupted",
         ConversationActivityKind::Failure => "Failure",
         ConversationActivityKind::Completion => "Completed",
+    }
+}
+
+fn agent_session_state_rank(state: ConversationAgentSessionState) -> u8 {
+    match state {
+        ConversationAgentSessionState::Starting
+        | ConversationAgentSessionState::Ready
+        | ConversationAgentSessionState::Working
+        | ConversationAgentSessionState::Waiting => 0,
+        ConversationAgentSessionState::Failed | ConversationAgentSessionState::Retired => 1,
     }
 }
 
@@ -1648,8 +2060,10 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use mcg_domain::{
-        Conversation, ConversationInputOption, ConversationInputRequest, ConversationTeamState,
-        ConversationTurn, ConversationTurnId, ExecutionPreferences, MentionKind,
+        CONVERSATION_TEAM_SCHEMA_VERSION, Conversation, ConversationAgentKind,
+        ConversationAgentSession, ConversationAgentSessionState, ConversationInputOption,
+        ConversationInputRequest, ConversationTeamState, ConversationTurn, ConversationTurnId,
+        ExecutionPreferences, MentionKind, OrganizationRevisionId, RoleId,
     };
 
     fn mention(label: &str, resource: &str) -> PaletteCandidate {
@@ -1835,6 +2249,121 @@ mod tests {
             messages: Vec::new(),
             activities: Vec::new(),
             team: ConversationTeamState::default(),
+        }
+    }
+
+    fn agent_session(
+        conversation: &Conversation,
+        display_name: &str,
+        kind: ConversationAgentKind,
+        state: ConversationAgentSessionState,
+    ) -> ConversationAgentSession {
+        ConversationAgentSession {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: ConversationAgentSessionId::new(),
+            conversation_id: conversation.id,
+            role_id: RoleId::new(),
+            organization_revision_id: OrganizationRevisionId::new(),
+            kind,
+            display_name: display_name.into(),
+            parent_session_id: None,
+            state,
+            codex_thread_id: Some(format!("thread-{display_name}")),
+            model: Some("gpt-5.6-terra".into()),
+            prompt_revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn agent_picker_filters_active_first_and_switches_the_transcript_view() {
+        let mut agent_view = view(false);
+        let retired = agent_session(
+            &agent_view.conversation,
+            "Retired Coder",
+            ConversationAgentKind::Coder,
+            ConversationAgentSessionState::Retired,
+        );
+        let working = agent_session(
+            &agent_view.conversation,
+            "Coding Agent Atlas",
+            ConversationAgentKind::Coder,
+            ConversationAgentSessionState::Working,
+        );
+        agent_view.team.sessions = vec![retired, working.clone()];
+        let mut model = TuiModel::new(agent_view, "project".into(), "main".into());
+
+        model.editor.replace_all("/agent".into());
+        model.set_candidates(vec![PaletteCandidate::Slash(SlashCandidate {
+            name: "agent",
+            description: "Switch agent thread",
+        })]);
+        assert!(
+            model
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("open picker")
+                .is_none()
+        );
+        let candidates = model.agent_picker_candidates();
+        assert_eq!(candidates[0].1, "Main thread");
+        assert_eq!(candidates[1].1, "Coding Agent Atlas");
+        assert!(candidates[1].2.starts_with("Active"));
+        assert_eq!(candidates[2].1, "Retired Coder");
+        assert!(candidates[2].2.starts_with("Done"));
+
+        model
+            .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .expect("choose active agent");
+        model
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("select active agent");
+        assert_eq!(model.selected_agent_session_id, Some(working.id));
+        assert!(model.agent_picker.is_none());
+        assert_eq!(model.selected_agent_name(), "Coding Agent Atlas");
+
+        model.editor.replace_all("Focus on the failing test".into());
+        assert!(matches!(
+            model
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("route agent message"),
+            Some(TuiAction::MessageAgent { session_id, content })
+                if session_id == working.id && content == "Focus on the failing test"
+        ));
+
+        assert!(
+            model
+                .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .expect("return to main")
+                .is_none()
+        );
+        assert!(model.selected_agent_session_id.is_none());
+    }
+
+    #[test]
+    fn agent_picker_scrolls_to_late_choices_at_compact_and_wide_sizes() {
+        let mut agent_view = view(false);
+        agent_view.team.sessions = (0..20)
+            .map(|index| {
+                agent_session(
+                    &agent_view.conversation,
+                    &format!("Coding Agent {index}"),
+                    ConversationAgentKind::Coder,
+                    ConversationAgentSessionState::Ready,
+                )
+            })
+            .collect();
+        let mut model = TuiModel::new(agent_view, "project".into(), "main".into());
+        model.agent_picker = Some(AgentPickerOverlay {
+            query: String::new(),
+            selected: 20,
+        });
+        for (width, height) in [(48, 12), (96, 18), (180, 30)] {
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| model.render(frame))
+                .expect("agent picker should render without clipping or panics");
         }
     }
 

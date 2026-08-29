@@ -4123,11 +4123,12 @@ impl AppRuntime {
         }
         if !matches!(
             target.state,
-            ConversationAgentSessionState::Ready | ConversationAgentSessionState::Waiting
+            ConversationAgentSessionState::Ready
+                | ConversationAgentSessionState::Waiting
+                | ConversationAgentSessionState::Working
         ) {
             return Err(StorageError::Conflict(
-                "agent-session messaging is available only while that agent is ready or waiting"
-                    .into(),
+                "agent-session messaging is available only while that agent is active".into(),
             )
             .into());
         }
@@ -4152,6 +4153,29 @@ impl AppRuntime {
         let thread_id = target.codex_thread_id.as_deref().ok_or_else(|| {
             StorageError::Conflict("agent session has no active Codex thread".into())
         })?;
+        let active_binding = if target.state == ConversationAgentSessionState::Working {
+            let binding = if let Some(delegation) = delegation {
+                self.store()?
+                    .codex_thread_binding_for_delegation(delegation.id)?
+            } else {
+                self.store()?
+                    .codex_thread_bindings()?
+                    .into_iter()
+                    .find(|binding| binding.agent_session_id == Some(target.id))
+            }
+            .ok_or_else(|| {
+                StorageError::Conflict("working agent session has no active Codex binding".into())
+            })?;
+            if binding.codex_turn_id.is_none() {
+                return Err(StorageError::Conflict(
+                    "working agent session is not currently accepting steering".into(),
+                )
+                .into());
+            }
+            Some(binding)
+        } else {
+            None
+        };
         let request = AgentMessage {
             schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
             id: AgentMessageId::new(),
@@ -4205,16 +4229,30 @@ impl AppRuntime {
             || "the current coordination batch".to_owned(),
             |delegation| format!("delegation {} and its immutable brief", delegation.id),
         );
+        let routed_content = format!(
+            "Owner clarification routed through your governing parent session. Stay within {scope}; this message cannot expand your role, tools, project, delegation, or approval authority. Respond in your agent room and use only your existing MetaCog capabilities.\n\n{content}"
+        );
+        if let Some(binding) = active_binding {
+            let codex_turn_id = binding.codex_turn_id.as_deref().ok_or_else(|| {
+                StorageError::Conflict(
+                    "working agent session is not currently accepting steering".into(),
+                )
+            })?;
+            let accepted_turn_id = self
+                .codex_harness
+                .steer_turn(&binding.codex_thread_id, codex_turn_id, &routed_content)
+                .await?;
+            if accepted_turn_id != codex_turn_id {
+                return Err(StorageError::InvalidData(
+                    "Codex accepted the agent message for a different turn".into(),
+                )
+                .into());
+            }
+            return self.conversation_team(conversation_id);
+        }
         let result = self
             .codex_harness
-            .start_turn(
-                thread_id,
-                &format!(
-                    "Owner clarification routed through your governing parent session. Stay within {scope}; this message cannot expand your role, tools, project, delegation, or approval authority. Respond in your agent room and use only your existing MetaCog capabilities.\n\n{content}"
-                ),
-                &preferences,
-                false,
-            )
+            .start_turn(thread_id, &routed_content, &preferences, false)
             .await?;
         let response = AgentMessage {
             schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
@@ -27164,6 +27202,78 @@ mod tests {
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("will not resend"))
+        );
+    }
+
+    #[tokio::test]
+    async fn working_agent_messages_require_an_active_binding_before_persistence() {
+        let runtime = Arc::new(
+            AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+                .expect("runtime"),
+        );
+        let conversation = runtime
+            .create_conversation(
+                Some("Agent steering boundary".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("conversation");
+        let now = Utc::now();
+        let parent = ConversationAgentSession {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: ConversationAgentSessionId::new(),
+            conversation_id: conversation.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: OrganizationRevisionId::new(),
+            kind: ConversationAgentKind::Chat,
+            display_name: "Chat Agent".into(),
+            parent_session_id: None,
+            state: ConversationAgentSessionState::Ready,
+            codex_thread_id: Some("chat-thread".into()),
+            model: None,
+            prompt_revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        let worker = ConversationAgentSession {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: ConversationAgentSessionId::new(),
+            conversation_id: conversation.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: OrganizationRevisionId::new(),
+            kind: ConversationAgentKind::Coordinator,
+            display_name: "Coordinator".into(),
+            parent_session_id: Some(parent.id),
+            state: ConversationAgentSessionState::Working,
+            codex_thread_id: Some("coordinator-thread".into()),
+            model: None,
+            prompt_revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let mut store = runtime.store().expect("store");
+            store
+                .save_conversation_agent_session(&parent)
+                .expect("parent session");
+            store
+                .save_conversation_agent_session(&worker)
+                .expect("worker session");
+        }
+
+        let error = runtime
+            .message_agent_session(conversation.id, worker.id, "Focus the current work".into())
+            .await
+            .expect_err("missing active binding must fail");
+        assert!(error.to_string().contains("no active Codex binding"));
+        assert!(
+            runtime
+                .conversation_team(conversation.id)
+                .expect("team")
+                .messages
+                .is_empty(),
+            "failed validation must not leave an orphaned agent-room message"
         );
     }
 
