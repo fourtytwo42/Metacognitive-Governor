@@ -5797,6 +5797,7 @@ mod tests {
             output: Some("Checking".into()),
             exit_code: None,
             duration_ms: None,
+            codex_payload: None,
             started_at: now,
             updated_at: now,
         };

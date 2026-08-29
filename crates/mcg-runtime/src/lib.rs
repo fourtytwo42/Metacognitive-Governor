@@ -27070,6 +27070,7 @@ fn conversation_activity_from_codex_item(
             .get("durationMs")
             .and_then(serde_json::Value::as_u64)
             .or_else(|| existing.and_then(|activity| activity.duration_ms)),
+        codex_payload: Some(item.clone()),
         started_at: existing.map(|activity| activity.started_at).unwrap_or(now),
         updated_at: now,
     })
@@ -27111,6 +27112,11 @@ fn conversation_activity_from_codex_notification(
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .or_else(|| Some(activity_label_for_notification(method).into()));
+    let state = if matches!(method, "item/plan/delta" | "turn/plan/updated") {
+        ConversationActivityState::Running
+    } else {
+        ConversationActivityState::Completed
+    };
     Some(ConversationActivity {
         schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
         conversation_id,
@@ -27119,12 +27125,13 @@ fn conversation_activity_from_codex_notification(
         delegation_id: None,
         codex_item_id: format!("notification:{item_id}:{method}"),
         kind,
-        state: ConversationActivityState::Completed,
+        state,
         command,
         cwd: None,
         output: serde_json::to_string(params).ok(),
         exit_code: None,
         duration_ms: None,
+        codex_payload: Some(params.clone()),
         started_at: Utc::now(),
         updated_at: Utc::now(),
     })
@@ -27219,6 +27226,37 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn conversation_activity_preserves_typed_codex_payloads_for_exact_clients() {
+        let conversation_id = ConversationId::new();
+        let turn_id = ConversationTurnId::new();
+        let item = serde_json::json!({
+            "id": "command-1",
+            "type": "commandExecution",
+            "command": "cargo check",
+            "status": "inProgress"
+        });
+        let activity =
+            conversation_activity_from_codex_item(conversation_id, turn_id, &item, false, None)
+                .expect("command activity");
+        assert_eq!(activity.codex_payload.as_ref(), Some(&item));
+
+        let plan = serde_json::json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "plan": [{"step":"inspect", "status":"pending"}]
+        });
+        let activity = conversation_activity_from_codex_notification(
+            conversation_id,
+            turn_id,
+            "turn/plan/updated",
+            &plan,
+        )
+        .expect("plan activity");
+        assert_eq!(activity.state, ConversationActivityState::Running);
+        assert_eq!(activity.codex_payload.as_ref(), Some(&plan));
+    }
 
     #[test]
     fn exact_execution_controls_survive_runtime_adapter_mapping() {
@@ -28345,6 +28383,7 @@ mod tests {
                 ),
                 exit_code: None,
                 duration_ms: Some(1_000),
+                codex_payload: None,
                 started_at: now,
                 updated_at: now,
             })

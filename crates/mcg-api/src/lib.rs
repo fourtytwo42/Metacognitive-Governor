@@ -36,22 +36,22 @@ use mcg_config::{AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRe
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, CloudDiffApply,
     CloudDiffApplyId, ComposerMentionInput, ComputerActionBatchId, ComputerUseCapability,
-    ComputerUseTarget, Conversation, ConversationAgentSessionId, ConversationGoalStatus,
-    ConversationId, ConversationInteractionKind, ConversationMode, ConversationPreview,
-    ConversationPreviewId, ConversationTeamState, ConversationTurnId, ConversationTurnState,
-    ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId, ManagedWorktree,
-    MemoryClaimId, MemoryTransferId, MentionCandidate, NotificationSeverity, OrganizationId,
-    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
-    PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId, RiskLevel, RoleId,
-    RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
-    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
-    SchedulerNotificationId, SharedContextHit, Site, SiteDeployment, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
-    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
-    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
-    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    ComputerUseTarget, Conversation, ConversationActivity, ConversationAgentSessionId,
+    ConversationGoalStatus, ConversationId, ConversationInteractionKind, ConversationMessage,
+    ConversationMode, ConversationPreview, ConversationPreviewId, ConversationTeamState,
+    ConversationTurnId, ConversationTurnState, ConversationView, ExecutionPreferences,
+    ExperimentId, GovernorProposalId, ManagedWorktree, MemoryClaimId, MemoryTransferId,
+    MentionCandidate, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
+    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
+    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
+    SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
+    SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
+    SshWorkflow, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::{EventEnvelope, EventKind};
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -278,6 +278,10 @@ pub struct MessageAgentSessionRequest {
 pub struct ConversationStreamEvent {
     pub sequence: u64,
     pub kind: EventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ConversationActivity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<ConversationMessage>,
     pub view: ConversationView,
 }
 
@@ -4233,17 +4237,37 @@ fn conversation_stream_frame(
     if !json_mentions_conversation(&event.payload, conversation_id) {
         return None;
     }
-    let view = runtime.conversation(conversation_id).ok()?;
-    let projected = ConversationStreamEvent {
-        sequence: event.sequence,
-        kind: event.kind,
-        view,
-    };
+    let projected = conversation_stream_projection(runtime, conversation_id, event)?;
     serde_json::to_string(&projected).ok().map(|data| {
         Ok(Event::default()
-            .id(event.sequence.to_string())
-            .event(event.kind.as_str())
+            .id(projected.sequence.to_string())
+            .event(projected.kind.as_str())
             .data(data))
+    })
+}
+
+fn conversation_stream_projection(
+    runtime: &AppRuntime,
+    conversation_id: ConversationId,
+    event: EventEnvelope,
+) -> Option<ConversationStreamEvent> {
+    let view = runtime.conversation(conversation_id).ok()?;
+    let activity = event
+        .payload
+        .get("activity")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let message = event
+        .payload
+        .get("message")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    Some(ConversationStreamEvent {
+        sequence: event.sequence,
+        kind: event.kind,
+        activity,
+        message,
+        view,
     })
 }
 
@@ -16277,6 +16301,58 @@ form.addEventListener('submit', (event) => {
         assert!(text.contains(&first.id.to_string()));
         assert!(!text.contains(&second.id.to_string()));
         assert!(text.contains("event: conversation_created"));
+    }
+
+    #[test]
+    fn conversation_event_stream_replays_the_exact_safe_activity_delta() {
+        let runtime = test_runtime();
+        let conversation = runtime
+            .create_conversation(
+                None,
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::NonInteractive,
+            )
+            .expect("conversation");
+        let now = Utc::now();
+        let activity = ConversationActivity {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            conversation_id: conversation.id,
+            turn_id: ConversationTurnId::new(),
+            agent_session_id: None,
+            delegation_id: None,
+            codex_item_id: "command-1".into(),
+            kind: mcg_domain::ConversationActivityKind::Command,
+            state: mcg_domain::ConversationActivityState::Running,
+            command: Some("cargo check".into()),
+            cwd: None,
+            output: None,
+            exit_code: None,
+            duration_ms: None,
+            codex_payload: Some(serde_json::json!({
+                "id":"command-1",
+                "type":"commandExecution",
+                "command":"cargo check",
+                "status":"inProgress"
+            })),
+            started_at: now,
+            updated_at: now,
+        };
+        let event = EventEnvelope::new(
+            EventKind::ConversationActivityUpdated,
+            None,
+            serde_json::json!({
+                "conversation_id": conversation.id,
+                "activity": activity
+            }),
+        );
+        let projection = conversation_stream_projection(&runtime, conversation.id, event)
+            .expect("activity projection");
+        assert_eq!(projection.activity.as_ref(), Some(&activity));
+        assert!(projection.message.is_none());
+        assert_eq!(projection.view.conversation.id, conversation.id);
+        let json = serde_json::to_value(projection).expect("projection JSON");
+        assert_eq!(json["activity"]["codex_payload"]["command"], "cargo check");
     }
 
     #[tokio::test]

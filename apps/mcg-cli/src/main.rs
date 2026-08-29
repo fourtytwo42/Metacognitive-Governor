@@ -9,6 +9,7 @@ use std::{
 };
 
 mod commands;
+mod exec_jsonl;
 mod interactive;
 
 #[cfg(windows)]
@@ -118,6 +119,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
+use exec_jsonl::{ExecJsonlEvent, ExecJsonlProjector};
 use interactive::{
     PaletteCandidate, PaletteKind, PaletteRequest, SessionPickerCandidate, SlashCandidate,
     SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_resume_cwd,
@@ -7299,26 +7301,45 @@ async fn run_codex_compatible_exec(
                 .map(|message| message.turn_id)
                 .ok_or("resumed conversation did not contain the submitted turn")?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "conversation_started",
-                        "conversation_id": conversation.id,
-                        "origin_turn_id": turn_id,
-                    })
-                );
-                std::io::stdout().flush()?;
+                emit_exec_jsonl(&ExecJsonlEvent::ThreadStarted {
+                    thread_id: conversation.id.to_string(),
+                })?;
+                emit_exec_jsonl(&ExecJsonlEvent::TurnStarted {})?;
             }
-            view = wait_for_conversation(
-                client,
-                host,
-                token,
-                &conversation.id.to_string(),
-                turn_id,
-                3_600,
-                2,
-            )
-            .await?;
+            let mut projector = ExecJsonlProjector::new(turn_id);
+            view = if json {
+                match wait_for_conversation_jsonl(
+                    client,
+                    host,
+                    token,
+                    view,
+                    turn_id,
+                    &mut projector,
+                    3_600,
+                )
+                .await
+                {
+                    Ok(view) => view,
+                    Err(error) => {
+                        emit_exec_jsonl(&ExecJsonlEvent::Error {
+                            message: error.to_string(),
+                        })?;
+                        emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
+                        return Err(error);
+                    }
+                }
+            } else {
+                wait_for_conversation(
+                    client,
+                    host,
+                    token,
+                    &conversation.id.to_string(),
+                    turn_id,
+                    3_600,
+                    2,
+                )
+                .await?
+            };
             let final_message = view
                 .messages
                 .iter()
@@ -7332,17 +7353,18 @@ async fn run_codex_compatible_exec(
                 std::fs::write(path, final_message)?;
             }
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "conversation_completed",
-                        "receipt": conversation_receipt(&view, Some(turn_id))?,
-                    })
-                );
+                for event in projector.finalize_items(&view) {
+                    emit_exec_jsonl(&event)?;
+                }
+                if let Err(error) = ensure_governed_consumer_success(&view, turn_id) {
+                    emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
+                    return Err(error);
+                }
+                emit_exec_jsonl(&projector.completed())?;
             } else {
                 println!("{final_message}");
+                ensure_governed_consumer_success(&view, turn_id)?;
             }
-            ensure_governed_consumer_success(&view, turn_id)?;
             if ephemeral {
                 let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await?;
             }
@@ -7517,27 +7539,45 @@ async fn run_consumer_submission(
         .ok_or("governed consumer response did not contain the owner turn")?;
 
     if output == ConsumerOutput::StreamJson {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "conversation_started",
-                "conversation_id": conversation.id,
-                "origin_turn_id": origin_turn_id,
-                "project_id": project.project.project_id,
-            })
-        );
-        std::io::stdout().flush()?;
+        emit_exec_jsonl(&ExecJsonlEvent::ThreadStarted {
+            thread_id: conversation.id.to_string(),
+        })?;
+        emit_exec_jsonl(&ExecJsonlEvent::TurnStarted {})?;
     }
-    view = wait_for_conversation(
-        client,
-        host,
-        token,
-        &conversation.id.to_string(),
-        origin_turn_id,
-        3_600,
-        2,
-    )
-    .await?;
+    let mut projector = ExecJsonlProjector::new(origin_turn_id);
+    view = if output == ConsumerOutput::StreamJson {
+        match wait_for_conversation_jsonl(
+            client,
+            host,
+            token,
+            view,
+            origin_turn_id,
+            &mut projector,
+            3_600,
+        )
+        .await
+        {
+            Ok(view) => view,
+            Err(error) => {
+                emit_exec_jsonl(&ExecJsonlEvent::Error {
+                    message: error.to_string(),
+                })?;
+                emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
+                return Err(error);
+            }
+        }
+    } else {
+        wait_for_conversation(
+            client,
+            host,
+            token,
+            &conversation.id.to_string(),
+            origin_turn_id,
+            3_600,
+            2,
+        )
+        .await?
+    };
     let final_message = view
         .messages
         .iter()
@@ -7555,13 +7595,14 @@ async fn run_consumer_submission(
             serde_json::to_string_pretty(&conversation_receipt(&view, Some(origin_turn_id))?)?
         );
     } else if output == ConsumerOutput::StreamJson {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "conversation_completed",
-                "receipt": conversation_receipt(&view, Some(origin_turn_id))?
-            })
-        );
+        for event in projector.finalize_items(&view) {
+            emit_exec_jsonl(&event)?;
+        }
+        if let Err(error) = ensure_governed_consumer_success(&view, origin_turn_id) {
+            emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
+            return Err(error);
+        }
+        emit_exec_jsonl(&projector.completed())?;
     } else {
         println!("Project: {}", project.project.root);
         println!("Conversation: {}", conversation.id);
@@ -7569,7 +7610,9 @@ async fn run_consumer_submission(
             println!("\n{text}");
         }
     }
-    ensure_governed_consumer_success(&view, origin_turn_id)?;
+    if output != ConsumerOutput::StreamJson {
+        ensure_governed_consumer_success(&view, origin_turn_id)?;
+    }
     if ephemeral {
         let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await?;
     }
@@ -11735,6 +11778,76 @@ async fn wait_for_conversation(
             .into());
         }
         tokio::time::sleep(interval).await;
+    }
+}
+
+fn emit_exec_jsonl(event: &ExecJsonlEvent) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string(event)?);
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+async fn wait_for_conversation_jsonl(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    mut view: ConversationView,
+    origin_turn_id: ConversationTurnId,
+    projector: &mut ExecJsonlProjector,
+    timeout_seconds: u64,
+) -> Result<ConversationView, Box<dyn std::error::Error>> {
+    for event in projector.project_view(&view) {
+        emit_exec_jsonl(&event)?;
+    }
+    if conversation_settled(&view, origin_turn_id) {
+        return Ok(view);
+    }
+
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let stream = spawn_conversation_stream(
+        client.clone(),
+        host.to_owned(),
+        token.to_owned(),
+        view.conversation.id,
+        sender,
+    );
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(timeout_seconds.clamp(1, 86_400));
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            stream.abort();
+            return Err(format!(
+                "conversation {} did not settle within {timeout_seconds} seconds; durable work remains inspectable with `mcg conversation team {}`",
+                view.conversation.id, view.conversation.id
+            )
+            .into());
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await {
+            Ok(Some(event)) => {
+                if let Some(activity) = event.activity.as_ref() {
+                    for event in projector.project_activity(activity) {
+                        emit_exec_jsonl(&event)?;
+                    }
+                }
+                if let Some(message) = event.message.as_ref() {
+                    for event in projector.project_message(message) {
+                        emit_exec_jsonl(&event)?;
+                    }
+                }
+                view = event.view;
+            }
+            Ok(None) | Err(_) => {
+                view = fetch_conversation(client, host, token, &view.conversation.id.to_string())
+                    .await?;
+            }
+        }
+        for event in projector.project_view(&view) {
+            emit_exec_jsonl(&event)?;
+        }
+        if conversation_settled(&view, origin_turn_id) {
+            stream.abort();
+            return Ok(view);
+        }
     }
 }
 

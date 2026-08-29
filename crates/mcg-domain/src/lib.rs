@@ -2103,6 +2103,11 @@ pub struct ConversationActivity {
     pub output: Option<String>,
     pub exit_code: Option<i64>,
     pub duration_ms: Option<u64>,
+    /// The validated app-server item or notification payload used to build this
+    /// presentation projection. Older activities omit it; consumers must keep
+    /// using the normalized fields when it is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_payload: Option<serde_json::Value>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

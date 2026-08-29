@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Cycle 25 matches the pinned Codex 0.150.1 JSONL lifecycle, item, error, and usage envelopes over the replayable conversation stream. Local providers and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -336,6 +336,18 @@ directory and asks the pinned `codex sandbox` engine to refresh the selected
 project permission profile with that read root. Both operations are rejected
 while any conversation has nonterminal work. Advanced Settings mirrors the
 same governed contract without exposing it in Simple mode.
+
+Cycle 25 replaces MetaCog's approximate `exec --json` receipts with the exact
+pinned Codex 0.150.1 JSONL projection: `thread.started`, `turn.started`,
+`item.started`, `item.updated`, `item.completed`, `error`, `turn.completed`, and
+`turn.failed`. Command executions, file changes, MCP and collaboration calls,
+web searches, agent messages, reasoning summaries, todo lists, nonfatal errors,
+and token usage use the pinned item shapes, including cache-write input tokens.
+The daemon's replayable conversation stream now carries the exact safe activity
+or message delta alongside the backward-compatible full view, preventing short
+lifecycle states from being lost when a fast turn completes before a client
+connects. Human output and MetaCog's separate consumer JSON receipts are
+unchanged.
 
 ## Safety invariants
 
