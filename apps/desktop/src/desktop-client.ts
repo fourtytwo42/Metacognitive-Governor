@@ -317,6 +317,7 @@ export interface ChatRunPreferences {
   codex_config_overrides?: CodexConfigOverride[];
   codex_profile?: string;
   strict_config?: boolean;
+  output_schema?: Record<string, unknown>;
   team_preset: TeamPreset;
   personality?: string;
 }
@@ -334,6 +335,7 @@ export interface ExecutionPreferences {
   codex_config_overrides?: CodexConfigOverride[];
   codex_profile?: string;
   strict_config?: boolean;
+  output_schema?: Record<string, unknown>;
   team_preset?: TeamPreset;
   personality?: string;
 }

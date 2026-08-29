@@ -2538,6 +2538,80 @@ fn codex_config_overrides(preferences: &ExecutionPreferences) -> Vec<CodexAppCon
         .collect()
 }
 
+const MAX_OUTPUT_SCHEMA_BYTES: usize = 64 * 1024;
+const MAX_OUTPUT_SCHEMA_DEPTH: usize = 32;
+const MAX_OUTPUT_SCHEMA_NODES: usize = 4_096;
+
+fn validate_output_schema_value(
+    value: &serde_json::Value,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), StorageError> {
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_OUTPUT_SCHEMA_NODES {
+        return Err(StorageError::InvalidData(format!(
+            "output schema exceeds the {MAX_OUTPUT_SCHEMA_NODES}-node limit"
+        )));
+    }
+    if depth > MAX_OUTPUT_SCHEMA_DEPTH {
+        return Err(StorageError::InvalidData(format!(
+            "output schema exceeds the {MAX_OUTPUT_SCHEMA_DEPTH}-level nesting limit"
+        )));
+    }
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                validate_output_schema_value(value, depth.saturating_add(1), nodes)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                validate_output_schema_value(value, depth.saturating_add(1), nodes)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_output_schema(preferences: &ExecutionPreferences) -> Result<(), StorageError> {
+    let Some(schema) = preferences.output_schema.as_ref() else {
+        return Ok(());
+    };
+    if !schema.is_object() {
+        return Err(StorageError::InvalidData(
+            "output schema must be a JSON object".into(),
+        ));
+    }
+    let bytes = serde_json::to_vec(schema)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?
+        .len();
+    if bytes > MAX_OUTPUT_SCHEMA_BYTES {
+        return Err(StorageError::InvalidData(format!(
+            "output schema exceeds the {MAX_OUTPUT_SCHEMA_BYTES}-byte limit"
+        )));
+    }
+    let mut nodes = 0;
+    validate_output_schema_value(schema, 0, &mut nodes)
+}
+
+fn validate_output_schema_mode(
+    preferences: &ExecutionPreferences,
+    mode: ConversationMode,
+    requested_goal: bool,
+    active_goal: bool,
+) -> Result<(), StorageError> {
+    if preferences.output_schema.is_some()
+        && (mode == ConversationMode::Plan || requested_goal || active_goal)
+    {
+        return Err(StorageError::InvalidData(
+            "structured output cannot be combined with Plan or an active Goal; return to normal chat first"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_execution_preferences(
     preferences: &mut ExecutionPreferences,
     has_project: bool,
@@ -2547,6 +2621,7 @@ fn validate_execution_preferences(
     preferences.codex_profile_config = None;
     preferences.codex_profile_digest = None;
     preferences.codex_profile_ignored_keys.clear();
+    validate_output_schema(preferences)?;
     if let Some(profile) = preferences.codex_profile.as_mut() {
         *profile = profile.trim().to_owned();
         if profile.is_empty()
@@ -6427,16 +6502,24 @@ impl AppRuntime {
             let _ = self.codex_harness.archive_thread(thread_id).await;
             return Err(error.into());
         }
-        let response = self
-            .codex_harness
-            .start_turn(thread_id, &prompt, &preferences, false)
-            .await
-            .map(|result| result.text)
-            .unwrap_or_else(|error| {
-                format!(
-                    "The Coordinator reported an update, but the Chat Agent could not synthesize it safely: {error}. The durable result and available actions are shown below."
-                )
-            });
+        let response = if let Some(output_schema) =
+            conversation.execution_preferences.output_schema.as_ref()
+        {
+            self.codex_harness
+                .start_structured_turn(thread_id, &prompt, &preferences, false, output_schema)
+                .await
+                .map(|result| result.text)?
+        } else {
+            self.codex_harness
+                .start_turn(thread_id, &prompt, &preferences, false)
+                .await
+                .map(|result| result.text)
+                .unwrap_or_else(|error| {
+                    format!(
+                        "The Coordinator reported an update, but the Chat Agent could not synthesize it safely: {error}. The durable result and available actions are shown below."
+                    )
+                })
+        };
         let _ = self.codex_harness.archive_thread(thread_id).await;
         let _ = self.codex_harness.unsubscribe_thread(thread_id).await;
         self.append_background_chat_response(conversation_id, turn_id, response)
@@ -7002,12 +7085,15 @@ impl AppRuntime {
                     )
                     .await;
                 if let Err(error) = delivery {
-                    let fallback = format!(
-                        "The Coding Agent team finished, but Chat synthesis could not be delivered safely: {error}. Review the durable Coding Agent cards for the completed changes and evidence."
-                    );
-                    let _ = runtime
-                        .append_background_chat_response(conversation.id, turn_id, fallback)
-                        .await;
+                    let structured = conversation.execution_preferences.output_schema.is_some();
+                    if !structured {
+                        let fallback = format!(
+                            "The Coding Agent team finished, but Chat synthesis could not be delivered safely: {error}. Review the durable Coding Agent cards for the completed changes and evidence."
+                        );
+                        let _ = runtime
+                            .append_background_chat_response(conversation.id, turn_id, fallback)
+                            .await;
+                    }
                     let fallback_batch = coordination_batch_id.and_then(|batch_id| {
                         runtime
                             .store()
@@ -7015,9 +7101,17 @@ impl AppRuntime {
                             .and_then(|store| store.coordination_batch(batch_id).ok().flatten())
                     });
                     if let Some(mut batch) = fallback_batch {
-                        batch.state = CoordinationBatchState::Completed;
+                        batch.state = if structured {
+                            CoordinationBatchState::Failed
+                        } else {
+                            CoordinationBatchState::Completed
+                        };
                         batch.revision = batch.revision.saturating_add(1);
-                        batch.last_error = Some(format!("Chat synthesis fallback used: {error}"));
+                        batch.last_error = Some(if structured {
+                            format!("structured Chat synthesis failed: {error}")
+                        } else {
+                            format!("Chat synthesis fallback used: {error}")
+                        });
                         batch.updated_at = Utc::now();
                         if let Ok(event) = runtime.store().and_then(|mut store| {
                             store
@@ -7030,9 +7124,21 @@ impl AppRuntime {
                 }
                 let _ = runtime.refresh_coordinator_activity(conversation.id, chat_session.id);
             } else {
-                let _ = runtime
-                    .append_background_chat_response(conversation.id, turn_id, response)
-                    .await;
+                if conversation.execution_preferences.output_schema.is_some() {
+                    let _ = runtime
+                        .deliver_coordinator_result_to_chat(
+                            conversation.id,
+                            turn_id,
+                            chat_session.id,
+                            coordination_batch_id,
+                            response,
+                        )
+                        .await;
+                } else {
+                    let _ = runtime
+                        .append_background_chat_response(conversation.id, turn_id, response)
+                        .await;
+                }
             }
             runtime
                 .conversation_team
@@ -11328,6 +11434,15 @@ impl AppRuntime {
         let mut preferences =
             turn_preferences.unwrap_or_else(|| conversation.execution_preferences.clone());
         validate_execution_preferences(&mut preferences, conversation.project_id.is_some())?;
+        validate_output_schema_mode(
+            &preferences,
+            conversation.mode,
+            requested_goal.is_some(),
+            conversation
+                .goal
+                .as_ref()
+                .is_some_and(|goal| !matches!(goal.status, ConversationGoalStatus::Complete)),
+        )?;
         self.validate_codex_strict_config(&preferences, conversation.project_id)
             .await?;
         self.resolve_codex_profile(&mut preferences, conversation.project_id)
@@ -11593,13 +11708,21 @@ impl AppRuntime {
                                     })
                             });
                             if coordinator_accepted {
-                                "The Coordinator accepted the request. I’ll remain available here while the agent team works, and their live activity will stay visible below."
-                                    .into()
+                                Some(
+                                    "The Coordinator accepted the request. I’ll remain available here while the agent team works, and their live activity will stay visible below."
+                                        .into(),
+                                )
+                            } else if preferences.output_schema.is_some() {
+                                // The routing turn must remain unconstrained so it can call the
+                                // Coordinator. Run the actual owner answer below with the schema.
+                                None
                             } else {
-                                response
+                                Some(response)
                             }
+                        } else if preferences.output_schema.is_some() {
+                            None
                         } else {
-                            response
+                            Some(response)
                         }
                     }
                     ChatAgentDecision::DelegateCode {
@@ -11616,56 +11739,60 @@ impl AppRuntime {
                             success_conditions,
                             context_references,
                         };
-                        match self
-                            .launch_coding_delegation(
-                                conversation.clone(),
-                                chat_session.clone(),
-                                thread_id.clone(),
-                                codex_preferences.clone(),
-                                brief,
-                                turn.id,
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                            .await
-                        {
-                            Ok((_, response)) => response,
-                            Err(error) => format!(
-                                "I could not start another Coding Agent safely: {error}. No project files were changed."
-                            ),
-                        }
+                        Some(
+                            match self
+                                .launch_coding_delegation(
+                                    conversation.clone(),
+                                    chat_session.clone(),
+                                    thread_id.clone(),
+                                    codex_preferences.clone(),
+                                    brief,
+                                    turn.id,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok((_, response)) => response,
+                                Err(error) => format!(
+                                    "I could not start another Coding Agent safely: {error}. No project files were changed."
+                                ),
+                            },
+                        )
                     }
                 };
-                let assistant_message = ConversationMessage {
-                    schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
-                    id: ConversationMessageId::new(),
-                    conversation_id,
-                    turn_id: turn.id,
-                    role: ConversationRole::Assistant,
-                    content: response,
-                    mentions: Vec::new(),
-                    codex_item_id: None,
-                    created_at: Utc::now(),
-                };
-                let event = self
-                    .store()?
-                    .save_conversation_message(&assistant_message)?;
-                let _ = self.event_sender.send(event);
-                turn.state = ConversationTurnState::Completed;
-                turn.updated_at = Utc::now();
-                let event = self.store()?.save_conversation_turn(&turn)?;
-                let _ = self.event_sender.send(event);
-                chat_session.state = ConversationAgentSessionState::Ready;
-                chat_session.updated_at = Utc::now();
-                let event = self
-                    .store()?
-                    .save_conversation_agent_session(&chat_session)?;
-                let _ = self.event_sender.send(event);
-                let _ = self.codex_harness.archive_thread(&thread_id).await;
-                let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
-                return self.conversation(conversation_id);
+                if let Some(response) = response {
+                    let assistant_message = ConversationMessage {
+                        schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+                        id: ConversationMessageId::new(),
+                        conversation_id,
+                        turn_id: turn.id,
+                        role: ConversationRole::Assistant,
+                        content: response,
+                        mentions: Vec::new(),
+                        codex_item_id: None,
+                        created_at: Utc::now(),
+                    };
+                    let event = self
+                        .store()?
+                        .save_conversation_message(&assistant_message)?;
+                    let _ = self.event_sender.send(event);
+                    turn.state = ConversationTurnState::Completed;
+                    turn.updated_at = Utc::now();
+                    let event = self.store()?.save_conversation_turn(&turn)?;
+                    let _ = self.event_sender.send(event);
+                    chat_session.state = ConversationAgentSessionState::Ready;
+                    chat_session.updated_at = Utc::now();
+                    let event = self
+                        .store()?
+                        .save_conversation_agent_session(&chat_session)?;
+                    let _ = self.event_sender.send(event);
+                    let _ = self.codex_harness.archive_thread(&thread_id).await;
+                    let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
+                    return self.conversation(conversation_id);
+                }
             }
         }
 
@@ -11675,7 +11802,8 @@ impl AppRuntime {
         // The schema-39 fallback may carry an internal `respond` or `delegate_code`
         // envelope. Buffer its text until completion so protocol content is classified
         // before anything becomes owner-visible. Schema-40 MCP turns retain live streaming.
-        let defer_compatibility_text = !self.config.two_agent_conversations;
+        let defer_compatibility_text =
+            !self.config.two_agent_conversations || preferences.output_schema.is_some();
         let mut last_timeline_at = Utc::now();
         let mut accepted = false;
         let turn_prompt = if mention_context.is_empty() {
@@ -11707,14 +11835,18 @@ impl AppRuntime {
                     >,
                 >
         } else {
-            Box::pin(self.codex_harness.start_turn_with_mentions_and_progress(
-                &thread_id,
-                &turn_prompt,
-                &codex_mentions,
-                &codex_preferences,
-                writable,
-                Some(progress_sender),
-            ))
+            Box::pin(
+                self.codex_harness
+                    .start_turn_with_mentions_and_progress_and_schema(
+                        &thread_id,
+                        &turn_prompt,
+                        &codex_mentions,
+                        &codex_preferences,
+                        writable,
+                        Some(progress_sender),
+                        preferences.output_schema.as_ref(),
+                    ),
+            )
         };
         tokio::pin!(turn_future);
         let turn_result = loop {
@@ -11852,50 +11984,54 @@ impl AppRuntime {
                     ));
                 }
                 turn.updated_at = Utc::now();
-                let compatibility_response = match parse_completed_compatibility_fallback(
-                    self.config.two_agent_conversations,
-                    turn.state,
-                    &result.text,
-                ) {
-                    Some(ChatAgentDecision::Respond { response }) => Some(response),
-                    Some(ChatAgentDecision::DelegateCode {
-                        objective,
-                        scope,
-                        constraints,
-                        success_conditions,
-                        context_references,
-                    }) => {
-                        let brief = CodingDelegationBrief {
+                let compatibility_response = if preferences.output_schema.is_some() {
+                    None
+                } else {
+                    match parse_completed_compatibility_fallback(
+                        self.config.two_agent_conversations,
+                        turn.state,
+                        &result.text,
+                    ) {
+                        Some(ChatAgentDecision::Respond { response }) => Some(response),
+                        Some(ChatAgentDecision::DelegateCode {
                             objective,
                             scope,
                             constraints,
                             success_conditions,
                             context_references,
-                        };
-                        Some(
-                            match self
-                                .launch_coding_delegation(
-                                    conversation.clone(),
-                                    chat_session.clone(),
-                                    thread_id.clone(),
-                                    codex_preferences.clone(),
-                                    brief,
-                                    turn.id,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                )
-                                .await
-                            {
-                                Ok((_, acknowledgement)) => acknowledgement,
-                                Err(error) => format!(
-                                    "I could not start another Coding Agent safely: {error}. No project files were changed."
-                                ),
-                            },
-                        )
+                        }) => {
+                            let brief = CodingDelegationBrief {
+                                objective,
+                                scope,
+                                constraints,
+                                success_conditions,
+                                context_references,
+                            };
+                            Some(
+                                match self
+                                    .launch_coding_delegation(
+                                        conversation.clone(),
+                                        chat_session.clone(),
+                                        thread_id.clone(),
+                                        codex_preferences.clone(),
+                                        brief,
+                                        turn.id,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    Ok((_, acknowledgement)) => acknowledgement,
+                                    Err(error) => format!(
+                                        "I could not start another Coding Agent safely: {error}. No project files were changed."
+                                    ),
+                                },
+                            )
+                        }
+                        None => None,
                     }
-                    None => None,
                 };
                 if let Some(response) = compatibility_response {
                     // The compatibility fallback streams before MCG knows whether the first
@@ -26233,6 +26369,66 @@ mod tests {
             })
             .collect();
         assert!(validate_execution_preferences(&mut preferences, true).is_err());
+    }
+
+    #[test]
+    fn output_schemas_are_object_bounded_and_mode_compatible() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+            "additionalProperties": false
+        });
+        let mut preferences = ExecutionPreferences {
+            output_schema: Some(schema.clone()),
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut preferences, false).expect("valid output schema");
+        assert_eq!(preferences.output_schema.as_ref(), Some(&schema));
+        validate_output_schema_mode(&preferences, ConversationMode::Default, false, false)
+            .expect("normal chat supports structured output");
+        assert!(
+            validate_output_schema_mode(&preferences, ConversationMode::Plan, false, false)
+                .is_err()
+        );
+        assert!(
+            validate_output_schema_mode(&preferences, ConversationMode::Default, true, false)
+                .is_err()
+        );
+        assert!(
+            validate_output_schema_mode(&preferences, ConversationMode::Default, false, true)
+                .is_err()
+        );
+
+        for invalid in [serde_json::json!([]), serde_json::json!("object")] {
+            let mut malformed = ExecutionPreferences {
+                output_schema: Some(invalid),
+                ..Default::default()
+            };
+            assert!(validate_execution_preferences(&mut malformed, false).is_err());
+        }
+
+        let mut oversized = ExecutionPreferences {
+            output_schema: Some(serde_json::json!({"description": "x".repeat(65 * 1024)})),
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut oversized, false).is_err());
+
+        let mut nested = serde_json::json!({});
+        for _ in 0..34 {
+            nested = serde_json::json!({"next": nested});
+        }
+        let mut too_deep = ExecutionPreferences {
+            output_schema: Some(nested),
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut too_deep, false).is_err());
+
+        let mut too_many_nodes = ExecutionPreferences {
+            output_schema: Some(serde_json::json!({"enum": vec![0; 4_097]})),
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut too_many_nodes, false).is_err());
     }
 
     #[test]

@@ -584,6 +584,7 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       codex_config_overrides: parsed.codex_config_overrides ?? [],
       codex_profile: parsed.codex_profile,
       strict_config: parsed.strict_config ?? false,
+      output_schema: parsed.output_schema,
       team_preset: parsed.team_preset ?? "automatic",
       personality: parsed.personality
     };
@@ -994,7 +995,7 @@ function TechnicalDetails({ title, summary, children }: { title: string; summary
   </details>;
 }
 
-type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "search" | "features" | "config";
+type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "search" | "features" | "config" | "output";
 
 function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
   if (panel === "model") return <Cpu aria-hidden="true" />;
@@ -1003,6 +1004,7 @@ function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
   if (panel === "search") return <Search aria-hidden="true" />;
   if (panel === "features") return <SlidersHorizontal aria-hidden="true" />;
   if (panel === "config") return <Braces aria-hidden="true" />;
+  if (panel === "output") return <File aria-hidden="true" />;
   return <Users aria-hidden="true" />;
 }
 
@@ -1028,6 +1030,47 @@ function codexConfigKeyError(key: string): string | null {
   const secret = segments.some((segment) => ["api_key", "auth", "bearer", "credential", "password", "secret", "token"].some((needle) => segment.includes(needle)));
   if (secret || segments.some((segment) => GOVERNED_CODEX_CONFIG_SEGMENTS.has(segment))) return "That setting is governed by MetaCog and cannot be overridden per run.";
   return null;
+}
+
+const MAX_OUTPUT_SCHEMA_BYTES = 64 * 1024;
+const MAX_OUTPUT_SCHEMA_DEPTH = 32;
+const MAX_OUTPUT_SCHEMA_NODES = 4096;
+
+function parseOutputSchema(raw: string): { schema?: Record<string, unknown>; error?: string } {
+  const source = raw.trim();
+  if (!source) return {};
+  if (new TextEncoder().encode(source).byteLength > MAX_OUTPUT_SCHEMA_BYTES) {
+    return { error: "The output schema must be 64 KiB or smaller." };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    return { error: `Invalid JSON: ${error instanceof Error ? error.message : "unable to parse schema"}` };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "The output schema must be a JSON object." };
+  }
+  let nodes = 0;
+  const inspect = (value: unknown, depth: number): string | null => {
+    nodes += 1;
+    if (nodes > MAX_OUTPUT_SCHEMA_NODES) return "The output schema contains more than 4,096 values.";
+    if (depth > MAX_OUTPUT_SCHEMA_DEPTH) return "The output schema is nested more than 32 levels deep.";
+    if (Array.isArray(value)) {
+      for (const child of value) {
+        const error = inspect(child, depth + 1);
+        if (error) return error;
+      }
+    } else if (value && typeof value === "object") {
+      for (const child of Object.values(value)) {
+        const error = inspect(child, depth + 1);
+        if (error) return error;
+      }
+    }
+    return null;
+  };
+  const error = inspect(parsed, 0);
+  return error ? { error } : { schema: parsed as Record<string, unknown> };
 }
 
 function ChatRunChoice({
@@ -1079,6 +1122,15 @@ function ChatRunSelector({
   const [configKey, setConfigKey] = useState("");
   const [configValue, setConfigValue] = useState("");
   const [configError, setConfigError] = useState<string | null>(null);
+  const [outputSchemaText, setOutputSchemaText] = useState(() => value.output_schema ? JSON.stringify(value.output_schema, null, 2) : "");
+  const [outputSchemaError, setOutputSchemaError] = useState<string | null>(null);
+  const serializedOutputSchema = value.output_schema ? JSON.stringify(value.output_schema) : "";
+  useEffect(() => {
+    if (panel !== "output") {
+      setOutputSchemaText(value.output_schema ? JSON.stringify(value.output_schema, null, 2) : "");
+      setOutputSchemaError(null);
+    }
+  }, [panel, serializedOutputSchema]);
   const providerModels = providers.flatMap((provider) => (provider.catalog?.models ?? []).map((model) => ({
     providerId: provider.connection.id,
     providerName: provider.connection.display_name,
@@ -1116,6 +1168,7 @@ function ChatRunSelector({
       codex_config_overrides: value.codex_config_overrides,
       codex_profile: value.codex_profile,
       strict_config: value.strict_config,
+      output_schema: value.output_schema,
       team_preset: value.team_preset,
       personality: value.personality
     });
@@ -1146,6 +1199,7 @@ function ChatRunSelector({
     value.strict_config ? "Strict" : null,
     configOverrides.length > 0 ? `${configOverrides.length} override${configOverrides.length === 1 ? "" : "s"}` : null
   ].filter(Boolean).join(" · ") || "Use Codex defaults";
+  const outputSchemaSummary = value.output_schema ? "Structured JSON" : "Text";
   const webSearchOverride = [...configOverrides].reverse().find((config) => config.key.trim().toLocaleLowerCase().replaceAll("-", "_") === "web_search");
   const webSearchMode = typeof webSearchOverride?.value === "string" && ["cached", "live", "disabled"].includes(webSearchOverride.value)
     ? webSearchOverride.value as "cached" | "live" | "disabled"
@@ -1193,6 +1247,16 @@ function ChatRunSelector({
     if (!path || writableRoots.some((root) => root.toLocaleLowerCase() === path.toLocaleLowerCase())) return;
     onChange({ ...value, additional_writable_roots: [...writableRoots, path] });
   };
+  const applyOutputSchema = () => {
+    const result = parseOutputSchema(outputSchemaText);
+    if (result.error) {
+      setOutputSchemaError(result.error);
+      return;
+    }
+    onChange({ ...value, output_schema: result.schema });
+    setOutputSchemaText(result.schema ? JSON.stringify(result.schema, null, 2) : "");
+    setOutputSchemaError(null);
+  };
   const closeSelector = (target: HTMLElement) => target.closest("details")?.removeAttribute("open");
   return <details className="chat-run-selector" data-transient-popover onToggle={(event) => {
     if (!(event.currentTarget as HTMLDetailsElement).open) setPanel("root");
@@ -1211,6 +1275,7 @@ function ChatRunSelector({
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("search")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="search" /></span><span className="chat-run-menu-copy"><strong>Web search</strong><small>{webSearchMode === "live" ? "Live" : webSearchMode === "disabled" ? "Off" : "Default (cached)"}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("features")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="features" /></span><span className="chat-run-menu-copy"><strong>Session features</strong><small>{Object.keys(featureOverrides).length > 0 ? `${Object.keys(featureOverrides).length} override${Object.keys(featureOverrides).length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("config")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="config" /></span><span className="chat-run-menu-copy"><strong>Codex config</strong><small>{configSummary}</small></span><ChevronRight aria-hidden="true" /></button>}
+        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("output")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="output" /></span><span className="chat-run-menu-copy"><strong>Output format</strong><small>{outputSchemaSummary}</small></span><ChevronRight aria-hidden="true" /></button>}
         <details className="chat-run-advanced">
           <summary>Advanced <ChevronDown aria-hidden="true" /></summary>
           <div className="chat-run-model-status">
@@ -1239,7 +1304,7 @@ function ChatRunSelector({
           </div>
         </details>
       </> : <>
-        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "search" ? "Web search" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : "Team"}</span></button>
+        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "search" ? "Web search" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : panel === "output" ? "Output format" : "Team"}</span></button>
         {panel === "search" ? <div className="chat-run-choice-list" role="menu" aria-label="Web search">
           <ChatRunChoice selected={webSearchMode === "cached"} label="Default" description="Use cached search when available" onSelect={(target) => { setWebSearchMode("cached"); closeSelector(target); setPanel("root"); }} />
           <ChatRunChoice selected={webSearchMode === "live"} label="Live" description="Use current web results for this run" onSelect={(target) => { setWebSearchMode("live"); closeSelector(target); setPanel("root"); }} />
@@ -1283,6 +1348,17 @@ function ChatRunSelector({
               <button type="button" aria-label={`Remove Codex configuration ${config.key}`} onClick={() => onChange({ ...value, codex_config_overrides: configOverrides.filter((_, candidate) => candidate !== index) })}><X aria-hidden="true" /></button>
             </div>)}
             {configOverrides.length === 0 && <small className="empty-state">No per-run configuration overrides.</small>}
+          </div>
+        </div> : panel === "output" ? <div className="chat-run-output-panel">
+          <p>Require the final owner-visible response to match a JSON Schema. Routing and agent work remain unconstrained; Plan and active Goal runs cannot use structured output.</p>
+          <label>
+            <span><strong>Output JSON Schema</strong><small>JSON object · 64 KiB maximum · 32 nesting levels</small></span>
+            <textarea aria-label="Output JSON Schema" spellCheck={false} placeholder={'{\n  "type": "object",\n  "properties": {\n    "summary": { "type": "string" }\n  },\n  "required": ["summary"],\n  "additionalProperties": false\n}'} value={outputSchemaText} onChange={(event) => { setOutputSchemaText(event.target.value); setOutputSchemaError(null); }} />
+          </label>
+          {outputSchemaError && <small className="chat-run-config-error" role="alert">{outputSchemaError}</small>}
+          <div className="chat-run-output-actions">
+            <button className="secondary" type="button" disabled={!value.output_schema && !outputSchemaText.trim()} onClick={() => { onChange({ ...value, output_schema: undefined }); setOutputSchemaText(""); setOutputSchemaError(null); }}>Use text</button>
+            <button className="primary" type="button" onClick={applyOutputSchema}>Apply schema</button>
           </div>
         </div> : <div className="chat-run-choice-list" role="menu" aria-label={panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team preset"}>
           {panel === "model" && <>
@@ -3252,6 +3328,7 @@ export function App() {
         codex_config_overrides: conversation.execution_preferences.codex_config_overrides ?? [],
         codex_profile: conversation.execution_preferences.codex_profile,
         strict_config: conversation.execution_preferences.strict_config ?? false,
+        output_schema: conversation.execution_preferences.output_schema,
         team_preset: conversation.execution_preferences.team_preset ?? "automatic",
         personality: conversation.execution_preferences.personality
       }));
@@ -4787,6 +4864,7 @@ export function App() {
         codex_config_overrides: preferences.codex_config_overrides,
         codex_profile: preferences.codex_profile,
         strict_config: preferences.strict_config,
+        output_schema: preferences.output_schema,
         team_preset: preferences.team_preset,
         personality: preferences.personality
       };
@@ -5296,6 +5374,7 @@ export function App() {
           codex_config_overrides: uncertainTurn.execution_preferences.codex_config_overrides ?? [],
           codex_profile: uncertainTurn.execution_preferences.codex_profile,
           strict_config: uncertainTurn.execution_preferences.strict_config ?? false,
+          output_schema: uncertainTurn.execution_preferences.output_schema,
           team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });
       }

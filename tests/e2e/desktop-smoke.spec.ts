@@ -575,6 +575,40 @@ test("advanced run settings expose typed bounded Codex config overrides", async 
   expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
 });
 
+test("advanced structured output editor validates JSON without leaking into Simple", async ({ page }) => {
+  await page.setViewportSize({ width: 960, height: 720 });
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+
+  const selector = page.locator('summary[aria-label="New chat model, effort, speed, and team"]');
+  await selector.click();
+  let dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await expect(dialog.getByText("Output format", { exact: true })).toHaveCount(0);
+  await selector.click();
+
+  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await selector.click();
+  dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByText("Output format", { exact: true }).click();
+  const editor = dialog.getByRole("textbox", { name: "Output JSON Schema" });
+  await editor.fill("[]");
+  await dialog.getByRole("button", { name: "Apply schema" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("must be a JSON object");
+  await editor.fill('{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}');
+  await dialog.getByRole("button", { name: "Apply schema" }).click();
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Output format", exact: true }).click();
+  await expect(dialog.getByText("Structured JSON", { exact: true })).toBeVisible();
+
+  const box = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(960);
+});
+
 test("advanced run settings expose live web search without changing Simple", async ({ page }) => {
   await page.goto("/");
   await openOwnerSurface(page, "Projects");

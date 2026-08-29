@@ -2660,12 +2660,44 @@ test("advanced run settings persist typed Codex config and block governed keys",
   ));
 });
 
+test("advanced run settings validate and persist structured output schemas", async () => {
+  render(<App />);
+  await enableAdvancedMode();
+  const settings = openNewChatRunSettings().dialog;
+  fireEvent.click(within(settings).getByText("Output format"));
+  const editor = within(settings).getByRole("textbox", { name: "Output JSON Schema" });
+
+  fireEvent.change(editor, { target: { value: "[]" } });
+  fireEvent.click(within(settings).getByRole("button", { name: "Apply schema" }));
+  expect(within(settings).getByRole("alert")).toHaveTextContent("must be a JSON object");
+
+  const schema = {
+    type: "object",
+    properties: { summary: { type: "string" } },
+    required: ["summary"],
+    additionalProperties: false
+  };
+  fireEvent.change(editor, { target: { value: JSON.stringify(schema) } });
+  fireEvent.click(within(settings).getByRole("button", { name: "Apply schema" }));
+  expect(within(settings).queryByRole("alert")).not.toBeInTheDocument();
+
+  fireEvent.click(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]') as HTMLElement);
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Return a structured summary" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ output_schema: schema }) })
+  ));
+});
+
 test("simple run settings omit strict Codex configuration", () => {
   render(<App />);
   const settings = openNewChatRunSettings().dialog;
   expect(within(settings).queryByText("Codex config", { exact: true })).not.toBeInTheDocument();
+  expect(within(settings).queryByText("Output format", { exact: true })).not.toBeInTheDocument();
   expect(within(settings).queryByRole("textbox", { name: "Codex profile" })).not.toBeInTheDocument();
   expect(within(settings).queryByRole("checkbox", { name: "Require strict Codex configuration" })).not.toBeInTheDocument();
+  expect(within(settings).queryByRole("textbox", { name: "Output JSON Schema" })).not.toBeInTheDocument();
 });
 
 test("goal and plan commands are available from Add and prepare the composer", () => {

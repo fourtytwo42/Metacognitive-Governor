@@ -2163,6 +2163,12 @@ pub struct ExecutionPreferences {
     /// base and project configuration before this run is persisted or sent.
     #[serde(default)]
     pub strict_config: bool,
+    /// Optional JSON Schema constraining the final owner-visible response.
+    /// The runtime validates and bounds this value before persistence, and
+    /// applies it only to the final Chat response rather than internal routing
+    /// or specialist coordination turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub team_preset: TeamPreset,
     /// Optional owner-selected response style. This never expands authority.
@@ -2530,6 +2536,7 @@ mod tests {
         execution_preferences.remove("codex_profile_config");
         execution_preferences.remove("codex_profile_digest");
         execution_preferences.remove("codex_profile_ignored_keys");
+        execution_preferences.remove("output_schema");
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
@@ -2543,6 +2550,7 @@ mod tests {
         assert_eq!(decoded.execution_preferences.codex_profile, None);
         assert_eq!(decoded.execution_preferences.codex_profile_config, None);
         assert_eq!(decoded.execution_preferences.codex_profile_digest, None);
+        assert_eq!(decoded.execution_preferences.output_schema, None);
         assert!(
             decoded
                 .execution_preferences

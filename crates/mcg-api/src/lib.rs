@@ -21567,6 +21567,63 @@ form.addEventListener('submit', (event) => {
     }
 
     #[tokio::test]
+    async fn conversation_api_persists_bounded_structured_output_preferences() {
+        let runtime = test_runtime();
+        let app = router(runtime);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+            "additionalProperties": false
+        });
+        let created = app
+            .clone()
+            .oneshot(
+                authorized(Request::post("/api/v1/conversations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateConversationRequest {
+                            title: Some("Structured output".into()),
+                            project_id: None,
+                            execution_preferences: ExecutionPreferences {
+                                output_schema: Some(schema.clone()),
+                                ..Default::default()
+                            },
+                        })
+                        .expect("structured conversation request"),
+                    ))
+                    .expect("structured conversation"),
+            )
+            .await
+            .expect("structured conversation response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: Conversation =
+            serde_json::from_value(response_json(created).await).expect("created conversation");
+        assert_eq!(created.execution_preferences.output_schema, Some(schema));
+
+        let rejected = app
+            .oneshot(
+                authorized(Request::post("/api/v1/conversations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateConversationRequest {
+                            title: Some("Invalid structured output".into()),
+                            project_id: None,
+                            execution_preferences: ExecutionPreferences {
+                                output_schema: Some(serde_json::json!([])),
+                                ..Default::default()
+                            },
+                        })
+                        .expect("invalid structured conversation request"),
+                    ))
+                    .expect("invalid structured conversation"),
+            )
+            .await
+            .expect("invalid structured conversation response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn cli_session_fork_preferences_and_confirmed_tree_deletion_are_native() {
         let runtime = test_runtime();
         let parent = runtime

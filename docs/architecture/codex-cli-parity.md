@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-17 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -162,8 +162,17 @@ resumed and delegated execution deterministic without allowing a profile to
 expand MetaCog governance. The installed Codex 0.150.1 qualification proves the
 documented named-file loader shape.
 
+Cycle 18 adds Codex-compatible `--output-schema <FILE>` to initial `exec` and
+`exec resume`. MetaCog reads one bounded JSON-object schema, validates it again
+at the runtime boundary, persists it with the originating run, and forwards it
+through native app-server `turn/start.outputSchema`. Internal routing remains
+unconstrained so it can still delegate, but the final owner answer is constrained;
+schema failure is terminal and never replaced with nonconforming fallback text.
+Plan and active Goal modes reject structured output because their interactive
+continuation contracts are incompatible with a single final JSON document.
+
 Codex-compatible support remains incomplete for local providers/OSS, remote
-endpoints/authentication, output schemas, and hook trust. Current Codex 0.150.1
+endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1
 documents `--permission-profile` only for the
 Windows `sandbox` command; that exact contract is already Native rather than a
 missing global non-sandbox flag. These
@@ -245,6 +254,13 @@ panel. The compact summary shows the selected profile, strict state, and overrid
 count; the responsive form explains the exact named-file location and that
 MetaCog ignores authority- and secret-bearing keys. New Chat and established
 Chat share the control and persistence path, while Simple remains unchanged.
+
+Cycle 18 adds Output format to the same Advanced shared run-settings hierarchy.
+It accepts a bounded JSON-object schema with inline validation, preserves it with
+New Chat and established Chat drafts and turns, and summarizes the selection as
+Structured JSON. Simple remains text-first and does not expose this expert-only
+control. The panel is responsive, independently scrollable where needed, and
+uses the existing MetaCog disclosure, field, error, and action styling.
 
 ## Safety invariants
 

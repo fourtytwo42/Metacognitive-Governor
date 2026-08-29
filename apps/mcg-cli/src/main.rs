@@ -521,6 +521,9 @@ struct ExecArgs {
     skip_git_repo_check: bool,
     #[arg(short = 'o', long)]
     output_last_message: Option<PathBuf>,
+    /// JSON Schema describing the final owner-visible response.
+    #[arg(long)]
+    output_schema: Option<PathBuf>,
     #[arg(value_name = "PROMPT", num_args = 0..)]
     prompt: Vec<String>,
 }
@@ -612,6 +615,8 @@ enum ExecCommand {
         #[arg(long)]
         all: bool,
         session: Option<String>,
+        #[arg(long)]
+        output_schema: Option<PathBuf>,
         #[arg(value_name = "PROMPT", num_args = 0..)]
         prompt: Vec<String>,
     },
@@ -3006,6 +3011,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 ephemeral,
                 skip_git_repo_check,
                 output_last_message,
+                output_schema,
                 prompt,
             } = *args;
             Box::pin(run_codex_compatible_exec(
@@ -3029,6 +3035,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 strict_config,
                 images,
                 output_last_message,
+                output_schema,
                 prompt,
             ))
             .await?;
@@ -6342,6 +6349,34 @@ fn require_git_repository(project: &std::path::Path) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+fn read_output_schema(
+    path: &std::path::Path,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    const MAX_OUTPUT_SCHEMA_BYTES: u64 = 64 * 1024;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("cannot read output schema {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("output schema is not a regular file: {}", path.display()).into());
+    }
+    if metadata.len() > MAX_OUTPUT_SCHEMA_BYTES {
+        return Err(format!(
+            "output schema exceeds the {MAX_OUTPUT_SCHEMA_BYTES}-byte limit: {}",
+            path.display()
+        )
+        .into());
+    }
+    let schema: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|error| format!("output schema {} is invalid JSON: {error}", path.display()))?;
+    if !schema.is_object() {
+        return Err(format!(
+            "output schema must contain a JSON object: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(schema)
+}
+
 async fn run_codex_compatible_exec(
     client: &reqwest::Client,
     host: &str,
@@ -6363,12 +6398,13 @@ async fn run_codex_compatible_exec(
     strict_config: bool,
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
+    output_schema: Option<PathBuf>,
     prompt: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !skip_git_repo_check {
         require_git_repository(project)?;
     }
-    let preferences = codex_execution_preferences(
+    let mut preferences = codex_execution_preferences(
         model,
         sandbox,
         approval_policy,
@@ -6381,6 +6417,10 @@ async fn run_codex_compatible_exec(
         strict_config,
         conversation_preferences(None, None, None, ApprovalMode::Ask),
     );
+    preferences.output_schema = output_schema
+        .as_deref()
+        .map(read_output_schema)
+        .transpose()?;
     let mentions = codex_exec_mentions(&images)?;
     match command {
         None => {
@@ -6408,6 +6448,7 @@ async fn run_codex_compatible_exec(
             last,
             all,
             session,
+            output_schema,
             prompt: follow_up,
         }) => {
             if !prompt.is_empty() {
@@ -6424,6 +6465,9 @@ async fn run_codex_compatible_exec(
                 Some(false),
             )
             .await?;
+            if let Some(path) = output_schema.as_deref() {
+                preferences.output_schema = Some(read_output_schema(path)?);
+            }
             let content = codex_exec_prompt(&follow_up)?;
             let (content, mentions) =
                 resolve_cli_mentions(client, host, token, content, &mentions).await?;
@@ -10586,6 +10630,7 @@ fn conversation_preferences_exact(
         codex_profile_digest: None,
         codex_profile_ignored_keys: Vec::new(),
         strict_config: false,
+        output_schema: None,
         team_preset: Default::default(),
         personality: None,
     }
@@ -13151,6 +13196,8 @@ mod tests {
             ".",
             "--output-last-message",
             "answer.txt",
+            "--output-schema",
+            "schema.json",
             "fix the tests",
         ])
         .expect("Codex-compatible exec command");
@@ -13161,6 +13208,7 @@ mod tests {
                     && args.ephemeral
                     && args.skip_git_repo_check
                     && args.output_last_message.as_deref() == Some(std::path::Path::new("answer.txt"))
+                    && args.output_schema.as_deref() == Some(std::path::Path::new("schema.json"))
                     && args.prompt == ["fix the tests"]
         ));
         assert_eq!(exec.model.as_deref(), Some("gpt-5.6-terra"));
@@ -13171,6 +13219,28 @@ mod tests {
         ));
         assert_eq!(exec.images, [PathBuf::from("screen.png")]);
         assert_eq!(exec.add_dirs, [PathBuf::from(".")]);
+
+        let exec_resume = CodexCompatCli::try_parse_from([
+            "mcg",
+            "exec",
+            "resume",
+            "--last",
+            "--output-schema",
+            "follow-up-schema.json",
+            "continue",
+        ])
+        .expect("Codex-compatible structured exec resume");
+        let CodexCompatCommand::Exec(exec_resume_args) = exec_resume.command else {
+            panic!("expected exec command");
+        };
+        assert!(matches!(
+            exec_resume_args.command,
+            Some(ExecCommand::Resume {
+                last: true,
+                output_schema: Some(path),
+                ..
+            }) if path == PathBuf::from("follow-up-schema.json")
+        ));
 
         let before_command = CodexCompatCli::try_parse_from([
             "mcg",
@@ -13596,5 +13666,36 @@ mod tests {
             ]
             .map(OsString::from)
         );
+    }
+
+    #[test]
+    fn output_schema_files_are_bounded_json_objects() {
+        let directory = tempfile::tempdir().expect("temporary output schema directory");
+        let valid = directory.path().join("valid.json");
+        std::fs::write(
+            &valid,
+            r#"{"type":"object","properties":{"answer":{"type":"string"}}}"#,
+        )
+        .expect("write valid schema");
+        assert_eq!(
+            read_output_schema(&valid).expect("valid schema")["type"],
+            "object"
+        );
+
+        let array = directory.path().join("array.json");
+        std::fs::write(&array, "[]").expect("write array schema");
+        assert!(read_output_schema(&array).is_err());
+
+        let malformed = directory.path().join("malformed.json");
+        std::fs::write(&malformed, "{").expect("write malformed schema");
+        assert!(read_output_schema(&malformed).is_err());
+
+        let oversized = directory.path().join("oversized.json");
+        std::fs::write(
+            &oversized,
+            format!("{{\"description\":\"{}\"}}", "x".repeat(65 * 1024)),
+        )
+        .expect("write oversized schema");
+        assert!(read_output_schema(&oversized).is_err());
     }
 }

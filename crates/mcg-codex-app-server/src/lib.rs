@@ -410,6 +410,40 @@ fn codex_user_input(prompt: &str, mentions: &[CodexMentionInput]) -> Vec<Value> 
     input
 }
 
+fn turn_start_params(
+    thread_id: &str,
+    prompt: &str,
+    mentions: &[CodexMentionInput],
+    preferences: &CodexExecutionPreferences,
+    writable: bool,
+    output_schema: Option<&Value>,
+    plan_mode: bool,
+) -> Value {
+    let collaboration_mode = plan_mode.then(|| {
+        json!({
+            "mode": "plan",
+            "settings": {
+                "model": preferences.model.clone().unwrap_or_default(),
+                "reasoning_effort": preferences.effort,
+                "developer_instructions": null
+            }
+        })
+    });
+    json!({
+        "threadId": thread_id,
+        "input": codex_user_input(prompt, mentions),
+        "model": preferences.model,
+        "effort": preferences.effort,
+        "serviceTier": preferences.service_tier,
+        "approvalPolicy": preferences.approval_policy(writable),
+        "approvalsReviewer": preferences.approvals_reviewer(),
+        "sandboxPolicy": preferences.turn_sandbox(writable),
+        "permissions": preferences.effective_permission_profile(writable),
+        "outputSchema": output_schema,
+        "collaborationMode": collaboration_mode
+    })
+}
+
 /// Verifies the exact pinned binary and the feature/config surface required by the two-agent
 /// security boundary. Callers must fail rollout closed on any error.
 pub fn verify_pinned_two_agent_conformance(executable: &Path) -> Result<(), CodexHarnessError> {
@@ -1735,6 +1769,32 @@ impl CodexAppServerHarness {
         .await
     }
 
+    /// Starts an ordinary turn with typed mentions, progress events, and an
+    /// optional JSON Schema for the final response. Callers should reserve the
+    /// schema for the owner-visible completion turn; internal routing and
+    /// coordination turns must remain unconstrained.
+    pub async fn start_turn_with_mentions_and_progress_and_schema(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        mentions: &[CodexMentionInput],
+        preferences: &CodexExecutionPreferences,
+        writable: bool,
+        progress: Option<mpsc::UnboundedSender<CodexTurnProgress>>,
+        output_schema: Option<&Value>,
+    ) -> Result<CodexTurnResult, CodexHarnessError> {
+        self.start_turn_with_progress_and_schema(
+            thread_id,
+            prompt,
+            mentions,
+            preferences,
+            writable,
+            progress,
+            output_schema,
+        )
+        .await
+    }
+
     pub async fn start_plan_turn_with_mentions_and_progress(
         &self,
         thread_id: &str,
@@ -1814,32 +1874,18 @@ impl CodexAppServerHarness {
             self.ensure_started().await?;
             self.inner.lock().await.notifications.subscribe()
         };
-        let collaboration_mode = plan_mode.then(|| {
-            json!({
-                "mode": "plan",
-                "settings": {
-                    "model": preferences.model.clone().unwrap_or_default(),
-                    "reasoning_effort": preferences.effort,
-                    "developer_instructions": null
-                }
-            })
-        });
         let response = self
             .request(
                 "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": codex_user_input(prompt, mentions),
-                    "model": preferences.model,
-                    "effort": preferences.effort,
-                    "serviceTier": preferences.service_tier,
-                    "approvalPolicy": preferences.approval_policy(writable),
-                    "approvalsReviewer": preferences.approvals_reviewer(),
-                    "sandboxPolicy": preferences.turn_sandbox(writable),
-                    "permissions": preferences.effective_permission_profile(writable),
-                    "outputSchema": output_schema
-                    ,"collaborationMode": collaboration_mode
-                }),
+                turn_start_params(
+                    thread_id,
+                    prompt,
+                    mentions,
+                    preferences,
+                    writable,
+                    output_schema,
+                    plan_mode,
+                ),
             )
             .await?;
         let turn_id = response
@@ -2762,6 +2808,54 @@ mod tests {
         );
         assert_eq!(named.effective_permission_profile(false), None);
         assert_eq!(named.turn_sandbox(false), Some(json!({"type": "readOnly"})));
+    }
+
+    #[test]
+    fn structured_turn_payload_constrains_only_the_requested_turn() {
+        let protocol: Value = serde_json::from_str(include_str!(
+            "../../../protocol/codex-app-server/0.150.1/codex_app_server_protocol.v2.schemas.json"
+        ))
+        .expect("pinned protocol schema");
+        assert!(
+            protocol
+                .pointer("/definitions/TurnStartParams/properties/outputSchema")
+                .is_some(),
+            "pinned Codex protocol must expose turn/start outputSchema"
+        );
+        let preferences = CodexExecutionPreferences {
+            model: Some("gpt-5.6-terra".into()),
+            effort: Some("medium".into()),
+            ..Default::default()
+        };
+        let schema = json!({
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+            "additionalProperties": false
+        });
+        let params = turn_start_params(
+            "thread-structured",
+            "Summarize this",
+            &[],
+            &preferences,
+            false,
+            Some(&schema),
+            false,
+        );
+        assert_eq!(params["outputSchema"], schema);
+        assert_eq!(params["collaborationMode"], Value::Null);
+        assert_eq!(params["input"][0]["text"], "Summarize this");
+
+        let ordinary = turn_start_params(
+            "thread-text",
+            "Answer normally",
+            &[],
+            &preferences,
+            false,
+            None,
+            false,
+        );
+        assert_eq!(ordinary["outputSchema"], Value::Null);
     }
 
     #[test]
