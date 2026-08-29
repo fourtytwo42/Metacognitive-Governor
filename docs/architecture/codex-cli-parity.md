@@ -37,7 +37,7 @@ Environment variables alone are not capability discovery.
 
 | Codex family | State | Notes |
 | --- | --- | --- |
-| `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
+| `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. Root and session-local `--remote`/`--remote-auth-token-env` overrides support authenticated WebSockets plus Unix sockets on Unix without persisting endpoint or credential state. |
 | `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Cycle 25 matches the pinned Codex 0.150.1 JSONL lifecycle, item, error, and usage envelopes over the replayable conversation stream. Cycle 27 adds exact `--oss`/`--local-provider` selection and readiness behavior. Hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
@@ -48,7 +48,7 @@ Environment variables alone are not capability discovery.
 | `login`, `logout` | Native | Browser OAuth, device-code login, API-key stdin, access-token stdin, status, and device-wide logout use the shared Codex account. Secrets are accepted only through standard input or a transient desktop credential field, zeroized after use, and never persisted by MetaCog. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
-| `agents` | Partial | Lists every active MetaCog Chat, Coordinator, Coder, Tester, and future governed agent session across conversations. `/agent` provides searchable inspection and messaging inside the active conversation; a global cross-conversation live browser remains pending. |
+| `agents` | Partial | Lists every active MetaCog Chat, Coordinator, Coder, Tester, and future governed agent session across conversations. `/agent` provides searchable inspection and messaging inside the active conversation; Codex-style global cross-conversation live browsing and `agents --remote` remain pending. |
 | `queue` | Native | Resolves a conversation UUID or exact name, validates global execution and image-reference options, durably persists the queued owner turn, and returns after daemon acceptance while governed work continues FIFO. |
 | `migrate-rollouts` | Native | Daemon-free pass-through to the pinned Codex 0.150.1 migration engine with dry-run default, `--apply`, repeated `--thread`, throughput, JSON, and verbose controls. MetaCog does not reinterpret Codex rollout storage. |
 | global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
@@ -235,12 +235,12 @@ the previous installation, and removes only its private staged files. Unsigned
 development builds and incomplete installations fail closed. The Desktop update
 layout and workflow are unchanged; they consume the same shared trust contract.
 
-Codex-compatible support remains incomplete for exact per-invocation remote CLI
-flag semantics and hook trust. Current Codex 0.150.1
+Codex-compatible support remains incomplete for hook trust, the global agent
+browser, and approval-source navigation. Current Codex 0.150.1
 documents `--permission-profile` only for the
 Windows `sandbox` command; that exact contract is already Native rather than a
 missing global non-sandbox flag. These
-flags must map into governed requests; they may not bypass organization or
+remaining capabilities must map into governed requests; they may not bypass organization or
 approval policy.
 
 ## Desktop alignment rule
@@ -349,7 +349,7 @@ lifecycle states from being lost when a fast turn completes before a client
 connects. Human output and MetaCog's separate consumer JSON receipts are
 unchanged.
 
-Cycle 26 adds the stable Codex authentication variants and remote app-server
+Cycle 26 adds the stable Codex authentication variants and shared remote app-server
 transport without weakening MetaCog's authority boundary. Top-level `mcg login`
 now supports browser OAuth, `--device-auth`, API-key stdin, and access-token
 stdin. Credentials never enter argv, durable settings, logs, or API responses;
@@ -362,10 +362,7 @@ and reads the token from the named environment variable only when connecting.
 Transport changes are revisioned, rejected while governed work is active, and
 rolled back if the replacement cannot initialize. Advanced Settings exposes the
 same configuration and credential sign-in controls; Simple retains the normal
-shared-account browser and device-code paths. The next exact transport gap is
-Codex's invocation-local `--remote` and `--remote-auth-token-env` CLI override
-semantics; MetaCog currently applies the equivalent through shared revisioned
-settings.
+shared-account browser and device-code paths.
 
 Cycle 27 adds current Codex `--oss` and `--local-provider` behavior to the root
 TUI, bare/piped prompts, consumer runs, `exec`, resume, queue, fork, and review.
@@ -385,6 +382,23 @@ controls. Advanced New Chat and established Chat expose the same discovered
 provider/model controls inside the shared run-settings hierarchy, while Simple
 keeps the frequent OpenAI-subscription workflow uncluttered. Raw hidden
 reasoning remains excluded; only model-provided summaries are rendered.
+
+Cycle 28 adds Codex's invocation-local `--remote` and
+`--remote-auth-token-env` contract to the root TUI, resume, fork, queue,
+archive, unarchive, and delete. Command-local values override root values
+independently. WebSockets require an explicit port and root path; MetaCog keeps
+the stronger boundary that cleartext `ws://` never leaves loopback. Unix builds
+accept `unix://` and `unix://PATH`, including Codex's default control-socket
+resolution and WebSocket-over-UDS handshake; Windows rejects Unix sockets
+honestly. The daemon binds a dedicated harness only to the selected
+conversation, propagates it to Chat, Coordinator, Coder, Tester, review,
+configuration, and governed command activity, and transfers or inherits it
+across native session changes and forks. Settled invocations release the socket;
+accepted turns, active goals, and running commands retain it when the CLI
+detaches so durable work is not severed. Bearer values are bounded, zeroized,
+sent only during the handshake, absent from status and persistence, and never
+replace the shared revisioned Desktop transport preference. `agents --remote`
+remains part of the later global agent-browser cycle.
 
 ## Safety invariants
 

@@ -13,6 +13,7 @@ use std::{
 };
 
 use async_tungstenite::{
+    WebSocketStream,
     tokio::connect_async,
     tungstenite::{
         Message,
@@ -34,7 +35,7 @@ use tokio::{
     task::JoinHandle,
 };
 use url::Url;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 mod protocol_generated;
 
@@ -290,6 +291,9 @@ pub enum CodexTransportConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token_env: Option<String>,
     },
+    RemoteUnixSocket {
+        socket_path: String,
+    },
 }
 
 impl CodexTransportConfig {
@@ -303,7 +307,10 @@ impl CodexTransportConfig {
 
     #[must_use]
     pub const fn is_remote(&self) -> bool {
-        matches!(self, Self::RemoteWebSocket { .. })
+        matches!(
+            self,
+            Self::RemoteWebSocket { .. } | Self::RemoteUnixSocket { .. }
+        )
     }
 
     #[must_use]
@@ -311,6 +318,7 @@ impl CodexTransportConfig {
         match self {
             Self::LocalStdio => None,
             Self::RemoteWebSocket { endpoint, .. } => Some(endpoint),
+            Self::RemoteUnixSocket { socket_path } => Some(socket_path),
         }
     }
 
@@ -319,6 +327,7 @@ impl CodexTransportConfig {
         match self {
             Self::LocalStdio => None,
             Self::RemoteWebSocket { auth_token_env, .. } => auth_token_env.as_deref(),
+            Self::RemoteUnixSocket { .. } => None,
         }
     }
 }
@@ -1095,6 +1104,12 @@ struct RemoteConnection {
     task: JoinHandle<()>,
 }
 
+impl Drop for RemoteConnection {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 enum Connection {
     Local(Process),
     Remote(RemoteConnection),
@@ -1120,12 +1135,25 @@ fn validate_login_credential(value: &str, label: &str) -> Result<(), CodexHarnes
 }
 
 pub fn validate_transport(transport: &CodexTransportConfig) -> Result<(), CodexHarnessError> {
-    let CodexTransportConfig::RemoteWebSocket {
-        endpoint,
-        auth_token_env,
-    } = transport
-    else {
-        return Ok(());
+    let (endpoint, auth_token_env) = match transport {
+        CodexTransportConfig::LocalStdio => return Ok(()),
+        CodexTransportConfig::RemoteUnixSocket { socket_path } => {
+            if socket_path.is_empty()
+                || socket_path.len() > 2_048
+                || socket_path.chars().any(char::is_control)
+                || !Path::new(socket_path).is_absolute()
+            {
+                return Err(CodexHarnessError::InvalidRequest(
+                    "remote Codex Unix socket path must be an absolute printable path of at most 2048 bytes"
+                        .into(),
+                ));
+            }
+            return Ok(());
+        }
+        CodexTransportConfig::RemoteWebSocket {
+            endpoint,
+            auth_token_env,
+        } => (endpoint, auth_token_env),
     };
     if endpoint.len() > 2_048 || endpoint.chars().any(char::is_control) {
         return Err(CodexHarnessError::InvalidRequest(
@@ -1175,6 +1203,124 @@ pub fn validate_transport(transport: &CodexTransportConfig) -> Result<(), CodexH
     Ok(())
 }
 
+fn remote_websocket_has_explicit_port(endpoint: &str, parsed: &Url) -> bool {
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if parsed.port().is_some() {
+        return true;
+    }
+    let Some((_, rest)) = endpoint.split_once("://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_and_port)| host_and_port);
+    let default_port = match parsed.scheme() {
+        "ws" => 80,
+        "wss" => 443,
+        _ => return false,
+    };
+    let expected_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    host_and_port == format!("{expected_host}:{default_port}")
+}
+
+/// Validates the narrower per-invocation CLI transport contract independently of the caller.
+pub fn validate_invocation_remote_transport(
+    endpoint: &str,
+    auth_token: Option<&str>,
+) -> Result<(), CodexHarnessError> {
+    if endpoint.starts_with("unix://") {
+        let _ = normalize_invocation_remote_endpoint(endpoint, auth_token)?;
+        return Ok(());
+    }
+    validate_transport(&CodexTransportConfig::remote(endpoint.to_owned(), None))?;
+    let parsed = Url::parse(endpoint).map_err(|error| {
+        CodexHarnessError::InvalidRequest(format!("remote Codex endpoint is invalid: {error}"))
+    })?;
+    if !remote_websocket_has_explicit_port(endpoint, &parsed)
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(CodexHarnessError::InvalidRequest(
+            "invocation remote endpoints must use ws://host:port or wss://host:port at the root path"
+                .into(),
+        ));
+    }
+    if let Some(token) = auth_token {
+        validate_login_credential(token, "remote Codex bearer token")?;
+        if parsed.scheme() != "wss" {
+            let host = parsed.host_str().unwrap_or_default();
+            let loopback = host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback());
+            if !loopback {
+                return Err(CodexHarnessError::InvalidRequest(
+                    "remote Codex bearer tokens require wss:// or loopback ws://".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolves Codex's invocation-local remote syntax without persisting credentials or relying on
+/// the daemon's working directory for relative Unix socket paths.
+pub fn normalize_invocation_remote_endpoint(
+    endpoint: &str,
+    auth_token: Option<&str>,
+) -> Result<String, CodexHarnessError> {
+    let endpoint = endpoint.trim();
+    if endpoint.starts_with("unix://") {
+        if auth_token.is_some() {
+            return Err(CodexHarnessError::InvalidRequest(
+                "remote Codex bearer tokens are unavailable for Unix sockets".into(),
+            ));
+        }
+        #[cfg(windows)]
+        return Err(CodexHarnessError::InvalidRequest(
+            "unix:// remote app servers are unavailable on Windows".into(),
+        ));
+        #[cfg(not(windows))]
+        {
+            let socket_path = endpoint
+                .strip_prefix("unix://")
+                .expect("Unix endpoint prefix checked");
+            let socket_path = if socket_path.is_empty() {
+                codex_home()?
+                    .join("app-server-control")
+                    .join("app-server-control.sock")
+            } else {
+                let path = PathBuf::from(socket_path);
+                if path.is_absolute() {
+                    path
+                } else {
+                    std::env::current_dir()?.join(path)
+                }
+            };
+            let rendered = socket_path.to_str().ok_or_else(|| {
+                CodexHarnessError::InvalidRequest(
+                    "remote Codex Unix socket path must be valid Unicode".into(),
+                )
+            })?;
+            validate_transport(&CodexTransportConfig::RemoteUnixSocket {
+                socket_path: rendered.to_owned(),
+            })?;
+            return Ok(format!("unix://{rendered}"));
+        }
+    }
+    validate_invocation_remote_transport(endpoint, auth_token)?;
+    Ok(endpoint.to_owned())
+}
+
 async fn dispatch_incoming_document(
     document: Value,
     pending: &Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value, String>>>>>,
@@ -1222,6 +1368,7 @@ async fn dispatch_incoming_document(
 async fn connect_remote(
     endpoint: &str,
     auth_token_env: Option<&str>,
+    invocation_auth_token: Option<&str>,
     pending: Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value, String>>>>>,
     notifications: broadcast::Sender<Value>,
     server_requests: Arc<Mutex<BTreeMap<String, CodexPendingRequest>>>,
@@ -1233,12 +1380,24 @@ async fn connect_remote(
     let mut request = endpoint.into_client_request().map_err(|error| {
         CodexHarnessError::InvalidRequest(format!("remote Codex request is invalid: {error}"))
     })?;
-    if let Some(name) = auth_token_env {
-        let mut token = std::env::var(name).map_err(|_| {
-            CodexHarnessError::InvalidRequest(format!(
+    if auth_token_env.is_some() && invocation_auth_token.is_some() {
+        return Err(CodexHarnessError::InvalidRequest(
+            "remote Codex authentication must use either a configured environment variable or an invocation token"
+                .into(),
+        ));
+    }
+    if let Some(token_source) = invocation_auth_token
+        .map(str::to_owned)
+        .or_else(|| auth_token_env.map(|name| std::env::var(name).unwrap_or_default()))
+    {
+        let mut token = token_source;
+        if let Some(name) = auth_token_env
+            && token.is_empty()
+        {
+            return Err(CodexHarnessError::InvalidRequest(format!(
                 "remote Codex bearer token environment variable `{name}` is missing"
-            ))
-        })?;
+            )));
+        }
         if token.is_empty() || token.len() > 16_384 || token.chars().any(char::is_control) {
             token.zeroize();
             return Err(CodexHarnessError::InvalidRequest(
@@ -1263,6 +1422,25 @@ async fn connect_remote(
         .await
         .map_err(|_| CodexHarnessError::Timeout)?
         .map_err(|error| CodexHarnessError::Start(format!("remote WebSocket failed: {error}")))?;
+    Ok(remote_connection_from_stream(
+        stream,
+        pending,
+        notifications,
+        server_requests,
+        notification_telemetry,
+    ))
+}
+
+fn remote_connection_from_stream<S>(
+    stream: WebSocketStream<S>,
+    pending: Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    notifications: broadcast::Sender<Value>,
+    server_requests: Arc<Mutex<BTreeMap<String, CodexPendingRequest>>>,
+    notification_telemetry: Arc<Mutex<(Option<String>, Option<String>)>>,
+) -> RemoteConnection
+where
+    S: futures_util::AsyncRead + futures_util::AsyncWrite + Unpin + Send + 'static,
+{
     let (mut sink, mut source) = stream.split();
     let (outbound, mut outbound_rx) = mpsc::channel::<String>(256);
     let task = tokio::spawn(async move {
@@ -1302,7 +1480,37 @@ async fn connect_remote(
             let _ = sender.send(Err("Codex app-server stopped".into()));
         }
     });
-    Ok(RemoteConnection { outbound, task })
+    RemoteConnection { outbound, task }
+}
+
+#[cfg(unix)]
+async fn connect_remote_unix(
+    socket_path: &str,
+    pending: Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    notifications: broadcast::Sender<Value>,
+    server_requests: Arc<Mutex<BTreeMap<String, CodexPendingRequest>>>,
+    notification_telemetry: Arc<Mutex<(Option<String>, Option<String>)>>,
+) -> Result<RemoteConnection, CodexHarnessError> {
+    let socket = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::net::UnixStream::connect(socket_path),
+    )
+    .await
+    .map_err(|_| CodexHarnessError::Timeout)??;
+    let (stream, _) = tokio::time::timeout(
+        Duration::from_secs(20),
+        async_tungstenite::tokio::client_async("ws://localhost/rpc", socket),
+    )
+    .await
+    .map_err(|_| CodexHarnessError::Timeout)?
+    .map_err(|error| CodexHarnessError::Start(format!("remote Unix WebSocket failed: {error}")))?;
+    Ok(remote_connection_from_stream(
+        stream,
+        pending,
+        notifications,
+        server_requests,
+        notification_telemetry,
+    ))
 }
 
 #[cfg(windows)]
@@ -1326,6 +1534,9 @@ struct Inner {
     executable: PathBuf,
     connection: Option<Connection>,
     transport: CodexTransportConfig,
+    /// A per-invocation bearer value supplied by an authenticated local client. It is never
+    /// projected into status, settings, logs, or serialized request records.
+    invocation_auth_token: Option<Zeroizing<String>>,
     next_id: u64,
     pending: Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value, String>>>>>,
     notifications: broadcast::Sender<Value>,
@@ -1366,6 +1577,7 @@ impl CodexAppServerHarness {
                 executable: executable.into(),
                 connection: None,
                 transport,
+                invocation_auth_token: None,
                 next_id: 1,
                 pending: Arc::new(Mutex::new(BTreeMap::new())),
                 notifications,
@@ -1374,6 +1586,31 @@ impl CodexAppServerHarness {
                 notification_telemetry: Arc::new(Mutex::new((None, None))),
             })),
         }
+    }
+
+    /// Creates an invocation-scoped remote harness without persisting or exposing its bearer
+    /// value. The caller must already have validated that the endpoint supports authentication.
+    #[must_use]
+    pub fn new_with_invocation_remote(
+        executable: impl Into<PathBuf>,
+        endpoint: String,
+        auth_token: Option<Zeroizing<String>>,
+    ) -> Result<Self, CodexHarnessError> {
+        let endpoint = normalize_invocation_remote_endpoint(
+            &endpoint,
+            auth_token.as_deref().map(String::as_str),
+        )?;
+        let transport = endpoint.strip_prefix("unix://").map_or_else(
+            || CodexTransportConfig::remote(endpoint.clone(), None),
+            |socket_path| CodexTransportConfig::RemoteUnixSocket {
+                socket_path: socket_path.to_owned(),
+            },
+        );
+        let harness = Self::new_with_transport(executable, transport);
+        if let Ok(mut inner) = harness.inner.try_lock() {
+            inner.invocation_auth_token = auth_token;
+        }
+        Ok(harness)
     }
 
     pub async fn status(&self) -> CodexHarnessStatus {
@@ -1638,20 +1875,45 @@ impl CodexAppServerHarness {
         }
         inner.status.process_state = CodexProcessState::Starting;
         let transport = inner.transport.clone();
-        if let CodexTransportConfig::RemoteWebSocket {
-            endpoint,
-            auth_token_env,
-        } = transport
-        {
-            let remote = connect_remote(
-                &endpoint,
-                auth_token_env.as_deref(),
-                inner.pending.clone(),
-                inner.notifications.clone(),
-                inner.server_requests.clone(),
-                inner.notification_telemetry.clone(),
-            )
-            .await
+        if transport.is_remote() {
+            let remote = match transport {
+                CodexTransportConfig::RemoteWebSocket {
+                    endpoint,
+                    auth_token_env,
+                } => {
+                    connect_remote(
+                        &endpoint,
+                        auth_token_env.as_deref(),
+                        inner.invocation_auth_token.as_deref().map(String::as_str),
+                        inner.pending.clone(),
+                        inner.notifications.clone(),
+                        inner.server_requests.clone(),
+                        inner.notification_telemetry.clone(),
+                    )
+                    .await
+                }
+                CodexTransportConfig::RemoteUnixSocket { socket_path } => {
+                    #[cfg(unix)]
+                    {
+                        connect_remote_unix(
+                            &socket_path,
+                            inner.pending.clone(),
+                            inner.notifications.clone(),
+                            inner.server_requests.clone(),
+                            inner.notification_telemetry.clone(),
+                        )
+                        .await
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = socket_path;
+                        Err(CodexHarnessError::InvalidRequest(
+                            "unix:// remote app servers are unavailable on this platform".into(),
+                        ))
+                    }
+                }
+                CodexTransportConfig::LocalStdio => unreachable!("remote transport checked"),
+            }
             .map_err(|error| {
                 inner.status.process_state = CodexProcessState::Failed;
                 error
@@ -1822,6 +2084,7 @@ impl CodexAppServerHarness {
             let previous = inner.transport.clone();
             stop_connection(&mut inner);
             inner.transport = transport.clone();
+            inner.invocation_auth_token = None;
             inner.status.transport = transport;
             previous
         };
@@ -4051,6 +4314,114 @@ mod tests {
         assert!(!account.authenticated);
         assert_eq!(harness.status().await.transport, transport);
         server.await.expect("fixture server completion");
+    }
+
+    #[tokio::test]
+    async fn invocation_remote_sends_bearer_without_exposing_it_in_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authenticated websocket fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let (authorization_tx, authorization_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept fixture client");
+            let mut authorization_tx = Some(authorization_tx);
+            let mut socket = async_tungstenite::tokio::accept_hdr_async(
+                socket,
+                move |request: &async_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    if let Some(sender) = authorization_tx.take() {
+                        let value = request
+                            .headers()
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let _ = sender.send(value);
+                    }
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("upgrade authenticated fixture websocket");
+            while let Some(message) = socket.next().await {
+                let Message::Text(text) = message.expect("fixture websocket message") else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).expect("fixture JSON-RPC request");
+                let Some(id) = request.get("id").cloned() else {
+                    continue;
+                };
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = if method == "account/read" {
+                    json!({"account": null, "requiresOpenaiAuth": true})
+                } else {
+                    json!({})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": id, "result": result}).to_string().into(),
+                    ))
+                    .await
+                    .expect("send fixture response");
+                if method == "account/read" {
+                    break;
+                }
+            }
+        });
+        let endpoint = format!("ws://{address}/");
+        let harness = CodexAppServerHarness::new_with_invocation_remote(
+            "unused",
+            endpoint.clone(),
+            Some(Zeroizing::new("invocation-secret".into())),
+        )
+        .expect("invocation remote harness");
+        let account = harness.account().await.expect("remote account request");
+        assert!(!account.authenticated);
+        assert_eq!(
+            authorization_rx.await.expect("authorization capture"),
+            Some("Bearer invocation-secret".into())
+        );
+        assert_eq!(
+            harness.status().await.transport,
+            CodexTransportConfig::remote(endpoint, None)
+        );
+        server.await.expect("fixture server completion");
+    }
+
+    #[test]
+    fn invocation_remote_validation_requires_root_explicit_port_and_secure_scope() {
+        assert!(validate_invocation_remote_transport("ws://127.0.0.1:4500", None).is_ok());
+        assert!(
+            validate_invocation_remote_transport(
+                "wss://codex.example.test:443",
+                Some("fixture-token")
+            )
+            .is_ok()
+        );
+        for endpoint in [
+            "ws://127.0.0.1",
+            "wss://codex.example.test",
+            "ws://127.0.0.1:4500/rpc",
+            "ws://127.0.0.1:4500/?query=1",
+            "ws://example.test:4500",
+        ] {
+            assert!(
+                validate_invocation_remote_transport(endpoint, None).is_err(),
+                "{endpoint} must be rejected"
+            );
+        }
+        assert!(
+            validate_invocation_remote_transport(
+                "wss://codex.example.test:443",
+                Some("line\nbreak")
+            )
+            .is_err()
+        );
+        #[cfg(windows)]
+        assert!(normalize_invocation_remote_endpoint("unix://", None).is_err());
     }
 
     #[test]

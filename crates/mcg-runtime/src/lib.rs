@@ -180,6 +180,7 @@ use tokio::{
     sync::oneshot,
 };
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_MENTIONS_PER_TURN: usize = 20;
 const MAX_EXTERNAL_MENTION_FILE_BYTES: u64 = 25 * 1024 * 1024;
@@ -3143,7 +3144,9 @@ pub struct AppRuntime {
     github: Arc<GitHubIntegration>,
     mcp_credentials: Arc<dyn McpCredentialStore>,
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
+    codex_executable: PathBuf,
     codex_harness: CodexAppServerHarness,
+    invocation_codex_harnesses: Arc<RwLock<BTreeMap<ConversationId, CodexAppServerHarness>>>,
     conversation_team: Arc<ConversationTeamCoordinator>,
     live_conversation_previews:
         Arc<tokio::sync::Mutex<BTreeMap<ConversationPreviewId, LiveConversationPreview>>>,
@@ -3416,7 +3419,7 @@ impl AppRuntime {
             },
         )?;
         let codex_harness =
-            CodexAppServerHarness::new_with_transport(codex_executable, codex_transport);
+            CodexAppServerHarness::new_with_transport(codex_executable.clone(), codex_transport);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let harness = codex_harness.clone();
             let event_store = store.clone();
@@ -3475,7 +3478,9 @@ impl AppRuntime {
             github,
             mcp_credentials,
             provider_registry,
+            codex_executable,
             codex_harness,
+            invocation_codex_harnesses: Arc::new(RwLock::new(BTreeMap::new())),
             conversation_team: Arc::new(ConversationTeamCoordinator::default()),
             live_conversation_previews: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             project_mention_cache: Arc::new(Mutex::new(BTreeMap::new())),
@@ -4137,9 +4142,18 @@ impl AppRuntime {
             )
             .into());
         }
+        let invocation_harness = self
+            .invocation_codex_harnesses
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&parent_id)
+            .cloned();
+        let codex_harness = invocation_harness
+            .clone()
+            .unwrap_or_else(|| self.codex_harness.clone());
         let forked_thread_id = if let Some(binding) = &existing_binding {
             Some(
-                self.codex_harness
+                codex_harness
                     .fork_thread_at_with_preferences(
                         &binding.codex_thread_id,
                         selected_origin
@@ -4175,6 +4189,12 @@ impl AppRuntime {
         child.interaction_kind = parent.conversation.interaction_kind;
         let event = self.store()?.create_conversation(&child, None)?;
         let _ = self.event_sender.send(event);
+        if let Some(harness) = invocation_harness {
+            self.invocation_codex_harnesses
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(child.id, harness);
+        }
 
         if let Some(origin) = &selected_origin {
             for source_turn in &parent.turns {
@@ -4309,6 +4329,15 @@ impl AppRuntime {
             .store()?
             .delete_conversation_tree(conversation_id, Utc::now())?;
         let _ = self.event_sender.send(event);
+        {
+            let mut invocation_harnesses = self
+                .invocation_codex_harnesses
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for deleted_id in &deleted {
+                invocation_harnesses.remove(deleted_id);
+            }
+        }
         for relative_path in candidate_artifacts.difference(&retained_artifacts) {
             if !self
                 .store()?
@@ -4463,14 +4492,14 @@ impl AppRuntime {
         let routed_content = format!(
             "Owner clarification routed through your governing parent session. Stay within {scope}; this message cannot expand your role, tools, project, delegation, or approval authority. Respond in your agent room and use only your existing MetaCog capabilities.\n\n{content}"
         );
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
         if let Some(binding) = active_binding {
             let codex_turn_id = binding.codex_turn_id.as_deref().ok_or_else(|| {
                 StorageError::Conflict(
                     "working agent session is not currently accepting steering".into(),
                 )
             })?;
-            let accepted_turn_id = self
-                .codex_harness
+            let accepted_turn_id = codex_harness
                 .steer_turn(&binding.codex_thread_id, codex_turn_id, &routed_content)
                 .await?;
             if accepted_turn_id != codex_turn_id {
@@ -4481,8 +4510,7 @@ impl AppRuntime {
             }
             return self.conversation_team(conversation_id);
         }
-        let result = self
-            .codex_harness
+        let result = codex_harness
             .start_turn(thread_id, &routed_content, &preferences, false)
             .await?;
         let response = AgentMessage {
@@ -4731,6 +4759,7 @@ impl AppRuntime {
             .store()?
             .conversation(conversation_id)?
             .ok_or(StorageError::ConversationNotFound(conversation_id))?;
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
         let team = self.store()?.conversation_team_state(conversation_id)?;
         let chat_session = team
             .sessions
@@ -4754,9 +4783,9 @@ impl AppRuntime {
         let thread_id = if let Some(thread_id) = coordinator.codex_thread_id.as_deref() {
             // Idle MCG-owned role threads are archived so they do not crowd Codex Recents.
             // Restore the durable thread just-in-time when this agent receives more work.
-            let _ = self.codex_harness.unarchive_thread(thread_id).await;
+            let _ = codex_harness.unarchive_thread(thread_id).await;
             if let Err(error) = self
-                .codex_harness
+                .codex_harness_for_conversation(conversation_id)
                 .resume_thread_with_instructions(
                     thread_id,
                     Some(&cwd),
@@ -4766,12 +4795,12 @@ impl AppRuntime {
                 )
                 .await
             {
-                let _ = self.codex_harness.archive_thread(thread_id).await;
+                let _ = codex_harness.archive_thread(thread_id).await;
                 return Err(error.into());
             }
             thread_id.to_owned()
         } else {
-            self.codex_harness
+            codex_harness
                 .start_thread_with_instructions(
                     Some(&cwd),
                     &preferences,
@@ -4894,8 +4923,7 @@ impl AppRuntime {
         );
         let mut coordinator_turn_count = 1_u32;
         let mut coordinator_token_chars = prompt.len();
-        let mut result = self
-            .codex_harness
+        let mut result = codex_harness
             .start_turn(&thread_id, &prompt, &preferences, false)
             .await;
         if let Ok(completed) = &result {
@@ -4917,8 +4945,7 @@ impl AppRuntime {
                 );
                 coordinator_turn_count = coordinator_turn_count.saturating_add(1);
                 coordinator_token_chars = coordinator_token_chars.saturating_add(correction.len());
-                result = self
-                    .codex_harness
+                result = codex_harness
                     .start_turn(&thread_id, &correction, &preferences, false)
                     .await;
                 if let Ok(completed) = &result {
@@ -4993,8 +5020,8 @@ impl AppRuntime {
                 AgentContextCheckpointCause::Question
             },
         )?;
-        let _ = self.codex_harness.archive_thread(&thread_id).await;
-        let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
+        let _ = codex_harness.archive_thread(&thread_id).await;
+        let _ = codex_harness.unsubscribe_thread(&thread_id).await;
         if missing_delegation {
             return Err(StorageError::InvalidData(
                 "Coordinator completed twice without creating the required Coding Agent".into(),
@@ -5347,6 +5374,7 @@ impl AppRuntime {
         retry_of_id: Option<AgentDelegationId>,
         idempotency_key: Option<String>,
     ) -> Result<String, RuntimeError> {
+        let codex_harness = self.codex_harness_for_conversation(conversation.id);
         if !matches!(
             worker_kind,
             ConversationAgentKind::Coder | ConversationAgentKind::Tester
@@ -5767,8 +5795,7 @@ impl AppRuntime {
                 None
             },
         };
-        let coder_thread = self
-            .codex_harness
+        let coder_thread = codex_harness
             .start_thread_with_instructions(
                 Some(&worktree.root),
                 preferences,
@@ -5879,7 +5906,7 @@ impl AppRuntime {
                 .last()
                 .map(|turn| turn.id)
         });
-        let coder_turn = self.codex_harness.start_turn_with_progress(
+        let coder_turn = codex_harness.start_turn_with_progress(
             &coder_thread,
             &coder_prompt,
             preferences,
@@ -5902,7 +5929,7 @@ impl AppRuntime {
                     Some(CodexTurnProgress::ApprovalRequested(request)) => {
                         // Coder capability and approval policy are enforced by its pinned
                         // thread configuration. Any unexpected interactive request fails closed.
-                        self.codex_harness.resolve_approval_request(&request, false).await?;
+                        codex_harness.resolve_approval_request(&request, false).await?;
                     }
                     Some(CodexTurnProgress::ItemStarted { item }) => {
                         let Some(activity_turn_id) = activity_turn_id else { continue };
@@ -5969,8 +5996,8 @@ impl AppRuntime {
             // their MCP process and workspace handles cannot pin a completed Windows worktree.
             // Failure remains non-destructive: integration may complete while the worktree is
             // retained for a later safe cleanup.
-            let _ = self.codex_harness.archive_thread(&coder_thread).await;
-            let _ = self.codex_harness.unsubscribe_thread(&coder_thread).await;
+            let _ = codex_harness.archive_thread(&coder_thread).await;
+            let _ = codex_harness.unsubscribe_thread(&coder_thread).await;
         }
         let root = PathBuf::from(&worktree.root);
         let actual_changed_files: Vec<String> =
@@ -6327,11 +6354,10 @@ impl AppRuntime {
         let review_cwd = fs::canonicalize(review_scratch)?
             .to_string_lossy()
             .into_owned();
-        let _ = self.codex_harness.unarchive_thread(chat_thread_id).await;
+        let _ = codex_harness.unarchive_thread(chat_thread_id).await;
         let mut review_turn_count = 1_u32;
         let mut review_token_chars = synthesis_prompt.len();
-        let synthesis = match self
-            .codex_harness
+        let synthesis = match codex_harness
             .resume_thread_with_instructions(
                 chat_thread_id,
                 Some(&review_cwd),
@@ -6342,7 +6368,7 @@ impl AppRuntime {
             .await
         {
             Ok(()) => {
-                self.codex_harness
+                codex_harness
                     .start_turn(chat_thread_id, &synthesis_prompt, preferences, false)
                     .await
             }
@@ -6390,8 +6416,7 @@ impl AppRuntime {
             );
             review_turn_count = review_turn_count.saturating_add(1);
             review_token_chars = review_token_chars.saturating_add(corrective_prompt.len());
-            let corrective = self
-                .codex_harness
+            let corrective = codex_harness
                 .start_turn(chat_thread_id, &corrective_prompt, preferences, false)
                 .await;
             if let Ok(completed) = &corrective {
@@ -6541,8 +6566,8 @@ impl AppRuntime {
             let event = self.store()?.save_coordination_batch(&batch)?;
             let _ = self.event_sender.send(event);
         }
-        let _ = self.codex_harness.archive_thread(chat_thread_id).await;
-        let _ = self.codex_harness.unsubscribe_thread(chat_thread_id).await;
+        let _ = codex_harness.archive_thread(chat_thread_id).await;
+        let _ = codex_harness.unsubscribe_thread(chat_thread_id).await;
         self.checkpoint_agent_context(
             conversation.id,
             chat_session.id,
@@ -6621,6 +6646,7 @@ impl AppRuntime {
         coordination_batch_id: Option<CoordinationBatchId>,
         internal_result: String,
     ) -> Result<(), RuntimeError> {
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
         let conversation = self
             .store()?
             .conversation(conversation_id)?
@@ -6760,9 +6786,9 @@ impl AppRuntime {
             .join(conversation_id.to_string());
         fs::create_dir_all(&scratch)?;
         let cwd = fs::canonicalize(scratch)?.to_string_lossy().into_owned();
-        let _ = self.codex_harness.unarchive_thread(thread_id).await;
+        let _ = codex_harness.unarchive_thread(thread_id).await;
         if let Err(error) = self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .resume_thread_with_instructions(
                 thread_id,
                 Some(&cwd),
@@ -6772,18 +6798,18 @@ impl AppRuntime {
             )
             .await
         {
-            let _ = self.codex_harness.archive_thread(thread_id).await;
+            let _ = codex_harness.archive_thread(thread_id).await;
             return Err(error.into());
         }
         let response = if let Some(output_schema) =
             conversation.execution_preferences.output_schema.as_ref()
         {
-            self.codex_harness
+            codex_harness
                 .start_structured_turn(thread_id, &prompt, &preferences, false, output_schema)
                 .await
                 .map(|result| result.text)?
         } else {
-            self.codex_harness
+            codex_harness
                 .start_turn(thread_id, &prompt, &preferences, false)
                 .await
                 .map(|result| result.text)
@@ -6793,8 +6819,8 @@ impl AppRuntime {
                     )
                 })
         };
-        let _ = self.codex_harness.archive_thread(thread_id).await;
-        let _ = self.codex_harness.unsubscribe_thread(thread_id).await;
+        let _ = codex_harness.archive_thread(thread_id).await;
+        let _ = codex_harness.unsubscribe_thread(thread_id).await;
         self.append_background_chat_response(conversation_id, turn_id, response)
             .await?;
         if let Some(wake) = delivery_wake.as_mut() {
@@ -7336,12 +7362,12 @@ impl AppRuntime {
                 Err(_) => None,
             };
             if let Some(binding) = completed_binding {
+                let codex_harness = runtime.codex_harness_for_conversation(conversation.id);
                 let _archive_result = runtime
-                    .codex_harness
+                    .codex_harness_for_conversation(conversation.id)
                     .archive_thread(&binding.codex_thread_id)
                     .await;
-                let _ = runtime
-                    .codex_harness
+                let _ = codex_harness
                     .unsubscribe_thread(&binding.codex_thread_id)
                     .await;
             }
@@ -11133,8 +11159,137 @@ impl AppRuntime {
         self.codex_harness.status().await
     }
 
+    fn codex_harness_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> CodexAppServerHarness {
+        self.invocation_codex_harnesses
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&conversation_id)
+            .cloned()
+            .unwrap_or_else(|| self.codex_harness.clone())
+    }
+
+    /// Binds one authenticated CLI invocation to an isolated remote app-server connection.
+    /// The endpoint and bearer value remain process-local and never modify durable settings.
+    pub async fn bind_invocation_codex_transport(
+        &self,
+        conversation_id: ConversationId,
+        endpoint: String,
+        auth_token: Option<Zeroizing<String>>,
+    ) -> Result<CodexHarnessStatus, RuntimeError> {
+        let view = self.conversation(conversation_id)?;
+        if view.turns.iter().any(|turn| {
+            matches!(
+                turn.state,
+                ConversationTurnState::Pending
+                    | ConversationTurnState::Streaming
+                    | ConversationTurnState::Recovering
+            )
+        }) {
+            return Err(StorageError::Conflict(
+                "the conversation transport cannot change while work is active".into(),
+            )
+            .into());
+        }
+        let validation = CodexTransportConfig::remote(
+            endpoint.clone(),
+            auth_token
+                .as_ref()
+                .map(|_| "MCG_INVOCATION_REMOTE_TOKEN".to_owned()),
+        );
+        validate_transport(&validation)?;
+        let harness = CodexAppServerHarness::new_with_invocation_remote(
+            self.codex_executable.clone(),
+            endpoint,
+            auth_token,
+        )?;
+        // Codex resolves and connects before presenting the interactive TUI. Do the same here,
+        // before replacing any prior invocation binding.
+        let _ = harness.account().await?;
+        let status = harness.status().await;
+        self.invocation_codex_harnesses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(conversation_id, harness.clone());
+        let mut notifications = harness.subscribe().await;
+        let event_store = self.store.clone();
+        let live_events = self.event_sender.clone();
+        tokio::spawn(async move {
+            while let Ok(notification) = notifications.recv().await {
+                let payload = serde_json::json!({
+                    "method": notification.get("method").cloned().unwrap_or(serde_json::Value::Null),
+                    "params": notification.get("params").cloned().unwrap_or(serde_json::Value::Null),
+                });
+                if let Ok(mut store) = event_store.lock()
+                    && let Ok(event) = store.record_codex_harness_event(payload)
+                {
+                    let _ = live_events.send(event);
+                }
+            }
+        });
+        Ok(status)
+    }
+
+    /// Releases a settled conversation's invocation-local transport. Active work is retained so
+    /// closing a CLI never severs a durable accepted turn.
+    pub async fn release_invocation_codex_transport(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, RuntimeError> {
+        let view = self.conversation(conversation_id)?;
+        let goal_active = view
+            .conversation
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status == ConversationGoalStatus::Active);
+        let command_active = self
+            .conversation_commands
+            .lock()
+            .await
+            .values()
+            .any(|command| {
+                command.conversation_id == conversation_id
+                    && matches!(
+                        command.state,
+                        ConversationCommandState::Running | ConversationCommandState::Stopping
+                    )
+            });
+        if goal_active
+            || command_active
+            || view.turns.iter().any(|turn| {
+                matches!(
+                    turn.state,
+                    ConversationTurnState::Pending
+                        | ConversationTurnState::Streaming
+                        | ConversationTurnState::Recovering
+                )
+            })
+        {
+            return Ok(false);
+        }
+        Ok(self
+            .invocation_codex_harnesses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&conversation_id)
+            .is_some())
+    }
+
     pub async fn codex_models(&self) -> Result<Vec<CodexModel>, RuntimeError> {
         Ok(self.codex_harness.models().await?)
+    }
+
+    pub async fn codex_models_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<CodexModel>, RuntimeError> {
+        self.conversation(conversation_id)?;
+        Ok(self
+            .codex_harness_for_conversation(conversation_id)
+            .models()
+            .await?)
     }
 
     pub async fn codex_features(&self) -> Result<Vec<CodexFeature>, RuntimeError> {
@@ -11172,8 +11327,38 @@ impl AppRuntime {
         self.codex_permission_profiles(cwd.as_deref()).await
     }
 
+    pub async fn codex_permission_profiles_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+        project_id: Option<ProjectId>,
+    ) -> Result<Vec<CodexPermissionProfile>, RuntimeError> {
+        self.conversation(conversation_id)?;
+        let cwd = if let Some(project_id) = project_id {
+            let project = self
+                .project(project_id)?
+                .ok_or(StorageError::ProjectNotFound(project_id))?;
+            Some(
+                fs::canonicalize(&project.root)
+                    .map_err(|error| {
+                        StorageError::InvalidData(format!(
+                            "project cannot be resolved for permission profiles: {error}"
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        } else {
+            None
+        };
+        Ok(self
+            .codex_harness_for_conversation(conversation_id)
+            .permission_profiles(cwd.as_deref())
+            .await?)
+    }
+
     async fn validate_codex_permission_profile(
         &self,
+        conversation_id: ConversationId,
         preferences: &ExecutionPreferences,
         project_id: Option<ProjectId>,
     ) -> Result<(), RuntimeError> {
@@ -11194,7 +11379,10 @@ impl AppRuntime {
             })?
             .to_string_lossy()
             .into_owned();
-        let profiles = self.codex_permission_profiles(Some(&cwd)).await?;
+        let profiles = self
+            .codex_harness_for_conversation(conversation_id)
+            .permission_profiles(Some(&cwd))
+            .await?;
         match profiles.iter().find(|profile| profile.id == selected) {
             Some(profile) if profile.allowed => Ok(()),
             Some(_) => Err(StorageError::InvalidData(format!(
@@ -11210,6 +11398,7 @@ impl AppRuntime {
 
     async fn validate_codex_strict_config(
         &self,
+        conversation_id: ConversationId,
         preferences: &ExecutionPreferences,
         project_id: Option<ProjectId>,
     ) -> Result<(), RuntimeError> {
@@ -11228,7 +11417,7 @@ impl AppRuntime {
         } else {
             None
         };
-        self.codex_harness
+        self.codex_harness_for_conversation(conversation_id)
             .validate_strict_config(cwd.as_deref())
             .await?;
         Ok(())
@@ -11236,6 +11425,7 @@ impl AppRuntime {
 
     async fn resolve_codex_profile(
         &self,
+        conversation_id: ConversationId,
         preferences: &mut ExecutionPreferences,
         project_id: Option<ProjectId>,
     ) -> Result<(), RuntimeError> {
@@ -11255,7 +11445,7 @@ impl AppRuntime {
             None
         };
         let resolved = self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .resolve_profile(profile, cwd.as_deref(), preferences.strict_config)
             .await?;
         preferences.codex_profile_config = Some(resolved.config);
@@ -11295,6 +11485,19 @@ impl AppRuntime {
             .await?)
     }
 
+    pub async fn codex_stable_discovery_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+        cwds: &[String],
+        force_reload: bool,
+    ) -> Result<CodexStableDiscovery, RuntimeError> {
+        self.conversation(conversation_id)?;
+        Ok(self
+            .codex_harness_for_conversation(conversation_id)
+            .stable_discovery(cwds, force_reload)
+            .await?)
+    }
+
     pub async fn codex_configuration_status(
         &self,
     ) -> Result<CodexConfigurationStatus, RuntimeError> {
@@ -11303,6 +11506,26 @@ impl AppRuntime {
             self.codex_harness.model_provider_capabilities(),
             self.codex_harness.windows_sandbox_readiness(),
             self.codex_harness.local_provider_discovery(),
+        )?;
+        Ok(CodexConfigurationStatus {
+            requirements,
+            provider_capabilities,
+            windows_sandbox,
+            local_providers,
+        })
+    }
+
+    pub async fn codex_configuration_status_for_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<CodexConfigurationStatus, RuntimeError> {
+        self.conversation(conversation_id)?;
+        let harness = self.codex_harness_for_conversation(conversation_id);
+        let (requirements, provider_capabilities, windows_sandbox, local_providers) = tokio::try_join!(
+            harness.configuration_requirements(),
+            harness.model_provider_capabilities(),
+            harness.windows_sandbox_readiness(),
+            harness.local_provider_discovery(),
         )?;
         Ok(CodexConfigurationStatus {
             requirements,
@@ -11502,6 +11725,7 @@ impl AppRuntime {
             StorageError::InvalidData(format!("code review project cannot be resolved: {error}"))
         })?;
         let project_root = project_root.to_string_lossy().into_owned();
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
         let preferences = CodexExecutionPreferences {
             model_provider: conversation.execution_preferences.model_provider.clone(),
             model: conversation.execution_preferences.model_id.clone(),
@@ -11522,25 +11746,23 @@ impl AppRuntime {
                 .codex_profile_config
                 .clone(),
         };
-        let host_thread_id = self
-            .codex_harness
+        let host_thread_id = codex_harness
             .start_thread(Some(&project_root), &preferences, false)
             .await?;
-        match self
-            .codex_harness
+        match codex_harness
             .start_review(&host_thread_id, target, delivery)
             .await
         {
             Ok(result) => {
                 if delivery == CodexReviewDelivery::Detached {
-                    let _ = self.codex_harness.archive_thread(&host_thread_id).await;
-                    let _ = self.codex_harness.unsubscribe_thread(&host_thread_id).await;
+                    let _ = codex_harness.archive_thread(&host_thread_id).await;
+                    let _ = codex_harness.unsubscribe_thread(&host_thread_id).await;
                 }
                 Ok(result)
             }
             Err(error) => {
-                let _ = self.codex_harness.archive_thread(&host_thread_id).await;
-                let _ = self.codex_harness.unsubscribe_thread(&host_thread_id).await;
+                let _ = codex_harness.archive_thread(&host_thread_id).await;
+                let _ = codex_harness.unsubscribe_thread(&host_thread_id).await;
                 Err(error.into())
             }
         }
@@ -11552,7 +11774,10 @@ impl AppRuntime {
         request: CodexCommandExecRequest,
     ) -> Result<CodexCommandExecResult, RuntimeError> {
         let request = self.prepare_governed_codex_command(conversation_id, request)?;
-        Ok(self.codex_harness.exec_command(request).await?)
+        Ok(self
+            .codex_harness_for_conversation(conversation_id)
+            .exec_command(request)
+            .await?)
     }
 
     fn prepare_governed_codex_command(
@@ -11602,8 +11827,9 @@ impl AppRuntime {
             .await
             .insert(id.clone(), execution.clone());
         let runtime = self.clone();
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
         tokio::spawn(async move {
-            let result = runtime.codex_harness.exec_command(request).await;
+            let result = codex_harness.exec_command(request).await;
             let mut commands = runtime.conversation_commands.lock().await;
             let Some(execution) = commands.get_mut(&id) else {
                 return;
@@ -11675,7 +11901,9 @@ impl AppRuntime {
             }
             execution.state = ConversationCommandState::Stopping;
         }
-        self.codex_harness.terminate_command(command_id).await?;
+        self.codex_harness_for_conversation(conversation_id)
+            .terminate_command(command_id)
+            .await?;
         Ok(self
             .conversation_commands
             .lock()
@@ -11692,7 +11920,7 @@ impl AppRuntime {
         let root = self.conversation_project_root(conversation_id)?;
         let watch_id = format!("mcg-conversation-{conversation_id}");
         Ok(self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .watch_path(&watch_id, &root.to_string_lossy())
             .await?)
     }
@@ -11703,7 +11931,7 @@ impl AppRuntime {
     ) -> Result<(), RuntimeError> {
         self.conversation(conversation_id)?;
         Ok(self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .unwatch_path(&format!("mcg-conversation-{conversation_id}"))
             .await?)
     }
@@ -11714,7 +11942,7 @@ impl AppRuntime {
     ) -> Result<serde_json::Value, RuntimeError> {
         let mut binding = self.manageable_codex_binding(conversation_id)?;
         let thread = self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .read_thread(&binding.codex_thread_id)
             .await?;
         binding.recovery_state = CodexRecoveryState::Healthy;
@@ -11738,7 +11966,7 @@ impl AppRuntime {
     ) -> Result<CodexThreadBinding, RuntimeError> {
         let mut binding = self.manageable_codex_binding(conversation_id)?;
         let thread_id = self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .fork_thread(&binding.codex_thread_id)
             .await?;
         binding.codex_thread_id = thread_id;
@@ -11755,7 +11983,7 @@ impl AppRuntime {
         conversation_id: ConversationId,
     ) -> Result<CodexThreadBinding, RuntimeError> {
         let mut binding = self.manageable_codex_binding(conversation_id)?;
-        self.codex_harness
+        self.codex_harness_for_conversation(conversation_id)
             .compact_thread(&binding.codex_thread_id)
             .await?;
         binding.recovery_state = CodexRecoveryState::Healthy;
@@ -11769,7 +11997,7 @@ impl AppRuntime {
     ) -> Result<(), RuntimeError> {
         let binding = self.manageable_codex_binding(conversation_id)?;
         Ok(self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .unsubscribe_thread(&binding.codex_thread_id)
             .await?)
     }
@@ -11786,7 +12014,7 @@ impl AppRuntime {
             return Ok(());
         };
         if binding.manageable && binding.ownership_source.as_deref() == Some("mcg") {
-            self.codex_harness
+            self.codex_harness_for_conversation(conversation_id)
                 .set_thread_name(&binding.codex_thread_id, title)
                 .await?;
         }
@@ -11805,12 +12033,13 @@ impl AppRuntime {
             return Ok(());
         };
         if binding.manageable && binding.ownership_source.as_deref() == Some("mcg") {
+            let codex_harness = self.codex_harness_for_conversation(conversation_id);
             if archived {
-                self.codex_harness
+                codex_harness
                     .archive_thread(&binding.codex_thread_id)
                     .await?;
             } else {
-                self.codex_harness
+                codex_harness
                     .unarchive_thread(&binding.codex_thread_id)
                     .await?;
             }
@@ -11930,8 +12159,8 @@ impl AppRuntime {
         else {
             return self.conversation(conversation_id);
         };
-        let response = self
-            .codex_harness
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
+        let response = codex_harness
             .get_thread_goal(&binding.codex_thread_id)
             .await?;
         let mut view = self.conversation(conversation_id)?;
@@ -11940,7 +12169,7 @@ impl AppRuntime {
             .get("goal")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok());
-        for request in self.codex_harness.pending_server_requests().await {
+        for request in codex_harness.pending_server_requests().await {
             if request.method == "item/tool/requestUserInput"
                 && request
                     .params
@@ -11963,10 +12192,7 @@ impl AppRuntime {
             return Ok(view);
         }
 
-        let thread = self
-            .codex_harness
-            .read_thread(&binding.codex_thread_id)
-            .await?;
+        let thread = codex_harness.read_thread(&binding.codex_thread_id).await?;
         let codex_turns = thread
             .pointer("/thread/turns")
             .and_then(serde_json::Value::as_array)
@@ -12084,7 +12310,7 @@ impl AppRuntime {
             ConversationGoalStatus::Complete => "complete",
         });
         let response = self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .set_thread_goal(
                 &binding.codex_thread_id,
                 objective.as_deref(),
@@ -12108,7 +12334,7 @@ impl AppRuntime {
         conversation_id: ConversationId,
     ) -> Result<ConversationView, RuntimeError> {
         let binding = self.manageable_codex_binding(conversation_id)?;
-        self.codex_harness
+        self.codex_harness_for_conversation(conversation_id)
             .clear_thread_goal(&binding.codex_thread_id)
             .await?;
         let mut conversation = self.conversation(conversation_id)?.conversation;
@@ -12125,7 +12351,7 @@ impl AppRuntime {
         request_id: serde_json::Value,
         answers: serde_json::Value,
     ) -> Result<ConversationView, RuntimeError> {
-        self.codex_harness
+        self.codex_harness_for_conversation(conversation_id)
             .resolve_user_input_request(&request_id, answers)
             .await?;
         let mut conversation = self.conversation(conversation_id)?.conversation;
@@ -12580,6 +12806,7 @@ impl AppRuntime {
             self.agent_mcp_executable()?;
         }
         let existing_view = self.conversation(conversation_id)?;
+        let codex_harness = self.codex_harness_for_conversation(conversation_id);
         let mut conversation = existing_view.conversation;
         let resolved_mentions =
             self.resolve_conversation_mentions(&conversation, prompt, mention_inputs)?;
@@ -12598,12 +12825,16 @@ impl AppRuntime {
                 .as_ref()
                 .is_some_and(|goal| !matches!(goal.status, ConversationGoalStatus::Complete)),
         )?;
-        self.validate_codex_strict_config(&preferences, conversation.project_id)
+        self.validate_codex_strict_config(conversation_id, &preferences, conversation.project_id)
             .await?;
-        self.resolve_codex_profile(&mut preferences, conversation.project_id)
+        self.resolve_codex_profile(conversation_id, &mut preferences, conversation.project_id)
             .await?;
-        self.validate_codex_permission_profile(&preferences, conversation.project_id)
-            .await?;
+        self.validate_codex_permission_profile(
+            conversation_id,
+            &preferences,
+            conversation.project_id,
+        )
+        .await?;
         conversation.execution_preferences = preferences.clone();
         conversation.updated_at = Utc::now();
         if conversation.title == "New chat" {
@@ -12714,9 +12945,9 @@ impl AppRuntime {
         let thread_id = if let Some(thread_id) = previous_thread {
             // MCG keeps idle role threads archived outside Codex Recents and revives them only
             // for the duration of an owner turn.
-            let _ = self.codex_harness.unarchive_thread(&thread_id).await;
+            let _ = codex_harness.unarchive_thread(&thread_id).await;
             if let Err(error) = self
-                .codex_harness
+                .codex_harness_for_conversation(conversation_id)
                 .resume_thread_with_instructions(
                     &thread_id,
                     project_root.as_deref(),
@@ -12726,12 +12957,12 @@ impl AppRuntime {
                 )
                 .await
             {
-                let _ = self.codex_harness.archive_thread(&thread_id).await;
+                let _ = codex_harness.archive_thread(&thread_id).await;
                 return Err(error.into());
             }
             thread_id
         } else {
-            self.codex_harness
+            codex_harness
                 .start_thread_with_instructions(
                     project_root.as_deref(),
                     &codex_preferences,
@@ -12777,7 +13008,7 @@ impl AppRuntime {
 
         if let Some(objective) = requested_goal.as_deref() {
             let response = self
-                .codex_harness
+                .codex_harness_for_conversation(conversation_id)
                 .set_thread_goal(&thread_id, Some(objective), Some("active"), None)
                 .await?;
             conversation.goal = response
@@ -12814,7 +13045,7 @@ impl AppRuntime {
                 "plan mode bypasses the routing decision turn".into(),
             ))
         } else if self.config.two_agent_conversations {
-            self.codex_harness
+            codex_harness
                 .start_turn_with_mentions(
                     &thread_id,
                     &decision_prompt,
@@ -12826,7 +13057,7 @@ impl AppRuntime {
         } else {
             // Schema-39 compatibility path. It is retained only while the schema-40 rollout flag
             // is off; enabled sessions must delegate through the authenticated MCP tool.
-            self.codex_harness
+            codex_harness
                 .start_structured_turn(
                     &thread_id,
                     &decision_prompt,
@@ -12945,8 +13176,8 @@ impl AppRuntime {
                         .store()?
                         .save_conversation_agent_session(&chat_session)?;
                     let _ = self.event_sender.send(event);
-                    let _ = self.codex_harness.archive_thread(&thread_id).await;
-                    let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
+                    let _ = codex_harness.archive_thread(&thread_id).await;
+                    let _ = codex_harness.unsubscribe_thread(&thread_id).await;
                     return self.conversation(conversation_id);
                 }
             }
@@ -12970,16 +13201,13 @@ impl AppRuntime {
         let turn_mention_offset = turn_prompt.len().saturating_sub(prompt.len());
         let codex_mentions = self.codex_mention_inputs(&resolved_mentions, turn_mention_offset)?;
         let turn_future = if conversation.mode == ConversationMode::Plan {
-            Box::pin(
-                self.codex_harness
-                    .start_plan_turn_with_mentions_and_progress(
-                        &thread_id,
-                        &turn_prompt,
-                        &codex_mentions,
-                        &codex_preferences,
-                        Some(progress_sender),
-                    ),
-            )
+            Box::pin(codex_harness.start_plan_turn_with_mentions_and_progress(
+                &thread_id,
+                &turn_prompt,
+                &codex_mentions,
+                &codex_preferences,
+                Some(progress_sender),
+            ))
                 as std::pin::Pin<
                     Box<
                         dyn std::future::Future<
@@ -12992,16 +13220,15 @@ impl AppRuntime {
                 >
         } else {
             Box::pin(
-                self.codex_harness
-                    .start_turn_with_mentions_and_progress_and_schema(
-                        &thread_id,
-                        &turn_prompt,
-                        &codex_mentions,
-                        &codex_preferences,
-                        writable,
-                        Some(progress_sender),
-                        preferences.output_schema.as_ref(),
-                    ),
+                codex_harness.start_turn_with_mentions_and_progress_and_schema(
+                    &thread_id,
+                    &turn_prompt,
+                    &codex_mentions,
+                    &codex_preferences,
+                    writable,
+                    Some(progress_sender),
+                    preferences.output_schema.as_ref(),
+                ),
             )
         };
         tokio::pin!(turn_future);
@@ -13082,7 +13309,7 @@ impl AppRuntime {
                             // Persistence or UI-bridge failures must fail closed and
                             // release the app-server request instead of hanging it.
                             let _ = self
-                                .codex_harness
+                                .codex_harness_for_conversation(conversation_id)
                                 .resolve_approval_request(&request, false)
                                 .await;
                             return Err(error);
@@ -13321,7 +13548,7 @@ impl AppRuntime {
             .store()?
             .save_conversation_agent_session(&chat_session)?;
         let _ = self.event_sender.send(event);
-        let goal_response = self.codex_harness.get_thread_goal(&thread_id).await.ok();
+        let goal_response = codex_harness.get_thread_goal(&thread_id).await.ok();
         let mut latest_conversation = self.conversation(conversation_id)?.conversation;
         latest_conversation.goal = goal_response
             .as_ref()
@@ -13332,8 +13559,8 @@ impl AppRuntime {
         let event = self.store()?.update_conversation(&latest_conversation)?;
         let _ = self.event_sender.send(event);
         if latest_conversation.goal.is_none() {
-            let _ = self.codex_harness.archive_thread(&thread_id).await;
-            let _ = self.codex_harness.unsubscribe_thread(&thread_id).await;
+            let _ = codex_harness.archive_thread(&thread_id).await;
+            let _ = codex_harness.unsubscribe_thread(&thread_id).await;
         }
         if let Some(task_id) = turn.task_id
             && let Some(task) = self.task(task_id)?
@@ -13365,10 +13592,11 @@ impl AppRuntime {
         turn: &mut ConversationTurn,
         request: &CodexApprovalRequest,
     ) -> Result<(), RuntimeError> {
+        let codex_harness = self.codex_harness_for_conversation(conversation.id);
         // Project-free conversations never receive mutation authority. If a future Codex
         // version asks despite the read-only policy, keep the response fail-closed.
         if conversation.project_id.is_none() {
-            self.codex_harness
+            codex_harness
                 .resolve_approval_request(request, false)
                 .await?;
             return Ok(());
@@ -13443,7 +13671,7 @@ impl AppRuntime {
             }
         };
 
-        self.codex_harness
+        codex_harness
             .resolve_approval_request(request, approved)
             .await?;
         if let Some(task) = self.task(task_id)?
@@ -13482,7 +13710,7 @@ impl AppRuntime {
         let codex_turn_id = turn.codex_turn_id.as_deref().ok_or_else(|| {
             StorageError::InvalidData("conversation turn has no active Codex turn".into())
         })?;
-        self.codex_harness
+        self.codex_harness_for_conversation(conversation_id)
             .interrupt_turn(thread_id, codex_turn_id)
             .await?;
         self.conversation(conversation_id)
@@ -13524,7 +13752,7 @@ impl AppRuntime {
         })?;
         let codex_mentions = self.codex_mention_inputs(&mentions, 0)?;
         let accepted_turn_id = self
-            .codex_harness
+            .codex_harness_for_conversation(conversation_id)
             .steer_turn_with_mentions(thread_id, codex_turn_id, &content, &codex_mentions)
             .await?;
         if accepted_turn_id != codex_turn_id {
@@ -27361,6 +27589,105 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn invocation_transport_is_conversation_scoped_and_release_respects_active_work() {
+        let runtime = AppRuntime::open_in_memory(
+            AppConfig::default(),
+            "0123456789abcdef0123456789abcdef".into(),
+        )
+        .expect("runtime");
+        let first = runtime
+            .create_conversation(
+                Some("Remote conversation".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("first conversation");
+        let second = runtime
+            .create_conversation(
+                Some("Local conversation".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("second conversation");
+        let endpoint = "ws://127.0.0.1:4500/".to_owned();
+        let remote = CodexAppServerHarness::new_with_transport(
+            "unused",
+            CodexTransportConfig::remote(endpoint.clone(), None),
+        );
+        runtime
+            .invocation_codex_harnesses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(first.id, remote);
+
+        assert_eq!(
+            runtime
+                .codex_harness_for_conversation(first.id)
+                .status()
+                .await
+                .transport,
+            CodexTransportConfig::remote(endpoint, None)
+        );
+        assert_eq!(
+            runtime
+                .codex_harness_for_conversation(second.id)
+                .status()
+                .await
+                .transport,
+            CodexTransportConfig::LocalStdio
+        );
+
+        let now = Utc::now();
+        let mut turn = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: first.id,
+            state: ConversationTurnState::Pending,
+            execution_preferences: ExecutionPreferences::default(),
+            codex_thread_id: None,
+            codex_turn_id: None,
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .store()
+            .expect("store")
+            .save_conversation_turn(&turn)
+            .expect("pending turn");
+        assert!(
+            !runtime
+                .release_invocation_codex_transport(first.id)
+                .await
+                .expect("active release guard")
+        );
+        turn.state = ConversationTurnState::Completed;
+        turn.updated_at = Utc::now();
+        runtime
+            .store()
+            .expect("store")
+            .save_conversation_turn(&turn)
+            .expect("completed turn");
+        assert!(
+            runtime
+                .release_invocation_codex_transport(first.id)
+                .await
+                .expect("settled release")
+        );
+        assert!(
+            !runtime
+                .invocation_codex_harnesses
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&first.id)
+        );
+    }
 
     #[test]
     fn conversation_activity_preserves_typed_codex_payloads_for_exact_clients() {

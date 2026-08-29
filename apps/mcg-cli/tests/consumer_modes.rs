@@ -454,6 +454,46 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
 }
 
 #[test]
+fn invocation_remote_flags_route_to_sessions_and_fail_closed_for_noninteractive_work() {
+    for arguments in [
+        vec!["--remote", "ws://127.0.0.1:4512", "resume", "--help"],
+        vec!["resume", "--remote", "ws://127.0.0.1:4512", "--help"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mcg"))
+            .args(arguments)
+            .output()
+            .expect("remote session help process");
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--remote"));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mcg"))
+        .args([
+            "--remote",
+            "wss://codex.example.test:443",
+            "--remote-auth-token-env",
+            "MCG_TEST_REMOTE_SECRET",
+            "exec",
+            "do not run",
+        ])
+        .env("MCG_TEST_REMOTE_SECRET", "never-print-this-token")
+        .output()
+        .expect("rejected remote exec process");
+    assert!(!output.status.success());
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(rendered.contains("only supported for interactive TUI commands"));
+    assert!(!rendered.contains("never-print-this-token"));
+}
+
+#[test]
 fn sandbox_is_daemon_free_and_exposes_the_pinned_codex_contract() {
     let output = Command::new(env!("CARGO_BIN_EXE_mcg"))
         .args(["sandbox", "--help"])

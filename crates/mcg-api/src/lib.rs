@@ -96,7 +96,7 @@ use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, sync::watch};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::trace::TraceLayer;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone)]
 struct ApiState {
@@ -407,6 +407,26 @@ pub struct UpdateCodexTransportRequest {
     #[serde(default)]
     pub auth_token_env: Option<String>,
     pub reason: String,
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct BindConversationCodexTransportRequest {
+    pub endpoint: String,
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for BindConversationCodexTransportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BindConversationCodexTransportRequest")
+            .field("endpoint", &self.endpoint)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1753,6 +1773,27 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/conversations/{conversation_id}/events/stream",
             get(stream_conversation_events),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex-transport",
+            axum::routing::put(bind_conversation_codex_transport)
+                .delete(release_conversation_codex_transport),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/models",
+            get(conversation_codex_models),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/discovery",
+            post(conversation_codex_discovery),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/configuration",
+            get(conversation_codex_configuration),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/permission-profiles",
+            get(conversation_codex_permission_profiles),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/archive",
@@ -4376,15 +4417,13 @@ async fn archive_conversation(
         .runtime
         .archive_conversation(conversation_id, request.archived)
         .map_err(map_runtime_error)?;
-    let runtime = Arc::clone(&state.runtime);
-    tokio::spawn(async move {
-        // The MCG catalog is authoritative for its sidebar. Codex thread cleanup is
-        // deliberately best-effort so an unavailable app-server cannot block the
-        // owner's archive or restore action.
-        let _ = runtime
-            .set_owned_codex_thread_archived(conversation_id, request.archived)
-            .await;
-    });
+    // The MCG catalog is authoritative for its sidebar. Codex thread cleanup remains
+    // best-effort, but is awaited so an invocation-local transport cannot be released before
+    // the matching remote archive operation has consumed its conversation binding.
+    let _ = state
+        .runtime
+        .set_owned_codex_thread_archived(conversation_id, request.archived)
+        .await;
     Ok(Json(conversation))
 }
 
@@ -4747,6 +4786,98 @@ async fn codex_harness_status(
     State(state): State<ApiState>,
 ) -> Json<mcg_codex_app_server::CodexHarnessStatus> {
     Json(state.runtime.codex_harness_status().await)
+}
+
+async fn bind_conversation_codex_transport(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(mut request): Json<BindConversationCodexTransportRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexHarnessStatus>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    let endpoint = std::mem::take(&mut request.endpoint);
+    let auth_token = request.auth_token.take().map(Zeroizing::new);
+    Ok(Json(
+        state
+            .runtime
+            .bind_invocation_codex_transport(conversation_id, endpoint, auth_token)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn release_conversation_codex_transport(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    let released = state
+        .runtime
+        .release_invocation_codex_transport(conversation_id)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(serde_json::json!({ "released": released })))
+}
+
+async fn conversation_codex_models(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Vec<mcg_codex_app_server::CodexModel>>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .codex_models_for_conversation(conversation_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn conversation_codex_discovery(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<CodexDiscoveryRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexStableDiscovery>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .codex_stable_discovery_for_conversation(
+                conversation_id,
+                &request.cwds,
+                request.force_reload,
+            )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn conversation_codex_configuration(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<mcg_codex_app_server::CodexConfigurationStatus>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .codex_configuration_status_for_conversation(conversation_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn conversation_codex_permission_profiles(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<CodexPermissionProfileQuery>,
+) -> Result<Json<Vec<mcg_codex_app_server::CodexPermissionProfile>>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .codex_permission_profiles_for_conversation(conversation_id, query.project_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
 }
 
 async fn codex_models(
@@ -7866,6 +7997,188 @@ mod tests {
         Arc,
         atomic::{AtomicU16, AtomicUsize, Ordering},
     };
+
+    use async_tungstenite::tungstenite::{Message, http::header::AUTHORIZATION};
+
+    #[test]
+    fn invocation_remote_request_debug_redacts_bearer_token() {
+        let request: BindConversationCodexTransportRequest =
+            serde_json::from_value(serde_json::json!({
+                "endpoint": "wss://codex.example.test:443/",
+                "auth_token": "never-print-this-token"
+            }))
+            .expect("invocation remote request");
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("never-print-this-token"));
+    }
+
+    #[tokio::test]
+    async fn invocation_remote_route_rejects_unsafe_endpoints_without_leaking_tokens() {
+        let runtime = test_runtime();
+        let conversation = runtime
+            .create_conversation(
+                Some("Invocation transport boundary".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("conversation");
+        let app = router(runtime);
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::put(format!(
+                    "/api/v1/conversations/{}/codex-transport",
+                    conversation.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"endpoint":"ws://remote.example.test:4500","auth_token":"never-print-this-token"}"#,
+                ))
+                .expect("bind request"),
+            )
+            .await
+            .expect("bind response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        let rendered = body.to_string();
+        assert!(!rendered.contains("never-print-this-token"));
+
+        let release = app
+            .oneshot(
+                authorized(Request::delete(format!(
+                    "/api/v1/conversations/{}/codex-transport",
+                    conversation.id
+                )))
+                .body(Body::empty())
+                .expect("release request"),
+            )
+            .await
+            .expect("release response");
+        assert_eq!(release.status(), StatusCode::OK);
+        assert_eq!(response_json(release).await["released"], false);
+    }
+
+    #[tokio::test]
+    async fn invocation_remote_route_binds_authenticates_and_releases_the_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind websocket fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let (authorization_tx, authorization_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept fixture client");
+            let mut authorization_tx = Some(authorization_tx);
+            let mut socket = async_tungstenite::tokio::accept_hdr_async(
+                socket,
+                move |request: &async_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    if let Some(sender) = authorization_tx.take() {
+                        let value = request
+                            .headers()
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let _ = sender.send(value);
+                    }
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("upgrade authenticated fixture websocket");
+            while let Some(message) = futures_util::StreamExt::next(&mut socket).await {
+                let Ok(message) = message else {
+                    break;
+                };
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fixture JSON-RPC request");
+                let Some(id) = request.get("id").cloned() else {
+                    continue;
+                };
+                let method = request
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let result = if method == "account/read" {
+                    serde_json::json!({"account": null, "requiresOpenaiAuth": true})
+                } else {
+                    serde_json::json!({})
+                };
+                futures_util::SinkExt::send(
+                    &mut socket,
+                    Message::Text(
+                        serde_json::json!({"id": id, "result": result})
+                            .to_string()
+                            .into(),
+                    ),
+                )
+                .await
+                .expect("send fixture response");
+            }
+        });
+
+        let runtime = test_runtime();
+        let conversation = runtime
+            .create_conversation(
+                Some("Authenticated invocation transport".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("conversation");
+        let app = router(runtime);
+        let endpoint = format!("ws://{address}/");
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Request::put(format!(
+                    "/api/v1/conversations/{}/codex-transport",
+                    conversation.id
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "endpoint": endpoint,
+                        "auth_token": "invocation-secret"
+                    })
+                    .to_string(),
+                ))
+                .expect("bind request"),
+            )
+            .await
+            .expect("bind response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["transport"]["kind"], "remote_web_socket");
+        assert_eq!(body["transport"]["endpoint"], endpoint);
+        assert!(!body.to_string().contains("invocation-secret"));
+        assert_eq!(
+            authorization_rx.await.expect("authorization capture"),
+            Some("Bearer invocation-secret".into())
+        );
+
+        let release = app
+            .oneshot(
+                authorized(Request::delete(format!(
+                    "/api/v1/conversations/{}/codex-transport",
+                    conversation.id
+                )))
+                .body(Body::empty())
+                .expect("release request"),
+            )
+            .await
+            .expect("release response");
+        assert_eq!(release.status(), StatusCode::OK);
+        assert_eq!(response_json(release).await["released"], true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("released transport closes its websocket task")
+            .expect("fixture server completion");
+    }
 
     #[test]
     fn codex_login_request_defaults_to_browser_and_accepts_typed_methods() {

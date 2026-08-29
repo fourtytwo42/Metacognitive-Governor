@@ -172,6 +172,8 @@ struct Cli {
     /// Override the local daemon bearer-token file.
     #[arg(long)]
     token_file: Option<PathBuf>,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
     /// Select the project directory for consumer work (defaults to the current directory).
     #[arg(short = 'C', long = "project", global = true)]
     project: Option<PathBuf>,
@@ -375,6 +377,8 @@ struct CodexCompatCli {
     host: String,
     #[arg(long)]
     token_file: Option<PathBuf>,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
     #[arg(short = 'C', long = "cd", visible_alias = "project", global = true)]
     project: Option<PathBuf>,
     #[arg(short = 'c', long = "config", value_name = "KEY=VALUE", global = true)]
@@ -428,9 +432,9 @@ enum CodexCompatCommand {
     /// Fork a previous conversation and open the fork in the terminal UI.
     Fork(Box<ForkArgs>),
     /// Archive a saved conversation by ID or exact name.
-    Archive { session: String },
+    Archive(Box<SessionArchiveArgs>),
     /// Restore an archived conversation by ID or exact name.
-    Unarchive { session: String },
+    Unarchive(Box<SessionArchiveArgs>),
     /// Permanently delete a saved conversation.
     Delete(Box<DeleteArgs>),
     /// Run a native, read-only code review.
@@ -672,6 +676,8 @@ struct ResumeArgs {
     #[arg(long)]
     last: bool,
     session: Option<String>,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
 }
 
 #[derive(Debug, Args)]
@@ -681,6 +687,8 @@ struct ForkArgs {
     #[arg(long)]
     last: bool,
     session: Option<String>,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
 }
 
 #[derive(Debug, Args)]
@@ -691,6 +699,15 @@ struct QueueArgs {
     /// Message text to queue.
     #[arg(long)]
     message: String,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
+}
+
+#[derive(Debug, Args)]
+struct SessionArchiveArgs {
+    session: String,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
 }
 
 #[derive(Debug, Args)]
@@ -717,6 +734,257 @@ struct DeleteArgs {
     session: String,
     #[arg(long)]
     force: bool,
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
+}
+
+#[derive(Debug, Default, Args)]
+struct InteractiveRemoteArgs {
+    /// Connect this invocation to a remote Codex app server.
+    #[arg(long = "remote", value_name = "ADDR")]
+    remote: Option<String>,
+    /// Environment variable containing the bearer token for the remote app server.
+    #[arg(long = "remote-auth-token-env", value_name = "ENV_VAR")]
+    remote_auth_token_env: Option<String>,
+}
+
+struct InvocationRemote {
+    endpoint: String,
+    auth_token: Option<String>,
+}
+
+fn remote_websocket_has_explicit_port(endpoint: &str, url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if url.port().is_some() {
+        return true;
+    }
+    let Some((_, rest)) = endpoint.split_once("://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_and_port)| host_and_port);
+    let default_port = match url.scheme() {
+        "ws" => 80,
+        "wss" => 443,
+        _ => return false,
+    };
+    let expected_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    host_and_port == format!("{expected_host}:{default_port}")
+}
+
+impl Drop for InvocationRemote {
+    fn drop(&mut self) {
+        if let Some(auth_token) = &mut self.auth_token {
+            auth_token.zeroize();
+        }
+    }
+}
+
+fn resolve_invocation_remote(
+    root: InteractiveRemoteArgs,
+    command: InteractiveRemoteArgs,
+) -> Result<Option<InvocationRemote>, Box<dyn std::error::Error>> {
+    let endpoint = command.remote.or(root.remote);
+    let auth_token_env = command.remote_auth_token_env.or(root.remote_auth_token_env);
+    let Some(endpoint) = endpoint else {
+        if auth_token_env.is_some() {
+            return Err("`--remote-auth-token-env` requires `--remote`.".into());
+        }
+        return Ok(None);
+    };
+    let endpoint = endpoint.trim().to_owned();
+    if endpoint.starts_with("unix://") {
+        if auth_token_env.is_some() {
+            return Err(
+                "`--remote-auth-token-env` requires a `wss://` or loopback `ws://` remote.".into(),
+            );
+        }
+        let endpoint = mcg_codex_app_server::normalize_invocation_remote_endpoint(&endpoint, None)?;
+        return Ok(Some(InvocationRemote {
+            endpoint,
+            auth_token: None,
+        }));
+    }
+    let url = reqwest::Url::parse(&endpoint)
+        .map_err(|error| format!("invalid remote app-server endpoint: {error}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(
+            "remote app-server endpoints must use ws://, wss://, unix://, or unix://PATH".into(),
+        );
+    }
+    if !remote_websocket_has_explicit_port(&endpoint, &url) {
+        return Err("remote WebSocket endpoints require an explicit port".into());
+    }
+    if url.username() != "" || url.password().is_some() {
+        return Err("remote app-server endpoints cannot contain credentials".into());
+    }
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err(
+            "remote WebSocket endpoints must use the root path without query or fragment".into(),
+        );
+    }
+    let host = url.host_str().unwrap_or_default();
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    // MetaCog deliberately retains its stronger transport boundary: cleartext WebSockets never
+    // cross the local host, even when no bearer token is configured.
+    if url.scheme() == "ws" && !loopback {
+        return Err(
+            "unencrypted remote app-server endpoints are permitted only on loopback".into(),
+        );
+    }
+    let auth_token = if let Some(variable) = auth_token_env {
+        if url.scheme() != "wss" && !(url.scheme() == "ws" && loopback) {
+            return Err(
+                "`--remote-auth-token-env` requires a `wss://` or loopback `ws://` remote.".into(),
+            );
+        }
+        let variable = variable.trim();
+        if variable.is_empty() || variable.chars().any(char::is_whitespace) {
+            return Err("remote bearer-token environment variable name is invalid".into());
+        }
+        let token = std::env::var(variable).map_err(|_| {
+            format!("remote bearer-token environment variable `{variable}` is not set")
+        })?;
+        if token.is_empty() {
+            return Err(
+                format!("remote bearer-token environment variable `{variable}` is empty").into(),
+            );
+        }
+        if token.len() > 16_384 || token.chars().any(char::is_control) {
+            return Err("remote bearer token is invalid or exceeds 16384 bytes".into());
+        }
+        Some(token)
+    } else {
+        None
+    };
+    Ok(Some(InvocationRemote {
+        endpoint,
+        auth_token,
+    }))
+}
+
+fn reject_invocation_remote_for_subcommand(
+    remote: &InteractiveRemoteArgs,
+    subcommand: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(endpoint) = remote.remote.as_deref() {
+        return Err(format!(
+            "`--remote {endpoint}` is only supported for interactive TUI commands, not `mcg {subcommand}`"
+        )
+        .into());
+    }
+    if remote.remote_auth_token_env.is_some() {
+        return Err(format!(
+            "`--remote-auth-token-env` is only supported for interactive TUI commands, not `mcg {subcommand}`"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn bind_invocation_remote(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+    remote: &InvocationRemote,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .put(format!(
+            "{host}/api/v1/conversations/{conversation_id}/codex-transport"
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "endpoint": remote.endpoint,
+            "auth_token": remote.auth_token.as_deref(),
+        }))
+        .send()
+        .await?;
+    let _: mcg_codex_app_server::CodexHarnessStatus =
+        decode_api_response(response, "connect remote Codex app server").await?;
+    Ok(())
+}
+
+async fn release_invocation_remote(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let response: serde_json::Value = decode_api_response(
+        client
+            .delete(format!(
+                "{host}/api/v1/conversations/{conversation_id}/codex-transport"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "release remote Codex app server",
+    )
+    .await?;
+    Ok(response
+        .get("released")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
+async fn finish_invocation_remote_binding<T>(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+    was_bound: bool,
+    result: Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let release = if was_bound {
+        Some(release_invocation_remote(client, host, token, conversation_id).await)
+    } else {
+        None
+    };
+    match result {
+        Ok(value) => {
+            if let Some(release) = release {
+                let _ = release?;
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            // Preserve the operation failure while still making a best-effort attempt to remove
+            // the invocation-local credential and transport binding.
+            let _ = release;
+            Err(error)
+        }
+    }
+}
+
+async fn transfer_invocation_remote(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    from: ConversationId,
+    to: ConversationId,
+    remote: Option<&InvocationRemote>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if from == to {
+        return Ok(());
+    }
+    if let Some(remote) = remote {
+        bind_invocation_remote(client, host, token, to, remote).await?;
+        let _ = release_invocation_remote(client, host, token, from).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Args)]
@@ -2256,6 +2524,18 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
     let cli = Cli::parse_from(native_arguments);
+    let root_is_interactive = cli.command.is_none() && std::io::stdin().is_terminal();
+    if !root_is_interactive {
+        reject_invocation_remote_for_subcommand(
+            &cli.remote,
+            cli.command.as_ref().map_or("prompt", |_| "subcommand"),
+        )?;
+    }
+    let invocation_remote = if root_is_interactive {
+        resolve_invocation_remote(cli.remote, InteractiveRemoteArgs::default())?
+    } else {
+        None
+    };
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
     let token_path = cli
@@ -2543,6 +2823,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(preferences),
                 mentions,
                 no_alt_screen,
+                invocation_remote.as_ref(),
             )
             .await?;
         }
@@ -2609,6 +2890,10 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn codex_compat_command_requested() -> bool {
+    codex_compat_command_requested_from(std::env::args_os().skip(1))
+}
+
+fn codex_compat_command_requested_from(arguments: impl IntoIterator<Item = OsString>) -> bool {
     const COMMANDS: &[&str] = &[
         "exec",
         "e",
@@ -2631,7 +2916,7 @@ fn codex_compat_command_requested() -> bool {
         "features",
         "sandbox",
     ];
-    let mut arguments = std::env::args_os().skip(1);
+    let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         let Some(argument) = argument.to_str() else {
             continue;
@@ -2658,6 +2943,8 @@ fn codex_compat_command_requested() -> bool {
                 | "-p"
                 | "--enable"
                 | "--disable"
+                | "--remote"
+                | "--remote-auth-token-env"
         ) {
             let _ = arguments.next();
             continue;
@@ -2676,6 +2963,8 @@ fn codex_compat_command_requested() -> bool {
             || (argument.starts_with("-p") && argument.len() > 2)
             || argument.starts_with("--enable=")
             || argument.starts_with("--disable=")
+            || argument.starts_with("--remote=")
+            || argument.starts_with("--remote-auth-token-env=")
             || (argument.starts_with("-C") && argument.len() > 2)
             || (argument.starts_with("-m") && argument.len() > 2)
             || (argument.starts_with("-s") && argument.len() > 2)
@@ -3119,6 +3408,18 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         cli.config.is_empty(),
         "native config flags are extracted before parsing"
     );
+    let remote_supported = matches!(
+        &cli.command,
+        CodexCompatCommand::Resume(_)
+            | CodexCompatCommand::Queue(_)
+            | CodexCompatCommand::Fork(_)
+            | CodexCompatCommand::Archive(_)
+            | CodexCompatCommand::Unarchive(_)
+            | CodexCompatCommand::Delete(_)
+    );
+    if !remote_supported {
+        reject_invocation_remote_for_subcommand(&cli.remote, "subcommand")?;
+    }
     if let CodexCompatCommand::Completion { shell } = &cli.command {
         return generate_cli_completion(*shell);
     }
@@ -3147,6 +3448,8 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             || native_overrides.no_alt_screen
             || !native_overrides.raw_config_overrides.is_empty()
             || !native_overrides.feature_overrides.is_empty()
+            || cli.remote.remote.is_some()
+            || cli.remote.remote_auth_token_env.is_some()
         {
             return Err("`mcg update` does not accept runtime or project overrides".into());
         }
@@ -3189,6 +3492,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let codex_profile = native_overrides.codex_profile;
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
+    let root_remote = cli.remote;
     for feature in cli.enable_features {
         feature_overrides.insert(feature, true);
     }
@@ -3318,7 +3622,9 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 include_non_interactive,
                 last,
                 session,
+                remote,
             } = *args;
+            let invocation_remote = resolve_invocation_remote(root_remote, remote)?;
             let mut conversation = resolve_cli_session(
                 &client,
                 host,
@@ -3379,11 +3685,17 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 preferences,
                 mentions,
                 no_alt_screen,
+                invocation_remote.as_ref(),
             ))
             .await?;
         }
         CodexCompatCommand::Queue(args) => {
-            let QueueArgs { thread, message } = *args;
+            let QueueArgs {
+                thread,
+                message,
+                remote,
+            } = *args;
+            let invocation_remote = resolve_invocation_remote(root_remote, remote)?;
             let conversation = resolve_cli_session(
                 &client,
                 host,
@@ -3397,38 +3709,54 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 false,
             )
             .await?;
-            let preferences = codex_execution_preferences_override(
-                model,
-                model_provider.clone(),
-                sandbox,
-                approval_policy,
-                approve_for_me,
-                dangerously_bypass_approvals_and_sandbox,
-                &additional_writable_roots,
-                &feature_overrides,
-                &config_overrides,
-                codex_profile.clone(),
-                strict_config,
-                &conversation.execution_preferences,
-            );
-            let pending_mentions = codex_exec_mentions(&images)?;
-            let (content, mentions) =
-                resolve_cli_mentions(&client, host, token, message, &pending_mentions).await?;
-            let _: ConversationView = decode_api_response(
-                client
-                    .post(format!(
-                        "{host}/api/v1/conversations/{}/queue",
-                        conversation.id
-                    ))
-                    .bearer_auth(token)
-                    .json(&SendConversationMessageRequest {
-                        content,
-                        execution_preferences: preferences,
-                        mentions,
-                    })
-                    .send()
-                    .await?,
-                "queue conversation message",
+            if let Some(remote) = invocation_remote.as_ref() {
+                bind_invocation_remote(&client, host, token, conversation.id, remote).await?;
+            }
+            let result: Result<(), Box<dyn std::error::Error>> = async {
+                let preferences = codex_execution_preferences_override(
+                    model,
+                    model_provider.clone(),
+                    sandbox,
+                    approval_policy,
+                    approve_for_me,
+                    dangerously_bypass_approvals_and_sandbox,
+                    &additional_writable_roots,
+                    &feature_overrides,
+                    &config_overrides,
+                    codex_profile.clone(),
+                    strict_config,
+                    &conversation.execution_preferences,
+                );
+                let pending_mentions = codex_exec_mentions(&images)?;
+                let (content, mentions) =
+                    resolve_cli_mentions(&client, host, token, message, &pending_mentions).await?;
+                let _: ConversationView = decode_api_response(
+                    client
+                        .post(format!(
+                            "{host}/api/v1/conversations/{}/queue",
+                            conversation.id
+                        ))
+                        .bearer_auth(token)
+                        .json(&SendConversationMessageRequest {
+                            content,
+                            execution_preferences: preferences,
+                            mentions,
+                        })
+                        .send()
+                        .await?,
+                    "queue conversation message",
+                )
+                .await?;
+                Ok(())
+            }
+            .await;
+            finish_invocation_remote_binding(
+                &client,
+                host,
+                token,
+                conversation.id,
+                invocation_remote.is_some(),
+                result,
             )
             .await?;
             println!(
@@ -3437,7 +3765,13 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         CodexCompatCommand::Fork(args) => {
-            let ForkArgs { all, last, session } = *args;
+            let ForkArgs {
+                all,
+                last,
+                session,
+                remote,
+            } = *args;
+            let invocation_remote = resolve_invocation_remote(root_remote, remote)?;
             let source = resolve_cli_session(
                 &client,
                 host,
@@ -3451,49 +3785,80 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 no_alt_screen,
             )
             .await?;
-            let use_current_directory = should_resume_in_current_directory(
+            if let Some(remote) = invocation_remote.as_ref() {
+                bind_invocation_remote(&client, host, token, source.id, remote).await?;
+            }
+            let fork_result: Result<_, Box<dyn std::error::Error>> = async {
+                let use_current_directory = should_resume_in_current_directory(
+                    &client,
+                    host,
+                    token,
+                    &source,
+                    &project,
+                    project_was_explicit,
+                    &config_overrides,
+                    codex_profile.as_deref(),
+                    strict_config,
+                    no_alt_screen,
+                )
+                .await?;
+                let preferences = codex_execution_preferences_override(
+                    model.clone(),
+                    model_provider,
+                    sandbox,
+                    approval_policy,
+                    approve_for_me,
+                    dangerously_bypass_approvals_and_sandbox,
+                    &additional_writable_roots,
+                    &feature_overrides,
+                    &config_overrides,
+                    codex_profile,
+                    strict_config,
+                    &source.execution_preferences,
+                );
+                let fork: Conversation = decode_api_response(
+                    client
+                        .post(format!("{host}/api/v1/conversations/{}/fork", source.id))
+                        .bearer_auth(token)
+                        .json(&ForkConversationRequest {
+                            origin_turn_id: None,
+                            execution_preferences: preferences.clone(),
+                        })
+                        .send()
+                        .await?,
+                    "fork conversation",
+                )
+                .await?;
+                Ok((fork, use_current_directory, preferences))
+            }
+            .await;
+            let (mut fork, use_current_directory, preferences) = finish_invocation_remote_binding(
                 &client,
                 host,
                 token,
-                &source,
-                &project,
-                project_was_explicit,
-                &config_overrides,
-                codex_profile.as_deref(),
-                strict_config,
-                no_alt_screen,
-            )
-            .await?;
-            let preferences = codex_execution_preferences_override(
-                model.clone(),
-                model_provider,
-                sandbox,
-                approval_policy,
-                approve_for_me,
-                dangerously_bypass_approvals_and_sandbox,
-                &additional_writable_roots,
-                &feature_overrides,
-                &config_overrides,
-                codex_profile,
-                strict_config,
-                &source.execution_preferences,
-            );
-            let mut fork: Conversation = decode_api_response(
-                client
-                    .post(format!("{host}/api/v1/conversations/{}/fork", source.id))
-                    .bearer_auth(token)
-                    .json(&ForkConversationRequest {
-                        origin_turn_id: None,
-                        execution_preferences: preferences.clone(),
-                    })
-                    .send()
-                    .await?,
-                "fork conversation",
+                source.id,
+                invocation_remote.is_some(),
+                fork_result,
             )
             .await?;
             if use_current_directory {
-                fork = rebind_conversation_to_current_project(&client, host, token, &project, fork)
-                    .await?;
+                match rebind_conversation_to_current_project(
+                    &client,
+                    host,
+                    token,
+                    &project,
+                    fork.clone(),
+                )
+                .await
+                {
+                    Ok(rebound) => fork = rebound,
+                    Err(error) => {
+                        if invocation_remote.is_some() {
+                            let _ = release_invocation_remote(&client, host, token, fork.id).await;
+                        }
+                        return Err(error);
+                    }
+                }
             }
             let mentions = codex_exec_mentions(&images)?;
             Box::pin(run_interactive(
@@ -3505,18 +3870,101 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 preferences,
                 mentions,
                 no_alt_screen,
+                invocation_remote.as_ref(),
             ))
             .await?;
         }
-        CodexCompatCommand::Archive { session } => {
-            run_cli_archive(&client, host, token, &project, &session, true).await?;
+        CodexCompatCommand::Archive(args) => {
+            let SessionArchiveArgs { session, remote } = *args;
+            let invocation_remote = resolve_invocation_remote(root_remote, remote)?;
+            let conversation = resolve_cli_session(
+                &client,
+                host,
+                token,
+                &project,
+                Some(&session),
+                false,
+                true,
+                None,
+                true,
+                false,
+            )
+            .await?;
+            if let Some(remote) = invocation_remote.as_ref() {
+                bind_invocation_remote(&client, host, token, conversation.id, remote).await?;
+            }
+            let result = run_cli_archive(&client, host, token, &project, &session, true).await;
+            finish_invocation_remote_binding(
+                &client,
+                host,
+                token,
+                conversation.id,
+                invocation_remote.is_some(),
+                result,
+            )
+            .await?;
         }
-        CodexCompatCommand::Unarchive { session } => {
-            run_cli_archive(&client, host, token, &project, &session, false).await?;
+        CodexCompatCommand::Unarchive(args) => {
+            let SessionArchiveArgs { session, remote } = *args;
+            let invocation_remote = resolve_invocation_remote(root_remote, remote)?;
+            let conversation = resolve_cli_session(
+                &client,
+                host,
+                token,
+                &project,
+                Some(&session),
+                false,
+                true,
+                None,
+                true,
+                false,
+            )
+            .await?;
+            if let Some(remote) = invocation_remote.as_ref() {
+                bind_invocation_remote(&client, host, token, conversation.id, remote).await?;
+            }
+            let result = run_cli_archive(&client, host, token, &project, &session, false).await;
+            finish_invocation_remote_binding(
+                &client,
+                host,
+                token,
+                conversation.id,
+                invocation_remote.is_some(),
+                result,
+            )
+            .await?;
         }
         CodexCompatCommand::Delete(args) => {
-            let DeleteArgs { session, force } = *args;
-            run_cli_delete(&client, host, token, &project, &session, force).await?;
+            let DeleteArgs {
+                session,
+                force,
+                remote,
+            } = *args;
+            let invocation_remote = resolve_invocation_remote(root_remote, remote)?;
+            let conversation = resolve_cli_session(
+                &client,
+                host,
+                token,
+                &project,
+                Some(&session),
+                false,
+                true,
+                None,
+                true,
+                false,
+            )
+            .await?;
+            if let Some(remote) = invocation_remote.as_ref() {
+                bind_invocation_remote(&client, host, token, conversation.id, remote).await?;
+            }
+            if let Err(error) =
+                run_cli_delete(&client, host, token, &project, &session, force).await
+            {
+                if invocation_remote.is_some() {
+                    let _ = release_invocation_remote(&client, host, token, conversation.id).await;
+                }
+                return Err(error);
+            }
         }
         CodexCompatCommand::Review(args) => {
             let ReviewArgs {
@@ -4648,6 +5096,7 @@ async fn run_interactive(
     initial_preferences: Option<ExecutionPreferences>,
     initial_mentions: Vec<String>,
     no_alt_screen: bool,
+    remote: Option<&InvocationRemote>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut conversation, mut project_id, mut project_root, root, mut preferences) =
         if let Some(conversation) = initial_conversation {
@@ -4700,130 +5149,144 @@ async fn run_interactive(
             .await?;
             (conversation, project_id, project_root, root, preferences)
         };
-    let mut pending_mentions = initial_mentions;
-    let initial_view =
-        fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
-    let branch = git_branch(project_root.as_deref()).unwrap_or_else(|| "no branch".into());
-    let mut model = TuiModel::new(initial_view, root.clone(), branch);
-    if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await {
-        model.set_cli_preferences(tui_preferences);
+    if let Some(remote) = remote {
+        bind_invocation_remote(client, host, token, conversation.id, remote).await?;
     }
-    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut stream_task = spawn_conversation_stream(
-        client.clone(),
-        host.to_owned(),
-        token.to_owned(),
-        conversation.id,
-        stream_tx.clone(),
-    );
-    let mut terminal = TuiTerminal::enter(no_alt_screen)?;
-    loop {
-        while let Ok(event) = stream_rx.try_recv() {
-            if event.view.conversation.id == conversation.id {
-                conversation = event.view.conversation.clone();
-                model.set_view(event.view);
-            }
+    let result: Result<(), Box<dyn std::error::Error>> = async {
+        let mut pending_mentions = initial_mentions;
+        let initial_view =
+            fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
+        let branch = git_branch(project_root.as_deref()).unwrap_or_else(|| "no branch".into());
+        let mut model = TuiModel::new(initial_view, root.clone(), branch);
+        if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await {
+            model.set_cli_preferences(tui_preferences);
         }
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut stream_task = spawn_conversation_stream(
+            client.clone(),
+            host.to_owned(),
+            token.to_owned(),
+            conversation.id,
+            stream_tx.clone(),
+        );
+        let mut terminal = TuiTerminal::enter(no_alt_screen)?;
+        loop {
+            while let Ok(event) = stream_rx.try_recv() {
+                if event.view.conversation.id == conversation.id {
+                    conversation = event.view.conversation.clone();
+                    model.set_view(event.view);
+                }
+            }
 
-        if !model.is_active() {
-            if let Some(line) = model.pop_queue() {
-                let mut command_output = Vec::new();
-                match dispatch_interactive_line(
-                    client,
-                    host,
-                    token,
-                    &mut conversation,
-                    &mut project_id,
-                    &mut project_root,
-                    &mut preferences,
-                    &mut pending_mentions,
-                    line,
-                    &mut command_output,
-                )
-                .await
-                {
-                    Ok(Some(view)) => {
-                        let changed_conversation = view.conversation.id != conversation.id;
-                        conversation = view.conversation.clone();
-                        model.set_view(view);
-                        if changed_conversation {
-                            stream_task.abort();
-                            stream_task = spawn_conversation_stream(
-                                client.clone(),
-                                host.to_owned(),
-                                token.to_owned(),
+            if !model.is_active() {
+                if let Some(line) = model.pop_queue() {
+                    let mut command_output = Vec::new();
+                    match dispatch_interactive_line(
+                        client,
+                        host,
+                        token,
+                        &mut conversation,
+                        &mut project_id,
+                        &mut project_root,
+                        &mut preferences,
+                        &mut pending_mentions,
+                        line,
+                        &mut command_output,
+                    )
+                    .await
+                    {
+                        Ok(Some(view)) => {
+                            let changed_conversation = view.conversation.id != conversation.id;
+                            transfer_invocation_remote(
+                                client,
+                                host,
+                                token,
                                 conversation.id,
-                                stream_tx.clone(),
-                            );
+                                view.conversation.id,
+                                remote,
+                            )
+                            .await?;
+                            conversation = view.conversation.clone();
+                            model.set_view(view);
+                            if changed_conversation {
+                                stream_task.abort();
+                                stream_task = spawn_conversation_stream(
+                                    client.clone(),
+                                    host.to_owned(),
+                                    token.to_owned(),
+                                    conversation.id,
+                                    stream_tx.clone(),
+                                );
+                            }
                         }
+                        Ok(None) => {}
+                        Err(error) => model.set_status(format!("Queued message failed: {error}")),
                     }
-                    Ok(None) => {}
-                    Err(error) => model.set_status(format!("Queued message failed: {error}")),
-                }
-                model.push_notices(command_output);
-                if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await
-                {
-                    model.set_cli_preferences(tui_preferences);
+                    model.push_notices(command_output);
+                    if let Ok(tui_preferences) =
+                        interactive_tui_preferences(client, host, token).await
+                    {
+                        model.set_cli_preferences(tui_preferences);
+                    }
                 }
             }
-        }
 
-        if let Some(request) = model.palette_request() {
-            let plugins = interactive_plugin_candidates(client, host, token).await?;
-            let candidates = interactive_palette_candidates(
-                client,
-                host,
-                token,
-                conversation.id,
-                project_id,
-                &preferences,
-                &plugins,
-                request,
-            )
-            .await;
-            model.set_candidates(candidates);
-        } else {
-            model.set_candidates(Vec::new());
-        }
-        terminal.draw(&mut model)?;
-        if !crossterm::event::poll(std::time::Duration::from_millis(75))? {
-            continue;
-        }
-        let Some(action) = model.handle_event(crossterm::event::read()?)? else {
-            continue;
-        };
-        match action {
-            TuiAction::Exit => break,
-            TuiAction::AnswerInput {
-                request_id,
-                answers,
-            } => {
-                match answer_interactive_input(
+            if let Some(request) = model.palette_request() {
+                let plugins = interactive_plugin_candidates(client, host, token).await?;
+                let candidates = interactive_palette_candidates(
                     client,
                     host,
                     token,
                     conversation.id,
+                    project_id,
+                    &preferences,
+                    &plugins,
+                    request,
+                )
+                .await;
+                model.set_candidates(candidates);
+            } else {
+                model.set_candidates(Vec::new());
+            }
+            terminal.draw(&mut model)?;
+            if !crossterm::event::poll(std::time::Duration::from_millis(75))? {
+                continue;
+            }
+            let Some(action) = model.handle_event(crossterm::event::read()?)? else {
+                continue;
+            };
+            match action {
+                TuiAction::Exit => break,
+                TuiAction::AnswerInput {
                     request_id,
                     answers,
-                )
-                .await
-                {
-                    Ok(view) => {
-                        conversation = view.conversation.clone();
-                        model.set_view(view);
+                } => {
+                    match answer_interactive_input(
+                        client,
+                        host,
+                        token,
+                        conversation.id,
+                        request_id,
+                        answers,
+                    )
+                    .await
+                    {
+                        Ok(view) => {
+                            conversation = view.conversation.clone();
+                            model.set_view(view);
+                        }
+                        Err(error) => model.set_status(format!("Answer failed: {error}")),
                     }
-                    Err(error) => model.set_status(format!("Answer failed: {error}")),
                 }
-            }
-            TuiAction::Queue(line) => {
-                model.queue(line);
-                model.set_status(format!("{} queued", model.queued_len()));
-            }
-            TuiAction::MessageAgent {
-                session_id,
-                content,
-            } => {
-                let result: Result<mcg_domain::ConversationTeamState, _> = decode_api_response(
+                TuiAction::Queue(line) => {
+                    model.queue(line);
+                    model.set_status(format!("{} queued", model.queued_len()));
+                }
+                TuiAction::MessageAgent {
+                    session_id,
+                    content,
+                } => {
+                    let result: Result<mcg_domain::ConversationTeamState, _> = decode_api_response(
                     client
                         .post(format!(
                             "{host}/api/v1/conversations/{}/agent-sessions/{session_id}/messages",
@@ -4836,190 +5299,256 @@ async fn run_interactive(
                     "message agent thread",
                 )
                 .await;
-                match result {
-                    Ok(_) => {
-                        match fetch_conversation(client, host, token, &conversation.id.to_string())
+                    match result {
+                        Ok(_) => {
+                            match fetch_conversation(
+                                client,
+                                host,
+                                token,
+                                &conversation.id.to_string(),
+                            )
                             .await
-                        {
-                            Ok(view) => {
-                                conversation = view.conversation.clone();
-                                model.set_view(view);
-                                model.set_status("Agent message delivered");
-                            }
-                            Err(error) => {
-                                model.set_status(format!(
-                                    "Refresh after agent reply failed: {error}"
-                                ));
-                            }
-                        }
-                    }
-                    Err(error) => model.set_status(format!("Agent message failed: {error}")),
-                }
-            }
-            TuiAction::CopyLatest => {
-                model.set_status(
-                    if copy_to_clipboard(model.latest_assistant_text().unwrap_or_default()) {
-                        "Copied latest response"
-                    } else {
-                        "Clipboard unavailable"
-                    },
-                );
-            }
-            TuiAction::ForkPrevious => {
-                let line = SubmittedLine {
-                    content: "/fork".into(),
-                    mentions: Vec::new(),
-                };
-                let mut command_output = Vec::new();
-                if let Err(error) = run_interactive_slash(
-                    client,
-                    host,
-                    token,
-                    &mut conversation,
-                    &mut project_id,
-                    &mut project_root,
-                    &mut preferences,
-                    &mut pending_mentions,
-                    line,
-                    &mut command_output,
-                )
-                .await
-                {
-                    model.set_status(format!("Fork failed: {error}"));
-                }
-                model.push_notices(command_output);
-                if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await
-                {
-                    model.set_cli_preferences(tui_preferences);
-                }
-            }
-            TuiAction::Steer(line) => {
-                if let Some((requested, _, _)) = parse_interactive_slash(&line) {
-                    let context =
-                        interactive_command_context(client, host, token, project_id, &preferences)
-                            .await;
-                    if let Some(command) = command_named(&requested.to_ascii_lowercase(), context) {
-                        match command.queue_policy {
-                            QueuePolicy::QueueWhenActive => {
-                                model.queue(line);
-                                model.set_status(format!("{} queued", model.queued_len()));
-                            }
-                            QueuePolicy::RejectWhileActive => {
-                                model.set_status(format!(
-                                    "/{} is unavailable while the conversation is active",
-                                    command.name
-                                ));
-                            }
-                            QueuePolicy::Immediate => {
-                                let mut command_output = Vec::new();
-                                match dispatch_interactive_line(
-                                    client,
-                                    host,
-                                    token,
-                                    &mut conversation,
-                                    &mut project_id,
-                                    &mut project_root,
-                                    &mut preferences,
-                                    &mut pending_mentions,
-                                    line,
-                                    &mut command_output,
-                                )
-                                .await
-                                {
-                                    Ok(Some(view)) => {
-                                        let changed_conversation =
-                                            view.conversation.id != conversation.id;
-                                        conversation = view.conversation.clone();
-                                        model.set_view(view);
-                                        if changed_conversation {
-                                            stream_task.abort();
-                                            stream_task = spawn_conversation_stream(
-                                                client.clone(),
-                                                host.to_owned(),
-                                                token.to_owned(),
-                                                conversation.id,
-                                                stream_tx.clone(),
-                                            );
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        model.set_status(format!("Command failed: {error}"));
-                                    }
+                            {
+                                Ok(view) => {
+                                    conversation = view.conversation.clone();
+                                    model.set_view(view);
+                                    model.set_status("Agent message delivered");
                                 }
-                                model.push_notices(command_output);
-                                if let Ok(tui_preferences) =
-                                    interactive_tui_preferences(client, host, token).await
-                                {
-                                    model.set_cli_preferences(tui_preferences);
+                                Err(error) => {
+                                    model.set_status(format!(
+                                        "Refresh after agent reply failed: {error}"
+                                    ));
                                 }
                             }
                         }
-                        continue;
+                        Err(error) => model.set_status(format!("Agent message failed: {error}")),
                     }
                 }
-                let Some(turn) = model.active_turn() else {
-                    continue;
-                };
-                match steer_interactive_message(client, host, token, &conversation, &turn, line)
+                TuiAction::CopyLatest => {
+                    model.set_status(
+                        if copy_to_clipboard(model.latest_assistant_text().unwrap_or_default()) {
+                            "Copied latest response"
+                        } else {
+                            "Clipboard unavailable"
+                        },
+                    );
+                }
+                TuiAction::ForkPrevious => {
+                    let line = SubmittedLine {
+                        content: "/fork".into(),
+                        mentions: Vec::new(),
+                    };
+                    let mut command_output = Vec::new();
+                    let previous_conversation_id = conversation.id;
+                    if let Err(error) = run_interactive_slash(
+                        client,
+                        host,
+                        token,
+                        &mut conversation,
+                        &mut project_id,
+                        &mut project_root,
+                        &mut preferences,
+                        &mut pending_mentions,
+                        line,
+                        &mut command_output,
+                    )
                     .await
-                {
-                    Ok(view) => model.set_view(view),
-                    Err(error) => model.set_status(format!("Steer failed: {error}")),
-                }
-            }
-            TuiAction::Submit(line) => {
-                let mut command_output = Vec::new();
-                match dispatch_interactive_line(
-                    client,
-                    host,
-                    token,
-                    &mut conversation,
-                    &mut project_id,
-                    &mut project_root,
-                    &mut preferences,
-                    &mut pending_mentions,
-                    line,
-                    &mut command_output,
-                )
-                .await
-                {
-                    Ok(Some(view)) => {
-                        let changed_conversation = view.conversation.id != conversation.id;
-                        conversation = view.conversation.clone();
+                    {
+                        model.set_status(format!("Fork failed: {error}"));
+                    } else if conversation.id != previous_conversation_id {
+                        transfer_invocation_remote(
+                            client,
+                            host,
+                            token,
+                            previous_conversation_id,
+                            conversation.id,
+                            remote,
+                        )
+                        .await?;
+                        let view =
+                            fetch_conversation(client, host, token, &conversation.id.to_string())
+                                .await?;
                         model.set_view(view);
-                        if changed_conversation {
-                            stream_task.abort();
-                            stream_task = spawn_conversation_stream(
-                                client.clone(),
-                                host.to_owned(),
-                                token.to_owned(),
-                                conversation.id,
-                                stream_tx.clone(),
-                            );
-                        }
-                        let project_label = project_root
-                            .as_ref()
-                            .map_or_else(|| "No project".into(), |path| path.display().to_string());
-                        model.set_workspace(
-                            project_label,
-                            git_branch(project_root.as_deref())
-                                .unwrap_or_else(|| "no branch".into()),
+                        stream_task.abort();
+                        stream_task = spawn_conversation_stream(
+                            client.clone(),
+                            host.to_owned(),
+                            token.to_owned(),
+                            conversation.id,
+                            stream_tx.clone(),
                         );
                     }
-                    Ok(None) => {}
-                    Err(error) => model.set_status(format!("Command failed: {error}")),
+                    model.push_notices(command_output);
+                    if let Ok(tui_preferences) =
+                        interactive_tui_preferences(client, host, token).await
+                    {
+                        model.set_cli_preferences(tui_preferences);
+                    }
                 }
-                model.push_notices(command_output);
-                if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await
-                {
-                    model.set_cli_preferences(tui_preferences);
+                TuiAction::Steer(line) => {
+                    if let Some((requested, _, _)) = parse_interactive_slash(&line) {
+                        let context = interactive_command_context(
+                            client,
+                            host,
+                            token,
+                            conversation.id,
+                            project_id,
+                            &preferences,
+                        )
+                        .await;
+                        if let Some(command) =
+                            command_named(&requested.to_ascii_lowercase(), context)
+                        {
+                            match command.queue_policy {
+                                QueuePolicy::QueueWhenActive => {
+                                    model.queue(line);
+                                    model.set_status(format!("{} queued", model.queued_len()));
+                                }
+                                QueuePolicy::RejectWhileActive => {
+                                    model.set_status(format!(
+                                        "/{} is unavailable while the conversation is active",
+                                        command.name
+                                    ));
+                                }
+                                QueuePolicy::Immediate => {
+                                    let mut command_output = Vec::new();
+                                    match dispatch_interactive_line(
+                                        client,
+                                        host,
+                                        token,
+                                        &mut conversation,
+                                        &mut project_id,
+                                        &mut project_root,
+                                        &mut preferences,
+                                        &mut pending_mentions,
+                                        line,
+                                        &mut command_output,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(view)) => {
+                                            let changed_conversation =
+                                                view.conversation.id != conversation.id;
+                                            transfer_invocation_remote(
+                                                client,
+                                                host,
+                                                token,
+                                                conversation.id,
+                                                view.conversation.id,
+                                                remote,
+                                            )
+                                            .await?;
+                                            conversation = view.conversation.clone();
+                                            model.set_view(view);
+                                            if changed_conversation {
+                                                stream_task.abort();
+                                                stream_task = spawn_conversation_stream(
+                                                    client.clone(),
+                                                    host.to_owned(),
+                                                    token.to_owned(),
+                                                    conversation.id,
+                                                    stream_tx.clone(),
+                                                );
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            model.set_status(format!("Command failed: {error}"));
+                                        }
+                                    }
+                                    model.push_notices(command_output);
+                                    if let Ok(tui_preferences) =
+                                        interactive_tui_preferences(client, host, token).await
+                                    {
+                                        model.set_cli_preferences(tui_preferences);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    let Some(turn) = model.active_turn() else {
+                        continue;
+                    };
+                    match steer_interactive_message(client, host, token, &conversation, &turn, line)
+                        .await
+                    {
+                        Ok(view) => model.set_view(view),
+                        Err(error) => model.set_status(format!("Steer failed: {error}")),
+                    }
+                }
+                TuiAction::Submit(line) => {
+                    let mut command_output = Vec::new();
+                    match dispatch_interactive_line(
+                        client,
+                        host,
+                        token,
+                        &mut conversation,
+                        &mut project_id,
+                        &mut project_root,
+                        &mut preferences,
+                        &mut pending_mentions,
+                        line,
+                        &mut command_output,
+                    )
+                    .await
+                    {
+                        Ok(Some(view)) => {
+                            let changed_conversation = view.conversation.id != conversation.id;
+                            transfer_invocation_remote(
+                                client,
+                                host,
+                                token,
+                                conversation.id,
+                                view.conversation.id,
+                                remote,
+                            )
+                            .await?;
+                            conversation = view.conversation.clone();
+                            model.set_view(view);
+                            if changed_conversation {
+                                stream_task.abort();
+                                stream_task = spawn_conversation_stream(
+                                    client.clone(),
+                                    host.to_owned(),
+                                    token.to_owned(),
+                                    conversation.id,
+                                    stream_tx.clone(),
+                                );
+                            }
+                            let project_label = project_root.as_ref().map_or_else(
+                                || "No project".into(),
+                                |path| path.display().to_string(),
+                            );
+                            model.set_workspace(
+                                project_label,
+                                git_branch(project_root.as_deref())
+                                    .unwrap_or_else(|| "no branch".into()),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => model.set_status(format!("Command failed: {error}")),
+                    }
+                    model.push_notices(command_output);
+                    if let Ok(tui_preferences) =
+                        interactive_tui_preferences(client, host, token).await
+                    {
+                        model.set_cli_preferences(tui_preferences);
+                    }
                 }
             }
         }
+        stream_task.abort();
+        Ok(())
     }
-    stream_task.abort();
-    Ok(())
+    .await;
+    if remote.is_some() {
+        let release = release_invocation_remote(client, host, token, conversation.id).await;
+        if result.is_ok() {
+            let _ = release?;
+        }
+    }
+    result
 }
 
 async fn answer_interactive_input(
@@ -5372,8 +5901,15 @@ async fn interactive_palette_candidates(
 ) -> Vec<PaletteCandidate> {
     let needle = request.query.to_ascii_lowercase();
     if request.kind == PaletteKind::Slash {
-        let context =
-            interactive_command_context(client, host, token, project_id, preferences).await;
+        let context = interactive_command_context(
+            client,
+            host,
+            token,
+            conversation_id,
+            project_id,
+            preferences,
+        )
+        .await;
         return SLASH_COMMANDS
             .iter()
             .filter(|command| command.is_available(context) && command.name.starts_with(&needle))
@@ -5398,7 +5934,9 @@ async fn interactive_palette_candidates(
     }
     if request.kind == PaletteKind::Dollar {
         let discovery = client
-            .post(format!("{host}/api/v1/codex/discovery"))
+            .post(format!(
+                "{host}/api/v1/conversations/{conversation_id}/codex/discovery"
+            ))
             .bearer_auth(token)
             .json(&serde_json::json!({ "cwds": [], "force_reload": false }))
             .send()
@@ -5628,7 +6166,9 @@ async fn interactive_command_options(
                 "Use the catalog default".into(),
             )];
             if let Ok(response) = client
-                .get(format!("{host}/api/v1/codex/models"))
+                .get(format!(
+                    "{host}/api/v1/conversations/{conversation_id}/codex/models"
+                ))
                 .bearer_auth(token)
                 .send()
                 .await
@@ -5779,7 +6319,9 @@ async fn interactive_command_options(
         "apps" => {
             let mut apps = Vec::new();
             if let Ok(response) = client
-                .post(format!("{host}/api/v1/codex/discovery"))
+                .post(format!(
+                    "{host}/api/v1/conversations/{conversation_id}/codex/discovery"
+                ))
                 .bearer_auth(token)
                 .json(&serde_json::json!({ "cwds": [], "force_reload": false }))
                 .send()
@@ -5827,7 +6369,9 @@ async fn interactive_command_options(
             .and_then(|view| view.conversation.project_id);
         if let Some(project_id) = project_id
             && let Ok(response) = client
-                .get(format!("{host}/api/v1/codex/permission-profiles"))
+                .get(format!(
+                    "{host}/api/v1/conversations/{conversation_id}/codex/permission-profiles"
+                ))
                 .query(&[("project_id", project_id.to_string())])
                 .bearer_auth(token)
                 .send()
@@ -5867,11 +6411,14 @@ async fn interactive_command_context(
     client: &reqwest::Client,
     host: &str,
     token: &str,
+    conversation_id: ConversationId,
     project_id: Option<ProjectId>,
     preferences: &ExecutionPreferences,
 ) -> CommandContext {
     let models = client
-        .get(format!("{host}/api/v1/codex/models"))
+        .get(format!(
+            "{host}/api/v1/conversations/{conversation_id}/codex/models"
+        ))
         .bearer_auth(token)
         .send()
         .await
@@ -5914,7 +6461,9 @@ async fn interactive_command_context(
         false
     };
     let apps = match client
-        .post(format!("{host}/api/v1/codex/discovery"))
+        .post(format!(
+            "{host}/api/v1/conversations/{conversation_id}/codex/discovery"
+        ))
         .bearer_auth(token)
         .json(&serde_json::json!({ "cwds": [], "force_reload": false }))
         .send()
@@ -5935,7 +6484,9 @@ async fn interactive_command_context(
     };
     let windows_sandbox_setup = if cfg!(windows) {
         let configuration = client
-            .get(format!("{host}/api/v1/codex/configuration"))
+            .get(format!(
+                "{host}/api/v1/conversations/{conversation_id}/codex/configuration"
+            ))
             .bearer_auth(token)
             .send()
             .await
@@ -6138,8 +6689,15 @@ async fn run_interactive_slash(
     let (name, argument_start, argument) =
         parse_interactive_slash(&line).ok_or("invalid slash command")?;
     let requested_name = name.to_ascii_lowercase();
-    let command_context =
-        interactive_command_context(client, host, token, *project_id, preferences).await;
+    let command_context = interactive_command_context(
+        client,
+        host,
+        token,
+        conversation.id,
+        *project_id,
+        preferences,
+    )
+    .await;
     let command = command_named(&requested_name, command_context).ok_or_else(|| {
         format!("unknown or unavailable command /{requested_name}; type /help to list commands")
     })?;
@@ -6647,7 +7205,10 @@ async fn run_interactive_slash(
                 )
             );
             if let Ok(models) = client
-                .get(format!("{host}/api/v1/codex/models"))
+                .get(format!(
+                    "{host}/api/v1/conversations/{}/codex/models",
+                    conversation.id
+                ))
                 .bearer_auth(token)
                 .send()
                 .await
@@ -7077,7 +7638,10 @@ async fn run_interactive_slash(
         "skills" | "hooks" | "apps" => {
             let discovery: serde_json::Value = decode_api_response(
                 client
-                    .post(format!("{host}/api/v1/codex/discovery"))
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/codex/discovery",
+                        conversation.id
+                    ))
                     .bearer_auth(token)
                     .json(&serde_json::json!({
                         "cwds": project_root.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
@@ -13244,6 +13808,94 @@ async fn resolve_approval(
 mod tests {
     use super::*;
     use mcg_storage::{BackupBundleEntry, BackupBundleManifest};
+
+    #[test]
+    fn invocation_remote_flags_parse_at_root_and_supported_session_commands() {
+        let root = Cli::try_parse_from(["mcg", "--remote", "ws://127.0.0.1:4500"])
+            .expect("root remote flag");
+        assert_eq!(root.remote.remote.as_deref(), Some("ws://127.0.0.1:4500"));
+
+        let resume = CodexCompatCli::try_parse_from([
+            "mcg",
+            "resume",
+            "--remote",
+            "wss://codex.example.test:443",
+            "conversation",
+        ])
+        .expect("resume remote flag");
+        let CodexCompatCommand::Resume(args) = resume.command else {
+            panic!("resume command");
+        };
+        assert_eq!(
+            args.remote.remote.as_deref(),
+            Some("wss://codex.example.test:443")
+        );
+
+        let archive = CodexCompatCli::try_parse_from([
+            "mcg",
+            "archive",
+            "conversation",
+            "--remote",
+            "ws://localhost:4500",
+        ])
+        .expect("archive remote flag");
+        let CodexCompatCommand::Archive(args) = archive.command else {
+            panic!("archive command");
+        };
+        assert_eq!(args.remote.remote.as_deref(), Some("ws://localhost:4500"));
+
+        assert!(codex_compat_command_requested_from(
+            ["--remote", "ws://127.0.0.1:4500", "resume", "conversation",]
+                .into_iter()
+                .map(OsString::from),
+        ));
+        assert!(codex_compat_command_requested_from(
+            [
+                "--remote=wss://codex.example.test:443",
+                "archive",
+                "conversation",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        ));
+    }
+
+    #[test]
+    fn invocation_remote_resolution_enforces_security_and_subcommand_precedence() {
+        assert!(
+            resolve_invocation_remote(
+                InteractiveRemoteArgs::default(),
+                InteractiveRemoteArgs {
+                    remote: None,
+                    remote_auth_token_env: Some("MISSING".into()),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_invocation_remote(
+                InteractiveRemoteArgs {
+                    remote: Some("ws://example.test:4500".into()),
+                    remote_auth_token_env: None,
+                },
+                InteractiveRemoteArgs::default(),
+            )
+            .is_err()
+        );
+        let resolved = resolve_invocation_remote(
+            InteractiveRemoteArgs {
+                remote: Some("ws://127.0.0.1:4500".into()),
+                remote_auth_token_env: None,
+            },
+            InteractiveRemoteArgs {
+                remote: Some("wss://codex.example.test:443".into()),
+                remote_auth_token_env: None,
+            },
+        )
+        .expect("secure remote")
+        .expect("remote selection");
+        assert_eq!(resolved.endpoint, "wss://codex.example.test:443");
+    }
 
     fn cli_update_backup(backup_id: uuid::Uuid) -> BackupSummaryResponse {
         BackupSummaryResponse {

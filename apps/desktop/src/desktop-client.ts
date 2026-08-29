@@ -644,7 +644,10 @@ export interface CodexPermissionProfile { id: string; description?: string; allo
 export interface CodexAccount { authenticated: boolean; account_type?: string; email?: string; plan_type?: string; requires_openai_auth: boolean; }
 export type CodexLoginMethod = "browser" | "device_code" | "api_key" | "access_token";
 export interface CodexLoginStart { loginId?: string; authUrl?: string; verificationUrl?: string; userCode?: string; }
-export type CodexTransportConfig = { kind: "local_stdio" } | { kind: "remote_web_socket"; endpoint: string; auth_token_env?: string };
+export type CodexTransportConfig =
+  | { kind: "local_stdio" }
+  | { kind: "remote_web_socket"; endpoint: string; auth_token_env?: string }
+  | { kind: "remote_unix_socket"; socket_path: string };
 export interface CodexRateLimitWindow { used_percent: number; remaining_percent: number; resets_at?: number; }
 export interface CodexRateLimitBucket extends CodexRateLimitWindow { limit_id: string; limit_name?: string; }
 export interface CodexRateLimits {

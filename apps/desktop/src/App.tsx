@@ -10067,7 +10067,11 @@ export function App() {
           </div>
           {advanced && <TechnicalDetails
             title="Codex app-server transport"
-            summary={codexHarnessStatus?.transport?.kind === "remote_web_socket" ? `Remote · ${codexHarnessStatus.transport.endpoint}` : "Local stdio (default)"}
+            summary={codexHarnessStatus?.transport?.kind === "remote_web_socket"
+              ? `Remote · ${codexHarnessStatus.transport.endpoint}`
+              : codexHarnessStatus?.transport?.kind === "remote_unix_socket"
+                ? `Unix socket · ${codexHarnessStatus.transport.socket_path}`
+                : "Local stdio (default)"}
           >
             <p className="form-note">Connect to an explicitly managed Codex app-server over WebSocket. Use <code>wss://</code> except for localhost or an SSH-forwarded loopback connection. MetaCog stores only the environment-variable name, never its bearer token.</p>
             <div className="settings-card settings-card-stack" aria-label="Codex app-server transport configuration">

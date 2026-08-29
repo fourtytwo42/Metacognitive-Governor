@@ -33,7 +33,9 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+async-tungstenite.workspace = true
 ed25519-dalek.workspace = true
+futures-util.workspace = true
 http-body-util.workspace = true
 mcg-config = { path = "../mcg-config" }
 tempfile.workspace = true

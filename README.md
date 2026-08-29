@@ -139,6 +139,20 @@ environment variable containing the bearer token; it never stores that token.
 Unencrypted `ws://` is accepted only for loopback endpoints, while remote hosts
 must use `wss://`.
 
+The interactive CLI also matches Codex's invocation-local transport flags. The
+override is scoped to the selected conversation and is released when settled;
+accepted turns, goals, and governed commands retain their live connection when
+the terminal detaches. Bearer values are read only from the named environment
+variable and are never written to settings, status, logs, or conversation data.
+Unix sockets use Codex's `unix://` or `unix://PATH` syntax on Unix platforms.
+
+```powershell
+$env:CODEX_REMOTE_TOKEN = "..."
+mcg --remote wss://codex.example.test:443 --remote-auth-token-env CODEX_REMOTE_TOKEN
+mcg resume --remote ws://127.0.0.1:4512 CONVERSATION_ID
+mcg queue --remote ws://127.0.0.1:4512 CONVERSATION_ID --message "continue testing"
+```
+
 Codex-compatible local OSS execution is available anywhere model-consuming
 global options are accepted. MetaCog discovers the same Ollama and LM Studio
 providers, uses their Codex defaults, and prepares a missing selected model
