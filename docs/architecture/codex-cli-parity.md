@@ -54,7 +54,7 @@ Environment variables alone are not capability discovery.
 | global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
 | `sandbox` | Native | `mcg sandbox` is a daemon-free pass-through to the pinned Codex 0.150.1 Windows restricted-token sandbox. It preserves explicit state JSON, readable roots, network disabling, named permission/config profiles, managed configuration, working directory, literal command arguments, and repeatable config/feature overrides. The child process exit code and diagnostics pass through unchanged. |
 | `apply` / `a` | Native | Resolves the current canonical Git project, runs the pinned `codex apply TASK_ID` in an isolated shadow worktree seeded with the exact tracked, staged, dirty, and bounded-untracked owner baseline, validates and persists the resulting diff, then integrates it only if the live baseline is unchanged. Digest checks, dry-run application, preimage journaling, rollback, restart recovery, and project-scoped cleanup keep the owner workspace governed. The desktop exposes the same contract as a review-first Pull Requests flow with explicit Apply and Discard actions. |
-| `update` | Missing | MetaCog must update and verify the complete signed application bundle rather than updating only its pinned Codex sidecar. |
+| `update` | Native (packaged Windows) | `mcg update` uses the same immutable HTTPS/minisign authority as Desktop, selects only a strictly newer platform artifact, verifies the exact download, rechecks the feed identity, creates and verifies a fresh credential-free backup, binds the reviewed version to the Windows installer PE resources, stops the daemon, and hands replacement to the authenticated packaged supervisor. Development/unsigned builds fail closed. Linux and macOS CLIs direct installation through the existing Desktop updater until a complete packaged self-replacement contract is qualified there. |
 | `mcp-server` | Superseded | Current Codex documentation marks this family deprecated and directs integrations to app-server. MetaCog already uses its pinned app-server contract and will not add a new deprecated ungoverned endpoint. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
@@ -218,6 +218,22 @@ discard removes both the isolated worktree and sensitive durable patch content.
 The desktop Pull Requests surface lists recoverable candidates and keeps cloud
 changes reviewable until an explicit Apply action; its light- and dark-theme
 controls share the application tokens and meet the same accessibility gate.
+
+Cycle 23 adds stable top-level `update` for complete packaged Windows releases.
+The signed-feed parser and trust validation now live in `mcg-updater`, shared by
+the CLI and Desktop adapter. The CLI accepts no runtime, project, configuration,
+or feature overrides; it checks the immutable owner-controlled HTTPS feed,
+selects only a strictly newer target, bounds the manifest and artifact, validates
+canonical minisign envelopes, verifies the exact downloaded bytes, and rechecks
+the candidate before mutation. Installation requires a fresh verified
+credential-free database backup and an exact installed `mcg.exe`,
+`mcg-desktop.exe`, and `mcg-updater.exe` topology. The Windows supervisor request
+now pins either the packaged Desktop or packaged CLI requester identity, waits
+for that exact process to exit, binds the signed artifact to its embedded PE
+`ProductVersion`, supervises the installer, records failure evidence, recovers
+the previous installation, and removes only its private staged files. Unsigned
+development builds and incomplete installations fail closed. The Desktop update
+layout and workflow are unchanged; they consume the same shared trust contract.
 
 Codex-compatible support remains incomplete for local providers/OSS, remote
 endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1

@@ -15,7 +15,7 @@ mod interactive;
 use std::os::windows::process::CommandExt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use eventsource_stream::Eventsource as _;
@@ -405,6 +405,8 @@ enum CodexCompatCommand {
     /// Apply the latest diff produced by a Codex cloud task to the current project.
     #[command(alias = "a")]
     Apply(ApplyArgs),
+    /// Check for and apply an owner-signed MetaCog release update.
+    Update,
     /// Continue a previous interactive conversation.
     Resume(Box<ResumeArgs>),
     /// Queue a message for an existing conversation.
@@ -2455,6 +2457,7 @@ fn codex_compat_command_requested() -> bool {
         "e",
         "apply",
         "a",
+        "update",
         "agents",
         "queue",
         "migrate-rollouts",
@@ -2970,6 +2973,36 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     if let CodexCompatCommand::Sandbox(args) = &cli.command {
         return run_codex_sandbox(args, cli.project.as_deref(), &native_overrides);
     }
+    if matches!(cli.command, CodexCompatCommand::Update) {
+        if cli.model.is_some()
+            || cli.project.is_some()
+            || cli.sandbox.is_some()
+            || cli.approval_policy.is_some()
+            || cli.approve_for_me
+            || cli.dangerously_bypass_approvals_and_sandbox
+            || !cli.images.is_empty()
+            || !cli.add_dirs.is_empty()
+            || native_overrides.codex_profile.is_some()
+            || native_overrides.strict_config
+            || native_overrides.no_alt_screen
+            || !native_overrides.raw_config_overrides.is_empty()
+            || !native_overrides.feature_overrides.is_empty()
+        {
+            return Err("`mcg update` does not accept runtime or project overrides".into());
+        }
+        let config = AppConfig::default();
+        let token_path = cli
+            .token_file
+            .clone()
+            .unwrap_or_else(|| config.auth_token_path());
+        return run_codex_compatible_update(
+            &reqwest::Client::new(),
+            cli.host.trim_end_matches('/'),
+            &config,
+            &token_path,
+        )
+        .await;
+    }
     let model = cli.model;
     let sandbox = cli.sandbox;
     let approval_policy = cli.approval_policy;
@@ -3048,6 +3081,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
+        CodexCompatCommand::Update => unreachable!("update handled before daemon authentication"),
         CodexCompatCommand::Exec(args) => {
             let ExecArgs {
                 command,
@@ -3409,6 +3443,282 @@ async fn run_codex_compatible_apply(
         println!("{path}");
     }
     Ok(())
+}
+
+async fn run_codex_compatible_update(
+    client: &reqwest::Client,
+    host: &str,
+    config: &AppConfig,
+    token_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let updater = mcg_updater::TrustedUpdaterConfig::compiled()?;
+    let Some(candidate) = updater.check(env!("CARGO_PKG_VERSION")).await? else {
+        println!("MetaCog is up to date ({}).", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    };
+    println!(
+        "MetaCog {} is available from {}.",
+        candidate.version,
+        updater.trusted_origin()
+    );
+    if let Some(notes) = candidate
+        .notes
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        println!("{}", notes.trim());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (client, host, config, token_path);
+        return Err("This packaged CLI cannot safely replace the complete MetaCog application on this platform yet. Open Settings → Updates in MetaCog Desktop to install the verified release.".into());
+    }
+
+    #[cfg(windows)]
+    {
+        let installer = updater.download_and_verify(&candidate).await?;
+        let reviewed_again = updater
+            .check(env!("CARGO_PKG_VERSION"))
+            .await?
+            .ok_or("The checked update is no longer available.")?;
+        if reviewed_again != candidate {
+            return Err(format!(
+                "The available update changed while downloading. Run `mcg update` again to review {}.",
+                reviewed_again.version
+            )
+            .into());
+        }
+        let token = if let Ok(token) = std::env::var("MCG_AUTH_TOKEN") {
+            token
+        } else {
+            std::fs::read_to_string(token_path).map_err(|error| {
+                format!(
+                    "cannot read local daemon token at {}: {error}; start MetaCog before installing the update",
+                    token_path.display()
+                )
+            })?
+        };
+        install_verified_windows_cli_update(
+            client,
+            host,
+            token.trim(),
+            config,
+            token_path,
+            &candidate.version,
+            &installer,
+        )
+        .await
+    }
+}
+
+#[cfg(windows)]
+async fn install_verified_windows_cli_update(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    config: &AppConfig,
+    token_path: &std::path::Path,
+    expected_version: &str,
+    installer: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let current = std::env::current_exe()?.canonicalize()?;
+    let install_root = current
+        .parent()
+        .ok_or("the packaged MetaCog CLI has no installation directory")?;
+    let packaged_cli = install_root.join("mcg.exe");
+    let metadata = std::fs::symlink_metadata(&packaged_cli)
+        .map_err(|_| "`mcg update` is available only from a complete installed MetaCog release")?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || packaged_cli.canonicalize()? != current
+        || !install_root.join("mcg-desktop.exe").is_file()
+    {
+        return Err(
+            "`mcg update` is available only from a complete installed MetaCog release".into(),
+        );
+    }
+    let supervisor_path = install_root.join("mcg-updater.exe");
+    let supervisor_metadata = std::fs::symlink_metadata(&supervisor_path)
+        .map_err(|_| "the packaged MetaCog update supervisor is missing")?;
+    if supervisor_metadata.file_type().is_symlink() || !supervisor_metadata.is_file() {
+        return Err("the packaged MetaCog update supervisor is not a regular file".into());
+    }
+    let supervisor = std::fs::read(&supervisor_path)?;
+    let backup_id = uuid::Uuid::new_v4();
+    create_and_verify_cli_update_backup(client, host, token, backup_id).await?;
+    let staged = mcg_updater::stage_verified_windows_cli_installer(
+        &config.data_directory,
+        install_root,
+        backup_id,
+        std::process::id(),
+        expected_version,
+        installer,
+        &supervisor,
+    )?;
+    if let Err(error) = request_stop(client, host, token).await {
+        remove_staged_cli_update(&staged);
+        return Err(format!("The local service could not be stopped for update: {error}").into());
+    }
+    if let Err(error) = wait_for_daemon_stop(client, host, token, 10).await {
+        remove_staged_cli_update(&staged);
+        let recovery = restart_packaged_service(host, token_path, install_root, config).await;
+        return Err(format!("{error}. {recovery}").into());
+    }
+    let mut command = ProcessCommand::new(&staged.supervisor_path);
+    command
+        .arg("--apply")
+        .arg(&staged.request_path)
+        .env("MCG_DATA_DIR", &config.data_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.creation_flags(0x0800_0000);
+    if let Err(error) = command.spawn() {
+        remove_staged_cli_update(&staged);
+        let recovery = restart_packaged_service(host, token_path, install_root, config).await;
+        return Err(
+            format!("The supervised Windows updater could not start: {error}. {recovery}").into(),
+        );
+    }
+    println!("Verified MetaCog {expected_version}; created and verified backup {backup_id}.");
+    println!("The supervised installer will begin after this CLI process exits.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_staged_cli_update(staged: &mcg_updater::StagedWindowsUpdate) {
+    let _ = std::fs::remove_file(&staged.request_path);
+    let _ = std::fs::remove_file(&staged.installer_path);
+    let _ = std::fs::remove_file(&staged.supervisor_path);
+}
+
+async fn create_and_verify_cli_update_backup(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    backup_id: uuid::Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let requested_at = Utc::now();
+    let created: BackupSummaryResponse = decode_api_response(
+        client
+            .post(format!("{host}/api/v1/backups/{backup_id}"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "create pre-update backup",
+    )
+    .await?;
+    let verified: BackupSummaryResponse = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/backups/{backup_id}/verify"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "verify pre-update backup",
+    )
+    .await?;
+    if created != verified {
+        return Err("The automatic pre-update backup changed during verification.".into());
+    }
+    validate_cli_update_backup(&verified, backup_id, requested_at, Utc::now())?;
+    Ok(())
+}
+
+fn validate_cli_update_backup(
+    summary: &BackupSummaryResponse,
+    backup_id: uuid::Uuid,
+    requested_at: DateTime<Utc>,
+    verified_at: DateTime<Utc>,
+) -> Result<(), String> {
+    if summary.backup_id != backup_id || summary.file_name != format!("{backup_id}.mcgb") {
+        return Err("The automatic pre-update backup identity is not canonical.".into());
+    }
+    if summary.size_bytes == 0
+        || summary.sha256.len() != 64
+        || !summary
+            .sha256
+            .bytes()
+            .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+    {
+        return Err("The automatic pre-update backup digest or size is invalid.".into());
+    }
+    if summary.manifest.application_version != env!("CARGO_PKG_VERSION") {
+        return Err("The automatic pre-update backup came from another MetaCog version.".into());
+    }
+    if summary.manifest.secrets_included || summary.manifest.secret_encryption.is_some() {
+        return Err("Automatic pre-update backups must not contain credentials.".into());
+    }
+    if !summary
+        .manifest
+        .entries
+        .iter()
+        .any(|entry| entry.path == "state/mcg.sqlite3" && entry.size_bytes > 0)
+    {
+        return Err(
+            "The automatic pre-update backup does not contain the MetaCog database.".into(),
+        );
+    }
+    let skew = TimeDelta::seconds(5);
+    if summary.manifest.created_at < requested_at - skew
+        || summary.manifest.created_at > verified_at + skew
+    {
+        return Err("The automatic pre-update backup is not fresh for this update.".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn restart_packaged_service(
+    host: &str,
+    token_path: &std::path::Path,
+    install_root: &std::path::Path,
+    config: &AppConfig,
+) -> String {
+    let service = install_root.join("mcg-service.exe");
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let metadata = std::fs::symlink_metadata(&service)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("the packaged service is not a regular file".into());
+        }
+        let bind_address = daemon_bind_address(host)?;
+        let log_path = config.data_directory.join("mcg-daemon.log");
+        let stdout_log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let stderr_log = stdout_log.try_clone()?;
+        let mut command = ProcessCommand::new(service);
+        command
+            .env("MCG_BIND_ADDRESS", bind_address)
+            .env("MCG_DATA_DIR", &config.data_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log));
+        command.creation_flags(0x0800_0000 | 0x0000_0008);
+        command.spawn()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            let client = reqwest::Client::new();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if daemon_status_if_ready(&client, host, token_path)
+                    .await
+                    .is_some()
+                {
+                    break "The previous local service was restarted.".into();
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break "The previous local service was launched but did not become ready."
+                        .into();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+        Err(error) => format!("The previous local service could not restart: {error}"),
+    }
 }
 
 async fn run_codex_features(
@@ -12483,6 +12793,52 @@ async fn resolve_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcg_storage::{BackupBundleEntry, BackupBundleManifest};
+
+    fn cli_update_backup(backup_id: uuid::Uuid) -> BackupSummaryResponse {
+        BackupSummaryResponse {
+            backup_id,
+            file_name: format!("{backup_id}.mcgb"),
+            sha256: "a".repeat(64),
+            size_bytes: 1_024,
+            manifest: BackupBundleManifest {
+                schema_version: 2,
+                application_version: env!("CARGO_PKG_VERSION").into(),
+                created_at: Utc::now(),
+                secrets_included: false,
+                secret_encryption: None,
+                entries: vec![BackupBundleEntry {
+                    path: "state/mcg.sqlite3".into(),
+                    size_bytes: 512,
+                    sha256: "b".repeat(64),
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn cli_update_backup_must_be_current_fresh_and_credential_free() {
+        let backup_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let valid = cli_update_backup(backup_id);
+        assert!(validate_cli_update_backup(&valid, backup_id, now, now).is_ok());
+
+        let mut stale = valid.clone();
+        stale.manifest.created_at = now - TimeDelta::minutes(10);
+        assert!(validate_cli_update_backup(&stale, backup_id, now, now).is_err());
+
+        let mut secret = valid.clone();
+        secret.manifest.secrets_included = true;
+        assert!(validate_cli_update_backup(&secret, backup_id, now, now).is_err());
+
+        let mut wrong_version = valid.clone();
+        wrong_version.manifest.application_version = "999.0.0".into();
+        assert!(validate_cli_update_backup(&wrong_version, backup_id, now, now).is_err());
+
+        let mut missing_database = valid;
+        missing_database.manifest.entries.clear();
+        assert!(validate_cli_update_backup(&missing_database, backup_id, now, now).is_err());
+    }
 
     #[test]
     fn native_review_turn_renders_only_the_latest_human_finding() {
@@ -14042,6 +14398,9 @@ mod tests {
             apply.command,
             CodexCompatCommand::Apply(ApplyArgs { task_id }) if task_id == "task-123"
         ));
+        let update = CodexCompatCli::try_parse_from(["mcg", "update"])
+            .expect("Codex-compatible update command");
+        assert!(matches!(update.command, CodexCompatCommand::Update));
 
         let migrate = CodexCompatCli::try_parse_from([
             "mcg",

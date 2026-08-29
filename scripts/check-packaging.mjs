@@ -218,7 +218,7 @@ for (const invariant of ["mkdtemp", "generate-updater-uat-tls.py", "validity_hou
 for (const invariant of ["archive entry path is unsafe", "archive entry has an unsafe type", "source version surfaces do not agree", "metadata", "--offline", "--locked", "workspace_members", "destination already exists", "status", "--porcelain", "rm(destination"]) {
   requireText(updaterUatSourcePreparer, invariant, "updater UAT source preparer");
 }
-for (const invariant of ["0.1.1-uat.1", "01.1.0", "invalid preparation unexpectedly succeeded", "notEqual(baselineResult.commit", "finally", "rm(resolved"]) {
+for (const invariant of ["sourceVersion", "candidateVersion", "patchVersion + 1", "01.1.0", "invalid preparation unexpectedly succeeded", "notEqual(baselineResult.commit", "finally", "rm(resolved"]) {
   requireText(updaterUatSourcePreparerTest, invariant, "updater UAT source preparation test");
 }
 for (const invariant of ["candidate version must be newer", "canonical loopback HTTPS", "prepared source provenance diverged", "archive source preparer", "archive TLS generator", "source_preparer_sha256", "tls_generator_sha256", "npm.cmd ci", "generate-updater-uat-tls.py", '"signer", "generate"', "qualification-public.json", "qualification-private.json", "updater_public_key_sha256", "rm(workspace"]) {
@@ -277,7 +277,7 @@ for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 8', 'toolchain_root', 'C
 for (const invariant of ["NODE_TOOLCHAIN_MAX_BYTES", "NODE_TOOLCHAIN_MAX_FILES", "NODE_TOOLCHAIN_MAX_DEPTH", "BROWSER_RUNTIME_MAX_BYTES", "BROWSER_RUNTIME_MAX_FILES", "BROWSER_RUNTIME_MAX_DEPTH", '"--ro-bind"', 'r"C:\\mcg-toolchain"', 'r"C:\\mcg-browser"', '"/mcg-shadow-runner"']) {
   requireText(shadowVerification, invariant, "bounded read-only shadow toolchain contract");
 }
-for (const invariant of ["REQUEST_SCHEMA: u32 = 3", "stage_verified_windows_installer", "windows_installer_product_version", "expected_version", "installer_product_version", "canonical_regular_child", "installer_sha256", "supervisor_sha256", "validate_running_staged_supervisor", "cleanup_staged_windows_supervisor", "wait_for_desktop_exit", 'args(["/P", "/R", "/UPDATE", "/ARGS"])', "MCG_UPDATE_RECOVERY_NOTICE", "The update did not complete"]) {
+for (const invariant of ["REQUEST_SCHEMA: u32 = 4", "WindowsUpdateRequester", "stage_verified_windows_installer", "stage_verified_windows_cli_installer", "windows_installer_product_version", "expected_version", "installer_product_version", "canonical_regular_child", "canonical_packaged_requester", "installer_sha256", "supervisor_sha256", "validate_running_staged_supervisor", "cleanup_staged_windows_supervisor", "wait_for_requester_exit", 'args(["/P", "/R", "/UPDATE", "/ARGS"])', "MCG_UPDATE_RECOVERY_NOTICE", "The update did not complete"]) {
   requireText(updaterSupervisor, invariant, "supervised Windows updater contract");
 }
 for (const invariant of ["1b80120ef26a28e065e67f89bfef873f13bdd317", "support_setuid=false", "meson test", "bubblewrap-v0.11.2.tar.gz", "SHA256SUMS"]) {

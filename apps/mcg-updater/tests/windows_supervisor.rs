@@ -7,7 +7,9 @@ use std::{
     time::Duration,
 };
 
-use mcg_updater::{WindowsUpdateOutcome, stage_verified_windows_installer};
+use mcg_updater::{
+    WindowsUpdateOutcome, stage_verified_windows_cli_installer, stage_verified_windows_installer,
+};
 use uuid::Uuid;
 
 #[test]
@@ -114,4 +116,64 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     assert!(!staged.request_path.exists());
     assert!(!staged.installer_path.exists());
     assert!(!staged.supervisor_path.exists());
+}
+
+#[test]
+fn real_supervisor_accepts_only_the_declared_packaged_cli_requester() {
+    let temporary = tempfile::tempdir().unwrap();
+    let install = temporary.path().join("install");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(&install).unwrap();
+    let system32 =
+        std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let supervisor = install.join("mcg-updater.exe");
+    fs::copy(env!("CARGO_BIN_EXE_mcg-updater"), &supervisor).unwrap();
+    fs::copy(system32.join("PING.EXE"), install.join("mcg-desktop.exe")).unwrap();
+    let cli = install.join("mcg.exe");
+    fs::copy(system32.join("PING.EXE"), &cli).unwrap();
+    let mut cli_process = Command::new(&cli)
+        .args(["-n", "8", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let request_id = Uuid::new_v4();
+    let installer = fs::read(system32.join("curl.exe")).unwrap();
+    let expected_version = mcg_updater::windows_installer_product_version(&installer).unwrap();
+    let staged = stage_verified_windows_cli_installer(
+        &data,
+        &install,
+        request_id,
+        cli_process.id(),
+        &expected_version,
+        &installer,
+        &fs::read(&supervisor).unwrap(),
+    )
+    .unwrap();
+    let mut update_process = Command::new(&staged.supervisor_path)
+        .arg("--apply")
+        .arg(&staged.request_path)
+        .env("MCG_DATA_DIR", &data)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let status = update_process.wait().unwrap();
+    assert!(!status.success());
+    let _ = cli_process.wait();
+    thread::sleep(Duration::from_millis(500));
+    let outcome: WindowsUpdateOutcome = serde_json::from_slice(
+        &fs::read(
+            data.join("updates")
+                .join(format!("outcome-{request_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(outcome.request_id, request_id);
+    assert_eq!(outcome.result, "failed");
+    assert!(!staged.request_path.exists());
+    assert!(!staged.installer_path.exists());
 }

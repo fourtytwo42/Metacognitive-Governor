@@ -7,9 +7,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use base64::Engine;
 use chrono::{DateTime, TimeDelta, Utc};
-use minisign_verify::{PublicKey, Signature};
 use semver::Version;
 use serde::Serialize;
 use tauri::AppHandle;
@@ -20,19 +18,10 @@ use super::{LOCAL_DAEMON, daemon_token, portable_runtime, response_error, servic
 
 const UPDATE_ENDPOINT: Option<&str> = option_env!("MCG_UPDATER_ENDPOINT");
 const UPDATE_PUBLIC_KEY: Option<&str> = option_env!("MCG_UPDATER_PUBKEY");
-const MAX_ENDPOINT_BYTES: usize = 2_048;
-const MAX_PUBLIC_KEY_BYTES: usize = 4_096;
 const MAX_RELEASE_NOTES_CHARS: usize = 8_192;
-const MAX_RELEASE_SIGNATURE_BYTES: usize = 8_192;
 const BACKUP_CLOCK_SKEW_SECONDS: i64 = 5;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[derive(Clone)]
-struct TrustedUpdaterConfig {
-    endpoint: reqwest::Url,
-    public_key: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct UpdateConfiguration {
@@ -56,76 +45,8 @@ pub(crate) struct UpdateCheck {
     detail: String,
 }
 
-fn trusted_updater_config(
-    endpoint: Option<&str>,
-    public_key: Option<&str>,
-) -> Result<TrustedUpdaterConfig, String> {
-    let endpoint = endpoint
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "This build has no trusted update endpoint.".to_owned())?;
-    let public_key = public_key
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "This build has no trusted update signing key.".to_owned())?;
-    if endpoint.len() > MAX_ENDPOINT_BYTES {
-        return Err("The trusted update endpoint is too long.".into());
-    }
-    if public_key.len() > MAX_PUBLIC_KEY_BYTES {
-        return Err("The trusted update signing key is too long.".into());
-    }
-    let endpoint = reqwest::Url::parse(endpoint)
-        .map_err(|error| format!("The trusted update endpoint is invalid: {error}"))?;
-    if endpoint.scheme() != "https"
-        || endpoint.host_str().is_none()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.fragment().is_some()
-    {
-        return Err(
-            "The trusted update endpoint must be HTTPS without credentials or a fragment.".into(),
-        );
-    }
-    let decoded = decode_tauri_envelope(
-        public_key,
-        MAX_PUBLIC_KEY_BYTES,
-        "The trusted update signing key",
-    )?;
-    validate_public_key_envelope(&decoded)?;
-    Ok(TrustedUpdaterConfig {
-        endpoint,
-        public_key: public_key.trim().to_owned(),
-    })
-}
-
-fn validate_public_key_envelope(decoded: &str) -> Result<(), String> {
-    let lines = decoded.lines().collect::<Vec<_>>();
-    if lines.len() != 2 || !lines[0].starts_with("untrusted comment: minisign public key:") {
-        return Err("The trusted update signing key is not a Tauri minisign public key.".into());
-    }
-    PublicKey::decode(decoded)
-        .map_err(|_| "The trusted update signing key is not a minisign public key.".to_owned())?;
-    Ok(())
-}
-
-fn decode_tauri_envelope(value: &str, maximum: usize, label: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > maximum {
-        return Err(format!("{label} is empty or oversized."));
-    }
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(value)
-        .map_err(|_| format!("{label} is not canonical base64."))?;
-    if base64::engine::general_purpose::STANDARD.encode(&decoded) != value {
-        return Err(format!("{label} is not canonical base64."));
-    }
-    String::from_utf8(decoded).map_err(|_| format!("{label} is not UTF-8 minisign text."))
-}
-
-fn compiled_updater_config() -> Result<TrustedUpdaterConfig, String> {
-    trusted_updater_config(UPDATE_ENDPOINT, UPDATE_PUBLIC_KEY)
-}
-
-fn trusted_origin(endpoint: &reqwest::Url) -> String {
-    endpoint.origin().ascii_serialization()
+fn compiled_updater_config() -> Result<mcg_updater::TrustedUpdaterConfig, String> {
+    mcg_updater::TrustedUpdaterConfig::new(UPDATE_ENDPOINT, UPDATE_PUBLIC_KEY)
 }
 
 #[tauri::command]
@@ -139,7 +60,7 @@ pub(crate) fn update_configuration() -> UpdateConfiguration {
             schema_version: 1,
             configured: true,
             current_version: env!("CARGO_PKG_VERSION").into(),
-            trusted_origin: Some(trusted_origin(&config.endpoint)),
+            trusted_origin: Some(config.trusted_origin()),
             detail: "MetaCog will accept only packages signed by this build's trusted update key."
                 .into(),
             recovery_notice,
@@ -158,9 +79,9 @@ pub(crate) fn update_configuration() -> UpdateConfiguration {
 fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let config = compiled_updater_config()?;
     app.updater_builder()
-        .endpoints(vec![config.endpoint])
+        .endpoints(vec![config.endpoint().clone()])
         .map_err(|error| format!("The trusted update endpoint was rejected: {error}"))?
-        .pubkey(config.public_key)
+        .pubkey(config.public_key().to_owned())
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("The signed updater could not start: {error}"))
@@ -171,32 +92,7 @@ fn bounded_notes(notes: Option<String>) -> Option<String> {
 }
 
 fn validate_update(update: &Update) -> Result<(), String> {
-    let url = &update.download_url;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(
-            "The signed update manifest announced a non-HTTPS or credential-bearing package URL."
-                .into(),
-        );
-    }
-    validate_signature_envelope(&update.signature)?;
-    Ok(())
-}
-
-fn validate_signature_envelope(signature: &str) -> Result<(), String> {
-    let decoded = decode_tauri_envelope(
-        signature,
-        MAX_RELEASE_SIGNATURE_BYTES,
-        "The signed update manifest signature",
-    )?;
-    Signature::decode(&decoded).map_err(|_| {
-        "The signed update manifest announced an invalid signature envelope.".to_owned()
-    })?;
-    Ok(())
+    compiled_updater_config()?.validate_release(update.download_url.as_str(), &update.signature)
 }
 
 fn update_check(update: Option<&Update>) -> UpdateCheck {
@@ -478,10 +374,7 @@ mod tests {
     use mcg_storage::{BackupBundleEntry, BackupBundleManifest};
     use uuid::Uuid;
 
-    use super::{
-        canonical_expected_version, trusted_updater_config, update_check,
-        validate_pre_update_backup, validate_signature_envelope,
-    };
+    use super::{canonical_expected_version, update_check, validate_pre_update_backup};
 
     fn public_key() -> String {
         base64::engine::general_purpose::STANDARD.encode(
@@ -499,30 +392,36 @@ mod tests {
     fn updater_configuration_is_explicit_https_and_minisign_only() {
         let key = public_key();
         assert!(
-            trusted_updater_config(Some("https://updates.example.test/latest.json"), Some(&key))
-                .is_ok()
+            mcg_updater::TrustedUpdaterConfig::new(
+                Some("https://updates.example.test/latest.json"),
+                Some(&key)
+            )
+            .is_ok()
         );
-        assert!(trusted_updater_config(None, Some(&key)).is_err());
+        assert!(mcg_updater::TrustedUpdaterConfig::new(None, Some(&key)).is_err());
         assert!(
-            trusted_updater_config(Some("http://updates.example.test/latest.json"), Some(&key))
-                .is_err()
+            mcg_updater::TrustedUpdaterConfig::new(
+                Some("http://updates.example.test/latest.json"),
+                Some(&key)
+            )
+            .is_err()
         );
         assert!(
-            trusted_updater_config(
+            mcg_updater::TrustedUpdaterConfig::new(
                 Some("https://user:secret@updates.example.test/latest.json"),
                 Some(&key)
             )
             .is_err()
         );
         assert!(
-            trusted_updater_config(
+            mcg_updater::TrustedUpdaterConfig::new(
                 Some("https://updates.example.test/latest.json#fragment"),
                 Some(&key)
             )
             .is_err()
         );
         assert!(
-            trusted_updater_config(
+            mcg_updater::TrustedUpdaterConfig::new(
                 Some("https://updates.example.test/latest.json"),
                 Some("not-base64")
             )
@@ -532,13 +431,28 @@ mod tests {
 
     #[test]
     fn updater_manifest_signature_must_be_a_canonical_tauri_envelope() {
-        assert!(validate_signature_envelope(&signature()).is_ok());
-        assert!(validate_signature_envelope("not-base64").is_err());
+        let config = mcg_updater::TrustedUpdaterConfig::new(
+            Some("https://updates.example.test/latest.json"),
+            Some(&public_key()),
+        )
+        .unwrap();
         assert!(
-            validate_signature_envelope(
-                &base64::engine::general_purpose::STANDARD.encode("not a minisign signature")
-            )
-            .is_err()
+            config
+                .validate_release("https://updates.example.test/update.exe", &signature())
+                .is_ok()
+        );
+        assert!(
+            config
+                .validate_release("https://updates.example.test/update.exe", "not-base64")
+                .is_err()
+        );
+        assert!(
+            config
+                .validate_release(
+                    "https://updates.example.test/update.exe",
+                    &base64::engine::general_purpose::STANDARD.encode("not a minisign signature")
+                )
+                .is_err()
         );
     }
 

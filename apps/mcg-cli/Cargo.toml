@@ -32,6 +32,7 @@ mcg-providers = { path = "../../crates/mcg-providers" }
 mcg-runtime = { path = "../../crates/mcg-runtime" }
 mcg-storage = { path = "../../crates/mcg-storage" }
 mcg-tools = { path = "../../crates/mcg-tools" }
+mcg-updater = { path = "../mcg-updater" }
 reqwest.workspace = true
 rpassword.workspace = true
 serde.workspace = true

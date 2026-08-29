@@ -1,5 +1,9 @@
+use base64::Engine as _;
+use chrono::{DateTime, Utc};
+use futures_util::StreamExt as _;
+use minisign_verify::{PublicKey, Signature};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -28,7 +32,14 @@ use sha2::{Digest, Sha256};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use uuid::Uuid;
 
-const REQUEST_SCHEMA: u32 = 3;
+const REQUEST_SCHEMA: u32 = 4;
+const MAX_ENDPOINT_BYTES: usize = 2_048;
+const MAX_PUBLIC_KEY_BYTES: usize = 4_096;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_RELEASE_NOTES_CHARS: usize = 8_192;
+const MAX_RELEASE_SIGNATURE_BYTES: usize = 8_192;
+const MANIFEST_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PACKAGE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 #[cfg(windows)]
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const MAX_SUPERVISOR_BYTES: u64 = 64 * 1024 * 1024;
@@ -40,12 +51,327 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Immutable, compile-time update authority embedded into a signed `MetaCog` release.
+#[derive(Debug, Clone)]
+pub struct TrustedUpdaterConfig {
+    endpoint: reqwest::Url,
+    public_key: String,
+}
+
+/// A newer release selected from the trusted feed for this exact platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SignedUpdateCandidate {
+    pub current_version: String,
+    pub version: String,
+    pub notes: Option<String>,
+    pub published_at: String,
+    pub target: String,
+    #[serde(skip)]
+    download_url: reqwest::Url,
+    #[serde(skip)]
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedUpdateManifest {
+    version: String,
+    notes: String,
+    pub_date: String,
+    platforms: BTreeMap<String, SignedUpdatePlatform>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedUpdatePlatform {
+    signature: String,
+    url: String,
+}
+
+impl TrustedUpdaterConfig {
+    /// Loads the immutable endpoint and verification key compiled into this release.
+    ///
+    /// # Errors
+    /// Returns an error for unsigned/development builds or malformed update authority.
+    pub fn compiled() -> Result<Self, String> {
+        Self::new(
+            option_env!("MCG_UPDATER_ENDPOINT"),
+            option_env!("MCG_UPDATER_PUBKEY"),
+        )
+    }
+
+    /// Validates an explicit update endpoint and Tauri minisign public-key envelope.
+    ///
+    /// # Errors
+    /// Returns an error unless the endpoint is credential-free HTTPS and the key is canonical.
+    pub fn new(endpoint: Option<&str>, public_key: Option<&str>) -> Result<Self, String> {
+        let endpoint = endpoint
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "This build has no trusted update endpoint.".to_owned())?;
+        let public_key = public_key
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "This build has no trusted update signing key.".to_owned())?;
+        if endpoint.len() > MAX_ENDPOINT_BYTES {
+            return Err("The trusted update endpoint is too long.".into());
+        }
+        if public_key.len() > MAX_PUBLIC_KEY_BYTES {
+            return Err("The trusted update signing key is too long.".into());
+        }
+        let endpoint = canonical_https_url(endpoint, "trusted update endpoint")?;
+        let decoded = decode_tauri_envelope(
+            public_key,
+            MAX_PUBLIC_KEY_BYTES,
+            "The trusted update signing key",
+        )?;
+        validate_public_key_envelope(&decoded)?;
+        Ok(Self {
+            endpoint,
+            public_key: public_key.trim().to_owned(),
+        })
+    }
+
+    #[must_use]
+    pub fn endpoint(&self) -> &reqwest::Url {
+        &self.endpoint
+    }
+
+    #[must_use]
+    pub fn public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    #[must_use]
+    pub fn trusted_origin(&self) -> String {
+        self.endpoint.origin().ascii_serialization()
+    }
+
+    /// Checks the owner-controlled feed and returns a strictly newer platform release.
+    ///
+    /// # Errors
+    /// Returns an error for transport, schema, version, target, or trust-boundary failures.
+    pub async fn check(
+        &self,
+        current_version: &str,
+    ) -> Result<Option<SignedUpdateCandidate>, String> {
+        let bytes = download_bounded(
+            &self.endpoint,
+            MAX_MANIFEST_BYTES,
+            MANIFEST_DOWNLOAD_TIMEOUT,
+            "update manifest",
+        )
+        .await?;
+        Self::select_candidate(&bytes, current_version)
+    }
+
+    fn select_candidate(
+        bytes: &[u8],
+        current_version: &str,
+    ) -> Result<Option<SignedUpdateCandidate>, String> {
+        let current = canonical_version(current_version, "current MetaCog")?;
+        let manifest: SignedUpdateManifest = serde_json::from_slice(bytes)
+            .map_err(|error| format!("The signed update manifest is invalid: {error}"))?;
+        let available = canonical_version(&manifest.version, "available update")?;
+        let published = DateTime::parse_from_rfc3339(&manifest.pub_date)
+            .map_err(|_| "The signed update publication time is invalid.".to_owned())?
+            .with_timezone(&Utc);
+        if published.to_rfc3339_opts(chrono::SecondsFormat::Millis, true) != manifest.pub_date {
+            return Err("The signed update publication time is not canonical UTC text.".into());
+        }
+        if manifest.notes.chars().count() > MAX_RELEASE_NOTES_CHARS {
+            return Err("The signed update release notes are oversized.".into());
+        }
+        let target = updater_target()?.to_owned();
+        let platform = manifest
+            .platforms
+            .get(&target)
+            .ok_or_else(|| format!("The signed update manifest has no package for {target}."))?;
+        let download_url = canonical_https_url(&platform.url, "signed update package URL")?;
+        validate_signature_envelope(&platform.signature)?;
+        if Version::parse(&available).expect("canonical available version")
+            <= Version::parse(&current).expect("canonical current version")
+        {
+            return Ok(None);
+        }
+        Ok(Some(SignedUpdateCandidate {
+            current_version: current,
+            version: available,
+            notes: (!manifest.notes.is_empty()).then_some(manifest.notes),
+            published_at: manifest.pub_date,
+            target,
+            download_url,
+            signature: platform.signature.clone(),
+        }))
+    }
+
+    /// Downloads and verifies the exact package selected by [`Self::check`].
+    ///
+    /// # Errors
+    /// Returns an error for transport, bounds, signature-envelope, or signature failures.
+    pub async fn download_and_verify(
+        &self,
+        candidate: &SignedUpdateCandidate,
+    ) -> Result<Vec<u8>, String> {
+        if candidate.target != updater_target()? {
+            return Err("The reviewed update target changed before download.".into());
+        }
+        let bytes = download_bounded(
+            &candidate.download_url,
+            MAX_INSTALLER_BYTES,
+            PACKAGE_DOWNLOAD_TIMEOUT,
+            "signed update package",
+        )
+        .await?;
+        self.verify_candidate_bytes(candidate, &bytes)?;
+        Ok(bytes)
+    }
+
+    fn verify_candidate_bytes(
+        &self,
+        candidate: &SignedUpdateCandidate,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let public_key = PublicKey::decode(&decode_tauri_envelope(
+            &self.public_key,
+            MAX_PUBLIC_KEY_BYTES,
+            "The trusted update signing key",
+        )?)
+        .map_err(|_| "The trusted update signing key is invalid.".to_owned())?;
+        let signature = Signature::decode(&decode_tauri_envelope(
+            &candidate.signature,
+            MAX_RELEASE_SIGNATURE_BYTES,
+            "The signed update manifest signature",
+        )?)
+        .map_err(|_| "The signed update manifest signature is invalid.".to_owned())?;
+        public_key.verify(bytes, &signature, false).map_err(|_| {
+            "The downloaded update package did not match the owner signature.".to_owned()
+        })?;
+        Ok(())
+    }
+
+    /// Validates a release URL and signature announced by another trusted updater adapter.
+    ///
+    /// # Errors
+    /// Returns an error when either value falls outside the shared trust contract.
+    pub fn validate_release(&self, url: &str, signature: &str) -> Result<(), String> {
+        canonical_https_url(url, "signed update package URL")?;
+        validate_signature_envelope(signature)
+    }
+}
+
+async fn download_bounded(
+    url: &reqwest::Url,
+    maximum: u64,
+    timeout: std::time::Duration,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let response = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("The {label} client could not start: {error}"))?
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("The {label} could not be downloaded: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("The {label} request failed: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > maximum)
+    {
+        return Err(format!("The {label} is oversized."));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("The {label} download failed: {error}"))?;
+        let next = u64::try_from(bytes.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if next > maximum {
+            return Err(format!("The {label} is oversized."));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(format!("The {label} is empty."));
+    }
+    Ok(bytes)
+}
+
+fn canonical_https_url(value: &str, label: &str) -> Result<reqwest::Url, String> {
+    let url =
+        reqwest::Url::parse(value).map_err(|error| format!("The {label} is invalid: {error}"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "The {label} must be HTTPS without credentials or a fragment."
+        ));
+    }
+    Ok(url)
+}
+
+fn decode_tauri_envelope(value: &str, maximum: usize, label: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum {
+        return Err(format!("{label} is empty or oversized."));
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| format!("{label} is not canonical base64."))?;
+    if base64::engine::general_purpose::STANDARD.encode(&decoded) != value {
+        return Err(format!("{label} is not canonical base64."));
+    }
+    String::from_utf8(decoded).map_err(|_| format!("{label} is not UTF-8 minisign text."))
+}
+
+fn validate_public_key_envelope(decoded: &str) -> Result<(), String> {
+    let lines = decoded.lines().collect::<Vec<_>>();
+    if lines.len() != 2 || !lines[0].starts_with("untrusted comment: minisign public key:") {
+        return Err("The trusted update signing key is not a Tauri minisign public key.".into());
+    }
+    PublicKey::decode(decoded)
+        .map_err(|_| "The trusted update signing key is not a minisign public key.".to_owned())?;
+    Ok(())
+}
+
+fn validate_signature_envelope(signature: &str) -> Result<(), String> {
+    let decoded = decode_tauri_envelope(
+        signature,
+        MAX_RELEASE_SIGNATURE_BYTES,
+        "The signed update manifest signature",
+    )?;
+    Signature::decode(&decoded).map_err(|_| {
+        "The signed update manifest announced an invalid signature envelope.".to_owned()
+    })?;
+    Ok(())
+}
+
+fn updater_target() -> Result<&'static str, String> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok("windows-x86_64-nsis")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok("linux-x86_64-appimage")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok("darwin-aarch64-app")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Ok("darwin-x86_64-app")
+    } else {
+        Err("This platform has no supported MetaCog update package target.".into())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowsUpdateRequest {
     pub schema_version: u32,
     pub request_id: Uuid,
-    pub desktop_pid: u32,
+    pub requester_pid: u32,
+    pub requester_kind: WindowsUpdateRequester,
     pub installer_sha256: String,
     pub installer_name: String,
     pub expected_version: String,
@@ -53,6 +379,14 @@ pub struct WindowsUpdateRequest {
     pub supervisor_sha256: String,
     pub supervisor_name: String,
     pub install_root: PathBuf,
+}
+
+/// Packaged process authorized to request supervised Windows self-replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsUpdateRequester {
+    Desktop,
+    Cli,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +413,7 @@ pub fn stage_verified_windows_installer(
     data_directory: &Path,
     install_root: &Path,
     request_id: Uuid,
-    desktop_pid: u32,
+    requester_pid: u32,
     expected_version: &str,
     installer: &[u8],
     supervisor: &[u8],
@@ -105,7 +439,52 @@ pub fn stage_verified_windows_installer(
         data_directory,
         install_root,
         request_id,
-        desktop_pid,
+        requester_pid,
+        WindowsUpdateRequester::Desktop,
+        expected_version,
+        installer_product_version,
+        installer,
+        supervisor,
+    )
+}
+
+/// Stages a signature-verified Windows installer requested by the packaged `MetaCog` CLI.
+///
+/// # Errors
+/// Returns an error when the package, requester, installation root, or private staging area is
+/// invalid.
+pub fn stage_verified_windows_cli_installer(
+    data_directory: &Path,
+    install_root: &Path,
+    request_id: Uuid,
+    requester_pid: u32,
+    expected_version: &str,
+    installer: &[u8],
+    supervisor: &[u8],
+) -> Result<StagedWindowsUpdate, String> {
+    if installer.is_empty()
+        || u64::try_from(installer.len()).unwrap_or(u64::MAX) > MAX_INSTALLER_BYTES
+    {
+        return Err("The verified Windows installer is empty or oversized.".into());
+    }
+    if supervisor.is_empty()
+        || u64::try_from(supervisor.len()).unwrap_or(u64::MAX) > MAX_SUPERVISOR_BYTES
+    {
+        return Err("The packaged Windows update supervisor is empty or oversized.".into());
+    }
+    let expected_version = canonical_version(expected_version, "expected update")?;
+    let installer_product_version = windows_installer_product_version(installer)?;
+    if installer_product_version != expected_version {
+        return Err(format!(
+            "The signed Windows installer version {installer_product_version} does not match the reviewed update version {expected_version}."
+        ));
+    }
+    stage_windows_installer(
+        data_directory,
+        install_root,
+        request_id,
+        requester_pid,
+        WindowsUpdateRequester::Cli,
         expected_version,
         installer_product_version,
         installer,
@@ -118,7 +497,8 @@ fn stage_windows_installer(
     data_directory: &Path,
     install_root: &Path,
     request_id: Uuid,
-    desktop_pid: u32,
+    requester_pid: u32,
+    requester_kind: WindowsUpdateRequester,
     expected_version: String,
     installer_product_version: String,
     installer: &[u8],
@@ -148,7 +528,8 @@ fn stage_windows_installer(
     let request = WindowsUpdateRequest {
         schema_version: REQUEST_SCHEMA,
         request_id,
-        desktop_pid,
+        requester_pid,
+        requester_kind,
         installer_sha256,
         installer_name,
         expected_version,
@@ -268,7 +649,8 @@ fn run_staged_windows_update_inner(request_path: &Path) -> Result<WindowsUpdateO
     let install_root = canonical_install_root(&request.install_root)?;
     validate_packaged_supervisor(&install_root, &request.supervisor_sha256)?;
     let desktop = canonical_packaged_desktop(&install_root)?;
-    wait_for_desktop_exit(request.desktop_pid, &desktop)?;
+    let requester = canonical_packaged_requester(&install_root, request.requester_kind)?;
+    wait_for_requester_exit(request.requester_pid, &requester)?;
 
     let status = launch_installer(&installer_path)?;
     let succeeded = status.success();
@@ -302,7 +684,7 @@ fn run_staged_windows_update_inner(request_path: &Path) -> Result<WindowsUpdateO
 #[cfg(any(windows, test))]
 fn validate_request(request: &WindowsUpdateRequest) -> Result<(), String> {
     if request.schema_version != REQUEST_SCHEMA
-        || request.desktop_pid == 0
+        || request.requester_pid == 0
         || !request.install_root.is_absolute()
     {
         return Err("The Windows update request contract is invalid.".into());
@@ -833,8 +1215,29 @@ fn canonical_packaged_desktop(install_root: &Path) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn wait_for_desktop_exit(desktop_pid: u32, desktop: &Path) -> Result<(), String> {
-    let pid = Pid::from_u32(desktop_pid);
+fn canonical_packaged_requester(
+    install_root: &Path,
+    kind: WindowsUpdateRequester,
+) -> Result<PathBuf, String> {
+    let file_name = match kind {
+        WindowsUpdateRequester::Desktop => "mcg-desktop.exe",
+        WindowsUpdateRequester::Cli => "mcg.exe",
+    };
+    let candidate = install_root.join(file_name);
+    let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        format!("The packaged update requester could not be inspected: {error}")
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("The packaged update requester is not a regular installation file.".into());
+    }
+    candidate
+        .canonicalize()
+        .map_err(|error| format!("The packaged update requester could not be resolved: {error}"))
+}
+
+#[cfg(windows)]
+fn wait_for_requester_exit(requester_pid: u32, requester: &Path) -> Result<(), String> {
+    let pid = Pid::from_u32(requester_pid);
     let started = Instant::now();
     let mut system = System::new_all();
     if let Some(process) = system.process(pid) {
@@ -842,9 +1245,10 @@ fn wait_for_desktop_exit(desktop_pid: u32, desktop: &Path) -> Result<(), String>
             .exe()
             .and_then(|path| path.canonicalize().ok())
             .ok_or_else(|| "The requesting MCG desktop identity is unavailable.".to_owned())?;
-        if executable != desktop {
+        if executable != requester {
             return Err(
-                "The Windows update request did not originate from the packaged desktop.".into(),
+                "The Windows update request did not originate from the declared packaged process."
+                    .into(),
             );
         }
     }
@@ -855,7 +1259,7 @@ fn wait_for_desktop_exit(desktop_pid: u32, desktop: &Path) -> Result<(), String>
         }
         thread::sleep(PROCESS_POLL_INTERVAL);
     }
-    Err("The MCG desktop did not exit before the supervised update timeout.".into())
+    Err("The MetaCog update requester did not exit before the supervised update timeout.".into())
 }
 
 #[cfg(windows)]
@@ -993,6 +1397,109 @@ pub fn cleanup_staged_windows_supervisor(
 mod tests {
     use super::*;
 
+    fn test_public_key() -> String {
+        base64::engine::general_purpose::STANDARD.encode(
+            "untrusted comment: minisign public key: 0000000000000000\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n",
+        )
+    }
+
+    fn test_signature() -> String {
+        base64::engine::general_purpose::STANDARD.encode(
+            "untrusted comment: signature from minisign secret key\nRUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\ntrusted comment: timestamp:1633700835\tfile:test\tprehashed\nwLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==\n",
+        )
+    }
+
+    #[test]
+    fn signed_feed_selection_is_platform_bound_strict_and_monotonic() {
+        TrustedUpdaterConfig::new(
+            Some("https://updates.example.test/latest.json"),
+            Some(&test_public_key()),
+        )
+        .unwrap();
+        let target = updater_target().unwrap();
+        let manifest = serde_json::json!({
+            "version": "1.2.4",
+            "notes": "Security and reliability update.",
+            "pub_date": "2026-08-29T12:00:00.000Z",
+            "platforms": {
+                target: {
+                    "signature": test_signature(),
+                    "url": "https://updates.example.test/metacog-update.bin"
+                }
+            }
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let candidate = TrustedUpdaterConfig::select_candidate(&bytes, "1.2.3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.version, "1.2.4");
+        assert_eq!(candidate.target, target);
+        assert!(
+            TrustedUpdaterConfig::select_candidate(&bytes, "1.2.4")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            TrustedUpdaterConfig::select_candidate(&bytes, "1.3.0")
+                .unwrap()
+                .is_none()
+        );
+
+        let mut invalid = manifest;
+        invalid["platforms"][target]["url"] =
+            serde_json::Value::String("http://updates.example.test/update.bin".into());
+        assert!(
+            TrustedUpdaterConfig::select_candidate(&serde_json::to_vec(&invalid).unwrap(), "1.2.3")
+                .is_err()
+        );
+        invalid["platforms"][target]["url"] =
+            serde_json::Value::String("https://updates.example.test/update.bin".into());
+        invalid["unexpected"] = serde_json::Value::Bool(true);
+        assert!(
+            TrustedUpdaterConfig::select_candidate(&serde_json::to_vec(&invalid).unwrap(), "1.2.3")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn release_trust_rejects_noncanonical_or_tampered_signature_inputs() {
+        let config = TrustedUpdaterConfig::new(
+            Some("https://updates.example.test/latest.json"),
+            Some(&test_public_key()),
+        )
+        .unwrap();
+        assert!(
+            config
+                .validate_release("https://updates.example.test/update.bin", &test_signature())
+                .is_ok()
+        );
+        assert!(
+            config
+                .validate_release("https://updates.example.test/update.bin", "not-base64")
+                .is_err()
+        );
+        assert!(
+            config
+                .validate_release("http://updates.example.test/update.bin", &test_signature())
+                .is_err()
+        );
+        let candidate = SignedUpdateCandidate {
+            current_version: "1.2.3".into(),
+            version: "1.2.4".into(),
+            notes: None,
+            published_at: "2026-08-29T12:00:00.000Z".into(),
+            target: updater_target().unwrap().into(),
+            download_url: reqwest::Url::parse("https://updates.example.test/update.bin").unwrap(),
+            signature: test_signature(),
+        };
+        assert!(config.verify_candidate_bytes(&candidate, b"test").is_ok());
+        assert!(
+            config
+                .verify_candidate_bytes(&candidate, b"tampered")
+                .is_err()
+        );
+    }
+
     fn version_block(key: &str, value_type: u16, value: &[u8], children: &[Vec<u8>]) -> Vec<u8> {
         let value_length = if value_type == 1 {
             u16::try_from(value.len() / 2).unwrap()
@@ -1065,6 +1572,7 @@ mod tests {
             &install,
             request_id,
             42,
+            WindowsUpdateRequester::Desktop,
             "1.2.3".into(),
             "1.2.3".into(),
             b"signed installer",
@@ -1073,9 +1581,10 @@ mod tests {
         .unwrap();
         let request: WindowsUpdateRequest =
             serde_json::from_slice(&fs::read(&staged.request_path).unwrap()).unwrap();
-        assert_eq!(request.schema_version, 3);
+        assert_eq!(request.schema_version, 4);
         assert_eq!(request.request_id, request_id);
-        assert_eq!(request.desktop_pid, 42);
+        assert_eq!(request.requester_pid, 42);
+        assert_eq!(request.requester_kind, WindowsUpdateRequester::Desktop);
         assert_eq!(
             request.installer_name,
             format!("mcg-update-{request_id}.exe")
@@ -1098,6 +1607,7 @@ mod tests {
                 &install,
                 request_id,
                 42,
+                WindowsUpdateRequester::Desktop,
                 "1.2.3".into(),
                 "1.2.3".into(),
                 b"replacement",
@@ -1111,9 +1621,10 @@ mod tests {
     fn request_contract_rejects_noncanonical_identity_and_digest() {
         let request_id = Uuid::new_v4();
         let valid = WindowsUpdateRequest {
-            schema_version: 3,
+            schema_version: 4,
             request_id,
-            desktop_pid: 9,
+            requester_pid: 9,
+            requester_kind: WindowsUpdateRequester::Desktop,
             installer_sha256: "A".repeat(64),
             installer_name: format!("mcg-update-{request_id}.exe"),
             expected_version: "1.2.3".into(),
@@ -1131,9 +1642,10 @@ mod tests {
         assert!(validate_request(&invalid).is_err());
 
         let mut invalid = WindowsUpdateRequest {
-            schema_version: 3,
+            schema_version: 4,
             request_id,
-            desktop_pid: 9,
+            requester_pid: 9,
+            requester_kind: WindowsUpdateRequester::Cli,
             installer_sha256: "A".repeat(64),
             installer_name: format!("mcg-update-{request_id}.exe"),
             expected_version: "1.2.4".into(),

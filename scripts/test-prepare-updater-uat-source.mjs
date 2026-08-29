@@ -66,41 +66,46 @@ try {
   }
   const baseline = path.join(temporaryRoot, "baseline");
   const candidate = path.join(temporaryRoot, "candidate");
+  const sourceVersion = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version;
+  const [major, minor, patchVersion] = sourceVersion.split(".").map(Number);
+  assert.ok([major, minor, patchVersion].every(Number.isSafeInteger), "source version must be stable semantic version text");
+  const candidateVersion = `${major}.${minor}.${patchVersion + 1}-uat.1`;
   const listed = runPrepared("tar", ["-tzf", archive], root).split(/\r?\n/u).filter(Boolean);
   assert.ok(listed.some((entry) => entry.endsWith("/")), "fixture must exercise explicit directory entries");
-  const baselineResult = JSON.parse(run([archive, baseline, "0.1.0"]).stdout);
-  const candidateResult = JSON.parse(run([archive, candidate, "0.1.1-uat.1"]).stdout);
+  const baselineResult = JSON.parse(run([archive, baseline, sourceVersion]).stdout);
+  const candidateResult = JSON.parse(run([archive, candidate, candidateVersion]).stdout);
   assert.equal(baselineResult.schema_version, 1);
   assert.equal(baselineResult.archive_sha256, candidateResult.archive_sha256);
   assert.equal(baselineResult.archive_entries, candidateResult.archive_entries);
-  assert.equal(baselineResult.base_version, "0.1.0");
-  assert.equal(baselineResult.prepared_version, "0.1.0");
-  assert.equal(candidateResult.prepared_version, "0.1.1-uat.1");
+  assert.equal(baselineResult.base_version, sourceVersion);
+  assert.equal(baselineResult.prepared_version, sourceVersion);
+  assert.equal(candidateResult.prepared_version, candidateVersion);
   assert.match(baselineResult.commit, /^[0-9a-f]{40}$/u);
   assert.match(candidateResult.commit, /^[0-9a-f]{40}$/u);
   assert.notEqual(baselineResult.commit, candidateResult.commit);
   const candidateTauri = JSON.parse(await readFile(path.join(candidate, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
   const candidateNpm = JSON.parse(await readFile(path.join(candidate, "package-lock.json"), "utf8"));
-  assert.equal(candidateTauri.version, "0.1.1-uat.1");
-  assert.equal(candidateNpm.version, "0.1.1-uat.1");
-  assert.equal(candidateNpm.packages["apps/desktop"].version, "0.1.1-uat.1");
+  assert.equal(candidateTauri.version, candidateVersion);
+  assert.equal(candidateNpm.version, candidateVersion);
+  assert.equal(candidateNpm.packages["apps/desktop"].version, candidateVersion);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
   const git = process.platform === "win32" ? "git.exe" : "git";
   const candidateMetadata = JSON.parse(runPrepared(cargo, ["metadata", "--offline", "--format-version", "1", "--no-deps", "--locked"], candidate));
   const candidateWorkspace = candidateMetadata.packages.filter((item) => candidateMetadata.workspace_members.includes(item.id));
   assert.ok(candidateWorkspace.length > 0);
-  assert.ok(candidateWorkspace.every((item) => item.version === "0.1.1-uat.1"));
+  assert.ok(candidateWorkspace.every((item) => item.version === candidateVersion));
   const candidateCargoLock = await readFile(path.join(candidate, "Cargo.lock"), "utf8");
   for (const item of candidateWorkspace) {
     const escapedName = item.name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-    assert.match(candidateCargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "${escapedName}"\\r?\\nversion = "0\\.1\\.1-uat\\.1"`, "u"));
+    const escapedVersion = candidateVersion.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    assert.match(candidateCargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "${escapedName}"\\r?\\nversion = "${escapedVersion}"`, "u"));
   }
   assert.equal(runPrepared(git, ["status", "--porcelain"], candidate).trim(), "");
   run([archive, path.join(temporaryRoot, "invalid-version"), "01.1.0"], false);
-  run([archive, baseline, "0.1.2"], false);
+  run([archive, baseline, `${major}.${minor}.${patchVersion + 2}`], false);
   const symlinkArchive = path.join(temporaryRoot, "symlink.tar.gz");
   await archiveWithFirstFileChangedToSymlink(archive, symlinkArchive);
-  const symlinkResult = run([symlinkArchive, path.join(temporaryRoot, "symlink-source"), "0.1.0"], false);
+  const symlinkResult = run([symlinkArchive, path.join(temporaryRoot, "symlink-source"), sourceVersion], false);
   assert.match(symlinkResult.stderr, /archive entry has an unsafe type/u);
   console.log("Updater UAT source preparation passed exact extraction, lockfile/version convergence, clean commits, rejection, and cleanup checks.");
 } finally {
