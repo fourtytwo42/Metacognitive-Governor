@@ -33,6 +33,8 @@ pub use protocol_generated::{
 pub const CODEX_BINARY_VERSION: &str = protocol_generated::GENERATED_CODEX_VERSION;
 pub const CODEX_PROTOCOL_VERSION: &str = protocol_generated::GENERATED_PROTOCOL_VERSION;
 const WINDOWS_SANDBOX_READINESS_METHOD: &str = "windowsSandbox/readiness";
+const WINDOWS_SANDBOX_SETUP_START_METHOD: &str = "windowsSandbox/setupStart";
+const WINDOWS_SANDBOX_SETUP_COMPLETED_METHOD: &str = "windowsSandbox/setupCompleted";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexTurnProgress {
@@ -72,6 +74,51 @@ pub struct CodexConfigurationStatus {
     pub requirements: Value,
     pub provider_capabilities: Value,
     pub windows_sandbox: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexWindowsSandboxSetupMode {
+    Elevated,
+    Unelevated,
+}
+
+impl CodexWindowsSandboxSetupMode {
+    fn protocol_name(self) -> &'static str {
+        match self {
+            Self::Elevated => "elevated",
+            Self::Unelevated => "unelevated",
+        }
+    }
+}
+
+fn windows_sandbox_config_write_request(mode: CodexWindowsSandboxSetupMode) -> Value {
+    json!({
+        "edits": [
+            {"keyPath": "windows.sandbox", "value": mode.protocol_name(), "mergeStrategy": "replace"},
+            {"keyPath": "features.experimental_windows_sandbox", "value": null, "mergeStrategy": "replace"},
+            {"keyPath": "features.elevated_windows_sandbox", "value": null, "mergeStrategy": "replace"},
+            {"keyPath": "features.enable_experimental_windows_sandbox", "value": null, "mergeStrategy": "replace"}
+        ],
+        "filePath": null,
+        "expectedVersion": null,
+        "reloadUserConfig": true
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexWindowsSandboxSetupResult {
+    pub mode: CodexWindowsSandboxSetupMode,
+    pub readiness: String,
+    pub config_write_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexWindowsSandboxReadGrant {
+    pub path: String,
+    pub permission_profile: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2433,6 +2480,213 @@ impl CodexAppServerHarness {
             .await
     }
 
+    /// Runs Codex's current Windows sandbox setup RPC, waits for its completion
+    /// notification, and only then persists the matching native configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this is called off Windows, setup is rejected or
+    /// fails, the completion notification is lost, or Codex cannot persist the
+    /// selected sandbox mode.
+    pub async fn setup_windows_sandbox(
+        &self,
+        mode: CodexWindowsSandboxSetupMode,
+        cwd: Option<&Path>,
+    ) -> Result<CodexWindowsSandboxSetupResult, CodexHarnessError> {
+        #[cfg(not(windows))]
+        {
+            let _ = (mode, cwd);
+            return Err(CodexHarnessError::Protocol(
+                "Windows sandbox setup is only available on Windows".into(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            let cwd = cwd
+                .map(fs::canonicalize)
+                .transpose()?
+                .map(|path| path.to_string_lossy().into_owned());
+            let mut notifications = self.subscribe().await;
+            let response = self
+                .request(
+                    WINDOWS_SANDBOX_SETUP_START_METHOD,
+                    json!({"mode": mode.protocol_name(), "cwd": cwd}),
+                )
+                .await?;
+            if response.get("started").and_then(Value::as_bool) != Some(true) {
+                return Err(CodexHarnessError::Protocol(
+                    "Codex did not acknowledge Windows sandbox setup".into(),
+                ));
+            }
+
+            let completion = tokio::time::timeout(Duration::from_secs(600), async {
+                loop {
+                    let document = notifications
+                        .recv()
+                        .await
+                        .map_err(|error| CodexHarnessError::Protocol(error.to_string()))?;
+                    if document.get("method").and_then(Value::as_str)
+                        != Some(WINDOWS_SANDBOX_SETUP_COMPLETED_METHOD)
+                    {
+                        continue;
+                    }
+                    let params = document.get("params").cloned().unwrap_or(Value::Null);
+                    if params.get("mode").and_then(Value::as_str) == Some(mode.protocol_name()) {
+                        return Ok::<Value, CodexHarnessError>(params);
+                    }
+                }
+            })
+            .await
+            .map_err(|_| CodexHarnessError::Timeout)??;
+            if completion.get("success").and_then(Value::as_bool) != Some(true) {
+                let detail = completion
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex Windows sandbox setup failed");
+                return Err(CodexHarnessError::Protocol(detail.to_owned()));
+            }
+
+            let config = self
+                .request(
+                    "config/batchWrite",
+                    windows_sandbox_config_write_request(mode),
+                )
+                .await?;
+            let config_write_status = config
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            if config_write_status != "ok" {
+                let detail = if config_write_status == "okOverridden" {
+                    "Codex installed the Windows sandbox, but a higher-priority configuration layer overrides the requested default mode"
+                } else {
+                    "Codex installed the Windows sandbox, but did not confirm the default-mode configuration write"
+                };
+                return Err(CodexHarnessError::Protocol(detail.into()));
+            }
+            let readiness = self.windows_sandbox_readiness().await?;
+            let readiness = readiness
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            if readiness != "ready" {
+                return Err(CodexHarnessError::Protocol(format!(
+                    "Codex completed Windows sandbox setup, but readiness is `{readiness}`"
+                )));
+            }
+            Ok(CodexWindowsSandboxSetupResult {
+                mode,
+                readiness,
+                config_write_status,
+            })
+        }
+    }
+
+    /// Uses the pinned Codex sandbox engine to refresh the restricted-token ACL
+    /// with one additional read root. MetaCog supplies only a safe no-op command;
+    /// permission resolution and ACL mutation remain owned by the pinned Codex.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported platforms, invalid paths or profiles,
+    /// startup failures, timeout, or a rejected sandbox refresh.
+    pub async fn grant_windows_sandbox_read_directory(
+        &self,
+        cwd: &Path,
+        read_root: &Path,
+        permission_profile: Option<&str>,
+    ) -> Result<CodexWindowsSandboxReadGrant, CodexHarnessError> {
+        #[cfg(not(windows))]
+        {
+            let _ = (cwd, read_root, permission_profile);
+            return Err(CodexHarnessError::Protocol(
+                "Windows sandbox read-directory grants are only available on Windows".into(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            if !cwd.is_absolute() || !read_root.is_absolute() {
+                return Err(CodexHarnessError::Protocol(
+                    "Windows sandbox paths must be absolute".into(),
+                ));
+            }
+            let cwd = fs::canonicalize(cwd)?;
+            let read_root = fs::canonicalize(read_root)?;
+            if !cwd.is_dir() || !read_root.is_dir() {
+                return Err(CodexHarnessError::Protocol(
+                    "Windows sandbox paths must be existing directories".into(),
+                ));
+            }
+            let permission_profile = permission_profile.unwrap_or(":workspace").trim();
+            if !matches!(
+                permission_profile,
+                ":workspace" | ":read-only" | ":danger-full-access"
+            ) {
+                validate_profile_name(permission_profile)?;
+            }
+            let profiles = self.permission_profiles(cwd.to_str()).await?;
+            match profiles
+                .iter()
+                .find(|profile| profile.id == permission_profile)
+            {
+                Some(profile) if profile.allowed => {}
+                Some(_) => {
+                    return Err(CodexHarnessError::Protocol(format!(
+                        "Codex permission profile `{permission_profile}` is blocked by requirements"
+                    )));
+                }
+                None => {
+                    return Err(CodexHarnessError::Protocol(format!(
+                        "Codex permission profile `{permission_profile}` is unavailable"
+                    )));
+                }
+            }
+
+            let system_root = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .ok_or_else(|| CodexHarnessError::Protocol("SystemRoot is unavailable".into()))?;
+            let noop = fs::canonicalize(system_root.join("System32").join("cmd.exe"))?;
+            let executable = self.inner.lock().await.executable.clone();
+            let mut command = Command::new(executable);
+            command
+                .arg("sandbox")
+                .arg("--permission-profile")
+                .arg(permission_profile)
+                .arg("--cd")
+                .arg(&cwd)
+                .arg("--sandbox-state-readable-root")
+                .arg(&read_root)
+                .arg(noop)
+                .args(["/d", "/c", "exit", "0"])
+                .current_dir(&cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+            let output = tokio::time::timeout(Duration::from_secs(180), command.output())
+                .await
+                .map_err(|_| CodexHarnessError::Timeout)?
+                .map_err(|error| CodexHarnessError::Start(error.to_string()))?;
+            if !output.status.success() {
+                let diagnostic = String::from_utf8_lossy(&output.stderr);
+                let diagnostic = diagnostic.trim();
+                return Err(CodexHarnessError::Protocol(if diagnostic.is_empty() {
+                    format!("Codex sandbox refresh exited with {}", output.status)
+                } else {
+                    diagnostic.chars().take(4_096).collect()
+                }));
+            }
+            Ok(CodexWindowsSandboxReadGrant {
+                path: read_root.to_string_lossy().into_owned(),
+                permission_profile: permission_profile.to_owned(),
+            })
+        }
+    }
+
     pub async fn stable_discovery(
         &self,
         cwds: &[String],
@@ -2811,6 +3065,24 @@ mod tests {
         }))
         .expect("model fixture");
         assert!(model.is_default);
+    }
+
+    #[test]
+    fn windows_sandbox_config_write_matches_current_codex_semantics() {
+        let elevated = windows_sandbox_config_write_request(CodexWindowsSandboxSetupMode::Elevated);
+        assert_eq!(elevated["edits"][0]["keyPath"], "windows.sandbox");
+        assert_eq!(elevated["edits"][0]["value"], "elevated");
+        assert_eq!(elevated["edits"][1]["value"], Value::Null);
+        assert_eq!(
+            elevated["edits"][3]["keyPath"],
+            "features.enable_experimental_windows_sandbox"
+        );
+        assert_eq!(elevated["reloadUserConfig"], true);
+
+        let unelevated =
+            windows_sandbox_config_write_request(CodexWindowsSandboxSetupMode::Unelevated);
+        assert_eq!(unelevated["edits"][0]["value"], "unelevated");
+        assert_eq!(unelevated["edits"].as_array().map(Vec::len), Some(4));
     }
 
     #[test]

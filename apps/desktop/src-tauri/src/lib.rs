@@ -42,12 +42,13 @@ use mcg_api::{
     TrustOrganizationPublisherRequest, UpdateConversationGoalRequest,
     UpdateConversationModeRequest, UpdateConversationRequest, UpdateSiteRequest,
     UpdateSshHostRequest, UpdateUserSettingsRequest, UserSettingsHistoryResponse,
-    WakeScheduleRequest, WorktreeMutationRequest,
+    WakeScheduleRequest, WindowsSandboxReadDirectoryRequest, WindowsSandboxSetupRequest,
+    WorktreeMutationRequest,
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
     CloudDiffApply, Conversation, ConversationPreview, ConversationTeamState, ConversationView,
-    PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ScheduleDefinition,
+    PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ProjectId, ScheduleDefinition,
     SchedulerNotification, Site, SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
 };
 use mcg_events::EventEnvelope;
@@ -1272,6 +1273,39 @@ async fn codex_configuration_status() -> Result<serde_json::Value, String> {
         reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/codex/configuration")),
         None::<&()>,
         "Codex configuration status",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn setup_windows_sandbox(
+    mode: mcg_codex_app_server::CodexWindowsSandboxSetupMode,
+    project_id: Option<ProjectId>,
+) -> Result<mcg_codex_app_server::CodexWindowsSandboxSetupResult, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/windows-sandbox/setup")),
+        Some(&WindowsSandboxSetupRequest { mode, project_id }),
+        "Windows sandbox setup",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn grant_windows_sandbox_read_directory(
+    project_id: ProjectId,
+    path: String,
+    permission_profile: Option<String>,
+) -> Result<mcg_codex_app_server::CodexWindowsSandboxReadGrant, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!(
+            "{LOCAL_DAEMON}/api/v1/codex/windows-sandbox/read-directories"
+        )),
+        Some(&WindowsSandboxReadDirectoryRequest {
+            project_id,
+            path,
+            permission_profile,
+        }),
+        "Windows sandbox read-directory grant",
     )
     .await
 }
@@ -3050,6 +3084,20 @@ async fn pick_writable_folder(app: tauri::AppHandle) -> Result<Option<String>, S
 }
 
 #[tauri::command]
+async fn pick_sandbox_read_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    app.dialog()
+        .file()
+        .set_title("Allow the Codex Windows sandbox to read a folder")
+        .blocking_pick_folder()
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+#[tauri::command]
 async fn discover_project(request: DiscoverProjectRequest) -> Result<ProjectMutation, String> {
     let response = reqwest::Client::new()
         .post(format!("{LOCAL_DAEMON}/api/v1/projects"))
@@ -4004,6 +4052,8 @@ pub fn run() {
             codex_account_usage,
             codex_stable_discovery,
             codex_configuration_status,
+            setup_windows_sandbox,
+            grant_windows_sandbox_read_directory,
             codex_pending_requests,
             codex_owned_threads,
             reconcile_owned_codex_thread,
@@ -4065,6 +4115,7 @@ pub fn run() {
             pick_mention_files,
             pick_mention_folder,
             pick_writable_folder,
+            pick_sandbox_read_folder,
             discover_project,
             initialize_project_git,
             list_projects,

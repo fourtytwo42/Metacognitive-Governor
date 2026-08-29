@@ -62,6 +62,7 @@ const client = vi.hoisted(() => ({
   pickMentionFiles: vi.fn(),
   pickMentionFolder: vi.fn(),
   pickWritableFolder: vi.fn(),
+  pickSandboxReadFolder: vi.fn(),
   getCodexModels: vi.fn(),
   getCodexPermissionProfiles: vi.fn(),
   getCodexFeatures: vi.fn(),
@@ -70,6 +71,8 @@ const client = vi.hoisted(() => ({
   getCodexRateLimits: vi.fn(),
   getCodexHarnessStatus: vi.fn(),
   getCodexConfigurationStatus: vi.fn(),
+  setupWindowsSandbox: vi.fn(),
+  grantWindowsSandboxReadDirectory: vi.fn(),
   getCodexPendingRequests: vi.fn(),
   getCodexStableDiscovery: vi.fn(),
   reconcileOwnedCodexThread: vi.fn(),
@@ -260,6 +263,7 @@ vi.mock("./desktop-client", () => ({
   pickMentionFiles: client.pickMentionFiles,
   pickMentionFolder: client.pickMentionFolder,
   pickWritableFolder: client.pickWritableFolder,
+  pickSandboxReadFolder: client.pickSandboxReadFolder,
   getCodexModels: client.getCodexModels,
   getCodexPermissionProfiles: client.getCodexPermissionProfiles,
   getCodexFeatures: client.getCodexFeatures,
@@ -268,6 +272,8 @@ vi.mock("./desktop-client", () => ({
   getCodexRateLimits: client.getCodexRateLimits,
   getCodexHarnessStatus: client.getCodexHarnessStatus,
   getCodexConfigurationStatus: client.getCodexConfigurationStatus,
+  setupWindowsSandbox: client.setupWindowsSandbox,
+  grantWindowsSandboxReadDirectory: client.grantWindowsSandboxReadDirectory,
   getCodexPendingRequests: client.getCodexPendingRequests,
   getCodexStableDiscovery: client.getCodexStableDiscovery,
   reconcileOwnedCodexThread: client.reconcileOwnedCodexThread,
@@ -472,6 +478,7 @@ beforeEach(() => {
   client.pickMentionFiles.mockReset();
   client.pickMentionFolder.mockReset();
   client.pickWritableFolder.mockReset();
+  client.pickSandboxReadFolder.mockReset();
   client.getCodexModels.mockReset();
   client.getCodexPermissionProfiles.mockReset();
   client.getCodexFeatures.mockReset();
@@ -480,6 +487,8 @@ beforeEach(() => {
   client.getCodexRateLimits.mockReset();
   client.getCodexHarnessStatus.mockReset();
   client.getCodexConfigurationStatus.mockReset();
+  client.setupWindowsSandbox.mockReset();
+  client.grantWindowsSandboxReadDirectory.mockReset();
   client.getCodexPendingRequests.mockReset();
   client.getCodexStableDiscovery.mockReset();
   client.reconcileOwnedCodexThread.mockReset();
@@ -703,6 +712,7 @@ beforeEach(() => {
   client.pickMentionFiles.mockResolvedValue([]);
   client.pickMentionFolder.mockResolvedValue(null);
   client.pickWritableFolder.mockResolvedValue(null);
+  client.pickSandboxReadFolder.mockResolvedValue(null);
   client.getCodexModels.mockResolvedValue([]);
   client.getCodexPermissionProfiles.mockResolvedValue([]);
   client.getCodexFeatures.mockResolvedValue([]);
@@ -726,7 +736,9 @@ beforeEach(() => {
     ,mcp_bridge_state: "ready"
     ,recovery_state: "healthy"
   });
-  client.getCodexConfigurationStatus.mockResolvedValue({ requirements: {}, provider_capabilities: {}, windows_sandbox: {} });
+  client.getCodexConfigurationStatus.mockResolvedValue({ requirements: {}, provider_capabilities: {}, windows_sandbox: { status: "ready" } });
+  client.setupWindowsSandbox.mockResolvedValue({ mode: "elevated", readiness: "ready", config_write_status: "ok" });
+  client.grantWindowsSandboxReadDirectory.mockImplementation(async (_projectId: string, path: string, permissionProfile: string) => ({ path, permission_profile: permissionProfile }));
   client.getCodexPendingRequests.mockResolvedValue([]);
   client.getCodexStableDiscovery.mockResolvedValue({
     skills: [],
@@ -3165,6 +3177,52 @@ test("advanced configuration exposes searchable Codex feature flags and persists
   fireEvent.click(screen.getByRole("checkbox", { name: "Enable memories" }));
   await waitFor(() => expect(client.setCodexFeature).toHaveBeenCalledWith("memories", true));
   expect(screen.getByRole("checkbox", { name: "Disable memories" })).toBeChecked();
+});
+
+test("advanced configuration runs governed Windows sandbox setup and read grants", async () => {
+  const userAgent = vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000640",
+    project_id: "00000000-0000-4000-8000-000000000641",
+    root: "C:\\Projects\\sandbox-app",
+    observed_at: "2026-08-22T00:00:00Z",
+    repository: { is_git: true, branch: "main", dirty: false },
+    languages: [],
+    build_systems: [],
+    test_systems: [],
+    instructions: { conflicts: [] }
+  };
+  client.listProjects.mockResolvedValue({ projects: [project] });
+  client.getCodexPermissionProfiles.mockResolvedValue([
+    { id: ":workspace", description: "Project workspace", allowed: true },
+    { id: "blocked", description: "Managed policy", allowed: false }
+  ]);
+  client.getCodexConfigurationStatus
+    .mockResolvedValueOnce({ requirements: {}, provider_capabilities: {}, windows_sandbox: { status: "notConfigured" } })
+    .mockResolvedValue({ requirements: {}, provider_capabilities: {}, windows_sandbox: { status: "ready" } });
+  client.pickSandboxReadFolder.mockResolvedValue("C:\\Reference\\docs");
+  render(<App />);
+
+  expect(screen.queryByText("Windows sandbox", { exact: true })).not.toBeInTheDocument();
+  await enableAdvancedMode();
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Configuration" }));
+  fireEvent.click(await screen.findByText("Windows sandbox", { exact: true }));
+
+  const sandbox = screen.getByLabelText("Windows sandbox configuration");
+  await waitFor(() => expect(within(sandbox).getByLabelText("Windows sandbox project")).toHaveValue(project.project_id));
+  fireEvent.click(within(sandbox).getByRole("button", { name: "Set up" }));
+  await waitFor(() => expect(client.setupWindowsSandbox).toHaveBeenCalledWith("elevated", project.project_id));
+  expect(await within(sandbox).findByText(/Elevated Windows sandbox is configured/)).toBeInTheDocument();
+
+  fireEvent.click(within(sandbox).getByRole("button", { name: "Browse" }));
+  await waitFor(() => expect(within(sandbox).getByLabelText("Windows sandbox read directory")).toHaveValue("C:\\Reference\\docs"));
+  fireEvent.click(within(sandbox).getByRole("button", { name: "Grant read access" }));
+  await waitFor(() => expect(client.grantWindowsSandboxReadDirectory).toHaveBeenCalledWith(project.project_id, "C:\\Reference\\docs", ":workspace"));
+  expect(await within(sandbox).findByText(/Codex sandbox read access is ready/)).toBeInTheDocument();
+  userAgent.mockRestore();
 });
 
 test("Git settings complete browser sign-in and show accessible repositories", async () => {

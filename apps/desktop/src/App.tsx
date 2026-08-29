@@ -217,6 +217,8 @@ import {
   getCodexRateLimits,
   getCodexHarnessStatus,
   getCodexConfigurationStatus,
+  setupWindowsSandbox,
+  grantWindowsSandboxReadDirectory,
   getCodexPendingRequests,
   getCodexStableDiscovery,
   reconcileOwnedCodexThread,
@@ -318,6 +320,7 @@ import {
   pickMentionFiles,
   pickMentionFolder,
   pickWritableFolder,
+  pickSandboxReadFolder,
   searchProjectMentions,
   type ProjectModel,
   type MentionCandidate,
@@ -2569,6 +2572,13 @@ export function App() {
   const [codexFeatureSearch, setCodexFeatureSearch] = useState("");
   const [codexFeatureBusy, setCodexFeatureBusy] = useState<string | null>(null);
   const [codexFeatureError, setCodexFeatureError] = useState<string | null>(null);
+  const [windowsSandboxBusy, setWindowsSandboxBusy] = useState<"setup" | "read" | null>(null);
+  const [windowsSandboxError, setWindowsSandboxError] = useState<string | null>(null);
+  const [windowsSandboxNotice, setWindowsSandboxNotice] = useState<string | null>(null);
+  const [windowsSandboxProjectId, setWindowsSandboxProjectId] = useState("");
+  const [windowsSandboxReadPath, setWindowsSandboxReadPath] = useState("");
+  const [windowsSandboxPermissionProfile, setWindowsSandboxPermissionProfile] = useState(":workspace");
+  const [windowsSandboxPermissionProfiles, setWindowsSandboxPermissionProfiles] = useState<CodexPermissionProfile[]>([]);
   const [codexAccount, setCodexAccount] = useState<CodexAccount | null>(null);
   const [codexRateLimits, setCodexRateLimits] = useState<CodexRateLimits | null>(null);
   const [codexHarnessStatus, setCodexHarnessStatus] = useState<CodexHarnessStatus | null>(null);
@@ -2907,6 +2917,32 @@ export function App() {
       .catch(() => { if (active) setCodexPermissionProfiles([]); });
     return () => { active = false; };
   }, [selectedProject?.project_id]);
+
+  useEffect(() => {
+    if (windowsSandboxProjectId || projects.length === 0) return;
+    setWindowsSandboxProjectId(selectedProject?.project_id ?? projects[0].project_id);
+  }, [projects, selectedProject?.project_id, windowsSandboxProjectId]);
+
+  useEffect(() => {
+    let active = true;
+    if (!windowsSandboxProjectId) {
+      setWindowsSandboxPermissionProfiles([]);
+      return () => { active = false; };
+    }
+    void getCodexPermissionProfiles(windowsSandboxProjectId)
+      .then((profiles) => {
+        if (!active) return;
+        const allowed = profiles.filter((profile) => profile.allowed);
+        setWindowsSandboxPermissionProfiles(allowed);
+        setWindowsSandboxPermissionProfile(allowed.find((profile) => profile.id === ":workspace")?.id ?? allowed[0]?.id ?? ":workspace");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setWindowsSandboxPermissionProfiles([]);
+        setWindowsSandboxError(`Could not load sandbox permission profiles. ${errorMessage(error)}`);
+      });
+    return () => { active = false; };
+  }, [windowsSandboxProjectId]);
 
   useEffect(() => {
     window.localStorage.setItem("mcg.chat-run-preferences.tasks", JSON.stringify(taskRunPreferences));
@@ -4505,6 +4541,66 @@ export function App() {
       setCodexFeatureError(errorMessage(error));
     } finally {
       setCodexFeatureBusy(null);
+    }
+  }
+
+  async function refreshWindowsSandboxStatus() {
+    const [configuration, harness] = await Promise.all([
+      getCodexConfigurationStatus(),
+      getCodexHarnessStatus()
+    ]);
+    setCodexConfigurationStatus(configuration);
+    setCodexHarnessStatus(harness);
+  }
+
+  async function configureWindowsSandbox() {
+    setWindowsSandboxBusy("setup");
+    setWindowsSandboxError(null);
+    setWindowsSandboxNotice(null);
+    try {
+      const result = await setupWindowsSandbox("elevated", windowsSandboxProjectId || undefined);
+      await refreshWindowsSandboxStatus();
+      setWindowsSandboxNotice(`Elevated Windows sandbox is configured and reports ${result.readiness}.`);
+    } catch (error) {
+      setWindowsSandboxError(errorMessage(error));
+    } finally {
+      setWindowsSandboxBusy(null);
+    }
+  }
+
+  async function chooseWindowsSandboxReadFolder() {
+    try {
+      const path = await pickSandboxReadFolder();
+      if (path) setWindowsSandboxReadPath(path);
+    } catch (error) {
+      setWindowsSandboxError(errorMessage(error));
+    }
+  }
+
+  async function addWindowsSandboxReadDirectory() {
+    if (!windowsSandboxProjectId) {
+      setWindowsSandboxError("Choose the project whose Codex sandbox should receive this read-only folder.");
+      return;
+    }
+    if (!windowsSandboxReadPath.trim()) {
+      setWindowsSandboxError("Choose an existing absolute folder to grant read access.");
+      return;
+    }
+    setWindowsSandboxBusy("read");
+    setWindowsSandboxError(null);
+    setWindowsSandboxNotice(null);
+    try {
+      const result = await grantWindowsSandboxReadDirectory(
+        windowsSandboxProjectId,
+        windowsSandboxReadPath.trim(),
+        windowsSandboxPermissionProfile
+      );
+      setWindowsSandboxReadPath(result.path);
+      setWindowsSandboxNotice(`Codex sandbox read access is ready for ${result.path}.`);
+    } catch (error) {
+      setWindowsSandboxError(errorMessage(error));
+    } finally {
+      setWindowsSandboxBusy(null);
     }
   }
 
@@ -9837,6 +9933,33 @@ export function App() {
             <div className="settings-control"><span><strong>Web access</strong><small>Provider and tool access stays within reviewed capabilities.</small></span><span className="count-badge">Capability based</span></div>
             <div className="settings-control"><span><strong>Reasoning and output detail</strong><small>Available model features are discovered from each provider endpoint.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Models</button></div>
           </div>
+          {advanced && <TechnicalDetails
+            title="Windows sandbox"
+            summary={`Codex restricted-token sandbox · ${codexConfigurationStatus?.windows_sandbox?.status ?? "checking"}`}
+          >
+            <p className="form-note">These controls call the pinned Codex 0.150.1 sandbox setup directly. Setup may request Windows administrator approval. MetaCog blocks changes while any conversation is actively working.</p>
+            <div className="settings-card settings-card-stack" aria-label="Windows sandbox configuration">
+              <div className="settings-control">
+                <span><strong>Default restricted-token sandbox</strong><small>Configure the elevated Codex helper and make it the default for new Windows sessions.</small></span>
+                {codexConfigurationStatus?.windows_sandbox?.status === "ready"
+                  ? <span className="count-badge">Ready</span>
+                  : <button className="primary" type="button" disabled={!navigator.userAgent.includes("Windows") || windowsSandboxBusy !== null} onClick={() => void configureWindowsSandbox()}>{windowsSandboxBusy === "setup" ? "Setting up…" : "Set up"}</button>}
+              </div>
+              <div className="provider-form windows-sandbox-read-form" aria-label="Additional sandbox read directory">
+                <div className="section-heading compact-heading"><div><h3>Additional read directory</h3><p className="muted">Refresh one project sandbox with bounded read-only access. This does not add a writable root or change organization authority.</p></div></div>
+                <div className="editor-grid">
+                  <label>Project<select aria-label="Windows sandbox project" value={windowsSandboxProjectId} disabled={windowsSandboxBusy !== null} onChange={(event) => setWindowsSandboxProjectId(event.target.value)}><option value="">Choose project</option>{projects.map((project) => <option value={project.project_id} key={`sandbox-project-${project.project_id}`}>{projectDisplayName(project)}</option>)}</select></label>
+                  <label>Permission profile<select aria-label="Windows sandbox permission profile" value={windowsSandboxPermissionProfile} disabled={windowsSandboxBusy !== null || windowsSandboxPermissionProfiles.length === 0} onChange={(event) => setWindowsSandboxPermissionProfile(event.target.value)}>{windowsSandboxPermissionProfiles.length === 0 && <option value=":workspace">Workspace</option>}{windowsSandboxPermissionProfiles.map((profile) => <option value={profile.id} key={`sandbox-profile-${profile.id}`}>{profile.id}{profile.description ? ` · ${profile.description}` : ""}</option>)}</select></label>
+                </div>
+                <label>Folder<div className="settings-inline-field"><input aria-label="Windows sandbox read directory" value={windowsSandboxReadPath} disabled={windowsSandboxBusy !== null} onChange={(event) => setWindowsSandboxReadPath(event.target.value)} placeholder="C:\\path\\to\\reference" /><button className="secondary" type="button" disabled={!navigator.userAgent.includes("Windows") || windowsSandboxBusy !== null} onClick={() => void chooseWindowsSandboxReadFolder()}>Browse</button></div></label>
+                <div className="composer-actions"><button className="primary" type="button" disabled={!navigator.userAgent.includes("Windows") || windowsSandboxBusy !== null || !windowsSandboxProjectId || !windowsSandboxReadPath.trim()} onClick={() => void addWindowsSandboxReadDirectory()}>{windowsSandboxBusy === "read" ? "Granting…" : "Grant read access"}</button></div>
+                <p className="form-note">The folder must already exist and remain outside symlink escapes. Codex applies the effective project permission profile and does not persist this folder in MetaCog settings.</p>
+              </div>
+              {!navigator.userAgent.includes("Windows") && <p className="empty-state">Windows sandbox controls are available only in the Windows desktop app.</p>}
+              {windowsSandboxNotice && <p role="status">{windowsSandboxNotice}</p>}
+              {windowsSandboxError && <p className="error-message" role="alert">{windowsSandboxError}</p>}
+            </div>
+          </TechnicalDetails>}
           {advanced && <TechnicalDetails title="Codex feature flags" summary={`${codexFeatures.length} flags from pinned Codex 0.150.1`}>
             <p className="form-note">These are the same process-wide flags exposed by <code>mcg features</code>. Changes affect new Codex sessions and cannot expand MetaCog organization, approval, or agent authority.</p>
             <label className="codex-feature-search"><span className="sr-only">Search Codex feature flags</span><input value={codexFeatureSearch} onChange={(event) => setCodexFeatureSearch(event.target.value)} placeholder="Search feature flags" /></label>

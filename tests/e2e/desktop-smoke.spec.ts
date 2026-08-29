@@ -101,6 +101,7 @@ test.beforeEach(async ({ page }) => {
     let reviewedPlans: any[] = [];
     let reviewedRunCount = 0;
     let cloudApplyCandidate: any = null;
+    let windowsSandboxReady = false;
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -152,10 +153,12 @@ test.beforeEach(async ({ page }) => {
             return cloudApplyCandidate;
           }
           if (command === "codex_permission_profiles") return [
+            { id: ":workspace", description: "Project workspace", allowed: true },
             { id: "workspace-safe", description: "Write only inside the project.", allowed: true },
             { id: "organization-blocked", description: "Blocked by managed policy.", allowed: false }
           ];
           if (command === "pick_writable_folder") return "C:\\Shared\\assets";
+          if (command === "pick_sandbox_read_folder") return "C:\\Reference\\docs";
           if (command === "search_project_mentions") return {
             candidates: [
               { kind: "file", label: "main.ts", resource: "src/main.ts", detail: "src/main.ts" },
@@ -164,6 +167,18 @@ test.beforeEach(async ({ page }) => {
           };
           if (command === "list_conversations") return { conversations: [] };
           if (command === "codex_features") return codexFeatures;
+          if (command === "codex_configuration_status") return { requirements: {}, provider_capabilities: {}, windows_sandbox: { status: windowsSandboxReady ? "ready" : "notConfigured" } };
+          if (command === "codex_harness_status") return {
+            bundled_version: "0.150.1", protocol_version: "0.150.1", schema_sha256: "8".repeat(64),
+            process_state: "ready", initialized: true, account_state: "signed_out", active_threads: 0,
+            pending_approvals: 0, pending_requests: 0, unsupported_requests: 0, restart_count: 0,
+            configuration_state: "ready", windows_sandbox_state: "ready", mcp_bridge_state: "ready", recovery_state: "healthy"
+          };
+          if (command === "setup_windows_sandbox") {
+            windowsSandboxReady = true;
+            return { mode: args.mode, readiness: "ready", config_write_status: "ok" };
+          }
+          if (command === "grant_windows_sandbox_read_directory") return { path: args.path, permission_profile: args.permissionProfile };
           if (command === "codex_stable_discovery") return {
             skills: [],
             hooks: [],
@@ -401,6 +416,15 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(settings.getByLabel("Run opt-in shadow model experiments")).toBeChecked();
   await expect(settings.getByLabel("Settings revision history")).toContainText("Enabled advanced interface");
   await page.getByRole("button", { name: "Configuration", exact: true }).click();
+  await page.getByText("Windows sandbox", { exact: true }).click();
+  const windowsSandbox = page.getByLabel("Windows sandbox configuration");
+  await expect(windowsSandbox.getByLabel("Windows sandbox project")).toHaveValue("00000000-0000-4000-8000-000000000242");
+  await windowsSandbox.getByRole("button", { name: "Set up" }).click();
+  await expect(windowsSandbox.getByText(/Elevated Windows sandbox is configured/)).toBeVisible();
+  await windowsSandbox.getByRole("button", { name: "Browse" }).click();
+  await expect(windowsSandbox.getByLabel("Windows sandbox read directory")).toHaveValue("C:\\Reference\\docs");
+  await windowsSandbox.getByRole("button", { name: "Grant read access" }).click();
+  await expect(windowsSandbox.getByText(/Codex sandbox read access is ready/)).toBeVisible();
   await page.getByText("Codex feature flags", { exact: true }).click();
   const featureFlags = page.getByLabel("Codex feature flags", { exact: true });
   await expect(featureFlags).toBeVisible();
@@ -1198,6 +1222,7 @@ test("consumer composes and runs a revision-pinned multi-host workflow", async (
 });
 
 test("consumer manages provenance-bearing project memory and inspects the world model", async ({ page }) => {
+  test.slow();
   await page.goto("/");
   await enableAdvancedMode(page);
   await openOwnerSurface(page, "Projects");

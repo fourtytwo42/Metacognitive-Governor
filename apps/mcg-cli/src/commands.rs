@@ -20,6 +20,8 @@ pub enum Availability {
     FastModel,
     Ide,
     Apps,
+    Windows,
+    WindowsSandboxSetup,
     Experimental,
 }
 
@@ -39,6 +41,8 @@ pub struct CommandContext {
     pub fast_model: bool,
     pub ide: bool,
     pub apps: bool,
+    pub windows: bool,
+    pub windows_sandbox_setup: bool,
     pub experimental: bool,
 }
 
@@ -51,6 +55,8 @@ impl SlashCommandSpec {
             Availability::FastModel => context.fast_model,
             Availability::Ide => context.ide,
             Availability::Apps => context.apps,
+            Availability::Windows => context.windows,
+            Availability::WindowsSandboxSetup => context.windows_sandbox_setup,
             Availability::Experimental => context.experimental,
         }
     }
@@ -387,15 +393,15 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         "setup-default-sandbox",
         "Configure the Windows default sandbox",
         None,
-        Immediate,
-        Experimental
+        RejectWhileActive,
+        WindowsSandboxSetup
     ),
     command!(
         "sandbox-add-read-dir",
         "Add a Windows sandbox read directory",
         RequiredText,
-        Immediate,
-        Experimental
+        RejectWhileActive,
+        Windows
     ),
     command!(
         "mcg",
@@ -489,5 +495,31 @@ mod tests {
         let app = command_named("app", context).expect("desktop handoff command");
         assert_eq!(app.arguments, ArgumentSchema::None);
         assert_eq!(app.queue_policy, QueuePolicy::Immediate);
+    }
+
+    #[test]
+    fn windows_sandbox_commands_follow_codex_visibility_and_active_turn_policy() {
+        let non_windows = CommandContext::default();
+        assert!(command_named("setup-default-sandbox", non_windows).is_none());
+        assert!(command_named("sandbox-add-read-dir", non_windows).is_none());
+
+        let configured_windows = CommandContext {
+            windows: true,
+            ..CommandContext::default()
+        };
+        assert!(command_named("setup-default-sandbox", configured_windows).is_none());
+        let read_root = command_named("sandbox-add-read-dir", configured_windows)
+            .expect("Windows read-directory command");
+        assert_eq!(read_root.arguments, ArgumentSchema::RequiredText);
+        assert_eq!(read_root.queue_policy, QueuePolicy::RejectWhileActive);
+
+        let restricted_windows = CommandContext {
+            windows: true,
+            windows_sandbox_setup: true,
+            ..CommandContext::default()
+        };
+        let setup = command_named("setup-default-sandbox", restricted_windows)
+            .expect("restricted-token setup command");
+        assert_eq!(setup.queue_policy, QueuePolicy::RejectWhileActive);
     }
 }

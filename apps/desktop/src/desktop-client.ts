@@ -674,7 +674,21 @@ export interface CodexHarnessStatus {
 export interface CodexConfigurationStatus {
   requirements: unknown;
   provider_capabilities: unknown;
-  windows_sandbox: unknown;
+  windows_sandbox: CodexWindowsSandboxReadiness;
+}
+
+export type CodexWindowsSandboxSetupMode = "elevated" | "unelevated";
+export interface CodexWindowsSandboxReadiness {
+  status: "ready" | "notConfigured" | "updateRequired" | string;
+}
+export interface CodexWindowsSandboxSetupResult {
+  mode: CodexWindowsSandboxSetupMode;
+  readiness: string;
+  config_write_status: string;
+}
+export interface CodexWindowsSandboxReadGrant {
+  path: string;
+  permission_profile: string;
 }
 
 export interface CodexPendingRequest {
@@ -1970,6 +1984,7 @@ export function searchProjectMentions(projectId: string, query = "", limit = 50)
 export function pickMentionFiles(): Promise<string[]> { return invoke("pick_mention_files"); }
 export function pickMentionFolder(): Promise<string | null> { return invoke("pick_mention_folder"); }
 export function pickWritableFolder(): Promise<string | null> { return invoke("pick_writable_folder"); }
+export function pickSandboxReadFolder(): Promise<string | null> { return invoke("pick_sandbox_read_folder"); }
 
 export function updateConversationMode(conversationId: string, mode: ConversationMode): Promise<ConversationView> {
   return invoke("update_conversation_mode", { conversationId, request: { mode } });
@@ -2054,6 +2069,8 @@ export function getCodexHarnessStatus(): Promise<CodexHarnessStatus> { return in
 export function getCodexAccountUsage(): Promise<unknown> { return invoke("codex_account_usage"); }
 export function getCodexStableDiscovery(cwds: string[] = [], forceReload = false): Promise<CodexStableDiscovery> { return invoke("codex_stable_discovery", { cwds, forceReload }); }
 export function getCodexConfigurationStatus(): Promise<CodexConfigurationStatus> { return invoke("codex_configuration_status"); }
+export function setupWindowsSandbox(mode: CodexWindowsSandboxSetupMode, projectId?: string): Promise<CodexWindowsSandboxSetupResult> { return invoke("setup_windows_sandbox", { mode, projectId }); }
+export function grantWindowsSandboxReadDirectory(projectId: string, path: string, permissionProfile?: string): Promise<CodexWindowsSandboxReadGrant> { return invoke("grant_windows_sandbox_read_directory", { projectId, path, permissionProfile }); }
 export function getCodexPendingRequests(): Promise<CodexPendingRequest[]> { return invoke("codex_pending_requests"); }
 export function getCodexOwnedThreads(): Promise<CodexOwnedThread[]> { return invoke("codex_owned_threads"); }
 export function reconcileOwnedCodexThread(conversationId: string): Promise<unknown> { return invoke("reconcile_owned_codex_thread", { conversationId }); }

@@ -27,7 +27,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. `/agent` and `/subagents` now provide a searchable live-thread picker, replace the transcript viewport, and route replies through the selected governed session. Several other context commands still print discovery data, and approval-source thread jumping remains. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
 | Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout and `/app` workspace/conversation handoff work. Direct desktop deep-linking to the active conversation, IDE context, and import remain; hooks/feedback are informational. |
-| Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Missing | Implement a governed sandbox mutation contract and mirror it in Settings. |
+| Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Native | The setup command is shown only when the pinned Codex readiness contract says configuration is required; both mutations are blocked while any conversation has active work. Advanced Settings exposes the same setup, project, permission-profile, and canonical read-directory flow. |
 | Experimental | `/experimental` | Missing | Requires discovered capabilities and durable feature configuration. |
 
 Commands without implemented handlers must remain absent from completion.
@@ -325,6 +325,17 @@ New Chat and established Chat drafts and turns, and summarizes the selection as
 Structured JSON. Simple remains text-first and does not expose this expert-only
 control. The panel is responsive, independently scrollable where needed, and
 uses the existing MetaCog disclosure, field, error, and action styling.
+
+Cycle 24 adds current Codex 0.150.1 Windows sandbox setup and additional
+read-directory behavior. `/setup-default-sandbox` subscribes before invoking
+`windowsSandbox/setupStart`, waits for the matching completion notification,
+persists the exact `windows.sandbox` mode while clearing all three legacy
+feature keys, and requires both an effective configuration write and `ready`
+readiness. `/sandbox-add-read-dir` validates an existing canonical absolute
+directory and asks the pinned `codex sandbox` engine to refresh the selected
+project permission profile with that read root. Both operations are rejected
+while any conversation has nonterminal work. Advanced Settings mirrors the
+same governed contract without exposing it in Simple mode.
 
 ## Safety invariants
 

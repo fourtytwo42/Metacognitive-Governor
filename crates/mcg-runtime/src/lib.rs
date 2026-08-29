@@ -49,7 +49,9 @@ use mcg_codex_app_server::{
     CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
     CodexPermissionProfile, CodexRateLimits, CodexResumeCwd, CodexReviewDelivery,
     CodexReviewResult, CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery,
-    CodexThreadInstructions, CodexTurnProgress, verify_pinned_two_agent_conformance,
+    CodexThreadInstructions, CodexTurnProgress, CodexWindowsSandboxReadGrant,
+    CodexWindowsSandboxSetupMode, CodexWindowsSandboxSetupResult,
+    verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
@@ -11259,6 +11261,76 @@ impl AppRuntime {
             provider_capabilities,
             windows_sandbox,
         })
+    }
+
+    fn ensure_windows_sandbox_configuration_idle(&self) -> Result<(), RuntimeError> {
+        for conversation in self.conversations(true)? {
+            let view = self.conversation(conversation.id)?;
+            if view.turns.iter().any(|turn| {
+                matches!(
+                    turn.state,
+                    ConversationTurnState::Pending
+                        | ConversationTurnState::Streaming
+                        | ConversationTurnState::WaitingForApproval
+                        | ConversationTurnState::Recovering
+                        | ConversationTurnState::Indeterminate
+                )
+            }) {
+                return Err(StorageError::Conflict(format!(
+                    "Windows sandbox configuration is unavailable while conversation `{}` has active work",
+                    conversation.title
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn codex_project_cwd(&self, project_id: ProjectId) -> Result<PathBuf, RuntimeError> {
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        let cwd = fs::canonicalize(&project.root).map_err(|error| {
+            StorageError::InvalidData(format!(
+                "project cannot be resolved for Windows sandbox configuration: {error}"
+            ))
+        })?;
+        if !cwd.is_dir() {
+            return Err(StorageError::InvalidData(
+                "Windows sandbox project root must be an existing directory".into(),
+            )
+            .into());
+        }
+        Ok(cwd)
+    }
+
+    pub async fn setup_windows_sandbox(
+        &self,
+        mode: CodexWindowsSandboxSetupMode,
+        project_id: Option<ProjectId>,
+    ) -> Result<CodexWindowsSandboxSetupResult, RuntimeError> {
+        self.ensure_windows_sandbox_configuration_idle()?;
+        let cwd = project_id
+            .map(|project_id| self.codex_project_cwd(project_id))
+            .transpose()?;
+        Ok(self
+            .codex_harness
+            .setup_windows_sandbox(mode, cwd.as_deref())
+            .await?)
+    }
+
+    pub async fn grant_windows_sandbox_read_directory(
+        &self,
+        project_id: ProjectId,
+        read_root: &Path,
+        permission_profile: Option<&str>,
+    ) -> Result<CodexWindowsSandboxReadGrant, RuntimeError> {
+        self.ensure_windows_sandbox_configuration_idle()?;
+        let cwd = self.codex_project_cwd(project_id)?;
+        Ok(self
+            .codex_harness
+            .grant_windows_sandbox_read_directory(&cwd, read_root, permission_profile)
+            .await?)
     }
 
     pub async fn codex_resume_cwd(
@@ -28374,6 +28446,56 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("will not resend"))
         );
+    }
+
+    #[test]
+    fn windows_sandbox_configuration_is_blocked_until_all_conversation_work_is_terminal() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("runtime");
+        let conversation = runtime
+            .create_conversation(
+                Some("Sandbox configuration guard".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("conversation");
+        let now = Utc::now();
+        let mut turn = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: conversation.id,
+            state: ConversationTurnState::Pending,
+            execution_preferences: ExecutionPreferences::default(),
+            codex_thread_id: None,
+            codex_turn_id: None,
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .store()
+            .expect("store")
+            .save_conversation_turn(&turn)
+            .expect("pending turn");
+
+        let error = runtime
+            .ensure_windows_sandbox_configuration_idle()
+            .expect_err("active work must block sandbox mutation");
+        assert!(error.to_string().contains("active work"));
+
+        turn.state = ConversationTurnState::Completed;
+        turn.updated_at = Utc::now();
+        runtime
+            .store()
+            .expect("store")
+            .save_conversation_turn(&turn)
+            .expect("completed turn");
+        runtime
+            .ensure_windows_sandbox_configuration_idle()
+            .expect("terminal work permits sandbox mutation");
     }
 
     #[tokio::test]

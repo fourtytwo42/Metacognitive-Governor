@@ -5703,6 +5703,32 @@ async fn interactive_command_context(
             .unwrap_or(false),
         Err(_) => false,
     };
+    let windows_sandbox_setup = if cfg!(windows) {
+        let configuration = client
+            .get(format!("{host}/api/v1/codex/configuration"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .ok()
+            .and_then(|response| response.error_for_status().ok());
+        if let Some(response) = configuration {
+            response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|configuration| {
+                    configuration
+                        .pointer("/windows_sandbox/status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|status| status != "ready")
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     CommandContext {
         has_project: project_id.is_some(),
         fast_model,
@@ -5711,6 +5737,8 @@ async fn interactive_command_context(
         // discovery returns a handler-compatible endpoint.
         ide: false,
         apps,
+        windows: cfg!(windows),
+        windows_sandbox_setup,
         experimental: false,
     }
 }
@@ -6292,6 +6320,55 @@ async fn run_interactive_slash(
                 preferences.permission_profile = None;
                 println!("Permissions set to {:?}.", preferences.approval_mode);
             }
+        }
+        "setup-default-sandbox" => {
+            println!("Windows may request elevation while Codex configures its default sandbox.");
+            let result: mcg_codex_app_server::CodexWindowsSandboxSetupResult = decode_api_response(
+                client
+                    .post(format!("{host}/api/v1/codex/windows-sandbox/setup"))
+                    .bearer_auth(token)
+                    .json(&mcg_api::WindowsSandboxSetupRequest {
+                        mode: mcg_codex_app_server::CodexWindowsSandboxSetupMode::Elevated,
+                        project_id: *project_id,
+                    })
+                    .send()
+                    .await?,
+                "configure Windows sandbox",
+            )
+            .await?;
+            println!(
+                "Windows sandbox configured as {:?}; readiness {}.",
+                result.mode, result.readiness
+            );
+        }
+        "sandbox-add-read-dir" => {
+            let project_id = (*project_id).ok_or(
+                "/sandbox-add-read-dir requires a linked project so Codex can resolve its permission profile",
+            )?;
+            if argument.is_empty() {
+                return Err("Usage: /sandbox-add-read-dir <absolute-directory-path>".into());
+            }
+            let path = PathBuf::from(argument);
+            if !path.is_absolute() {
+                return Err("sandbox read directory must be an absolute path".into());
+            }
+            let result: mcg_codex_app_server::CodexWindowsSandboxReadGrant = decode_api_response(
+                client
+                    .post(format!(
+                        "{host}/api/v1/codex/windows-sandbox/read-directories"
+                    ))
+                    .bearer_auth(token)
+                    .json(&mcg_api::WindowsSandboxReadDirectoryRequest {
+                        project_id,
+                        path: argument.to_owned(),
+                        permission_profile: preferences.permission_profile.clone(),
+                    })
+                    .send()
+                    .await?,
+                "grant Windows sandbox read directory",
+            )
+            .await?;
+            println!("Sandbox read access granted for {}.", result.path);
         }
         "personality" => {
             if argument.is_empty() {

@@ -389,6 +389,21 @@ pub struct SetCodexFeatureRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsSandboxSetupRequest {
+    pub mode: mcg_codex_app_server::CodexWindowsSandboxSetupMode,
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsSandboxReadDirectoryRequest {
+    pub project_id: ProjectId,
+    pub path: String,
+    #[serde(default)]
+    pub permission_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexReviewRequest {
     pub target: mcg_codex_app_server::CodexReviewTarget,
     pub delivery: mcg_codex_app_server::CodexReviewDelivery,
@@ -1783,6 +1798,14 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/codex/configuration",
             get(codex_configuration_status),
+        )
+        .route(
+            "/api/v1/codex/windows-sandbox/setup",
+            post(setup_windows_sandbox),
+        )
+        .route(
+            "/api/v1/codex/windows-sandbox/read-directories",
+            post(grant_windows_sandbox_read_directory),
         )
         .route("/api/v1/codex/resume-cwd", get(codex_resume_cwd))
         .route(
@@ -4761,6 +4784,42 @@ async fn codex_configuration_status(
         state
             .runtime
             .codex_configuration_status()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn setup_windows_sandbox(
+    State(state): State<ApiState>,
+    Json(request): Json<WindowsSandboxSetupRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexWindowsSandboxSetupResult>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .setup_windows_sandbox(request.mode, request.project_id)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn grant_windows_sandbox_read_directory(
+    State(state): State<ApiState>,
+    Json(request): Json<WindowsSandboxReadDirectoryRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexWindowsSandboxReadGrant>, ApiError> {
+    let path = request.path.trim();
+    if path.is_empty() || path.len() > 32_768 || !std::path::Path::new(path).is_absolute() {
+        return Err(ApiError::bad_request(
+            "Windows sandbox read directory must be a bounded absolute path",
+        ));
+    }
+    Ok(Json(
+        state
+            .runtime
+            .grant_windows_sandbox_read_directory(
+                request.project_id,
+                std::path::Path::new(path),
+                request.permission_profile.as_deref(),
+            )
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -7765,6 +7824,32 @@ mod tests {
             .await
             .expect("permission profile response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn windows_sandbox_read_directory_route_rejects_non_absolute_paths_before_dispatch() {
+        let project_id = ProjectId::new();
+        for path in ["", "relative/folder"] {
+            let response = router(test_runtime())
+                .oneshot(
+                    authorized(Request::post(
+                        "/api/v1/codex/windows-sandbox/read-directories",
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "path": path,
+                            "permission_profile": ":workspace"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("sandbox read-directory request"),
+                )
+                .await
+                .expect("sandbox read-directory response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 
     #[tokio::test]
