@@ -85,6 +85,8 @@ export interface UserSettings {
   advanced_mode: boolean;
   autonomy: AutonomyPreset;
   shadow_experiments: boolean;
+  codex_remote_endpoint?: string;
+  codex_remote_auth_token_env?: string;
   updated_at: string;
 }
 
@@ -638,7 +640,9 @@ export interface CodexFeature {
 }
 export interface CodexPermissionProfile { id: string; description?: string; allowed: boolean; }
 export interface CodexAccount { authenticated: boolean; account_type?: string; email?: string; plan_type?: string; requires_openai_auth: boolean; }
-export interface CodexLoginStart { loginId: string; authUrl: string; }
+export type CodexLoginMethod = "browser" | "device_code" | "api_key" | "access_token";
+export interface CodexLoginStart { loginId?: string; authUrl?: string; verificationUrl?: string; userCode?: string; }
+export type CodexTransportConfig = { kind: "local_stdio" } | { kind: "remote_web_socket"; endpoint: string; auth_token_env?: string };
 export interface CodexRateLimitWindow { used_percent: number; remaining_percent: number; resets_at?: number; }
 export interface CodexRateLimitBucket extends CodexRateLimitWindow { limit_id: string; limit_name?: string; }
 export interface CodexRateLimits {
@@ -669,6 +673,7 @@ export interface CodexHarnessStatus {
   windows_sandbox_state: string;
   mcp_bridge_state: string;
   recovery_state: string;
+  transport: CodexTransportConfig;
 }
 
 export interface CodexConfigurationStatus {
@@ -2082,7 +2087,8 @@ export function startOwnedCodexReview(conversationId: string, target: CodexRevie
 export function execGovernedCodexCommand(conversationId: string, request: CodexCommandExecRequest): Promise<CodexCommandExecResult> { return invoke("exec_governed_codex_command", { conversationId, request }); }
 export function watchConversationProject(conversationId: string): Promise<CodexFsWatch> { return invoke("watch_conversation_project", { conversationId }); }
 export function unwatchConversationProject(conversationId: string): Promise<unknown> { return invoke("unwatch_conversation_project", { conversationId }); }
-export function startCodexLogin(): Promise<CodexLoginStart> { return invoke("start_codex_login"); }
+export function startCodexLogin(method: CodexLoginMethod = "browser", credential?: string): Promise<CodexLoginStart | CodexAccount> { return invoke("start_codex_login", { method, credential }); }
+export function updateCodexTransport(expectedRevision: number, endpoint?: string, authTokenEnv?: string, reason = "Updated Codex transport from desktop"): Promise<UserSettings> { return invoke("update_codex_transport", { expectedRevision, endpoint, authTokenEnv, reason }); }
 export function cancelCodexLogin(loginId: string): Promise<unknown> { return invoke("cancel_codex_login", { loginId }); }
 export function logoutCodexAccount(): Promise<unknown> { return invoke("logout_codex_account"); }
 

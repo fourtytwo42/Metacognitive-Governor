@@ -49,8 +49,8 @@ use mcg_codex_app_server::{
     CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
     CodexPermissionProfile, CodexRateLimits, CodexResumeCwd, CodexReviewDelivery,
     CodexReviewResult, CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery,
-    CodexThreadInstructions, CodexTurnProgress, CodexWindowsSandboxReadGrant,
-    CodexWindowsSandboxSetupMode, CodexWindowsSandboxSetupResult,
+    CodexThreadInstructions, CodexTransportConfig, CodexTurnProgress, CodexWindowsSandboxReadGrant,
+    CodexWindowsSandboxSetupMode, CodexWindowsSandboxSetupResult, validate_transport,
     verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
@@ -3385,7 +3385,19 @@ impl AppRuntime {
         if config.two_agent_conversations {
             verify_pinned_two_agent_conformance(&codex_executable)?;
         }
-        let codex_harness = CodexAppServerHarness::new(codex_executable);
+        let codex_transport = settings.codex_remote_endpoint.as_ref().map_or_else(
+            || Ok(CodexTransportConfig::LocalStdio),
+            |endpoint| {
+                let transport = CodexTransportConfig::remote(
+                    endpoint.clone(),
+                    settings.codex_remote_auth_token_env.clone(),
+                );
+                validate_transport(&transport)?;
+                Ok::<_, CodexHarnessError>(transport)
+            },
+        )?;
+        let codex_harness =
+            CodexAppServerHarness::new_with_transport(codex_executable, codex_transport);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let harness = codex_harness.clone();
             let event_store = store.clone();
@@ -11760,6 +11772,80 @@ impl AppRuntime {
 
     pub async fn start_codex_login(&self) -> Result<serde_json::Value, RuntimeError> {
         Ok(self.codex_harness.start_login().await?)
+    }
+
+    pub async fn start_codex_device_code_login(&self) -> Result<serde_json::Value, RuntimeError> {
+        Ok(self.codex_harness.start_device_code_login().await?)
+    }
+
+    pub async fn login_codex_with_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        Ok(self.codex_harness.login_with_api_key(api_key).await?)
+    }
+
+    pub async fn login_codex_with_access_token(
+        &self,
+        access_token: &str,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        Ok(self
+            .codex_harness
+            .login_with_access_token(access_token)
+            .await?)
+    }
+
+    pub async fn update_codex_transport(
+        &self,
+        expected_revision: u64,
+        endpoint: Option<String>,
+        auth_token_env: Option<String>,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<UserSettings, RuntimeError> {
+        let endpoint = endpoint
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let auth_token_env = auth_token_env
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if endpoint.is_none() && auth_token_env.is_some() {
+            return Err(CodexHarnessError::InvalidRequest(
+                "a remote auth token environment variable requires a remote endpoint".into(),
+            )
+            .into());
+        }
+        let next_transport = endpoint.as_ref().map_or_else(
+            || CodexTransportConfig::LocalStdio,
+            |endpoint| CodexTransportConfig::remote(endpoint.clone(), auth_token_env.clone()),
+        );
+        validate_transport(&next_transport)?;
+        let previous_transport = self.codex_harness.transport().await;
+        self.codex_harness
+            .configure_transport(next_transport)
+            .await?;
+        let persisted = self.store()?.update_codex_transport_settings(
+            expected_revision,
+            endpoint,
+            auth_token_env,
+            reason,
+            now,
+        );
+        let settings = match persisted {
+            Ok(settings) => settings,
+            Err(error) => {
+                let _ = self
+                    .codex_harness
+                    .configure_transport(previous_transport)
+                    .await;
+                return Err(error.into());
+            }
+        };
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings.clone();
+        Ok(settings)
     }
 
     pub async fn cancel_codex_login(

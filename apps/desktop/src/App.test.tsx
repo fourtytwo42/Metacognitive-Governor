@@ -82,6 +82,7 @@ const client = vi.hoisted(() => ({
   watchConversationProject: vi.fn(),
   unwatchConversationProject: vi.fn(),
   startCodexLogin: vi.fn(),
+  updateCodexTransport: vi.fn(),
   cancelCodexLogin: vi.fn(),
   logoutCodexAccount: vi.fn(),
   createTask: vi.fn(),
@@ -283,6 +284,7 @@ vi.mock("./desktop-client", () => ({
   watchConversationProject: client.watchConversationProject,
   unwatchConversationProject: client.unwatchConversationProject,
   startCodexLogin: client.startCodexLogin,
+  updateCodexTransport: client.updateCodexTransport,
   cancelCodexLogin: client.cancelCodexLogin,
   logoutCodexAccount: client.logoutCodexAccount,
   createTask: client.createTask,
@@ -498,6 +500,7 @@ beforeEach(() => {
   client.watchConversationProject.mockReset();
   client.unwatchConversationProject.mockReset();
   client.startCodexLogin.mockReset();
+  client.updateCodexTransport.mockReset();
   client.cancelCodexLogin.mockReset();
   client.logoutCodexAccount.mockReset();
   client.createTask.mockReset();
@@ -735,6 +738,7 @@ beforeEach(() => {
     ,windows_sandbox_state: "ready"
     ,mcp_bridge_state: "ready"
     ,recovery_state: "healthy"
+    ,transport: { kind: "local_stdio" }
   });
   client.getCodexConfigurationStatus.mockResolvedValue({ requirements: {}, provider_capabilities: {}, windows_sandbox: { status: "ready" } });
   client.setupWindowsSandbox.mockResolvedValue({ mode: "elevated", readiness: "ready", config_write_status: "ok" });
@@ -915,6 +919,13 @@ beforeEach(() => {
     autonomy: request.autonomy,
     shadow_experiments: request.shadow_experiments,
     updated_at: "2026-08-15T00:01:00Z"
+  }));
+  client.updateCodexTransport.mockImplementation(async (expectedRevision: number, endpoint?: string, authTokenEnv?: string) => ({
+    ...settings,
+    revision: expectedRevision + 1,
+    codex_remote_endpoint: endpoint,
+    codex_remote_auth_token_env: authTokenEnv,
+    updated_at: "2026-08-15T00:02:00Z"
   }));
 });
 
@@ -3177,6 +3188,60 @@ test("advanced configuration exposes searchable Codex feature flags and persists
   fireEvent.click(screen.getByRole("checkbox", { name: "Enable memories" }));
   await waitFor(() => expect(client.setCodexFeature).toHaveBeenCalledWith("memories", true));
   expect(screen.getByRole("checkbox", { name: "Disable memories" })).toBeChecked();
+});
+
+test("advanced configuration connects an authenticated remote Codex app-server without storing a token", async () => {
+  render(<App />);
+  await enableAdvancedMode();
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Configuration" }));
+  fireEvent.click(await screen.findByText("Codex app-server transport"));
+
+  const transport = screen.getByLabelText("Codex app-server transport configuration");
+  fireEvent.change(within(transport).getByLabelText("Codex remote endpoint"), { target: { value: "wss://codex.example.test/socket" } });
+  fireEvent.change(within(transport).getByLabelText("Codex remote bearer token environment variable"), { target: { value: "CODEX_REMOTE_TOKEN" } });
+  fireEvent.click(within(transport).getByRole("button", { name: "Connect remote" }));
+
+  await waitFor(() => expect(client.updateCodexTransport).toHaveBeenCalledWith(
+    2,
+    "wss://codex.example.test/socket",
+    "CODEX_REMOTE_TOKEN"
+  ));
+});
+
+test("account settings expose Codex device-code login", async () => {
+  client.startCodexLogin.mockResolvedValue({ loginId: "device-login", verificationUrl: "https://auth.openai.com/device", userCode: "ABCD-EFGH" });
+  client.getCodexAccount
+    .mockResolvedValueOnce({ authenticated: false, requires_openai_auth: true })
+    .mockResolvedValue({ authenticated: true, email: "owner@example.com", plan_type: "plus", requires_openai_auth: true });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Account" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Use device code" }));
+  await waitFor(() => expect(client.startCodexLogin).toHaveBeenCalledWith("device_code", undefined));
+  expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(client.open).toHaveBeenCalledWith("https://auth.openai.com/device");
+  await waitFor(() => expect(screen.getAllByText("Using shared Codex account")).not.toHaveLength(0), { timeout: 2_000 });
+});
+
+test("advanced account settings submit API credentials once and clear the field", async () => {
+  client.startCodexLogin.mockResolvedValue({ authenticated: true, account_type: "api_key", requires_openai_auth: true });
+  client.getCodexAccount
+    .mockResolvedValueOnce({ authenticated: false, requires_openai_auth: true })
+    .mockResolvedValue({ authenticated: true, account_type: "api_key", requires_openai_auth: true });
+  render(<App />);
+  await enableAdvancedMode();
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Account" }));
+  fireEvent.click(await screen.findByText("Credential login"));
+  const field = screen.getByLabelText("Codex login credential");
+  fireEvent.change(field, { target: { value: "sk-fixture" } });
+  fireEvent.click(screen.getByRole("button", { name: /^Sign in$/ }));
+  await waitFor(() => expect(client.startCodexLogin).toHaveBeenCalledWith("api_key", "sk-fixture"));
+  await waitFor(() => expect(screen.queryByLabelText("Codex login credential")).not.toBeInTheDocument());
 });
 
 test("advanced configuration runs governed Windows sandbox setup and read grants", async () => {

@@ -95,6 +95,8 @@ impl SqliteEventStore {
             advanced_mode,
             autonomy,
             shadow_experiments,
+            codex_remote_endpoint: current.codex_remote_endpoint,
+            codex_remote_auth_token_env: current.codex_remote_auth_token_env,
             updated_at,
         };
         validate_settings(&settings)?;
@@ -132,6 +134,47 @@ impl SqliteEventStore {
         Ok(settings)
     }
 
+    /// Atomically switches the persisted Codex app-server transport without ever
+    /// storing the bearer credential value.
+    pub fn update_codex_transport_settings(
+        &mut self,
+        expected_revision: u64,
+        endpoint: Option<String>,
+        auth_token_env: Option<String>,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<UserSettings, StorageError> {
+        validate_reason(reason)?;
+        let current = self.user_settings()?.ok_or_else(|| {
+            StorageError::InvalidData("user settings were not initialized".into())
+        })?;
+        if current.revision != expected_revision {
+            return Err(StorageError::Conflict(format!(
+                "user settings revision is {}; expected {expected_revision}",
+                current.revision
+            )));
+        }
+        let updated_at = if now > current.updated_at {
+            now
+        } else {
+            current.updated_at + Duration::nanoseconds(1)
+        };
+        let settings = UserSettings {
+            schema_version: USER_SETTINGS_SCHEMA_VERSION,
+            revision: current.revision.checked_add(1).ok_or_else(|| {
+                StorageError::InvalidData("user settings revision overflow".into())
+            })?,
+            advanced_mode: current.advanced_mode,
+            autonomy: current.autonomy,
+            shadow_experiments: current.shadow_experiments,
+            codex_remote_endpoint: endpoint,
+            codex_remote_auth_token_env: auth_token_env,
+            updated_at,
+        };
+        validate_settings(&settings)?;
+        persist_settings_revision(self, expected_revision, &settings, reason)
+    }
+
     /// Lists immutable settings history in revision order.
     ///
     /// # Errors
@@ -165,6 +208,46 @@ impl SqliteEventStore {
         }
         Ok(revisions)
     }
+}
+
+fn persist_settings_revision(
+    store: &mut SqliteEventStore,
+    expected_revision: u64,
+    settings: &UserSettings,
+    reason: &str,
+) -> Result<UserSettings, StorageError> {
+    let json = serde_json::to_string(settings)?;
+    let revision = revision_i64(settings.revision)?;
+    let expected_revision = revision_i64(expected_revision)?;
+    let transaction = store.connection.transaction()?;
+    let changed = transaction.execute(
+        "UPDATE user_settings SET revision = ?1, settings_json = ?2, updated_at = ?3
+         WHERE owner_key = ?4 AND revision = ?5",
+        params![
+            revision,
+            &json,
+            settings.updated_at.to_rfc3339(),
+            OWNER_KEY,
+            expected_revision
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::Conflict(
+            "user settings changed concurrently".into(),
+        ));
+    }
+    transaction.execute(
+        "INSERT INTO user_settings_revisions(revision, settings_json, reason, changed_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            revision,
+            &json,
+            reason.trim(),
+            settings.updated_at.to_rfc3339()
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(settings.clone())
 }
 
 fn validate_settings(settings: &UserSettings) -> Result<(), StorageError> {
@@ -223,6 +306,20 @@ mod tests {
         assert!(updated.advanced_mode);
         assert_eq!(updated.autonomy, AutonomyPreset::Guided);
         assert!(updated.updated_at > initial.updated_at);
+        let transported = store
+            .update_codex_transport_settings(
+                2,
+                Some("wss://codex.example.test/socket".into()),
+                Some("CODEX_REMOTE_TOKEN".into()),
+                "selected remote Codex transport",
+                now,
+            )
+            .expect("transport update");
+        assert_eq!(transported.revision, 3);
+        assert_eq!(
+            transported.codex_remote_endpoint.as_deref(),
+            Some("wss://codex.example.test/socket")
+        );
         assert!(matches!(
             store.update_user_settings(
                 1,
@@ -254,7 +351,7 @@ mod tests {
         let mut reopened = SqliteEventStore::open(&database).expect("reopen");
         assert_eq!(
             reopened.user_settings().expect("read"),
-            Some(updated.clone())
+            Some(transported.clone())
         );
         assert_eq!(
             reopened.user_settings_history().expect("history"),
@@ -269,13 +366,18 @@ mod tests {
                     reason: "owner enabled advanced controls".into(),
                     changed_at: updated.updated_at,
                 },
+                UserSettingsRevision {
+                    settings: transported.clone(),
+                    reason: "selected remote Codex transport".into(),
+                    changed_at: transported.updated_at,
+                },
             ]
         );
         assert_eq!(
             reopened
                 .initialize_user_settings(&AppConfig::default(), Utc::now())
                 .expect("reinitialize"),
-            updated
+            transported
         );
     }
 }

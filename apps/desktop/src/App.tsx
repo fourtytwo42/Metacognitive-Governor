@@ -227,6 +227,7 @@ import {
   watchConversationProject,
   unwatchConversationProject,
   startCodexLogin,
+  updateCodexTransport,
   cancelCodexLogin,
   logoutCodexAccount,
   getUpdateConfiguration,
@@ -2513,6 +2514,12 @@ export function App() {
   const [updateReview, setUpdateReview] = useState(false);
   const [login, setLogin] = useState<OAuthLoginStart | null>(null);
   const [codexLogin, setCodexLogin] = useState<CodexLoginStart | null>(null);
+  const [codexLoginMethod, setCodexLoginMethod] = useState<"api_key" | "access_token">("api_key");
+  const [codexCredential, setCodexCredential] = useState("");
+  const [codexRemoteEndpoint, setCodexRemoteEndpoint] = useState("");
+  const [codexRemoteAuthTokenEnv, setCodexRemoteAuthTokenEnv] = useState("");
+  const [codexTransportBusy, setCodexTransportBusy] = useState(false);
+  const [codexTransportError, setCodexTransportError] = useState<string | null>(null);
   const [codexAccountDisconnected, setCodexAccountDisconnected] = useState(() => window.localStorage.getItem("mcg.codex-account-disconnected") === "true");
   const [providerStatus, setProviderStatus] = useState("Not connected");
   const [busy, setBusy] = useState(false);
@@ -3898,6 +3905,8 @@ export function App() {
         if (active) {
           setUserSettings(settings);
           setAdvanced(settings.advanced_mode);
+          setCodexRemoteEndpoint(settings.codex_remote_endpoint ?? "");
+          setCodexRemoteAuthTokenEnv(settings.codex_remote_auth_token_env ?? "");
         }
       })
       .catch((error) => {
@@ -4195,6 +4204,7 @@ export function App() {
       setBackupConfirmation("");
       setProviderCredential("");
       setMcpCredential("");
+      setCodexCredential("");
     }
     await saveUserSettings(
       { ...userSettings, advanced_mode: nextAdvanced },
@@ -4202,6 +4212,32 @@ export function App() {
     );
     if (restoreFocus) {
       window.requestAnimationFrame(() => modeButtonRef.current?.focus());
+    }
+  }
+
+  async function saveCodexTransport() {
+    if (!userSettings || codexTransportBusy) return;
+    setCodexTransportBusy(true);
+    setCodexTransportError(null);
+    try {
+      const saved = await updateCodexTransport(
+        userSettings.revision,
+        codexRemoteEndpoint.trim() || undefined,
+        codexRemoteAuthTokenEnv.trim() || undefined,
+      );
+      setUserSettings(saved);
+      setSettingsHistory((current) => [...current, { settings: saved, reason: "Updated Codex transport from desktop", changed_at: saved.updated_at }]);
+      setCodexHarnessStatus(await getCodexHarnessStatus());
+    } catch (error) {
+      setCodexTransportError(errorMessage(error));
+      const current = await getUserSettings().catch(() => null);
+      if (current) {
+        setUserSettings(current);
+        setCodexRemoteEndpoint(current.codex_remote_endpoint ?? "");
+        setCodexRemoteAuthTokenEnv(current.codex_remote_auth_token_env ?? "");
+      }
+    } finally {
+      setCodexTransportBusy(false);
     }
   }
 
@@ -4288,46 +4324,64 @@ export function App() {
     }
   }
 
+  async function startSharedCodexLogin(method: "browser" | "device_code" | "api_key" | "access_token", credential?: string) {
+    setBusy(true);
+    setProviderError(null);
+    try {
+      if (method === "browser" && codexAccount?.authenticated) {
+        window.localStorage.removeItem("mcg.codex-account-disconnected");
+        setCodexAccountDisconnected(false);
+        setProviderStatus("Using shared Codex account");
+        return;
+      }
+      const response = await startCodexLogin(method, credential);
+      if (method === "api_key" || method === "access_token") {
+        const account = await getCodexAccount();
+        setCodexAccount(account);
+        setCodexAccountDisconnected(false);
+        window.localStorage.removeItem("mcg.codex-account-disconnected");
+        setProviderStatus(account.authenticated ? "Using shared Codex account" : "Credential accepted; account refresh pending");
+        await refreshCodexCatalog();
+        return;
+      }
+      const started = response as CodexLoginStart;
+      setCodexLogin(started);
+      const authorizationUrl = started.authUrl ?? started.verificationUrl;
+      setProviderStatus(method === "device_code" ? "Waiting for device authorization" : "Waiting for browser authorization (up to 3 minutes)");
+      if (authorizationUrl) await openExternalUrl(authorizationUrl);
+      const deadline = Date.now() + 180_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+        const account = await getCodexAccount();
+        if (account.authenticated) {
+          window.localStorage.removeItem("mcg.codex-account-disconnected");
+          setCodexAccountDisconnected(false);
+          setCodexAccount(account);
+          setCodexLogin(null);
+          setProviderStatus("Using shared Codex account");
+          await refreshCodexCatalog();
+          return;
+        }
+      }
+      if (started.loginId) await cancelCodexLogin(started.loginId).catch(() => undefined);
+      setCodexLogin(null);
+      setProviderStatus("Sign-in timed out");
+      setProviderError("Sign-in timed out after 3 minutes. Start sign-in again when you’re ready.");
+    } catch (error) {
+      setCodexLogin(null);
+      setProviderError(errorMessage(error));
+      setProviderStatus("Connection failed");
+    } finally {
+      setCodexCredential("");
+      setBusy(false);
+    }
+  }
+
   async function startLogin(method: OpenAiOAuthMethod) {
     setBusy(true);
     setProviderError(null);
     if (method === "browser") {
-      try {
-        if (codexAccount?.authenticated) {
-          window.localStorage.removeItem("mcg.codex-account-disconnected");
-          setCodexAccountDisconnected(false);
-          setProviderStatus("Using shared Codex account");
-          return;
-        }
-        const started = await startCodexLogin();
-        setCodexLogin(started);
-        setProviderStatus("Waiting for browser authorization (up to 3 minutes)");
-        await openExternalUrl(started.authUrl);
-        const deadline = Date.now() + 180_000;
-        while (Date.now() < deadline) {
-          await new Promise((resolve) => window.setTimeout(resolve, 1_000));
-          const account = await getCodexAccount();
-          if (account.authenticated) {
-            window.localStorage.removeItem("mcg.codex-account-disconnected");
-            setCodexAccountDisconnected(false);
-            setCodexAccount(account);
-            setCodexLogin(null);
-            setProviderStatus("Using shared Codex account");
-            await refreshCodexCatalog();
-            return;
-          }
-        }
-        await cancelCodexLogin(started.loginId).catch(() => undefined);
-        setCodexLogin(null);
-        setProviderStatus("Sign-in timed out");
-        setProviderError("Sign-in timed out after 3 minutes. Start sign-in again when you’re ready.");
-      } catch (error) {
-        setCodexLogin(null);
-        setProviderError(errorMessage(error));
-        setProviderStatus("Connection failed");
-      } finally {
-        setBusy(false);
-      }
+      await startSharedCodexLogin("browser");
       return;
     }
     try {
@@ -9934,6 +9988,19 @@ export function App() {
             <div className="settings-control"><span><strong>Reasoning and output detail</strong><small>Available model features are discovered from each provider endpoint.</small></span><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Models</button></div>
           </div>
           {advanced && <TechnicalDetails
+            title="Codex app-server transport"
+            summary={codexHarnessStatus?.transport?.kind === "remote_web_socket" ? `Remote · ${codexHarnessStatus.transport.endpoint}` : "Local stdio (default)"}
+          >
+            <p className="form-note">Connect to an explicitly managed Codex app-server over WebSocket. Use <code>wss://</code> except for localhost or an SSH-forwarded loopback connection. MetaCog stores only the environment-variable name, never its bearer token.</p>
+            <div className="settings-card settings-card-stack" aria-label="Codex app-server transport configuration">
+              <label>Remote endpoint<input aria-label="Codex remote endpoint" value={codexRemoteEndpoint} disabled={codexTransportBusy} onChange={(event) => setCodexRemoteEndpoint(event.target.value)} placeholder="wss://host.example/codex" /></label>
+              <label>Bearer token environment variable (optional)<input aria-label="Codex remote bearer token environment variable" value={codexRemoteAuthTokenEnv} disabled={codexTransportBusy || !codexRemoteEndpoint.trim()} onChange={(event) => setCodexRemoteAuthTokenEnv(event.target.value)} placeholder="CODEX_REMOTE_TOKEN" /></label>
+              <div className="composer-actions"><button className="primary" type="button" disabled={codexTransportBusy || !userSettings} onClick={() => void saveCodexTransport()}>{codexTransportBusy ? "Connecting…" : codexRemoteEndpoint.trim() ? "Connect remote" : "Use local"}</button></div>
+              <small>Transport changes are blocked while work is active and must initialize successfully before they are saved.</small>
+              {codexTransportError && <p className="error-message" role="alert">{codexTransportError}</p>}
+            </div>
+          </TechnicalDetails>}
+          {advanced && <TechnicalDetails
             title="Windows sandbox"
             summary={`Codex restricted-token sandbox · ${codexConfigurationStatus?.windows_sandbox?.status ?? "checking"}`}
           >
@@ -10207,8 +10274,10 @@ export function App() {
                 <p className="form-note">MetaCog does not sell credits, collect subscription payments, or silently move subscription work to API billing.</p>
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="account"><h2>Account</h2><div className="settings-card account-card"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><div><strong>{signedInWithOpenAi ? openAiAccountName : "Connect your OpenAI subscription"}</strong><p>{signedInWithOpenAi ? `Signed in with ChatGPT${codexAccount?.email ? ` as ${codexAccount.email}` : openAiProfile?.email ? ` as ${openAiProfile.email}` : ""}.` : "A browser window will open for OpenAI sign-in and return authorization to MetaCog automatically."}</p><small>{signedInWithOpenAi ? `${openAiPlanLabel} · Using shared Codex account` : "Subscription OAuth never silently falls back to API-key billing."}</small></div>{signedInWithOpenAi ? <button className="secondary" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}>{busy ? "Disconnecting…" : "Disconnect MetaCog"}</button> : <button className="primary" type="button" disabled={busy || Boolean(login || codexLogin)} onClick={() => void startLogin("browser")}>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</button>}</div>
+                {!signedInWithOpenAi && <div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Sign in on another device</strong><small>Use Codex device-code authorization when this computer cannot open the sign-in browser.</small></span><button className="secondary" type="button" disabled={busy || Boolean(login || codexLogin)} onClick={() => void startSharedCodexLogin("device_code")}>Use device code</button></div></div>}
+                {advanced && !signedInWithOpenAi && <TechnicalDetails title="Credential login" summary="API key or ChatGPT access token"><p className="form-note">API-key use is billed through the API account. Access-token login follows Codex's supported stdin flow. MetaCog sends the value once, does not save it, and clears this field after the attempt.</p><div className="settings-card settings-card-stack"><label>Credential type<select aria-label="Codex credential type" value={codexLoginMethod} disabled={busy} onChange={(event) => setCodexLoginMethod(event.target.value as "api_key" | "access_token")}><option value="api_key">OpenAI API key</option><option value="access_token">ChatGPT access token</option></select></label><label>Credential<input aria-label="Codex login credential" type="password" autoComplete="off" value={codexCredential} disabled={busy} onChange={(event) => setCodexCredential(event.target.value)} /></label><button className="primary" type="button" disabled={busy || !codexCredential} onClick={() => void startSharedCodexLogin(codexLoginMethod, codexCredential)}>Sign in</button></div></TechnicalDetails>}
                 {codexAccount?.authenticated && <div className="settings-card settings-card-stack"><div className="settings-control"><span><strong>Shared Codex authentication</strong><small>MetaCog uses the global Codex account without changing its plugins or settings.</small></span><button className="secondary" type="button" disabled={busy} onClick={() => void signOutOfCodexDevice()}>Sign out of Codex on this device</button></div></div>}
-                {(login || codexLogin) && <div className="oauth-card" role="status"><p>Finish signing in in your browser. MetaCog will connect automatically.</p><button className="link-button" type="button" onClick={() => openVerification(codexLogin?.authUrl ?? login?.verification_url ?? "")}>Open sign-in page</button><small>The callback listener closes after 3 minutes. If it expires, the sign-in option will return here.</small></div>}
+                {(login || codexLogin) && <div className="oauth-card" role="status"><p>{codexLogin?.userCode ? <>Enter code <strong>{codexLogin.userCode}</strong> on the Codex device authorization page.</> : "Finish signing in in your browser. MetaCog will connect automatically."}</p><button className="link-button" type="button" onClick={() => openVerification(codexLogin?.authUrl ?? codexLogin?.verificationUrl ?? login?.verification_url ?? "")}>Open sign-in page</button><small>The authorization listener closes after 3 minutes. If it expires, the sign-in option will return here.</small></div>}
                 <p className="provider-state" role="status">{providerStatus}</p>{providerError && <p className="error-message" role="alert">{providerError}</p>}
               </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="plugins">

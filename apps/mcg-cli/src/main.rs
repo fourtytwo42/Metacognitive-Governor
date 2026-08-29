@@ -618,8 +618,14 @@ struct ReviewArgs {
 struct LoginArgs {
     #[command(subcommand)]
     command: Option<LoginCommand>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["with_api_key", "with_access_token"])]
     device_auth: bool,
+    /// Read an OpenAI API key from standard input.
+    #[arg(long, conflicts_with_all = ["device_auth", "with_access_token"])]
+    with_api_key: bool,
+    /// Read a ChatGPT access token from standard input.
+    #[arg(long, conflicts_with_all = ["device_auth", "with_api_key"])]
+    with_access_token: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3351,17 +3357,34 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             let LoginArgs {
                 command: None,
                 device_auth,
+                with_api_key,
+                with_access_token,
             } = *args
             else {
                 unreachable!("login subcommand handled above")
             };
-            if device_auth {
-                return Err(
-                    "device-code login is not yet exposed by the pinned Codex app-server; use `mcg login` for browser OAuth"
-                        .into(),
-                );
+            let method = if device_auth {
+                "device_code"
+            } else if with_api_key {
+                "api_key"
+            } else if with_access_token {
+                "access_token"
+            } else {
+                "browser"
+            };
+            let mut credential = read_optional_standard_input_credential(
+                with_api_key || with_access_token,
+                if with_api_key {
+                    "API key"
+                } else {
+                    "access token"
+                },
+            )?;
+            let result = run_codex_login(&client, host, token, method, credential.as_deref()).await;
+            if let Some(value) = &mut credential {
+                value.zeroize();
             }
-            run_codex(&client, host, token, CodexCommand::Login).await?;
+            result?;
         }
         CodexCompatCommand::Logout => {
             run_codex(&client, host, token, CodexCommand::Logout).await?;
@@ -12219,6 +12242,22 @@ async fn print_json_response(
     Ok(())
 }
 
+async fn run_codex_login(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    method: &str,
+    credential: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .post(format!("{host}/api/v1/codex/account/login"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({"method": method, "credential": credential}))
+        .send()
+        .await?;
+    print_json_response(response).await
+}
+
 async fn run_codex(
     client: &reqwest::Client,
     host: &str,
@@ -14274,6 +14313,19 @@ mod tests {
             app.command,
             CodexCompatCommand::App(args) if args.path == PathBuf::from(".")
         ));
+
+        for arguments in [
+            vec!["mcg", "login", "--device-auth"],
+            vec!["mcg", "login", "--with-api-key"],
+            vec!["mcg", "login", "--with-access-token"],
+        ] {
+            let login = CodexCompatCli::try_parse_from(arguments).expect("Codex login shape");
+            assert!(matches!(login.command, CodexCompatCommand::Login(_)));
+        }
+        assert!(
+            CodexCompatCli::try_parse_from(["mcg", "login", "--device-auth", "--with-api-key"])
+                .is_err()
+        );
 
         let exec = CodexCompatCli::try_parse_from([
             "mcg",

@@ -371,6 +371,42 @@ pub struct CancelCodexLoginRequest {
     pub login_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexLoginMethod {
+    #[default]
+    Browser,
+    DeviceCode,
+    ApiKey,
+    AccessToken,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct StartCodexLoginRequest {
+    #[serde(default)]
+    pub method: CodexLoginMethod,
+    #[serde(default)]
+    pub credential: Option<String>,
+}
+
+impl Drop for StartCodexLoginRequest {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCodexTransportRequest {
+    pub expected_revision: u64,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CodexDiscoveryRequest {
     #[serde(default)]
@@ -1858,6 +1894,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             post(watch_conversation_project).delete(unwatch_conversation_project),
         )
         .route("/api/v1/codex/account/login", post(start_codex_login))
+        .route("/api/v1/codex/transport", put(update_codex_transport))
         .route(
             "/api/v1/codex/account/login/cancel",
             post(cancel_codex_login),
@@ -5051,14 +5088,68 @@ async fn unwatch_conversation_project(
 
 async fn start_codex_login(
     State(state): State<ApiState>,
+    request: Option<Json<StartCodexLoginRequest>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(
-        state
-            .runtime
-            .start_codex_login()
-            .await
-            .map_err(map_runtime_error)?,
-    ))
+    let mut request = request.map_or_else(StartCodexLoginRequest::default, |Json(value)| value);
+    let response = match request.method {
+        CodexLoginMethod::Browser => {
+            reject_login_credential(&request)?;
+            state.runtime.start_codex_login().await
+        }
+        CodexLoginMethod::DeviceCode => {
+            reject_login_credential(&request)?;
+            state.runtime.start_codex_device_code_login().await
+        }
+        CodexLoginMethod::ApiKey => {
+            let credential = request
+                .credential
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("API-key login requires a credential"))?;
+            state.runtime.login_codex_with_api_key(credential).await
+        }
+        CodexLoginMethod::AccessToken => {
+            let credential = request
+                .credential
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("access-token login requires a credential"))?;
+            state
+                .runtime
+                .login_codex_with_access_token(credential)
+                .await
+        }
+    }
+    .map_err(map_runtime_error);
+    if let Some(credential) = &mut request.credential {
+        credential.zeroize();
+    }
+    Ok(Json(response?))
+}
+
+fn reject_login_credential(request: &StartCodexLoginRequest) -> Result<(), ApiError> {
+    if request.credential.is_some() {
+        return Err(ApiError::bad_request(
+            "browser and device-code login do not accept a credential",
+        ));
+    }
+    Ok(())
+}
+
+async fn update_codex_transport(
+    State(state): State<ApiState>,
+    Json(request): Json<UpdateCodexTransportRequest>,
+) -> Result<Json<UserSettings>, ApiError> {
+    state
+        .runtime
+        .update_codex_transport(
+            request.expected_revision,
+            request.endpoint,
+            request.auth_token_env,
+            &request.reason,
+            Utc::now(),
+        )
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
 }
 
 async fn cancel_codex_login(
@@ -7741,6 +7832,21 @@ mod tests {
         Arc,
         atomic::{AtomicU16, AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn codex_login_request_defaults_to_browser_and_accepts_typed_methods() {
+        let default: StartCodexLoginRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.method, CodexLoginMethod::Browser);
+        let device: StartCodexLoginRequest =
+            serde_json::from_value(serde_json::json!({"method":"device_code"})).unwrap();
+        assert_eq!(device.method, CodexLoginMethod::DeviceCode);
+        let api: StartCodexLoginRequest = serde_json::from_value(
+            serde_json::json!({"method":"api_key","credential":"sk-fixture"}),
+        )
+        .unwrap();
+        assert_eq!(api.credential.as_deref(), Some("sk-fixture"));
+    }
 
     use axum::{body::Body, http::Request, response::Html};
     use ed25519_dalek::{Signer as _, SigningKey};

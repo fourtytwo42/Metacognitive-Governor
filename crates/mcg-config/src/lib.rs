@@ -101,6 +101,14 @@ pub struct UserSettings {
     pub advanced_mode: bool,
     pub autonomy: AutonomyPreset,
     pub shadow_experiments: bool,
+    /// Optional experimental Codex app-server WebSocket endpoint. `None` keeps the
+    /// bundled local stdio server. Credentials are never persisted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_remote_endpoint: Option<String>,
+    /// Name of the daemon environment variable containing the remote bearer token.
+    /// The token value itself is never stored in settings or audit revisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_remote_auth_token_env: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -121,6 +129,8 @@ impl UserSettings {
             advanced_mode: config.advanced_mode,
             autonomy: config.autonomy,
             shadow_experiments: config.shadow_experiments,
+            codex_remote_endpoint: None,
+            codex_remote_auth_token_env: None,
             updated_at: now,
         }
     }

@@ -53,13 +53,14 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.62"
+version = "0.4.63"
 edition = "2024"
 license = "UNLICENSED"
 rust-version = "1.93"
 
 [workspace.dependencies]
 async-trait = "0.1.92"
+async-tungstenite = { version = "0.32.1", features = ["tokio-runtime", "tokio-rustls-webpki-roots", "url"] }
 arboard = "3.6.1"
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 axum = "0.8.9"

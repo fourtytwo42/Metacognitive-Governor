@@ -45,7 +45,7 @@ Environment variables alone are not capability discovery.
 | `completion` | Native | Bash, Zsh, Fish, PowerShell (`power-shell`), and Elvish completions include both Codex-compatible and MetaCog-native commands and work without the daemon. |
 | `resume`, `fork` | Native | IDs, exact names, project-scoped `--last`, `--all`, durable forks, searchable terminal selection, and terminal reopening work. `resume --include-non-interactive` includes durably classified exec/consumer sessions while explicit IDs and names always remain addressable. Different roots prompt in an interactive terminal unless `tui.resume_cwd` decides; explicit `-C` wins. |
 | `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining global overrides need exact alignment. |
-| `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
+| `login`, `logout` | Native | Browser OAuth, device-code login, API-key stdin, access-token stdin, status, and device-wide logout use the shared Codex account. Secrets are accepted only through standard input or a transient desktop credential field, zeroized after use, and never persisted by MetaCog. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
 | `agents` | Partial | Lists every active MetaCog Chat, Coordinator, Coder, Tester, and future governed agent session across conversations. `/agent` provides searchable inspection and messaging inside the active conversation; a global cross-conversation live browser remains pending. |
@@ -56,7 +56,7 @@ Environment variables alone are not capability discovery.
 | `apply` / `a` | Native | Resolves the current canonical Git project, runs the pinned `codex apply TASK_ID` in an isolated shadow worktree seeded with the exact tracked, staged, dirty, and bounded-untracked owner baseline, validates and persists the resulting diff, then integrates it only if the live baseline is unchanged. Digest checks, dry-run application, preimage journaling, rollback, restart recovery, and project-scoped cleanup keep the owner workspace governed. The desktop exposes the same contract as a review-first Pull Requests flow with explicit Apply and Discard actions. |
 | `update` | Native (packaged Windows) | `mcg update` uses the same immutable HTTPS/minisign authority as Desktop, selects only a strictly newer platform artifact, verifies the exact download, rechecks the feed identity, creates and verifies a fresh credential-free backup, binds the reviewed version to the Windows installer PE resources, stops the daemon, and hands replacement to the authenticated packaged supervisor. Development/unsigned builds fail closed. Linux and macOS CLIs direct installation through the existing Desktop updater until a complete packaged self-replacement contract is qualified there. |
 | `mcp-server` | Superseded | Current Codex documentation marks this family deprecated and directs integrations to app-server. MetaCog already uses its pinned app-server contract and will not add a new deprecated ungoverned endpoint. |
-| `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
+| `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Partial | MetaCog can connect its pinned adapter to a local stdio or authenticated remote WebSocket app-server, but does not expose Codex's standalone experimental service/debug/control command families as owner-facing substitutes for MetaCog governance. |
 
 ## Global flag compatibility
 
@@ -235,8 +235,8 @@ the previous installation, and removes only its private staged files. Unsigned
 development builds and incomplete installations fail closed. The Desktop update
 layout and workflow are unchanged; they consume the same shared trust contract.
 
-Codex-compatible support remains incomplete for local providers/OSS, remote
-endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1
+Codex-compatible support remains incomplete for local providers/OSS, exact
+per-invocation remote CLI flag semantics, and hook trust. Current Codex 0.150.1
 documents `--permission-profile` only for the
 Windows `sandbox` command; that exact contract is already Native rather than a
 missing global non-sandbox flag. These
@@ -348,6 +348,24 @@ or message delta alongside the backward-compatible full view, preventing short
 lifecycle states from being lost when a fast turn completes before a client
 connects. Human output and MetaCog's separate consumer JSON receipts are
 unchanged.
+
+Cycle 26 adds the stable Codex authentication variants and remote app-server
+transport without weakening MetaCog's authority boundary. Top-level `mcg login`
+now supports browser OAuth, `--device-auth`, API-key stdin, and access-token
+stdin. Credentials never enter argv, durable settings, logs, or API responses;
+the CLI, API, Tauri bridge, and desktop clear their transient buffers after the
+attempt. The pinned adapter can use its default local stdio child or an
+authenticated WebSocket endpoint. Remote configuration stores only a validated
+endpoint and bearer-token environment-variable name, permits unencrypted `ws`
+only for loopback hosts, requires `wss` otherwise, rejects embedded credentials,
+and reads the token from the named environment variable only when connecting.
+Transport changes are revisioned, rejected while governed work is active, and
+rolled back if the replacement cannot initialize. Advanced Settings exposes the
+same configuration and credential sign-in controls; Simple retains the normal
+shared-account browser and device-code paths. The next exact transport gap is
+Codex's invocation-local `--remote` and `--remote-auth-token-env` CLI override
+semantics; MetaCog currently applies the equivalent through shared revisioned
+settings.
 
 ## Safety invariants
 

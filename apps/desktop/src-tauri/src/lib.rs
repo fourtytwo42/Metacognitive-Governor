@@ -104,6 +104,20 @@ struct ConfigureProviderCommand {
     credential: Option<String>,
 }
 
+#[derive(Serialize)]
+struct CodexLoginCommand {
+    method: String,
+    credential: Option<String>,
+}
+
+impl Drop for CodexLoginCommand {
+    fn drop(&mut self) {
+        if let Some(credential) = &mut self.credential {
+            credential.zeroize();
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct ProxyConversationListResponse {
     conversations: Vec<ProxyConversation>,
@@ -1452,11 +1466,35 @@ async fn unwatch_conversation_project(
 }
 
 #[tauri::command]
-async fn start_codex_login() -> Result<serde_json::Value, String> {
+async fn start_codex_login(
+    method: String,
+    credential: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let payload = CodexLoginCommand { method, credential };
     daemon_json(
         reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/account/login")),
-        None::<&()>,
+        Some(&payload),
         "Codex login",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn update_codex_transport(
+    expected_revision: u64,
+    endpoint: Option<String>,
+    auth_token_env: Option<String>,
+    reason: String,
+) -> Result<mcg_config::UserSettings, String> {
+    daemon_json(
+        reqwest::Client::new().put(format!("{LOCAL_DAEMON}/api/v1/codex/transport")),
+        Some(&serde_json::json!({
+            "expected_revision": expected_revision,
+            "endpoint": endpoint,
+            "auth_token_env": auth_token_env,
+            "reason": reason,
+        })),
+        "Codex transport update",
     )
     .await
 }
@@ -4066,6 +4104,7 @@ pub fn run() {
             watch_conversation_project,
             unwatch_conversation_project,
             start_codex_login,
+            update_codex_transport,
             cancel_codex_login,
             logout_codex_account,
             governor_overview,

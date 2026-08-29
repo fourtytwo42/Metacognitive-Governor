@@ -121,6 +121,24 @@ Piped input is bounded and becomes durable owner-supplied task context; do not
 pipe credentials. Streaming mode emits task-scoped durable events followed by a
 complete result as NDJSON. Existing administrative subcommands remain intact.
 
+MetaCog shares Codex account authentication and supports the same stable login
+forms. Browser login is the default; device login works on headless systems, and
+API/access tokens are read from standard input so they never appear in process
+arguments:
+
+```powershell
+mcg login
+mcg login --device-auth
+$env:OPENAI_API_KEY | mcg login --with-api-key
+$env:CHATGPT_ACCESS_TOKEN | mcg login --with-access-token
+```
+
+Advanced Settings can point the pinned Codex adapter at an authenticated remote
+WebSocket app-server. MetaCog stores only the endpoint and the name of the
+environment variable containing the bearer token; it never stores that token.
+Unencrypted `ws://` is accepted only for loopback endpoints, while remote hosts
+must use `wss://`.
+
 Owner-facing behavior is restart-safe and shared by every interface. Use the
 desktop Settings workspace or `mcg settings show|set|history` to select Guided,
 Balanced, or Autonomous operation, persist simple/advanced mode, and explicitly
